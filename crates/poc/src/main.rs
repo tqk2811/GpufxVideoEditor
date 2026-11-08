@@ -7,6 +7,7 @@ mod compositor;
 mod decoder;
 mod ffi;
 mod gpu;
+mod mix_bench;
 mod player;
 mod presenter;
 
@@ -14,7 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 const DEFAULT_SEEK_COUNT: usize = 20;
-const USAGE: &str = "usage: poc decode-bench <clip> [seek-count]\n       poc player <clip1> <clip2> <clip3>";
+const USAGE: &str = "usage: poc decode-bench <clip> [seek-count]\n       poc player <clip1> <clip2> <clip3>\n       poc bench <clip1> <clip2> <clip3> --out <json>";
 
 fn three_clips(arguments: &mut impl Iterator<Item = String>) -> Result<Vec<PathBuf>, String> {
     (0..3).map(|_| arguments.next().map(PathBuf::from).ok_or_else(|| USAGE.to_owned())).collect()
@@ -41,6 +42,16 @@ fn run() -> Result<(), String> {
             // SAFETY: called before any other libav* use.
             unsafe { ffi::av_log_set_level(ffi::AV_LOG_WARNING as i32) };
             player::run(clips)
+        }
+        Some("bench") => {
+            let clips = three_clips(&mut arguments)?;
+            if arguments.next().as_deref() != Some("--out") {
+                return Err(USAGE.to_owned());
+            }
+            let out = PathBuf::from(arguments.next().ok_or(USAGE)?);
+            // SAFETY: called before any other libav* use.
+            unsafe { ffi::av_log_set_level(ffi::AV_LOG_WARNING as i32) };
+            mix_bench::run(clips, out)
         }
         _ => Err(USAGE.to_owned()),
     }

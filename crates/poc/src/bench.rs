@@ -13,10 +13,10 @@ const INDICATOR_ROW: u32 = 32;
 const INDICATOR_CELL_WIDTH: usize = 120;
 const INDICATOR_BITS: usize = 16;
 
-struct SeedRandom(u64);
+pub struct SeedRandom(pub u64);
 
 impl SeedRandom {
-    fn next_unit(&mut self) -> f64 {
+    pub fn next_unit(&mut self) -> f64 {
         // xorshift64: a fixed sequence for a fixed seed.
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
@@ -25,7 +25,7 @@ impl SeedRandom {
     }
 }
 
-fn percentile(sorted: &[f64], fraction: f64) -> f64 {
+pub fn percentile(sorted: &[f64], fraction: f64) -> f64 {
     let index = ((sorted.len() as f64 - 1.0) * fraction).round() as usize;
     sorted[index]
 }
