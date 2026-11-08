@@ -1,0 +1,3 @@
+[submodule "external/FFmpegGpuFilter"]
+	path = external/FFmpegGpuFilter
+	url = https://github.com/tqk2811/FFmpegGpuFilter.git
