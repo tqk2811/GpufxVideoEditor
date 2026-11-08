@@ -1,0 +1,202 @@
+{
+  "adapter": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "blend_verification": {
+    "all_passed": true,
+    "cases": [
+      {
+        "error_vs_expected_blend": {
+          "mean": 0.27869505717995513,
+          "p99": 1.772019985322899
+        },
+        "error_vs_first": 0.27869505717995513,
+        "error_vs_second": 126.05403468816245,
+        "first_matrix": "Bt601",
+        "mean_brightness": 122.77549019607788,
+        "passed": true,
+        "progress": 0.0,
+        "samples": 2040,
+        "seconds": 3.2
+      },
+      {
+        "error_vs_expected_blend": {
+          "mean": 0.4975879490873971,
+          "p99": 5.564043643998697
+        },
+        "error_vs_first": 60.14772397242997,
+        "error_vs_second": 59.951169436994014,
+        "first_matrix": "Bt601",
+        "mean_brightness": 116.06339869281138,
+        "passed": true,
+        "progress": 0.5,
+        "samples": 2040,
+        "seconds": 11.7
+      },
+      {
+        "error_vs_expected_blend": {
+          "mean": 0.4200797719237232,
+          "p99": 7.660089162589695
+        },
+        "error_vs_first": 113.55121001428495,
+        "error_vs_second": 0.4200797719237232,
+        "first_matrix": "Bt601",
+        "mean_brightness": 99.26748366013081,
+        "passed": true,
+        "progress": 1.0,
+        "samples": 2040,
+        "seconds": 17.1
+      }
+    ],
+    "max_mean_error": 5.0
+  },
+  "blend_verification_after_load": {
+    "all_passed": true,
+    "cases": [
+      {
+        "error_vs_expected_blend": {
+          "mean": 0.27869505717995513,
+          "p99": 1.772019985322899
+        },
+        "error_vs_first": 0.27869505717995513,
+        "error_vs_second": 126.05403468816245,
+        "first_matrix": "Bt601",
+        "mean_brightness": 122.77549019607788,
+        "passed": true,
+        "progress": 0.0,
+        "samples": 2040,
+        "seconds": 3.2
+      },
+      {
+        "error_vs_expected_blend": {
+          "mean": 0.4975879490873971,
+          "p99": 5.564043643998697
+        },
+        "error_vs_first": 60.14772397242997,
+        "error_vs_second": 59.951169436994014,
+        "first_matrix": "Bt601",
+        "mean_brightness": 116.06339869281138,
+        "passed": true,
+        "progress": 0.5,
+        "samples": 2040,
+        "seconds": 11.7
+      },
+      {
+        "error_vs_expected_blend": {
+          "mean": 0.4200797719237232,
+          "p99": 7.660089162589695
+        },
+        "error_vs_first": 113.55121001428495,
+        "error_vs_second": 0.4200797719237232,
+        "first_matrix": "Bt601",
+        "mean_brightness": 99.26748366013081,
+        "passed": true,
+        "progress": 1.0,
+        "samples": 2040,
+        "seconds": 17.1
+      }
+    ],
+    "max_mean_error": 5.0
+  },
+  "clips": [
+    "test-clips\\clip-a.mp4",
+    "test-clips\\clip-b.mp4",
+    "test-clips\\clip-c.mp4"
+  ],
+  "frame_path": "one GPU copy per plane (decoder texture 1920x1088, array size 1, frame 1920x1080)",
+  "latency": {
+    "definition": "from the first decoder returning its frame",
+    "until_gpu_finished": {
+      "max_ms": 8.4812,
+      "n": 590,
+      "p50_ms": 8.2031,
+      "p95_ms": 8.2732,
+      "p99_ms": 8.3171
+    },
+    "until_gpu_finished_minus_acquire_and_present_blocking": {
+      "max_ms": 5.473,
+      "n": 590,
+      "p50_ms": 1.5859000000000005,
+      "p95_ms": 2.1424999999999983,
+      "p99_ms": 2.3351000000000006
+    },
+    "until_present_returned": {
+      "max_ms": 8.4386,
+      "n": 590,
+      "p50_ms": 8.1842,
+      "p95_ms": 8.2498,
+      "p99_ms": 8.2937
+    }
+  },
+  "playback": {
+    "blocked_in_present": {
+      "max_ms": 7.3498,
+      "n": 590,
+      "p50_ms": 6.6,
+      "p95_ms": 7.1526000000000005,
+      "p99_ms": 7.2326999999999995
+    },
+    "blocked_in_surface_acquire": {
+      "max_ms": 0.07930000000000001,
+      "n": 590,
+      "p50_ms": 0.0065,
+      "p95_ms": 0.0265,
+      "p99_ms": 0.037
+    },
+    "definition": "decode next frame of 2 clips + mix + egui draw + present + GPU idle wait; progress ramps 0 to 1",
+    "frame_time": {
+      "max_ms": 8.6083,
+      "n": 590,
+      "p50_ms": 8.3279,
+      "p95_ms": 8.395,
+      "p99_ms": 8.4442
+    },
+    "frame_time_minus_acquire_and_present_blocking": {
+      "max_ms": 5.614,
+      "n": 590,
+      "p50_ms": 1.717299999999999,
+      "p95_ms": 2.296100000000001,
+      "p99_ms": 2.5218
+    },
+    "skipped_presents": 0,
+    "up_to_mix_done": {
+      "max_ms": 4.005800000000001,
+      "n": 590,
+      "p50_ms": 1.4350999999999998,
+      "p95_ms": 1.9472999999999998,
+      "p99_ms": 2.1843000000000004
+    }
+  },
+  "present_mode": "Immediate",
+  "present_modes_available": "[Mailbox, Fifo, Immediate]",
+  "seek": {
+    "definition": "both clips seek accurately to random positions, then mix, until the GPU finished the output",
+    "seed": "0x5eed202611090002",
+    "timing": {
+      "max_ms": 67.6969,
+      "n": 200,
+      "p50_ms": 37.2324,
+      "p95_ms": 56.614900000000006,
+      "p99_ms": 60.597
+    },
+    "warmup_discarded": 5,
+    "wrong_timestamps": 0
+  },
+  "synchronization": "CPU waits: the output fence after each mix, and the app submission after each draw",
+  "vram": {
+    "baseline_bytes": 178311168,
+    "clips_open": 3,
+    "final_bytes": 464670720,
+    "gpufx": {
+      "input_texture_bytes": 16588800,
+      "input_textures": 2,
+      "pass_texture_bytes": 8294400,
+      "pass_textures": 1,
+      "pool_borrowed_bytes": 0,
+      "pool_created": 3,
+      "pool_idle_bytes": 24883200,
+      "pool_peak_bytes": 24883200,
+      "readback_bytes": 0
+    },
+    "peak_bytes": 464670720,
+    "peak_over_baseline_bytes": 286359552
+  }
+}
