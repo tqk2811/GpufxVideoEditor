@@ -1,0 +1,10 @@
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/avutil.h>
+#include <libavutil/buffer.h>
+#include <libavutil/error.h>
+#include <libavutil/frame.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_d3d12va.h>
+#include <libavutil/log.h>
+#include <libavutil/pixdesc.h>
