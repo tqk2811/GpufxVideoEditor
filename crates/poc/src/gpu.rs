@@ -1,15 +1,18 @@
-//! The application's wgpu device on Direct3D 12, and access to its `ID3D12Device`.
+//! The application's wgpu device on Direct3D 12, access to its `ID3D12Device`, and the video
+//! memory the process uses on that adapter.
 
 use wgpu::hal::api::Dx12;
 use windows::core::w;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory4, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_PIN};
 
 pub struct AppGpu {
     pub adapter_name: String,
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
-    #[allow(dead_code)] // used by the display path in part 2
     pub queue: wgpu::Queue,
 }
 
@@ -37,7 +40,7 @@ impl AppGpu {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
             .map_err(|e| format!("wgpu device creation failed: {e}"))?;
         pin_d3d12_module()?;
-        Ok(Self { adapter_name, device, queue })
+        Ok(Self { adapter_name, instance, adapter, device, queue })
     }
 
     /// The `ID3D12Device` behind the wgpu device (a new COM reference).
@@ -45,5 +48,38 @@ impl AppGpu {
         // SAFETY: the device is only cloned here; wgpu's use of it is not disturbed.
         let hal_device = unsafe { self.device.as_hal::<Dx12>() }.ok_or("the wgpu device is not a D3D12 device")?;
         Ok(hal_device.raw_device().clone())
+    }
+
+    /// Blocks until the GPU has finished `submission`.
+    pub fn wait_for(&self, submission: wgpu::SubmissionIndex) -> Result<(), String> {
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+            .map(|_| ())
+            .map_err(|e| format!("waiting for the GPU failed: {e}"))
+    }
+}
+
+/// `IDXGIAdapter3::QueryVideoMemoryInfo` for the adapter of a device.
+pub struct VideoMemoryProbe {
+    adapter: IDXGIAdapter3,
+}
+
+impl VideoMemoryProbe {
+    pub fn for_device(device: &ID3D12Device) -> Result<Self, String> {
+        // SAFETY: plain COM calls on valid objects; the LUID comes from a live device.
+        unsafe {
+            let factory: IDXGIFactory4 = CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1 failed: {e}"))?;
+            let adapter = factory.EnumAdapterByLuid(device.GetAdapterLuid()).map_err(|e| format!("EnumAdapterByLuid failed: {e}"))?;
+            Ok(Self { adapter })
+        }
+    }
+
+    /// Bytes of local video memory this process uses now.
+    pub fn current_usage(&self) -> Result<u64, String> {
+        let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+        // SAFETY: info outlives the call and node 0 is the only node of a single-GPU adapter.
+        unsafe { self.adapter.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info) }
+            .map_err(|e| format!("QueryVideoMemoryInfo failed: {e}"))?;
+        Ok(info.CurrentUsage)
     }
 }

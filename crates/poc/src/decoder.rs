@@ -6,6 +6,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::path::Path;
 use std::ptr;
 
+use gpufx_core::{ChromaLocation, ColorInfo, Matrix, Range};
 use windows::core::Interface;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Direct3D12::{ID3D12Device, ID3D12Fence, ID3D12Resource};
@@ -58,6 +59,15 @@ pub struct TextureLayout {
     pub texture_array_flag: bool,
 }
 
+/// A frame copied to memory, for verification.
+pub struct Nv12Image {
+    pub width: usize,
+    pub height: usize,
+    pub luma: Vec<u8>,
+    /// Interleaved U and V, half the luma size in each direction.
+    pub chroma: Vec<u8>,
+}
+
 /// A decoded frame. The GPU may still be writing it until [`DecodedFrame::wait_until_ready`].
 pub struct DecodedFrame {
     frame: *mut ffi::AVFrame,
@@ -76,12 +86,6 @@ impl DecodedFrame {
         unsafe { &*((*(*self.frame).hw_frames_ctx).data as *const ffi::AVHWFramesContext) }
     }
 
-    /// `AVFrame *`, for later use with libav* calls.
-    #[allow(dead_code)] // used by the mix path in part 2
-    pub fn as_ptr(&self) -> *mut ffi::AVFrame {
-        self.frame
-    }
-
     /// `ID3D12Resource *` (`AVD3D12VAFrame.texture`), borrowed from this frame.
     pub fn texture_ptr(&self) -> *mut c_void {
         self.descriptor().texture.cast()
@@ -97,9 +101,46 @@ impl DecodedFrame {
         self.descriptor().sync_ctx.fence.cast()
     }
 
-    /// The value [`Self::fence_ptr`] reaches when the decoder has finished this frame.
+    /// The value [`Self::fence_ptr`] reaches when the last user of this frame has finished.
     pub fn fence_value(&self) -> u64 {
         self.descriptor().sync_ctx.fence_value
+    }
+
+    /// Records that a later user of the frame signals its fence at `value`, as FFmpeg's
+    /// `sync_ctx` expects, so the pool does not reuse the surface before that user is done.
+    pub fn raise_fence_value(&mut self, value: u64) {
+        // SAFETY: data[0] is the descriptor of this frame (see `descriptor`), which FFmpeg lets
+        // the frame's user update; self.frame stays valid for the lifetime of self.
+        unsafe {
+            let descriptor = (*self.frame).data[0] as *mut ffi::AVD3D12VAFrame;
+            (*descriptor).sync_ctx.fence_value = (*descriptor).sync_ctx.fence_value.max(value);
+        }
+    }
+
+    /// The colour description of the frame for gpufx, with the same defaults as FFmpeg's vf_gpufx.
+    pub fn color_info(&self) -> Result<ColorInfo, String> {
+        // SAFETY: self.frame is valid for the lifetime of self.
+        let (colorspace, color_range, chroma_location) = unsafe { ((*self.frame).colorspace, (*self.frame).color_range, (*self.frame).chroma_location) };
+        let matrix = match colorspace {
+            ffi::AVCOL_SPC_BT709 => Matrix::Bt709,
+            ffi::AVCOL_SPC_BT2020_NCL => Matrix::Bt2020,
+            // Unknown matrices are BT.601 for swscale too.
+            ffi::AVCOL_SPC_UNSPECIFIED | ffi::AVCOL_SPC_BT470BG | ffi::AVCOL_SPC_SMPTE170M => Matrix::Bt601,
+            other => return Err(format!("colorspace {other} has no matrix in gpufx")),
+        };
+        let range = if color_range == ffi::AVCOL_RANGE_JPEG { Range::Full } else { Range::Limited };
+        let chroma_location = match chroma_location {
+            ffi::AVCHROMA_LOC_CENTER => ChromaLocation::Center,
+            ffi::AVCHROMA_LOC_TOPLEFT => ChromaLocation::TopLeft,
+            ffi::AVCHROMA_LOC_TOP => ChromaLocation::Top,
+            ffi::AVCHROMA_LOC_BOTTOMLEFT => ChromaLocation::BottomLeft,
+            ffi::AVCHROMA_LOC_BOTTOM => ChromaLocation::Bottom,
+            ffi::AVCHROMA_LOC_LEFT => ChromaLocation::Left,
+            // Unspecified: H.264 and MPEG-2 convention for limited range, JPEG convention for full.
+            _ if range == Range::Full => ChromaLocation::Center,
+            _ => ChromaLocation::Left,
+        };
+        Ok(ColorInfo { matrix, range, chroma_location, premultiplied: false })
     }
 
     pub fn width(&self) -> u32 {
@@ -148,8 +189,8 @@ impl DecodedFrame {
         unsafe { fence.SetEventOnCompletion(self.fence_value(), HANDLE::default()) }.map_err(|e| format!("fence wait failed: {e}"))
     }
 
-    /// Copies the luma of row `y` to memory (a slow read-back, for verification only).
-    pub fn read_luma_row(&self, y: u32) -> Result<Vec<u8>, String> {
+    /// Copies the frame to system memory and hands it to `read` (slow; verification only).
+    fn with_software_frame<T>(&self, read: impl FnOnce(&ffi::AVFrame) -> Result<T, String>) -> Result<T, String> {
         // SAFETY: software is freshly allocated and freed on every path; transfer fills it.
         unsafe {
             let mut software = ffi::av_frame_alloc();
@@ -160,12 +201,43 @@ impl DecodedFrame {
                 if (*software).format != ffi::AV_PIX_FMT_NV12 {
                     return Err(format!("unexpected read-back format {}", pixel_format_name((*software).format)));
                 }
-                let row = (*software).data[0].offset(y as isize * (*software).linesize[0] as isize);
-                Ok(std::slice::from_raw_parts(row, (*software).width as usize).to_vec())
+                read(&*software)
             });
             ffi::av_frame_free(&mut software);
             result
         }
+    }
+
+    /// Copies the luma of row `y` to memory (a slow read-back, for verification only).
+    pub fn read_luma_row(&self, y: u32) -> Result<Vec<u8>, String> {
+        self.with_software_frame(|software| {
+            // SAFETY: y is inside the frame and each luma row holds at least `width` bytes.
+            unsafe {
+                let row = software.data[0].offset(y as isize * software.linesize[0] as isize);
+                Ok(std::slice::from_raw_parts(row, software.width as usize).to_vec())
+            }
+        })
+    }
+
+    /// Copies the whole frame to memory (a slow read-back, for verification only).
+    pub fn read_nv12(&self) -> Result<Nv12Image, String> {
+        self.with_software_frame(|software| {
+            let width = software.width as usize;
+            let height = software.height as usize;
+            let mut luma = Vec::with_capacity(width * height);
+            let mut chroma = Vec::with_capacity(width * height / 2);
+            // SAFETY: NV12 has `height` luma rows and `height / 2` chroma rows of at least `width`
+            // bytes at the given line sizes.
+            unsafe {
+                for y in 0..height {
+                    luma.extend_from_slice(std::slice::from_raw_parts(software.data[0].offset(y as isize * software.linesize[0] as isize), width));
+                }
+                for y in 0..height / 2 {
+                    chroma.extend_from_slice(std::slice::from_raw_parts(software.data[1].offset(y as isize * software.linesize[1] as isize), width));
+                }
+            }
+            Ok(Nv12Image { width, height, luma, chroma })
+        })
     }
 }
 

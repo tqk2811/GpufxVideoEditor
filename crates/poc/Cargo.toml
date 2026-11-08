@@ -9,9 +9,10 @@ gpufx-core = { path = "../../external/FFmpegGpuFilter/crates/gpufx-core" }
 # Must stay the wgpu major version gpufx-core uses (30), or the two cannot share types.
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
 pollster = "0.4"
+serde_json = "1"
 
 # Display stack for part 2. egui-wgpu 0.37 requires wgpu 30 and egui-winit 0.37 requires winit 0.30.
-egui = "0.37"
+egui = { version = "0.37", features = ["default_fonts"] }
 egui-wgpu = { version = "0.37", default-features = false, features = ["winit"] }
 egui-winit = "0.37"
 winit = "0.30.13"
