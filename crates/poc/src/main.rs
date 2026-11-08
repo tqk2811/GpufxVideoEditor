@@ -10,6 +10,7 @@ mod gpu;
 mod mix_bench;
 mod player;
 mod presenter;
+mod validation;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

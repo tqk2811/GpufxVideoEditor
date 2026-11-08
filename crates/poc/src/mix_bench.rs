@@ -18,6 +18,7 @@ use crate::compositor::MixCompositor;
 use crate::decoder::{D3d12Decoder, DecodedFrame, Nv12Image};
 use crate::gpu::{AppGpu, VideoMemoryProbe};
 use crate::presenter::{fit_image, Presenter};
+use crate::validation::ValidationLog;
 
 const SEEK_SEED: u64 = 0x5EED_2026_1109_0002;
 const SEEK_COUNT: usize = 200;
@@ -142,11 +143,13 @@ struct Bench {
     latencies_unpaced: Vec<f64>,
     skipped_presents: usize,
     copy_note: String,
+    validation: Option<ValidationLog>,
 }
 
 impl Bench {
     fn open(event_loop: &ActiveEventLoop, clips: &[PathBuf]) -> Result<Self, String> {
         let gpu = AppGpu::create()?;
+        let validation = gpu.validation_log()?;
         let device = gpu.raw_d3d12_device()?;
         let probe = VideoMemoryProbe::for_device(&device)?;
         let baseline_vram = probe.current_usage()?;
@@ -183,6 +186,7 @@ impl Bench {
             latencies_unpaced: Vec::with_capacity(PLAYBACK_FRAMES),
             skipped_presents: 0,
             copy_note: String::new(),
+            validation,
         })
     }
 
@@ -355,7 +359,17 @@ impl Bench {
         self.sample_vram()
     }
 
+    fn drain_validation(&mut self) -> Result<(), String> {
+        self.validation.as_mut().map_or(Ok(()), ValidationLog::drain)
+    }
+
     fn finish(&mut self) -> Result<(), String> {
+        self.drain_validation()?;
+        if let Some(validation) = &self.validation {
+            let summary = validation.summary();
+            println!("d3d12 validation: {summary}");
+            self.results.insert("d3d12_validation".to_owned(), summary);
+        }
         let memory = self.compositor.graph_memory();
         let pool = self.compositor.pool_stats();
         let current = self.probe.current_usage()?;
@@ -411,6 +425,7 @@ impl Bench {
 
     /// Advances the benchmark by one unit; returns true when everything has run.
     fn step(&mut self) -> Result<bool, String> {
+        self.drain_validation()?;
         match self.phase {
             Phase::Verify => {
                 self.run_verification("blend_verification")?;
@@ -458,6 +473,12 @@ struct BenchApp {
 
 impl BenchApp {
     fn fail(&mut self, event_loop: &ActiveEventLoop, message: String) {
+        if let Some(bench) = self.bench.as_mut() {
+            let _ = bench.drain_validation();
+            if let Some(validation) = &bench.validation {
+                println!("d3d12 validation at failure: {}", validation.summary());
+            }
+        }
         self.error = Some(message);
         event_loop.exit();
     }

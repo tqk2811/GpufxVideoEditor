@@ -8,6 +8,8 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter3, IDXGIFactory4, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_PIN};
 
+use crate::validation::{self, ValidationLog};
+
 pub struct AppGpu {
     pub adapter_name: String,
     pub instance: wgpu::Instance,
@@ -27,10 +29,12 @@ fn pin_d3d12_module() -> Result<(), String> {
 
 impl AppGpu {
     pub fn create() -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
+        let mut descriptor = wgpu::InstanceDescriptor { backends: wgpu::Backends::DX12, ..wgpu::InstanceDescriptor::new_without_display_handle() };
+        if validation::is_requested() {
+            // The debug layer is process-wide, so it also covers gpufx's device and FFmpeg's decode queues.
+            descriptor.flags |= wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION;
+        }
+        let instance = wgpu::Instance::new(descriptor);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             ..Default::default()
@@ -48,6 +52,14 @@ impl AppGpu {
         // SAFETY: the device is only cloned here; wgpu's use of it is not disturbed.
         let hal_device = unsafe { self.device.as_hal::<Dx12>() }.ok_or("the wgpu device is not a D3D12 device")?;
         Ok(hal_device.raw_device().clone())
+    }
+
+    /// The collector of D3D12 validation messages, when `POC_D3D12_DEBUG=1`.
+    pub fn validation_log(&self) -> Result<Option<ValidationLog>, String> {
+        if !validation::is_requested() {
+            return Ok(None);
+        }
+        ValidationLog::attach(&self.raw_d3d12_device()?).map(Some)
     }
 
     /// Blocks until the GPU has finished `submission`.
