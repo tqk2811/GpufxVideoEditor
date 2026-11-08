@@ -144,6 +144,8 @@ struct Bench {
     skipped_presents: usize,
     copy_note: String,
     validation: Option<ValidationLog>,
+    mixes_with_decoder_running: usize,
+    mixes_total: usize,
 }
 
 impl Bench {
@@ -187,7 +189,20 @@ impl Bench {
             skipped_presents: 0,
             copy_note: String::new(),
             validation,
+            mixes_with_decoder_running: 0,
+            mixes_total: 0,
         })
+    }
+
+    /// Later decodes may still read a frame the decoder has output; `compositor.mix` needs them done.
+    fn wait_decoders_idle(&mut self, clips: &[usize]) -> Result<(), String> {
+        let mut running = false;
+        for &clip in clips {
+            running |= self.decoders[clip].wait_until_idle()?;
+        }
+        self.mixes_total += 1;
+        self.mixes_with_decoder_running += usize::from(running);
+        Ok(())
     }
 
     fn sample_vram(&mut self) -> Result<(), String> {
@@ -221,8 +236,7 @@ impl Bench {
     fn verify_one(&mut self, progress: f64, seconds: f64) -> Result<Value, String> {
         let mut first = self.decoders[0].seek_accurate(seconds)?;
         let mut second = self.decoders[1].seek_accurate(seconds)?;
-        first.frame.wait_until_ready()?;
-        second.frame.wait_until_ready()?;
+        self.wait_decoders_idle(&[0, 1])?;
         self.note_copy_path(&first.frame)?;
         let first_image = first.frame.read_nv12()?;
         let second_image = second.frame.read_nv12()?;
@@ -278,6 +292,7 @@ impl Bench {
         let started = Instant::now();
         let mut first = self.decoders[0].seek_accurate(first_seconds)?;
         let mut second = self.decoders[1].seek_accurate(second_seconds)?;
+        self.wait_decoders_idle(&[0, 1])?;
         let info = FrameInfo::new(first_seconds, 0);
         self.compositor.mix(&mut first.frame, &mut second.frame, progress, &info)?;
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
@@ -304,6 +319,7 @@ impl Bench {
         let decoder_returned = Instant::now();
         let Some(mut second) = self.decoders[1].next_frame()? else { return Ok(false) };
         self.note_copy_path(&first)?;
+        self.wait_decoders_idle(&[0, 1])?;
         let progress = index as f64 / (PLAYBACK_FRAMES - 1) as f64;
         let info = FrameInfo::new(index as f64 / 30.0, index as u64);
         self.compositor.mix(&mut first, &mut second, progress, &info)?;
@@ -353,6 +369,7 @@ impl Bench {
             };
             frames.push(frame);
         }
+        self.wait_decoders_idle(&[0, 1])?;
         let (first, rest) = frames.split_at_mut(1);
         let info = FrameInfo::new(0.0, 0);
         self.compositor.mix(&mut first[0], &mut rest[0], 0.5, &info)?;
@@ -374,6 +391,10 @@ impl Bench {
         let pool = self.compositor.pool_stats();
         let current = self.probe.current_usage()?;
         self.results.insert("frame_path".to_owned(), json!(self.copy_note));
+        self.results.insert(
+            "decoder_idle_wait".to_owned(),
+            json!({ "mixes": self.mixes_total, "mixes_where_a_decode_was_still_running": self.mixes_with_decoder_running }),
+        );
         self.results.insert(
             "synchronization".to_owned(),
             json!("CPU waits: the output fence after each mix, and the app submission after each draw"),

@@ -48,6 +48,17 @@ unsafe extern "C" fn choose_d3d12_format(_context: *mut ffi::AVCodecContext, for
     ffi::AV_PIX_FMT_NONE
 }
 
+/// Keeps a reference to the frame the decoder started last, so its fence can be waited for.
+unsafe extern "C" fn track_started_frame(context: *mut ffi::AVCodecContext, frame: *mut ffi::AVFrame, flags: std::ffi::c_int) -> std::ffi::c_int {
+    let status = ffi::avcodec_default_get_buffer2(context, frame, flags);
+    if status >= 0 {
+        let slot = (*context).opaque.cast::<*mut ffi::AVFrame>();
+        ffi::av_frame_free(slot);
+        *slot = ffi::av_frame_clone(frame);
+    }
+    status
+}
+
 /// How the decoder allocated a frame's texture; gpufx copies frames that are array slices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureLayout {
@@ -269,6 +280,8 @@ pub struct D3d12Decoder {
     format_context: *mut ffi::AVFormatContext,
     codec_context: *mut ffi::AVCodecContext,
     packet: *mut ffi::AVPacket,
+    /// Owned by the decoder; boxed because `codec_context.opaque` points at it.
+    latest_started: Box<*mut ffi::AVFrame>,
     stream_index: i32,
     time_base: ffi::AVRational,
     start_pts: i64,
@@ -285,6 +298,7 @@ impl D3d12Decoder {
             format_context: ptr::null_mut(),
             codec_context: ptr::null_mut(),
             packet: ptr::null_mut(),
+            latest_started: Box::new(ptr::null_mut()),
             stream_index: -1,
             time_base: ffi::AVRational { num: 0, den: 1 },
             start_pts: 0,
@@ -338,6 +352,8 @@ impl D3d12Decoder {
         // avcodec_free_context unrefs this; our own reference ends here.
         (*self.codec_context).hw_device_ctx = device_reference;
         (*self.codec_context).get_format = Some(choose_d3d12_format);
+        (*self.codec_context).get_buffer2 = Some(track_started_frame);
+        (*self.codec_context).opaque = (&raw mut *self.latest_started).cast();
         (*self.codec_context).extra_hw_frames = EXTRA_HW_FRAMES;
         // Frame threading adds latency and does nothing for hardware decoding.
         (*self.codec_context).thread_count = 1;
@@ -348,6 +364,30 @@ impl D3d12Decoder {
             return Err("av_packet_alloc failed".to_owned());
         }
         Ok(())
+    }
+
+    /// Blocks until every decode submitted so far is done; returns whether one was still running.
+    ///
+    /// FFmpeg returns from a decode without waiting for it and keeps reference frames in
+    /// VIDEO_DECODE_READ meanwhile. With B-frames a frame is output after later frames that
+    /// reference it were submitted, so its own fence does not show that nothing else uses it.
+    /// A queue finishes in order, so the newest decode's fence covers the earlier ones.
+    pub fn wait_until_idle(&self) -> Result<bool, String> {
+        let latest = *self.latest_started;
+        if latest.is_null() {
+            return Ok(false);
+        }
+        // SAFETY: latest is the frame reference held by self; D3D12 frames carry their descriptor in data[0].
+        let sync = unsafe { &(*((*latest).data[0] as *const ffi::AVD3D12VAFrame)).sync_ctx };
+        let raw = sync.fence.cast::<c_void>();
+        // SAFETY: raw is a live ID3D12Fence held by the frame.
+        let fence = unsafe { ID3D12Fence::from_raw_borrowed(&raw) }.ok_or("the frame has no fence")?;
+        // SAFETY: plain COM calls; a null event makes SetEventOnCompletion block until the value is reached.
+        unsafe {
+            let running = fence.GetCompletedValue() < sync.fence_value;
+            fence.SetEventOnCompletion(sync.fence_value, HANDLE::default()).map_err(|e| format!("decoder idle wait failed: {e}"))?;
+            Ok(running)
+        }
     }
 
     pub fn duration_seconds(&self) -> f64 {
@@ -464,6 +504,7 @@ impl Drop for D3d12Decoder {
     fn drop(&mut self) {
         // SAFETY: each pointer is null or owned by self, and these calls accept null.
         unsafe {
+            ffi::av_frame_free(&mut *self.latest_started);
             ffi::av_packet_free(&mut self.packet);
             ffi::avcodec_free_context(&mut self.codec_context);
             ffi::avformat_close_input(&mut self.format_context);

@@ -6,6 +6,12 @@ mod bindings;
 
 pub use bindings::*;
 
+// Not in the generated bindings; declared here so the bindings need not be regenerated.
+unsafe extern "C" {
+    pub fn av_frame_clone(source: *const AVFrame) -> *mut AVFrame;
+    pub fn avcodec_default_get_buffer2(context: *mut AVCodecContext, frame: *mut AVFrame, flags: core::ffi::c_int) -> core::ffi::c_int;
+}
+
 /// `AV_NOPTS_VALUE`
 pub const NO_PTS: i64 = i64::MIN;
 /// `AVERROR(EAGAIN)`: 11 is `EAGAIN` in the MSVC runtime FFmpeg's Windows ABI uses.

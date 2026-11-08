@@ -49,6 +49,8 @@ impl Session {
         self.dirty = false;
         let mut first = self.decoders[self.first_clip].seek_accurate(self.seconds)?;
         let mut second = self.decoders[self.second_clip].seek_accurate(self.seconds)?;
+        self.decoders[self.first_clip].wait_until_idle()?;
+        self.decoders[self.second_clip].wait_until_idle()?;
         let info = FrameInfo::new(self.seconds, 0);
         self.compositor.mix(&mut first.frame, &mut second.frame, self.progress, &info)
     }
