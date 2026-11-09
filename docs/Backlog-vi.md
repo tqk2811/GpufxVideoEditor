@@ -147,3 +147,15 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Bản render giữ lại khi đổi tên thất bại không được dọn
 
 `crates/d3d12-backend/src/export.rs:125`: file đích bị khoá thì mỗi lần xuất lại để thêm một file `*.tmp.*` đầy đủ, không có gì dọn. Nếu `out` đổi tên xong mà file hash lỗi thì báo thất bại dù đích đã bị thay. Nên thử lại hoặc kiểm quyền ghi trước khi render. Ghi ngày 2026-11-09.
+
+### [Thấp] Video không ghi độ dài mượn độ dài của container
+
+`crates/d3d12-backend/src/probe.rs:66`: luồng video không ghi độ dài sẽ lấy độ dài container. Với mkv có video 1 s và audio 3 s thì container là 3 s, nên 2 s cuối clip giữ nguyên khung cuối. Ghi ngày 2026-11-09.
+
+### [Thấp] Probe không có interrupt callback
+
+`crates/d3d12-backend/src/probe.rs`: `avformat_open_input` và `avformat_find_stream_info` không có interrupt callback. Ổ mạng chết làm một lượt nạp chạy mãi và chặn các yêu cầu khác cho tới khi đóng app. Nên cân nhắc một chỗ chạy riêng cho lượt nạp và hộp thoại, tách khỏi nhau. Ghi ngày 2026-11-09.
+
+### [Thấp] Khung UI có thể đói khi hiệu ứng nặng giữ cổng submit
+
+`crates/gpufx-editor/src/presenter.rs`: UI chỉ thăm dò `try_lock_submits` mỗi 8 ms, nên khi một hiệu ứng nặng giữ cổng liên tục nó có thể không bao giờ lọt vào; các cú nhấp xếp hàng cho tới khi lọt. Ghi ngày 2026-11-09.
