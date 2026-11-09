@@ -7,13 +7,13 @@ use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, Track
 use crate::packages::{Catalog, PickerState};
 use crate::project_lock::ProjectLock;
 use crate::playback::plan::{start_time, TransportCommand};
-use crate::timeline::drag::{begin_drag, clamp_trim, ClipDrag, EditCommand};
+use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, ClipDrag, EditCommand};
 use crate::timeline::hit::ClipHit;
 use crate::timeline::view::TimelineView;
 use crate::visuals::ClipVisuals;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_speed,
-    set_track_hidden, set_transition_params, split_clip, trim_end, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
+    set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
 use serde_json::{Map, Value};
@@ -192,6 +192,9 @@ impl UiState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ClipField {
     Start(f64),
+    /// Where the clip begins in its source.
+    SourceIn(f64),
+    /// How much of the source the clip plays; its length on the timeline follows from the speed.
     Duration(f64),
 }
 
@@ -934,16 +937,31 @@ impl EditorState {
         }
     }
 
-    /// The Start or Duration field of the selected clip, once its value is final.
+    /// A time field of the selected clip, once its value is final.
     pub fn apply_clip_field(&mut self, field: ClipField) {
         let Some(key) = self.selected_for(ClipAction::Change) else { return };
         let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
         let command = match field {
+            ClipField::SourceIn(seconds) => {
+                if let Some(source_in) = clamp_source_in(self.project(), key, crate::timecode::from_seconds(seconds)) {
+                    self.run(|project| trim_source_in(project, key, source_in));
+                }
+                return;
+            }
             ClipField::Start(seconds) => EditCommand::Move { key, track: key.track, desired_start: crate::timecode::from_seconds(seconds) },
-            ClipField::Duration(seconds) => EditCommand::TrimEnd { key, new_end: clip.start.saturating_add(crate::timecode::from_seconds(seconds)) },
+            ClipField::Duration(seconds) => EditCommand::TrimEnd { key, new_end: clip.start.saturating_add(clip.timeline_ticks(crate::timecode::from_seconds(seconds))) },
         };
         let command = clamp_trim(self.project(), command);
         self.finish_drag(command);
+    }
+
+    /// The source time from where clip `key` begins to the end of its stream, when a probe stated
+    /// the length of that stream.
+    pub fn source_remaining(&self, key: ClipKey) -> Option<Time> {
+        let track = self.project().tracks.get(key.track)?;
+        let clip = track.clips.get(key.clip)?;
+        let length = self.library.probed_duration(&clip.source, track.kind)?;
+        Some(length.saturating_sub(clip.source_in)).filter(|left| *left > Time::ZERO)
     }
 
     pub fn set_muted(&mut self, muted: bool) {
@@ -2384,6 +2402,66 @@ mod tests {
         assert_eq!(state.selection(), Some(key(0)));
         state.apply_clip_field(ClipField::Duration(2.0));
         assert_eq!(clips(state.project(), 0), vec![(seconds(4), seconds(2))]);
+    }
+
+    #[test]
+    fn the_source_in_field_cuts_the_head_and_goes_back_to_the_first_frame() {
+        let mut state = state_with_clip();
+        let whole = DEFAULT_CLIP_DURATION;
+        state.apply_clip_field(ClipField::SourceIn(2.0));
+        let clip = &state.project().tracks[0].clips[0];
+        assert_eq!((clip.start, clip.source_in, clip.duration), (Time::ZERO, seconds(2), whole.saturating_sub(seconds(2))));
+        assert_eq!(state.selection(), Some(key(0)));
+        state.apply_clip_field(ClipField::SourceIn(0.0));
+        let clip = &state.project().tracks[0].clips[0];
+        assert_eq!((clip.source_in, clip.duration), (Time::ZERO, whole));
+    }
+
+    #[test]
+    fn the_source_in_field_stops_at_the_next_clip_and_at_the_shortest_length() {
+        let mut state = state_with_clip();
+        state.apply_clip_field(ClipField::SourceIn(1_000.0));
+        let frame = state.project().output.frame_duration;
+        assert_eq!(state.project().tracks[0].clips[0].duration, frame, "a cut leaves one frame");
+        state.apply_clip_field(ClipField::SourceIn(0.0));
+        assert_eq!(state.project().tracks[0].clips[0].source_in, Time::ZERO);
+
+        state.apply_clip_field(ClipField::SourceIn(2.0));
+        let end = state.project().tracks[0].clips[0].end().unwrap();
+        let second = new_clip("b.mp4", end.saturating_add(seconds(1)), seconds(1));
+        assert!(state.run(|project| add_clip(project, 0, second)));
+        state.apply_clip_field(ClipField::SourceIn(0.0));
+        let clip = &state.project().tracks[0].clips[0];
+        assert_eq!(clip.source_in, seconds(1), "only the gap of one second can be given back");
+        assert_eq!(clip.end(), Some(end.saturating_add(seconds(1))));
+    }
+
+    #[test]
+    fn the_duration_field_counts_source_time_at_another_speed() {
+        let mut state = state_with_clip();
+        assert!(state.run(|project| set_speed(project, key(0), 2.0)));
+        state.apply_clip_field(ClipField::Duration(4.0));
+        assert_eq!(state.project().tracks[0].clips[0].duration, seconds(2));
+    }
+
+    #[test]
+    fn what_remains_of_the_source_needs_a_probed_length_and_counts_the_cut() {
+        let mut state = state_with_clip();
+        assert_eq!(state.source_remaining(key(0)), None, "nothing stated the length of the file");
+        let source = state.project().tracks[0].clips[0].source.clone();
+        state.library.add(crate::media::MediaItem { source, name: "a".to_owned(), kind: crate::media::MediaKind::Video, duration: Some(seconds(20)), estimated: false });
+        assert_eq!(state.source_remaining(key(0)), Some(seconds(20)));
+        state.apply_clip_field(ClipField::SourceIn(2.0));
+        assert_eq!(state.source_remaining(key(0)), Some(seconds(18)));
+    }
+
+    #[test]
+    fn the_source_in_field_reaches_the_first_frame_at_a_speed_off_the_grid() {
+        let mut state = state_with_clip();
+        state.apply_clip_field(ClipField::SourceIn(2.0));
+        assert!(state.run(|project| set_speed(project, key(0), 1.237)));
+        state.apply_clip_field(ClipField::SourceIn(0.0));
+        assert_eq!(state.project().tracks[0].clips[0].source_in, Time::ZERO);
     }
 
     #[test]

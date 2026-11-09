@@ -92,6 +92,28 @@ pub fn clamp_trim(project: &Project, command: EditCommand) -> EditCommand {
     }
 }
 
+/// `wanted` as the source position clip `key` may begin at: not before the source, not so far back
+/// that it runs into the next clip, and leaving it at least as long as a trim would. On the speed
+/// grid, so the engine takes it as it is.
+pub fn clamp_source_in(project: &Project, key: ClipKey, wanted: Time) -> Option<Time> {
+    let track = project.tracks.get(key.track)?;
+    let clip = track.clips.get(key.clip)?;
+    let end = clip.end()?;
+    let grid = clip.speed_grid();
+    let minimum = clip.fade_in.saturating_add(clip.fade_out).max(project.output.frame_duration);
+    let room = track.clips.get(key.clip + 1).map_or(i64::MAX, |next| next.start.saturating_sub(end).ticks()).max(0);
+    let back = clip.timeline_ticks(clip.source_in).ticks().min(room).max(0);
+    if wanted == Time::ZERO && back == clip.timeline_ticks(clip.source_in).ticks() {
+        return Some(Time::ZERO);
+    }
+    let lowest = -(back - back.rem_euclid(grid));
+    let forward = clip.duration.saturating_sub(minimum).ticks().max(0);
+    let highest = forward - forward.rem_euclid(grid);
+    // Not `clamp`: a clip already shorter than the minimum may have nothing to give either way.
+    let delta = clip.timeline_ticks(wanted.saturating_sub(clip.source_in)).ticks().max(lowest).min(highest);
+    Some(clip.source_in.saturating_add(clip.source_offset(Time::from_ticks(delta - delta.rem_euclid(grid)))).max(Time::ZERO))
+}
+
 impl EditCommand {
     pub fn apply(&self, project: &Project) -> Result<Project, EditError> {
         match *self {

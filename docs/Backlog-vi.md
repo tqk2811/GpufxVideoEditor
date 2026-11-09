@@ -306,3 +306,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Tách hoặc cắt clip đang tua có một mẫu lệch vị trí nguồn tiếng
 
 Ở tốc độ khác 1, sau khi tách, vị trí âm danh nghĩa của nửa sau khác tối đa 1 mẫu (dưới 21 µs) so với trước khi tách, và chuỗi grain bắt đầu lại ở chỗ cắt (`crates/engine/src/edit.rs` `cut_keeps_samples`). Vị trí khung hình vẫn chính xác. Không ảnh hưởng thời lượng hay đồng bộ. Ghi ngày 2026-11-10.
+
+### [Thấp] Nút reset trong panel Clip vẫn sáng khi không đi được đâu
+
+`crates/gpufx-editor/src/ui/inspector.rs:104`: nút reset của Start of video và Duration of video vẫn bấm được khi clip kế tiếp đã sát cạnh hoặc clip có transition ở cạnh đó, bấm thì không đổi gì hoặc bị từ chối. Không hại dữ liệu; nên tính trạng thái nút từ giới hạn thật (`clamp_source_in`, `clamp_trim`). Clip trên track audio lấy tiếng từ file video cũng chưa có reset độ dài, vì thư viện chỉ giữ độ dài hình. Ghi ngày 2026-11-10.

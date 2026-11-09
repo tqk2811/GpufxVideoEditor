@@ -1,5 +1,6 @@
 //! The panel on the right: the project figures, or everything about the selected clip.
 
+use super::icons::{self, Icon};
 use super::numeric::{drag_field, speed_field};
 use super::param_widgets;
 use super::theme;
@@ -13,6 +14,7 @@ use engine::{ClipKey, Time, Transition, TrackKind};
 use serde_json::{Map, Value};
 
 const HEADER_HEIGHT: f32 = 34.0;
+const RESET_BUTTON_SIDE: f32 = 20.0;
 /// As far up as a project may go; validation sets no floor.
 const GAIN_RANGE: std::ops::RangeInclusive<f64> = -60.0..=60.0;
 const SPEED_RANGE: std::ops::RangeInclusive<f64> = engine::MIN_SPEED..=engine::MAX_SPEED;
@@ -99,8 +101,12 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::TEXT_DIM)).wrap());
     }
     ui.add_enabled_ui(editable, |ui| {
-        time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start);
-        time_field(ui, state, &language.t(Message::FieldDuration), to_seconds(clip.duration), ClipField::Duration);
+        let full_source = state.source_remaining(key).filter(|left| clip.timeline_ticks(*left) != clip.duration);
+        time_field(ui, state, &language.t(Message::FieldSourceIn), to_seconds(clip.source_in), ClipField::SourceIn, Some((clip.source_in != Time::ZERO).then_some(ClipField::SourceIn(0.0))));
+        time_field(ui, state, &language.t(Message::FieldVideoDuration), to_seconds(clip.source_offset(clip.duration)), ClipField::Duration, Some(full_source.map(|source| ClipField::Duration(to_seconds(source)))));
+        ui.separator();
+
+        time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start, None);
         speed_row(ui, state, key, &language.t(Message::FieldSpeed), clip.speed);
         ui.separator();
 
@@ -137,10 +143,13 @@ fn transitions_beside(state: &EditorState, key: ClipKey) -> (bool, bool) {
     (key.clip > 0 && transitions.iter().any(|tr| tr.after_clip + 1 == key.clip), transitions.iter().any(|tr| tr.after_clip == key.clip))
 }
 
-fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f64, make: fn(f64) -> ClipField) {
+/// A time of the clip. `reset` is `None` for a field with no reset button; otherwise what the
+/// button applies, or `None` inside when it has nothing to do: the value is the default already,
+/// or the default is not known.
+fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f64, make: fn(f64) -> ClipField, reset: Option<Option<ClipField>>) {
     let pending = state.ui.clip_field.filter(|field| std::mem::discriminant(field) == std::mem::discriminant(&make(0.0)));
     let mut value = match pending {
-        Some(ClipField::Start(value) | ClipField::Duration(value)) => value,
+        Some(ClipField::Start(value) | ClipField::SourceIn(value) | ClipField::Duration(value)) => value,
         None => actual,
     };
     ui.horizontal(|ui| {
@@ -152,6 +161,13 @@ fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f
             }
             if response.drag_stopped() || (changed && !response.dragged()) {
                 if let Some(field) = state.ui.clip_field.take() {
+                    state.apply_clip_field(field);
+                }
+            }
+            if let Some(reset) = reset {
+                let tooltip = state.language().t(Message::Reset);
+                let clicked = ui.add_enabled_ui(reset.is_some() && !state.is_holding(), |ui| icons::button_of_size(ui, Icon::Undo, &tooltip, false, RESET_BUTTON_SIDE).clicked()).inner;
+                if let Some(field) = reset.filter(|_| clicked) {
                     state.apply_clip_field(field);
                 }
             }

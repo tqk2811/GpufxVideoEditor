@@ -51,6 +51,13 @@ pub struct MediaLibrary {
 }
 
 impl MediaLibrary {
+    /// The length a probe stated for the stream a track of `kind` plays from `source`. A video file
+    /// is listed with the length of its picture, so an audio track gets nothing from it. An
+    /// estimate is only what clips use of the file.
+    pub fn probed_duration(&self, source: &str, kind: TrackKind) -> Option<Time> {
+        self.items.iter().find(|item| same_source(&item.source, source) && !item.estimated && item.kind.track_kind() == kind)?.duration
+    }
+
     /// Adds `item`; the same source is replaced by a probed entry, never listed twice.
     pub fn add(&mut self, item: MediaItem) {
         match self.items.iter_mut().find(|known| same_source(&known.source, &item.source)) {

@@ -6,13 +6,57 @@ use common::*;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, audio_segments, clip_at,
     delete_clip, frame_count, layers_at_frame, move_clip, nearest_free_start, remove_effect,
-    remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_transition_params, split_clip, trim_end, trim_start, validate,
+    remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, validate,
     AcceptAll, ClipKey, EditError, EditHistory, Effect, LayerContent, Project, SourceSample, Time,
     TrackKind, ValidationError,
 };
 
 fn key(track: usize, clip: usize) -> ClipKey {
     ClipKey { track, clip }
+}
+
+#[test]
+fn cutting_the_head_keeps_the_position_and_the_last_frame() {
+    let start = project(3_000, vec![track(vec![clip("a", 9_000, 0, 900_000)], vec![])]);
+    let cut = trim_source_in(&start, key(0, 0), t(180_000)).unwrap();
+    let changed = &cut.tracks[0].clips[0];
+    assert_eq!((changed.start, changed.source_in, changed.duration), (t(9_000), t(180_000), t(720_000)));
+    assert_eq!(changed.source_end(), start.tracks[0].clips[0].source_end());
+    assert_eq!(trim_source_in(&cut, key(0, 0), Time::ZERO).unwrap(), start, "back to the first frame restores it");
+}
+
+#[test]
+fn cutting_the_head_of_a_sped_clip_counts_source_time() {
+    let mut start = project(3_000, vec![track(vec![clip("a", 0, 0, 90_000)], vec![])]);
+    start.tracks[0].clips[0].speed = 2.0;
+    let cut = trim_source_in(&start, key(0, 0), t(60_000)).unwrap();
+    let changed = &cut.tracks[0].clips[0];
+    assert_eq!((changed.source_in, changed.duration), (t(60_000), t(60_000)));
+    assert_eq!(changed.source_end(), t(180_000));
+}
+
+#[test]
+fn the_first_frame_is_reachable_off_the_speed_grid() {
+    let mut start = project(3_000, vec![track(vec![clip("a", 0, 180_000, 90_000)], vec![])]);
+    start.tracks[0].clips[0].speed = 1.237;
+    let back = trim_source_in(&start, key(0, 0), Time::ZERO).unwrap();
+    assert_eq!(back.tracks[0].clips[0].source_in, Time::ZERO);
+    let again = trim_source_in(&back, key(0, 0), Time::ZERO).unwrap();
+    assert_eq!(again, back, "nothing is left to give back");
+}
+
+#[test]
+fn restoring_the_head_is_refused_where_the_clip_would_not_fit() {
+    let start = project(3_000, vec![track(vec![clip("a", 0, 30_000, 30_000), clip("b", 45_000, 0, 30_000)], vec![])]);
+    assert!(matches!(trim_source_in(&start, key(0, 0), Time::ZERO), Err(EditError::Overlap { .. })));
+    assert!(matches!(trim_source_in(&start, key(0, 1), t(-3_000)), Err(EditError::BeforeSourceStart { .. })));
+}
+
+#[test]
+fn cutting_the_head_is_refused_beside_a_transition() {
+    let start = project(3_000, vec![track(vec![clip("a", 0, 0, 90_000), clip("b", 90_000, 0, 90_000)], vec![transition(0, 9_000)])]);
+    assert!(matches!(trim_source_in(&start, key(0, 0), t(3_000)), Err(EditError::TransitionOnEdge { edge: "end", .. })));
+    assert!(matches!(trim_source_in(&start, key(0, 1), t(3_000)), Err(EditError::TransitionOnEdge { edge: "start", .. })));
 }
 
 fn assert_valid(p: &Project) {

@@ -393,6 +393,45 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     finish(next)
 }
 
+/// Changes where in the source a clip begins, leaving its position on the timeline and the last
+/// source frame it plays: reading from later shortens it, reading from earlier lengthens it. The
+/// value lands on the grid of [`Clip::speed_grid`], toward the end of the clip, as a start trim does.
+/// Only the first frame of the source is exempt: asking for it gets it, at a cost of less than one
+/// grid step to where the last frame falls.
+pub fn trim_source_in(project: &Project, key: ClipKey, new_source_in: Time) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let clip = clip_of(project, key)?;
+    let overflow = EditError::TimeOverflow { key };
+    let to_first_frame = new_source_in == Time::ZERO;
+    let wanted = if to_first_frame { -clip.timeline_ticks(clip.source_in).ticks() } else { clip.timeline_ticks(new_source_in.checked_sub(clip.source_in).ok_or(overflow.clone())?).ticks() };
+    let grid = clip.speed_grid();
+    let delta = Time::from_ticks(wanted.div_euclid(grid).saturating_add(i64::from(wanted.rem_euclid(grid) != 0)).saturating_mul(grid));
+    if delta == Time::ZERO && (!to_first_frame || clip.source_in == Time::ZERO) {
+        return finish(project.clone());
+    }
+    let track = &project.tracks[key.track];
+    if has_transition_before(track, key.clip) {
+        return Err(EditError::TransitionOnEdge { key, edge: "start" });
+    }
+    if has_transition_after(track, key.clip) {
+        return Err(EditError::TransitionOnEdge { key, edge: "end" });
+    }
+    let source_in = if to_first_frame { Time::ZERO } else { clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())? };
+    if source_in < Time::ZERO {
+        return Err(EditError::BeforeSourceStart { key, source_in });
+    }
+    let duration = clip.duration.checked_sub(delta).ok_or(overflow.clone())?;
+    let end = clip.start.checked_add(duration).ok_or(overflow)?;
+    if overlaps_other(track, Some(key.clip), clip.start, end) {
+        return Err(EditError::Overlap { track: key.track, start: clip.start, end });
+    }
+    let mut next = project.clone();
+    let changed = &mut next.tracks[key.track].clips[key.clip];
+    changed.source_in = source_in;
+    changed.duration = duration;
+    finish(next)
+}
+
 /// Moves the end edge of a clip to `new_end`. Whether the source has that much media is for the
 /// caller to know; the project does not record source lengths.
 pub fn trim_end(project: &Project, key: ClipKey, new_end: Time) -> Result<Project, EditError> {
