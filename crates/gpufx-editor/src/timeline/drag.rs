@@ -74,8 +74,10 @@ pub fn clamp_trim(project: &Project, command: EditCommand) -> EditCommand {
             // The source cannot be read before its first frame.
             let source_limit = clip.start.saturating_sub(clip.timeline_ticks(clip.source_in)).max(Time::ZERO);
             let lower = previous_end.max(source_limit);
-            // A clip already shorter than the minimum is not shrunk further.
-            let upper = end.saturating_sub(minimum).max(clip.start);
+            // A clip already shorter than the minimum is not shrunk further. The engine rounds a
+            // start up to the grid of the speed, so the limit is the last grid position before it.
+            let room = end.saturating_sub(minimum).saturating_sub(clip.start).ticks().max(0);
+            let upper = clip.start.saturating_add(Time::from_ticks(room - room.rem_euclid(clip.speed_grid())));
             EditCommand::TrimStart { key, new_start: new_start.max(lower).min(upper) }
         }
         EditCommand::TrimEnd { new_end, .. } => {
@@ -324,6 +326,22 @@ mod tests {
         });
         let command = clamp_trim(&project, EditCommand::TrimEnd { key: key(1), new_end: seconds(7) });
         assert!(matches!(command.apply(&project), Err(EditError::TransitionOnEdge { .. })));
+    }
+
+    /// At 1.234x the grid is 500 ticks, and the end minus the fades is not a multiple of it.
+    #[test]
+    fn a_start_trim_to_the_limit_with_fades_lands_on_the_grid_and_is_accepted() {
+        let mut project = limits_project();
+        let clip = &mut project.tracks[0].clips[1];
+        clip.speed = 1.234;
+        clip.fade_in = Time::from_ticks(9000);
+        clip.fade_out = Time::from_ticks(6100);
+        let start = clip.start;
+        let command = clamp_trim(&project, EditCommand::TrimStart { key: key(1), new_start: seconds(9) });
+        let EditCommand::TrimStart { new_start, .. } = command else { panic!("a start trim") };
+        assert_eq!(new_start.saturating_sub(start).ticks().rem_euclid(500), 0, "on the grid: {new_start:?}");
+        let next = command.apply(&project).expect("the limit is a position the engine accepts");
+        assert_eq!(next.tracks[0].clips[1].start, new_start);
     }
 
     #[test]

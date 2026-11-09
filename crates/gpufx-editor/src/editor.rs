@@ -934,7 +934,10 @@ impl EditorState {
     pub fn trim_start_to_playhead(&mut self) {
         let Some(key) = self.selected_for(ClipAction::Trim) else { return };
         let at = self.playhead;
-        if !self.playhead_inside(key) {
+        // At another speed the start rounds up to a grid, which from the last grid of a clip is
+        // at or past its end: nothing would be left of it.
+        let lands_inside = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_some_and(|clip| clip.end().is_some_and(|end| clip.snapped_start(at) < end));
+        if !self.playhead_inside(key) || !lands_inside {
             self.status = Status::Info(Message::NothingAtPlayhead);
             return;
         }
@@ -1696,6 +1699,23 @@ mod tests {
         state.trim_start_to_playhead();
         assert_ne!(state.project().tracks[0].clips[0].start, Time::ZERO);
         assert_eq!(state.selection(), Some(key));
+    }
+
+    #[test]
+    fn trimming_to_a_playhead_in_the_last_grid_of_a_sped_clip_says_nothing_is_there() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("a.mp4"));
+        let key = ClipKey { track: 0, clip: 0 };
+        state.select(Some(key));
+        state.live_speed(1.234);
+        state.commit_live();
+        let before = state.project().clone();
+        let end = before.tracks[0].clips[0].end().unwrap();
+        state.scrub_to(end.saturating_sub(Time::from_ticks(1)));
+        state.trim_start_to_playhead();
+        assert_eq!(state.status(), &Status::Info(Message::NothingAtPlayhead), "not a raw refusal");
+        assert_eq!(state.project(), &before);
     }
 
     #[test]
