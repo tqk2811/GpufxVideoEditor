@@ -295,6 +295,14 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/engine/src/stretch.rs:39` đặt mỗi 64 grain một grain không căn với grain trước, để tua chỉ phải dựng lại tối đa 1,4 giây. Đo sine với RMS cửa sổ 256 mẫu: trước khi xử lý, hụt tới 18 dB tại đó (110 Hz ở 4x, phổ biến 2 đến 10 dB); sau `apply_join_gain` còn tối đa 1,7 dB ở 0,5x, 0,1x, 2x và test `a_key_grain_does_not_dip_the_level` giữ ngưỡng 3 dB. Riêng 110 Hz ở 4x còn đo được 8,2 dB (cửa sổ ngắn hơn một chu kỳ tín hiệu; chưa tách được khỏi gợn của WSOLA). Còn lại là một chỗ nhảy pha, nghe như tiếng nhấp nhẹ ở âm liên tục. Chưa nghe thử trên nhạc thật; nếu lộ rõ thì tăng khoảng hoặc giữ vị trí grain xuyên suốt clip. Ghi ngày 2026-11-10.
 
+### [Thấp] Cắt đuôi và transition không giới hạn theo độ dài nguồn
+
+`crates/gpufx-editor/src/timeline/drag.rs:81-87`: kéo cuối clip và thêm transition chỉ bị chặn bởi clip kế bên, không bị chặn bởi độ dài nguồn, vì project không lưu độ dài đó. Ở tốc độ cao ảnh hưởng nhân lên (10x đọc quá nguồn gấp 10 lần), nên phần thiếu phát ra im lặng hoặc ảnh đứng mà không có báo gì. Cần lưu độ dài nguồn vào project hoặc tra từ thư viện media khi sửa. Ghi ngày 2026-11-10.
+
+### [Thấp] Grain cuối của clip tua có thể đọc quá điểm ra
+
+`crates/engine/src/audio_schedule.rs:18`: grain cuối đọc quanh vị trí danh nghĩa nên có thể lấy tiếng quá `source_end` của clip tới khoảng 192 ms ở 10x. Bản sửa mức tiếng đầu/cuối chỉ biết ranh giới của file, không biết điểm ra của clip, và chặn theo clip còn phải tính cả cửa sổ transition. Đáng làm khi có âm khác ngay sau điểm ra. Ghi ngày 2026-11-10.
+
 ### [Thấp] Tách hoặc cắt clip đang tua có một mẫu lệch vị trí nguồn tiếng
 
 Ở tốc độ khác 1, sau khi tách, vị trí âm danh nghĩa của nửa sau khác tối đa 1 mẫu (dưới 21 µs) so với trước khi tách, và chuỗi grain bắt đầu lại ở chỗ cắt (`crates/engine/src/edit.rs` `cut_keeps_samples`). Vị trí khung hình vẫn chính xác. Không ảnh hưởng thời lượng hay đồng bộ. Ghi ngày 2026-11-10.

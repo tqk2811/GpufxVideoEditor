@@ -6,7 +6,9 @@
 //! graph restart after every seek. The result is also the only state the mixer would keep across
 //! blocks. Here the output is a function of the source audio and the clip alone, with no history:
 //! a block mixed after a seek, or split differently, is bit for bit what a sequential export
-//! writes.
+//! writes, as long as the source gives the same samples for a position however it is reached. The
+//! file decoder does for 48 kHz sources; after a seek it restarts the resampler for the others, so
+//! those can differ slightly from a sequential read.
 //!
 //! # Method
 //!
