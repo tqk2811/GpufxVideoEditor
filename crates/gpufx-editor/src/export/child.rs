@@ -27,6 +27,9 @@ const RENDER_EXE: &str = "gpufx-render.exe";
 pub const CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// How long a child that closed stdout gets to exit.
 const EXIT_GRACE: Duration = Duration::from_secs(5);
+/// How long a pipe of a child that is gone or killed may stay open, held by something it started
+/// or a process the system could not stop, before its reader is left behind.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
 /// How often the cancel flag is looked at while the child is quiet.
 const POLL: Duration = Duration::from_millis(20);
 /// Longer lines of stdout are not events. Their bytes are dropped, not kept.
@@ -177,22 +180,40 @@ enum Incoming {
     Closed,
 }
 
+/// The child's exit code. It is killed after `grace`; one that still does not go is left to the
+/// job object, with no code to report.
 fn wait_for_exit(child: &mut Child, grace: Duration) -> Option<i32> {
-    let started = Instant::now();
+    let mut started = Instant::now();
+    let mut killed = false;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.code(),
-            Ok(None) if started.elapsed() < grace => thread::sleep(POLL),
-            _ => {
+            Ok(None) if started.elapsed() < if killed { PIPE_GRACE } else { grace } => thread::sleep(POLL),
+            Ok(None) if !killed => {
                 let _ = child.kill();
-                return child.wait().ok().and_then(|status| status.code());
+                killed = true;
+                started = Instant::now();
             }
+            _ => return None,
         }
     }
 }
 
+/// The thread's result if it ends within `limit`; otherwise it is left running on its own.
+fn join_within<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Option<T> {
+    let started = Instant::now();
+    while !handle.is_finished() {
+        if started.elapsed() >= limit {
+            return None;
+        }
+        thread::sleep(POLL);
+    }
+    handle.join().ok()
+}
+
 /// Follows a started child until it is gone and works out the outcome. The child's pipes are
-/// read on threads of their own, so a full pipe never blocks it.
+/// read on threads of their own, so a full pipe never blocks it. `grace` is how long a child has
+/// to act on a cancel line, and to exit after reporting its end, before it is killed.
 fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Duration, outputs: &[&Path]) -> ExportOutcome {
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout is piped");
@@ -208,7 +229,9 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
 
     let mut machine = ChildMachine::default();
     let mut cancel_sent: Option<Instant> = None;
-    let mut killed = false;
+    let mut ended_at: Option<Instant> = None;
+    // When the child was seen gone or was killed: its stdout should close right after.
+    let mut gone_at: Option<Instant> = None;
     loop {
         match lines.recv_timeout(POLL) {
             Ok(Incoming::Line(line)) => {
@@ -225,15 +248,25 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
                 let _ = writeln!(pipe, "{CANCEL_LINE}").and_then(|()| pipe.flush());
             }
         }
-        if !killed && cancel_sent.is_some_and(|at| at.elapsed() >= grace) {
-            killed = true;
+        if machine.ended() && ended_at.is_none() {
+            ended_at = Some(Instant::now());
+        }
+        if gone_at.is_none() && matches!(child.try_wait(), Ok(Some(_))) {
+            gone_at = Some(Instant::now());
+        }
+        let overdue = |since: Option<Instant>| since.is_some_and(|at| at.elapsed() >= grace);
+        if gone_at.is_none() && (overdue(cancel_sent) || overdue(ended_at)) {
             let _ = child.kill();
+            gone_at = Some(Instant::now());
+        }
+        if gone_at.is_some_and(|at| at.elapsed() >= PIPE_GRACE) {
+            break;
         }
     }
     drop(stdin);
     let code = wait_for_exit(&mut child, EXIT_GRACE);
-    let _ = pump.join();
-    let stderr_tail = tail.join().unwrap_or_default();
+    let _ = join_within(pump, PIPE_GRACE);
+    let stderr_tail = join_within(tail, PIPE_GRACE).unwrap_or_default();
     let cancelled = cancel_sent.is_some() || cancel.load(Ordering::SeqCst);
     let (outcome, partials) = machine.finish(cancelled, code, &stderr_tail);
     for partial in partials.iter().filter(|partial| is_own_partial(partial, outputs)) {
@@ -301,6 +334,7 @@ mod tests {
     use d3d12_backend::ExportJob;
     use engine::{Clip, Effect, Output, Time, Track, TrackKind, SUPPORTED_VERSION};
     use serde_json::Map;
+    use std::sync::mpsc::channel;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -518,6 +552,42 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "the child outlived its job");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// `work` on a thread, failing the test rather than hanging it.
+    fn within<T: Send + 'static>(limit: Duration, work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = channel();
+        thread::spawn(move || sender.send(work()));
+        receiver.recv_timeout(limit).expect("the export ended in time")
+    }
+
+    #[test]
+    fn a_child_that_hangs_after_its_end_is_killed_and_the_end_stands() {
+        let dir = scratch("endhang");
+        let job = job(&dir, "endhang");
+        let out = job.out.clone();
+        assert!(matches!(within(Duration::from_secs(20), move || run(&job, false, SHORT_GRACE)), ExportOutcome::Finished(_)));
+        assert!(out.is_file());
+    }
+
+    #[test]
+    fn a_pipe_held_open_by_another_process_does_not_stop_the_wait() {
+        let dir = scratch("heldpipe");
+        let job = job(&dir, "heldpipe");
+        assert!(matches!(within(Duration::from_secs(20), move || run(&job, false, SHORT_GRACE)), ExportOutcome::Finished(_)));
+    }
+
+    #[test]
+    fn dropping_the_worker_does_not_wait_for_a_stuck_child() {
+        let dir = scratch("dropwait");
+        let job = job(&dir, "hang");
+        let (released, gate) = channel();
+        released.send(()).expect("the receiver is alive");
+        let worker = super::super::ExportWorker::start(job, Vec::new(), fake_tool(), gate, || {}).expect("start");
+        thread::sleep(Duration::from_millis(200));
+        let started = Instant::now();
+        drop(worker);
+        assert!(started.elapsed() < CANCEL_GRACE, "the UI thread waited {:?}", started.elapsed());
     }
 
     #[test]

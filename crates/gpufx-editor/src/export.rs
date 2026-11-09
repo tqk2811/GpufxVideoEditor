@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use d3d12_backend::{EncoderChoice, ExportJob, ExportReport, AUTO_ENCODERS};
 use engine::{frame_count, Project};
@@ -22,6 +23,9 @@ use crate::i18n::Message;
 
 pub use child::sibling_render_exe;
 pub use machine::ExportOutcome;
+
+/// How long closing the app waits for a cancelled export to stop.
+const DROP_WAIT: Duration = Duration::from_secs(2);
 
 /// Frames written so far, of the frames in the project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,11 +130,19 @@ impl ExportWorker {
 }
 
 impl Drop for ExportWorker {
+    /// Runs on the UI thread as the app closes, so the wait is bounded. A thread still following a
+    /// stuck child is left behind; the job object stops that child when the app exits.
     fn drop(&mut self) {
         self.cancel();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+        let Some(handle) = self.handle.take() else { return };
+        let started = Instant::now();
+        while !handle.is_finished() {
+            if started.elapsed() >= DROP_WAIT {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
         }
+        let _ = handle.join();
     }
 }
 

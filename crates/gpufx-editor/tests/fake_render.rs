@@ -87,6 +87,19 @@ fn main() {
             say(r#"{"event":"error","message":"kept as errorcrash.1-0.tmp.mp4"}"#);
             std::process::exit(0xC000_0005_u32 as i32);
         }
+        "endhang" => {
+            let partial = reserve(&out);
+            finish(&partial, &out);
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
+        "heldpipe" => {
+            // The other process inherits this one's stdout and keeps it open after this one exits.
+            std::process::Command::new(std::env::current_exe().expect("this executable")).args(["project.json", "--out"]).arg(out.with_file_name("hang.mp4")).spawn().expect("start");
+            let partial = reserve(&out);
+            finish(&partial, &out);
+        }
         "silent" => {}
         "error" => {
             let _partial = reserve(&out);

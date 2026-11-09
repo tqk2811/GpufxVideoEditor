@@ -45,6 +45,11 @@ impl ChildMachine {
         }
     }
 
+    /// Whether the child has reported how the export ended.
+    pub fn ended(&self) -> bool {
+        self.end.is_some()
+    }
+
     pub fn frames(&self) -> i64 {
         self.frames
     }
