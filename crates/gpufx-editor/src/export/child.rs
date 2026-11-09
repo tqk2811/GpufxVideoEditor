@@ -435,6 +435,22 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_after_finished_still_reports_the_published_file() {
+        let dir = scratch("endcrash");
+        let job = job(&dir, "endcrash");
+        assert!(matches!(run(&job, false, SHORT_GRACE), ExportOutcome::Finished(_)));
+        assert!(job.out.is_file(), "the destination was replaced");
+    }
+
+    #[test]
+    fn a_crash_after_an_error_keeps_the_only_copy_of_the_render() {
+        let dir = scratch("errorcrash");
+        let job = job(&dir, "errorcrash");
+        assert_eq!(run(&job, false, SHORT_GRACE), ExportOutcome::Failed(Message::ExportFailed("kept as errorcrash.1-0.tmp.mp4".into())));
+        assert!(dir.join("errorcrash.1-0.tmp.mp4").is_file());
+    }
+
+    #[test]
     fn a_huge_stderr_neither_blocks_the_child_nor_is_kept() {
         let dir = scratch("flood");
         assert!(matches!(run(&job(&dir, "flood"), false, SHORT_GRACE), ExportOutcome::Finished(_)), "the child wrote 32 MB to stderr");

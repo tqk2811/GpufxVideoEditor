@@ -475,6 +475,29 @@ fn json_progress_reports_every_frame_and_the_report() {
 }
 
 #[test]
+fn a_failed_rename_is_one_error_event_and_the_finished_file_stays() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("cli-json-locked");
+    let project = write_project(&dir, &two_clip_project());
+    let out = dir.join("locked.mp4");
+    std::fs::write(&out, b"old").expect("write the target");
+    let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&out).expect("lock the target");
+    let run = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).arg(&project).arg("--out").arg(&out).args(["--progress", "json"]).output().expect("run gpufx-render");
+    drop(lock);
+    assert!(!run.status.success());
+    let events = events(&run.stdout);
+    assert_eq!(events.iter().filter(|e| e.is_terminal()).count(), 1, "{events:?}");
+    let Some(ProgressEvent::Error { message }) = events.last() else { panic!("the last event is {:?}", events.last()) };
+    assert!(message.contains("was kept as"), "{message}");
+    assert_eq!(std::fs::read(&out).expect("read the target"), b"old");
+    assert_eq!(temporary_files(&dir).len(), 1, "the finished render is still there");
+}
+
+#[test]
 fn a_cancel_line_stops_a_json_run_and_removes_the_partial_files() {
     let _lock = gpu_lock();
     if !hardware_available() {

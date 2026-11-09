@@ -63,6 +63,9 @@ pub struct ExportControl<'a> {
     pub encoder_opened: Option<&'a dyn Fn(&str)>,
     /// Called with each temporary file as soon as it exists, so a process that may be killed can name it.
     pub reserved: Option<&'a dyn Fn(&Path)>,
+    /// Called once the output files are settled, before the GPU is released: a crash or hang while
+    /// it is released cannot change what is on disk. `Err` holds a message naming any file kept.
+    pub settled: Option<&'a dyn Fn(&Result<ExportReport, String>)>,
 }
 
 /// What a finished export produced.
@@ -282,17 +285,27 @@ impl ExportJob {
         // Closes the output and hash files, which the renames need.
         drop(sink);
         gpu.check_errors()?;
-        if let Err(error) = out_file.commit() {
-            // The hashes describe the render that was just kept.
-            if let Some(file) = &mut hashes_file {
-                file.keep = true;
-            }
-            return Err(error.into());
+        let report = ExportReport { encoder: encoder_name, frames: summary.frames, audio_samples: summary.audio_samples, clamped_samples: summary.clamped_samples, pcm_sha256 };
+        let settled = commit_outputs(&mut out_file, hashes_file.as_mut()).map(|()| report);
+        if let Some(notify) = control.settled {
+            notify(&settled);
         }
-        if let Some(file) = &mut hashes_file {
-            file.commit()?;
+        Ok(settled?)
+    }
+}
+
+/// Moves the finished files to their targets.
+fn commit_outputs(out_file: &mut PendingFile, hashes_file: Option<&mut PendingFile>) -> Result<(), String> {
+    if let Err(error) = out_file.commit() {
+        // The hashes describe the render that was just kept.
+        if let Some(file) = hashes_file {
+            file.keep = true;
         }
-        Ok(ExportReport { encoder: encoder_name, frames: summary.frames, audio_samples: summary.audio_samples, clamped_samples: summary.clamped_samples, pcm_sha256 })
+        return Err(error);
+    }
+    match hashes_file {
+        Some(file) => file.commit(),
+        None => Ok(()),
     }
 }
 

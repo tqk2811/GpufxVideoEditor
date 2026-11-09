@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use d3d12_backend::{probe_media, EncoderChoice, ExportControl, ExportError, ExportJob, Gpu};
+use d3d12_backend::{probe_media, EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu};
 use engine::{AudioOutput, Clip, Output, Project, Time, Track, TrackKind, Transition, SUPPORTED_VERSION};
 use gpufx_editor::editor::{EditorState, Status};
 use gpufx_editor::export::{ExportOutcome, ExportWorker};
@@ -117,6 +117,24 @@ fn the_ui_export_matches_the_cli_in_frames_and_pcm() {
     let (cli_pcm, ui_pcm) = (decoded_pcm(&cli_out), decoded_pcm(&ui_out));
     assert!(cli_pcm.chunks_exact(4).any(|sample| f32::from_le_bytes(sample.try_into().expect("four bytes")).abs() > 0.01), "the sound must not be silence");
     assert_eq!(Sha256::digest(&cli_pcm), Sha256::digest(&ui_pcm), "the encoded audio differs");
+}
+
+#[test]
+fn the_outcome_is_settled_and_reported_before_the_gpu_is_released() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let dir = scratch("export-settled-before-teardown");
+    let file = dir.join("project.json");
+    save_project_file(&project_with_transition_and_sound(), &file).expect("save the project");
+    let out = dir.join("settled.mp4");
+    let job = export_job(&file, &out, None);
+    let seen = std::cell::Cell::new(None);
+    let settled = |result: &Result<ExportReport, String>| seen.set(Some((Arc::strong_count(&gpu), result.is_ok(), out.is_file())));
+    job.run(gpu.clone(), ExportControl { settled: Some(&settled), ..ExportControl::default() }).expect("the export succeeds");
+    let (holders, succeeded, published) = seen.get().expect("the outcome was reported");
+    assert!(succeeded && published, "the file was at its target when it was reported");
+    // This test, `run`, `render`, and the compositor that is torn down last.
+    assert!(holders >= 4, "the compositor had already released the GPU: {holders} holders");
 }
 
 /// A validation error that no error scope captures: a buffer cannot map both ways.

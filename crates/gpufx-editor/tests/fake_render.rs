@@ -76,6 +76,17 @@ fn main() {
             eprintln!("the device went away");
             std::process::exit(0xC000_0005_u32 as i32);
         }
+        "endcrash" => {
+            start(&out);
+            let partial = reserve(&out);
+            finish(&partial, &out);
+            std::process::exit(0xC000_0005_u32 as i32);
+        }
+        "errorcrash" => {
+            let _partial = reserve(&out);
+            say(r#"{"event":"error","message":"kept as errorcrash.1-0.tmp.mp4"}"#);
+            std::process::exit(0xC000_0005_u32 as i32);
+        }
         "silent" => {}
         "error" => {
             let _partial = reserve(&out);

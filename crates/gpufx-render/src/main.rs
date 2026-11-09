@@ -1,5 +1,6 @@
 //! `gpufx-render`: renders a project JSON to a video file.
 
+use std::cell::Cell;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -7,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, Gpu, ProgressEvent, ProjectPaths, CANCEL_LINE, PROGRESS_PROTOCOL};
+use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu, ProgressEvent, ProjectPaths, CANCEL_LINE, PROGRESS_PROTOCOL};
 use engine::{frame_count, Project};
 
 const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]... [--progress <text|json>]\n\
@@ -74,6 +75,8 @@ fn parse_arguments() -> Result<Arguments, String> {
 enum Failure {
     Cancelled,
     Message(String),
+    /// A failure whose `error` event has already been written.
+    Reported(String),
 }
 
 impl From<String> for Failure {
@@ -130,13 +133,22 @@ fn run() -> Result<(), Failure> {
         let progress = |frame: i64, total: i64| emit(&ProgressEvent::Progress { frame, total, elapsed_ms: started.elapsed().as_millis() as u64 });
         let encoder_opened = |name: &str| emit(&ProgressEvent::Encoder { name: name.to_owned() });
         let reserved = |path: &Path| emit(&ProgressEvent::OutputReserved { path: path_text(path) });
-        let control = ExportControl { cancel: Some(cancel), progress: Some(&progress), encoder_opened: Some(&encoder_opened), reserved: Some(&reserved) };
-        match job.run(gpu, control) {
-            Ok(report) => emit(&ProgressEvent::Finished { report }),
-            Err(ExportError::Cancelled) => return Err(Failure::Cancelled),
-            Err(ExportError::Failed(message)) => return Err(Failure::Message(message)),
-        }
-        return Ok(());
+        // The end goes out as soon as the files are settled, ahead of the GPU teardown.
+        let settled_reported = Cell::new(false);
+        let settled = |result: &Result<ExportReport, String>| {
+            settled_reported.set(true);
+            emit(&match result {
+                Ok(report) => ProgressEvent::Finished { report: report.clone() },
+                Err(message) => ProgressEvent::Error { message: message.clone() },
+            });
+        };
+        let control = ExportControl { cancel: Some(cancel), progress: Some(&progress), encoder_opened: Some(&encoder_opened), reserved: Some(&reserved), settled: Some(&settled) };
+        return match job.run(gpu, control) {
+            Ok(_) => Ok(()),
+            Err(ExportError::Cancelled) => Err(Failure::Cancelled),
+            Err(ExportError::Failed(message)) if settled_reported.get() => Err(Failure::Reported(message)),
+            Err(ExportError::Failed(message)) => Err(Failure::Message(message)),
+        };
     }
 
     println!("gpu: {}", gpu.adapter_name);
@@ -170,6 +182,10 @@ fn main() -> ExitCode {
             if json {
                 emit(&ProgressEvent::Error { message: message.clone() });
             }
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+        Err(Failure::Reported(message)) => {
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }
