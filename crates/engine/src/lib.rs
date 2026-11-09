@@ -42,7 +42,7 @@ pub use edit::{
 };
 pub use project::{
     AudioOutput, Clip, Effect, LoadError, Output, Project, Track, TrackKind, Transition,
-    MAX_SPEED, MIN_SPEED, MIN_SUPPORTED_VERSION, SPEED_SCALE, SUPPORTED_VERSION,
+    speed_in_range, speed_milli, MAX_SPEED, MIN_SPEED, MIN_SUPPORTED_VERSION, SPEED_SCALE, SUPPORTED_VERSION,
 };
 pub use render::{ClipKey, RenderError};
 pub use schedule::{

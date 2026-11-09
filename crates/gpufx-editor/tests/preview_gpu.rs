@@ -235,6 +235,23 @@ fn producer_frame(producer: &mut D3d12Producer, timeline: &Arc<engine::Project>)
     producer.produce(&request(timeline, 30)).unwrap_or_else(|e| panic!("{}", describe(&e))).expect("a picture")
 }
 
+/// The preview renders through the same schedule as the export; a clip at another speed shows a
+/// picture and the frame after a fast seek still works.
+#[test]
+fn a_clip_at_another_speed_shows_a_picture() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let mut producer = D3d12Producer::new(gpu);
+    let seconds = Time::from_seconds(2).unwrap();
+    let mut fast = clip("clip-a.mp4", seconds);
+    fast.speed = 2.0;
+    let timeline = project(vec![fast]);
+    for frame in [0, 45, 10, 59] {
+        let picture = producer.produce(&request(&timeline, frame)).unwrap_or_else(|e| panic!("frame {frame}: {}", describe(&e))).expect("a picture");
+        producer.recycle(picture);
+    }
+}
+
 /// A transition number changing between frames is updated in place and still shows a picture.
 #[test]
 fn changing_a_transition_number_keeps_the_preview_working() {

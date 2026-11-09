@@ -32,11 +32,12 @@ struct Capture {
     hashes: Vec<String>,
     audio: Sha256,
     audio_samples: usize,
+    pcm: Vec<f32>,
 }
 
 impl Capture {
     fn new(wanted: &[i64]) -> Self {
-        Self { wanted: wanted.to_vec(), frames: Vec::new(), hashes: Vec::new(), audio: Sha256::new(), audio_samples: 0 }
+        Self { wanted: wanted.to_vec(), frames: Vec::new(), hashes: Vec::new(), audio: Sha256::new(), audio_samples: 0, pcm: Vec::new() }
     }
 
     fn frame(&self, index: i64) -> &[u8] {
@@ -58,6 +59,7 @@ impl FrameSink for Capture {
             self.audio.update(sample.to_le_bytes());
         }
         self.audio_samples += samples.len();
+        self.pcm.extend_from_slice(samples);
         Ok(())
     }
 }
@@ -154,6 +156,111 @@ fn trims_clips_exactly_and_cuts_between_them() {
     assert_eq!(read_frame_number(capture.frame(59), W), 129, "last frame");
     assert!((sample(capture.frame(29), W, W / 2, H / 2) - GREY_A).abs() <= 4);
     assert!((sample(capture.frame(30), W, W / 2, H / 2) - GREY_B).abs() <= 4);
+}
+
+/// A version 2 project: version 1 files are frozen and have no `speed`.
+fn speed_project_json(tracks: &str) -> String {
+    project_json(W, H, tracks).replace(r#""version":1"#, r#""version":2"#)
+}
+
+/// A clip at `speed`, in frames of the output.
+fn sped_clip_json(source: &Path, start: i64, source_in: i64, duration: i64, speed: f64) -> String {
+    format!(r#"{{"source":"{}","start":{},"source_in":{},"duration":{},"speed":{speed}}}"#, json_path(source), start * FRAME, source_in * FRAME, duration * FRAME)
+}
+
+#[test]
+fn double_speed_shows_every_second_source_frame_and_keeps_the_timeline_length() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}}"#, sped_clip_json(&a, 0, 10, 40, 2.0));
+    let wanted = [0, 1, 7, 39];
+    let mut capture = Capture::new(&wanted);
+    render_project(&gpu, &speed_project_json(&tracks), &mut capture).expect("render");
+    assert_eq!(capture.hashes.len(), 40, "the clip lasts its timeline length");
+    for frame in wanted {
+        assert_eq!(read_frame_number(capture.frame(frame), W), 10 + 2 * frame, "output frame {frame}");
+    }
+}
+
+#[test]
+fn half_speed_repeats_source_frames() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}}"#, sped_clip_json(&a, 0, 10, 40, 0.5));
+    let wanted = [0, 1, 2, 3, 39];
+    let mut capture = Capture::new(&wanted);
+    render_project(&gpu, &speed_project_json(&tracks), &mut capture).expect("render");
+    assert_eq!(capture.hashes.len(), 40);
+    for (frame, expected) in [(0, 10), (1, 10), (2, 11), (3, 11), (39, 29)] {
+        assert_eq!(read_frame_number(capture.frame(frame), W), expected, "output frame {frame}");
+    }
+    assert_eq!(capture.hashes[0], capture.hashes[1], "a repeated frame is the same picture");
+}
+
+#[test]
+fn a_speed_of_one_renders_exactly_as_a_project_without_the_field() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let plain = format!(r#"{{"clips":[{}]}}"#, clip_json(&a, 0, 5, 30));
+    let explicit = format!(r#"{{"clips":[{}]}}"#, sped_clip_json(&a, 0, 5, 30, 1.0));
+    let mut first = Capture::new(&[]);
+    render_project(&gpu, &speed_project_json(&plain), &mut first).expect("render");
+    let mut second = Capture::new(&[]);
+    render_project(&gpu, &speed_project_json(&explicit), &mut second).expect("render");
+    assert_eq!(first.hashes, second.hashes);
+
+    let tone = tone_clip_with_video();
+    let source = json_path(&tone);
+    let audio = |speed: &str| format!(r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":90000{speed}}}]}}]}}"#);
+    assert_eq!(render_pcm(&gpu, &audio("")), render_pcm(&gpu, &audio(r#","speed":1.0"#)), "the audio of 1x does not go through the stretcher");
+}
+
+/// The frequency of the left channel, from its rising zero crossings with linear interpolation.
+fn measured_hz(stereo: &[f32]) -> f64 {
+    let left: Vec<f32> = stereo.chunks_exact(2).map(|frame| frame[0]).collect();
+    let mut crossings = Vec::new();
+    for i in 1..left.len() {
+        if left[i - 1] < 0.0 && left[i] >= 0.0 {
+            crossings.push(i as f64 - f64::from(left[i]) / f64::from(left[i] - left[i - 1]));
+        }
+    }
+    let periods = crossings.len() - 1;
+    periods as f64 * 48_000.0 / (crossings[periods] - crossings[0])
+}
+
+/// The exported samples of one clip of the stepped tone clip at `speed`.
+fn exported_pcm(gpu: &Arc<Gpu>, source_in: i64, duration: i64, speed: f64) -> Vec<f32> {
+    let clip = tone_clip_with_video();
+    let source = json_path(&clip);
+    let json = format!(r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":{source_in},"duration":{duration},"speed":{speed}}}]}}]}}"#);
+    let project = Project::from_json(&json).expect("project parses");
+    let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
+    assert!(validate(&project, paths.as_ref()).is_empty());
+    let mut files = AudioFiles::new(paths.clone());
+    let mut compositor = D3d12Compositor::new(gpu.clone(), paths, project.output.width, project.output.height).expect("compositor");
+    let mut capture = Capture::new(&[]);
+    render_with_audio(&project, &mut compositor, &mut capture, Some(&mut files)).expect("render");
+    capture.pcm
+}
+
+#[test]
+fn an_exported_tone_keeps_its_frequency_and_the_timeline_length_at_2x_and_half() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    // Source second 1 holds 500 Hz; at 2x half a timeline second plays it.
+    let fast = exported_pcm(&gpu, 90_000, 45_000, 2.0);
+    assert_eq!(fast.len(), 24_000 * 2, "half a second of the timeline");
+    let hz = measured_hz(&fast[2 * 2_400..fast.len() - 2 * 2_400]);
+    assert!((hz - 500.0).abs() < 4.0, "2x: {hz}");
+
+    // Source second 2 holds 700 Hz; at 0.5x two timeline seconds play it.
+    let slow = exported_pcm(&gpu, 180_000, 180_000, 0.5);
+    assert_eq!(slow.len(), 96_000 * 2, "two seconds of the timeline");
+    let hz = measured_hz(&slow[2 * 4_800..slow.len() - 2 * 4_800]);
+    assert!((hz - 700.0).abs() < 5.0, "0.5x: {hz}");
 }
 
 /// `json` rendered by a compositor that already holds the graphs from `first`.

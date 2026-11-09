@@ -366,11 +366,8 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     }
     let overflow = EditError::TimeOverflow { key };
     let end = clip.end().ok_or(overflow.clone())?;
-    // The edge lands on the grid of the speed, toward the end of the clip, so the frames under the
-    // end edge stay exactly where they are.
+    let new_start = clip.snapped_start(new_start);
     let delta = new_start.checked_sub(clip.start).ok_or(overflow.clone())?;
-    let delta = Time::from_ticks(delta.ticks().div_euclid(clip.speed_grid()).saturating_add(i64::from(delta.ticks().rem_euclid(clip.speed_grid()) != 0)).saturating_mul(clip.speed_grid()));
-    let new_start = clip.start.checked_add(delta).ok_or(overflow.clone())?;
     if new_start == clip.start {
         return finish(project.clone());
     }

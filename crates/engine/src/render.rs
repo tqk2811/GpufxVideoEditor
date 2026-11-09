@@ -832,6 +832,21 @@ mod tests {
     }
 
     #[test]
+    fn export_and_a_single_frame_pick_the_same_source_time_at_any_speed() {
+        for speed in ["2", "0.5", "1.234", "10"] {
+            let json = TWO_TRACKS.replace(r#""duration":200}"#, &format!(r#""duration":200,"speed":{speed}}}"#));
+            let (exported, _) = run(&json);
+            let project = Project::from_json(&json).expect("valid json");
+            let (mut compositor, mut renderer, journal) = single_frame_rig();
+            for frame in 0..2 {
+                renderer.render_frame(&project, &mut compositor, frame, consume_nothing).expect("frame");
+            }
+            let picked = |events: &[String]| events.iter().filter(|e| e.contains(" clip ")).cloned().collect::<Vec<_>>();
+            assert_eq!(picked(&journal.borrow().events), picked(&exported.events), "speed {speed}");
+        }
+    }
+
+    #[test]
     fn empty_project_renders_nothing() {
         let (journal, summary) = run(
             r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[]}"#,

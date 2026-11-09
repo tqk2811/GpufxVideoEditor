@@ -72,7 +72,7 @@ pub fn clamp_trim(project: &Project, command: EditCommand) -> EditCommand {
         EditCommand::TrimStart { new_start, .. } => {
             let previous_end = key.clip.checked_sub(1).and_then(|index| track.clips.get(index)).and_then(|previous| previous.end()).unwrap_or(Time::ZERO);
             // The source cannot be read before its first frame.
-            let source_limit = clip.start.saturating_sub(clip.source_in).max(Time::ZERO);
+            let source_limit = clip.start.saturating_sub(clip.timeline_ticks(clip.source_in)).max(Time::ZERO);
             let lower = previous_end.max(source_limit);
             // A clip already shorter than the minimum is not shrunk further.
             let upper = end.saturating_sub(minimum).max(clip.start);
@@ -125,7 +125,7 @@ impl EditCommand {
                 let start = nearest_free_start(target, ignore, clip.duration, desired_start)?;
                 Some(ClipSpan { track, start, end: start.saturating_add(clip.duration) })
             }
-            EditCommand::TrimStart { new_start, .. } => Some(ClipSpan { track: key.track, start: new_start, end }),
+            EditCommand::TrimStart { new_start, .. } => Some(ClipSpan { track: key.track, start: clip.snapped_start(new_start), end }),
             EditCommand::TrimEnd { new_end, .. } => Some(ClipSpan { track: key.track, start: clip.start, end: new_end }),
         }
     }
@@ -202,6 +202,30 @@ mod tests {
         assert_eq!(span, ClipSpan { track: 0, start: seconds(8), end: seconds(10) });
         let next = command.apply(&project).unwrap();
         assert_eq!(engine::clip_at(&next, 0, span.start), Some(key(0)));
+    }
+
+    #[test]
+    fn a_start_trim_stops_where_the_source_starts_at_the_speed_of_the_clip() {
+        let mut project = project();
+        // Clip b at 10 to 12 with one source second before its in point, at 2x: that second is half
+        // a second of timeline.
+        let clip = &mut project.tracks[0].clips[1];
+        clip.source_in = seconds(1);
+        clip.speed = 2.0;
+        let command = clamp_trim(&project, EditCommand::TrimStart { key: key(1), new_start: seconds(5) });
+        assert_eq!(command, EditCommand::TrimStart { key: key(1), new_start: Time::from_ticks(9 * 90_000 + 45_000) });
+        assert!(command.apply(&project).is_ok(), "the limit is a position the engine accepts");
+    }
+
+    #[test]
+    fn a_start_trim_lands_where_the_engine_puts_it_at_another_speed() {
+        let mut project = project();
+        project.tracks[0].clips[1].speed = 1.5;
+        let command = EditCommand::TrimStart { key: key(1), new_start: Time::from_ticks(10 * 90_000 + 1) };
+        let span = command.landing(&project).unwrap();
+        let next = command.apply(&project).unwrap();
+        assert_eq!(next.tracks[0].clips[1].start, span.start);
+        assert_eq!(engine::clip_at(&next, 0, span.start), Some(key(1)), "the clip is found where it landed");
     }
 
     #[test]

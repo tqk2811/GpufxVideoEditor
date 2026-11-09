@@ -159,6 +159,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldFrameRate => "Tốc độ khung hình".to_owned(),
         Message::FieldAspect => "Tỉ lệ".to_owned(),
         Message::FieldDuration => "Thời lượng".to_owned(),
+        Message::FieldSpeed => "Tốc độ".to_owned(),
         Message::FieldStart => "Bắt đầu".to_owned(),
         Message::FieldVolume => "Âm lượng".to_owned(),
         Message::SelectClipHint => "Chọn một clip trên timeline để chỉnh.".to_owned(),

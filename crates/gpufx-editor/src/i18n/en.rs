@@ -176,6 +176,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldFrameRate => "Frame rate".to_owned(),
         Message::FieldAspect => "Aspect".to_owned(),
         Message::FieldDuration => "Duration".to_owned(),
+        Message::FieldSpeed => "Speed".to_owned(),
         Message::FieldStart => "Start".to_owned(),
         Message::FieldVolume => "Volume".to_owned(),
         Message::SelectClipHint => "Select a clip on the timeline to edit it.".to_owned(),

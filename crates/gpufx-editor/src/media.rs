@@ -65,7 +65,7 @@ impl MediaLibrary {
         for track in &project.tracks {
             let kind = if track.is_audio() { MediaKind::Audio } else { MediaKind::Video };
             for clip in &track.clips {
-                let used_to = clip.source_in.saturating_add(clip.duration);
+                let used_to = clip.source_end();
                 let known = self.items.iter_mut().find(|item| same_source(&item.source, &clip.source));
                 match known {
                     Some(item) if item.estimated => item.duration = item.duration.map_or(Some(used_to), |seen| Some(seen.max(used_to))),

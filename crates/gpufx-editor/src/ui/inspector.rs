@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 const HEADER_HEIGHT: f32 = 34.0;
 /// As far up as a project may go; validation sets no floor.
 const GAIN_RANGE: std::ops::RangeInclusive<f64> = -60.0..=60.0;
+const SPEED_RANGE: std::ops::RangeInclusive<f64> = engine::MIN_SPEED..=engine::MAX_SPEED;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let rect = ui.max_rect();
@@ -95,6 +96,7 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     ui.add_enabled_ui(editable, |ui| {
         time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start);
         time_field(ui, state, &language.t(Message::FieldDuration), to_seconds(clip.duration), ClipField::Duration);
+        speed_row(ui, state, &language.t(Message::FieldSpeed), clip.speed);
         ui.separator();
 
         let mut gain = clip.gain_db;
@@ -149,6 +151,21 @@ fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f
                 }
             }
         });
+    });
+}
+
+/// The speed of the clip: a logarithmic slider and a number shown as the factor. Goes through the
+/// live edit path, so a drag is one undo step and Esc restores the clip.
+fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, speed: f64) {
+    let mut value = speed;
+    ui.colored_label(theme::TEXT_DIM, label);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+        let mut changed = ui.add(slider(&mut value, SPEED_RANGE).logarithmic(true)).changed();
+        changed |= drag_field(ui, &mut value, SPEED_RANGE, 0.01, 2, "x", None).1;
+        if changed {
+            state.live_speed(value);
+        }
     });
 }
 

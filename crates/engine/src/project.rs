@@ -341,6 +341,15 @@ impl Clip {
         self.source_in.saturating_add(self.source_offset(self.duration))
     }
 
+    /// Where a start trim asked for `new_start` lands: on the grid of [`Clip::speed_grid`], toward
+    /// the end of the clip, so the frames under the end edge stay exactly where they are.
+    pub fn snapped_start(&self, new_start: Time) -> Time {
+        let grid = self.speed_grid();
+        let delta = new_start.saturating_sub(self.start).ticks();
+        let steps = delta.div_euclid(grid).saturating_add(i64::from(delta.rem_euclid(grid) != 0));
+        self.start.saturating_add(Time::from_ticks(steps.saturating_mul(grid)))
+    }
+
     /// The timeline ticks that play `source` source ticks, rounded down.
     pub fn timeline_ticks(&self, source: Time) -> Time {
         Time::from_ticks(scale_floor(source.ticks(), SPEED_SCALE, self.speed_milli()))

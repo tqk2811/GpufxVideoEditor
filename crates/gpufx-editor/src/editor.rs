@@ -12,7 +12,7 @@ use crate::timeline::hit::ClipHit;
 use crate::timeline::view::TimelineView;
 use crate::visuals::ClipVisuals;
 use engine::{
-    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted,
+    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_speed,
     set_track_hidden, set_transition_params, split_clip, trim_end, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
@@ -193,6 +193,11 @@ impl UiState {
 pub enum ClipField {
     Start(f64),
     Duration(f64),
+}
+
+/// A speed as the factor shown to the user, for example `2.00x`.
+pub fn format_speed(speed: f64) -> String {
+    format!("{speed:.2}x")
 }
 
 /// A clip of the whole default length at `start`, with no effects.
@@ -905,6 +910,12 @@ impl EditorState {
         self.live_edit(|project| set_gain(project, key, gain_db));
     }
 
+    /// Sets the speed of the selected clip, keeping its source range: see [`engine::set_speed`].
+    pub fn live_speed(&mut self, speed: f64) {
+        let Some(key) = self.selection else { return };
+        self.live_edit(|project| set_speed(project, key, speed));
+    }
+
     pub fn live_fades(&mut self, fade_in: Time, fade_out: Time) {
         let Some(key) = self.selection else { return };
         self.live_edit(|project| set_fades(project, key, fade_in, fade_out));
@@ -928,7 +939,8 @@ impl EditorState {
             return;
         }
         if self.run(|project| trim_start(project, key, at)) {
-            self.selection = clip_at(self.project(), key.track, at);
+            // A trim keeps the order of the clips, and at another speed lands near `at`, not on it.
+            self.selection = Some(key);
         }
     }
 
@@ -1669,6 +1681,59 @@ mod tests {
         state.finish_drag(EditCommand::Move { key: key(0), track: 0, desired_start: seconds(60) });
         assert_eq!(state.drag, None);
         assert_eq!(clips(state.project(), 0)[1].0, seconds(60));
+    }
+
+    #[test]
+    fn trimming_a_sped_clip_to_the_playhead_keeps_it_selected() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("a.mp4"));
+        let key = ClipKey { track: 0, clip: 0 };
+        state.select(Some(key));
+        state.live_speed(1.5);
+        state.commit_live();
+        state.scrub_to(Time::from_ticks(90_001));
+        state.trim_start_to_playhead();
+        assert_ne!(state.project().tracks[0].clips[0].start, Time::ZERO);
+        assert_eq!(state.selection(), Some(key));
+    }
+
+    #[test]
+    fn a_speed_drag_is_one_undo_step_and_can_be_cancelled() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("a.mp4"));
+        let key = ClipKey { track: 0, clip: 0 };
+        state.select(Some(key));
+        let before = state.project().tracks[0].clips[0].clone();
+        state.live_speed(2.0);
+        state.live_speed(4.0);
+        assert_eq!(state.project().tracks[0].clips[0].speed, 4.0, "the preview follows the drag");
+        state.commit_live();
+        let done = state.project().tracks[0].clips[0].clone();
+        assert_eq!((done.speed, done.source_in, done.start), (4.0, before.source_in, before.start));
+        assert_eq!(done.source_end(), before.source_end(), "the same part of the source");
+        state.undo();
+        assert_eq!(state.project().tracks[0].clips[0], before, "one undo step");
+
+        state.live_speed(2.0);
+        state.cancel_live();
+        assert_eq!(state.project().tracks[0].clips[0], before, "Esc restores the clip");
+    }
+
+    #[test]
+    fn a_speed_that_would_run_into_the_next_clip_is_refused_and_the_clip_stays() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("a.mp4"));
+        state.add_clip_from_file(0, Path::new("b.mp4"));
+        let key = ClipKey { track: 0, clip: 0 };
+        state.select(Some(key));
+        let before = state.project().tracks[0].clips[0].clone();
+        state.live_speed(0.5);
+        state.commit_live();
+        assert_eq!(state.project().tracks[0].clips[0], before);
+        assert!(matches!(state.status(), Status::Refused(Message::EditSpeedOverlap { .. })), "{:?}", state.status());
     }
 
     #[test]

@@ -40,16 +40,16 @@ fn width_ticks(x: f64, pixels_per_second: f64) -> i64 {
     (x / pixels_per_second * TICKS_PER_SECOND as f64).round() as i64
 }
 
-/// The ticks a tile `tile_width` wide lasts.
-pub fn tile_ticks(tile_width: f64, pixels_per_second: f64) -> i64 {
-    width_ticks(tile_width, pixels_per_second)
+/// The source ticks a tile `tile_width` wide covers of `clip`.
+pub fn tile_ticks(clip: &Clip, tile_width: f64, pixels_per_second: f64) -> i64 {
+    clip.source_offset(Time::from_ticks(width_ticks(tile_width, pixels_per_second))).ticks().max(1)
 }
 
 /// The source position at the middle of tile `index` of a clip, inside what the clip plays.
 pub fn tile_source_ticks(clip: &Clip, tile_width: f64, pixels_per_second: f64, index: usize) -> i64 {
     let middle = (index as f64 + 0.5) * tile_width;
     let into_clip = width_ticks(middle, pixels_per_second).clamp(0, clip.duration.ticks().saturating_sub(1).max(0));
-    clip.source_in.ticks().saturating_add(into_clip)
+    clip.source_in.saturating_add(clip.source_offset(Time::from_ticks(into_clip))).ticks()
 }
 
 /// The cells of width `cell` from `origin` that overlap `visible`, within `extent` of cells.
@@ -68,7 +68,8 @@ pub fn bar_span(clip: &Clip, pixels_per_second: f64, index: usize) -> Range<i64>
     let pitch = BAR_WIDTH + BAR_GAP;
     let begin = width_ticks(index as f64 * pitch, pixels_per_second);
     let end = width_ticks((index + 1) as f64 * pitch, pixels_per_second).min(clip.duration.ticks());
-    clip.source_in.ticks().saturating_add(begin)..clip.source_in.ticks().saturating_add(end.max(begin + 1))
+    let at = |ticks: i64| clip.source_in.saturating_add(clip.source_offset(Time::from_ticks(ticks))).ticks();
+    at(begin)..at(end.max(begin + 1)).max(at(begin) + 1)
 }
 
 /// Heights of the picture strip and of the level bars in a clip body `height` tall.
@@ -113,7 +114,7 @@ mod tests {
         let pixels_per_second = 10.0;
         let tile = 16.0;
         let clip = clip(0, 100);
-        let step = bucket_step(tile_ticks(tile, pixels_per_second));
+        let step = bucket_step(tile_ticks(&clip, tile, pixels_per_second));
         let times: Vec<i64> = (0..40).map(|i| bucket_time(tile_source_ticks(&clip, tile, pixels_per_second, i), step, None)).collect();
         for pair in times.windows(2) {
             assert!(pair[0] < pair[1], "{pair:?}");
@@ -149,6 +150,23 @@ mod tests {
         assert_eq!(span.end - span.start, TICKS_PER_SECOND / 100);
         let last = bar_span(&clip, 300.0, 499);
         assert!(last.end <= 15 * TICKS_PER_SECOND);
+    }
+
+    #[test]
+    fn tiles_and_bars_follow_the_speed_of_the_clip() {
+        let mut fast = clip(10, 20);
+        fast.speed = 2.0;
+        // A 200 px tile at 100 px/s is two timeline seconds, four of the source.
+        assert_eq!(tile_source_ticks(&fast, 200.0, 100.0, 0), 12 * TICKS_PER_SECOND);
+        assert_eq!(tile_source_ticks(&fast, 200.0, 100.0, 1), 16 * TICKS_PER_SECOND);
+        assert_eq!(tile_ticks(&fast, 200.0, 100.0), 4 * TICKS_PER_SECOND);
+        let bar = bar_span(&fast, 300.0, 0);
+        assert_eq!(bar.start, 10 * TICKS_PER_SECOND);
+        assert_eq!(bar.end - bar.start, 2 * TICKS_PER_SECOND / 100, "a bar covers twice the source");
+        let mut slow = clip(10, 20);
+        slow.speed = 0.5;
+        assert_eq!(tile_source_ticks(&slow, 200.0, 100.0, 0), 10 * TICKS_PER_SECOND + TICKS_PER_SECOND / 2);
+        assert_eq!(tile_ticks(&slow, 200.0, 100.0), TICKS_PER_SECOND);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
-use crate::editor::{clip_label, EditorState};
+use crate::editor::{clip_label, format_speed, EditorState};
 use crate::i18n::{Language, Message};
 use crate::timeline::drag::{clamp_trim, drag_command};
 use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
@@ -301,6 +301,14 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     painter.rect_filled(strip, CornerRadius { nw: CLIP_RADIUS, ne: CLIP_RADIUS, sw: 0, se: 0 }, dim(header));
     let text = painter.with_clip_rect(paint.rect.intersect(paint.clip_area));
     text.text(strip.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_label(&paint.clip.source), FontId::proportional(11.0), theme::TEXT);
+    if paint.clip.has_speed() {
+        let at = strip.right_center() - Vec2::new(6.0, 0.0);
+        let font = FontId::proportional(11.0);
+        let galley = text.layout_no_wrap(format_speed(paint.clip.speed), font, theme::ACCENT_TEXT);
+        let badge = Align2::RIGHT_CENTER.anchor_size(at, galley.size());
+        text.rect_filled(badge.expand2(Vec2::new(3.0, 1.0)), CornerRadius::same(3), dim(header));
+        text.galley(badge.min, galley, theme::ACCENT_TEXT);
+    }
     if let Some(visuals) = paint.visuals {
         draw_clip_media(painter, paint, &mut visuals.borrow_mut(), paint.rect.with_min_y(strip.bottom()));
     }
@@ -342,7 +350,7 @@ fn draw_film_strip(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut
     let visible = paint.clip_area.x_range();
     let tint = Color32::WHITE.gamma_multiply(paint.opacity());
     let cells = visible_cells(f64::from(strip.left()), f64::from(tile_width), f64::from(strip.width()), f64::from(visible.min)..f64::from(visible.max));
-    let step = bucket_step(tile_ticks(f64::from(tile_width), paint.pixels_per_second));
+    let step = bucket_step(tile_ticks(paint.clip, f64::from(tile_width), paint.pixels_per_second));
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     for index in cells {
         let left = strip.left() + index as f32 * tile_width;
