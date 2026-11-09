@@ -31,6 +31,8 @@ pub struct Mp4Encoder {
     packet: *mut ffi::AVPacket,
     width: usize,
     height: usize,
+    /// Duration of one frame in the codec time base (1, as the time base is one frame).
+    frame_duration: i64,
     encoder_name: String,
 }
 
@@ -74,6 +76,7 @@ impl Mp4Encoder {
             packet: ptr::null_mut(),
             width: output.width as usize,
             height: output.height as usize,
+            frame_duration: 0,
             encoder_name: name.to_owned(),
         };
         // SAFETY: on error, Drop releases what was created so far.
@@ -94,12 +97,13 @@ impl Mp4Encoder {
         let duration = output.frame_duration.ticks();
         let divisor = gcd(duration, TICKS_PER_SECOND);
         let time_base = ffi::AVRational { num: (duration / divisor) as i32, den: (TICKS_PER_SECOND / divisor) as i32 };
+        let context_framerate = ffi::AVRational { num: time_base.den, den: time_base.num };
         let context = &mut *self.codec_context;
         context.width = output.width as i32;
         context.height = output.height as i32;
         context.pix_fmt = ffi::AV_PIX_FMT_NV12;
         context.time_base = time_base;
-        context.framerate = ffi::AVRational { num: time_base.den, den: time_base.num };
+        context.framerate = context_framerate;
         context.colorspace = ffi::AVCOL_SPC_BT709;
         context.color_range = ffi::AVCOL_RANGE_MPEG;
         context.color_primaries = ffi::AVCOL_PRI_BT709;
@@ -120,6 +124,8 @@ impl Mp4Encoder {
             return Err("avformat_new_stream failed".to_owned());
         }
         (*self.stream).time_base = time_base;
+        (*self.stream).avg_frame_rate = context_framerate;
+        self.frame_duration = Self::duration_in_time_base(duration, time_base);
         check(ffi::avcodec_parameters_from_context((*self.stream).codecpar, self.codec_context), "avcodec_parameters_from_context")?;
 
         if (*(*self.format_context).oformat).flags & ffi::AVFMT_NOFILE == 0 {
@@ -137,6 +143,13 @@ impl Mp4Encoder {
         (*self.frame).height = output.height as i32;
         check(ffi::av_frame_get_buffer(self.frame, 0), "av_frame_get_buffer")?;
         Ok(())
+    }
+
+    /// `ticks` of project time as a count of `time_base` units, rounded to nearest.
+    fn duration_in_time_base(ticks: i64, time_base: ffi::AVRational) -> i64 {
+        let numerator = i128::from(ticks) * i128::from(time_base.den);
+        let denominator = i128::from(TICKS_PER_SECOND) * i128::from(time_base.num);
+        ((2 * numerator + denominator) / (2 * denominator)) as i64
     }
 
     /// About 0.1 bit per pixel per frame, a quality setting all encoders understand.
@@ -200,7 +213,7 @@ fn rgba_to_nv12(rgba: &[u8], width: usize, height: usize, luma: &mut [u8], luma_
         for x in (0..width).step_by(2) {
             let average = |channel: usize| (i32::from(top[x * 4 + channel]) + i32::from(top[x * 4 + 4 + channel]) + i32::from(bottom[x * 4 + channel]) + i32::from(bottom[x * 4 + 4 + channel]) + 2) / 4;
             let (r, g, b) = (average(0), average(1), average(2));
-            chroma_row[x] = (((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128) as u8;
+            chroma_row[x] = (((-26 * r - 86 * g + 112 * b + 128) >> 8) + 128) as u8;
             chroma_row[x + 1] = (((112 * r - 102 * g - 10 * b + 128) >> 8) + 128) as u8;
         }
     }
@@ -218,6 +231,7 @@ impl FrameSink for Mp4Encoder {
             let chroma = std::slice::from_raw_parts_mut(frame.data[1], chroma_stride * (self.height / 2));
             rgba_to_nv12(rgba, self.width, self.height, luma, luma_stride, chroma, chroma_stride);
             frame.pts = index;
+            frame.duration = self.frame_duration;
             let sent = ffi::avcodec_send_frame(self.codec_context, self.frame);
             if sent < 0 {
                 return Err(RenderError(format!("avcodec_send_frame failed: {}", describe_error(sent))));
@@ -268,5 +282,23 @@ mod tests {
         assert_eq!(chroma, [128, 128]);
         rgba_to_nv12(&[0, 0, 0, 255].repeat(4), 2, 2, &mut luma, 2, &mut chroma, 2);
         assert_eq!(luma, [16; 4]);
+        assert_eq!(chroma, [128, 128]);
+    }
+
+    #[test]
+    fn grey_has_neutral_chroma() {
+        let mut luma = [0u8; 4];
+        let mut chroma = [0u8; 2];
+        rgba_to_nv12(&[128, 128, 128, 255].repeat(4), 2, 2, &mut luma, 2, &mut chroma, 2);
+        assert_eq!(chroma, [128, 128]);
+    }
+
+    #[test]
+    fn the_frame_duration_in_the_time_base_is_one_frame() {
+        for ticks in [3000, 3003, 3600, 1500] {
+            let divisor = gcd(ticks, TICKS_PER_SECOND);
+            let time_base = ffi::AVRational { num: (ticks / divisor) as i32, den: (TICKS_PER_SECOND / divisor) as i32 };
+            assert_eq!(Mp4Encoder::duration_in_time_base(ticks, time_base), 1);
+        }
     }
 }
