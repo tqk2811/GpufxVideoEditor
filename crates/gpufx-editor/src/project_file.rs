@@ -3,6 +3,7 @@
 //! In memory every source is absolute. The file on disk holds a source under the project's folder
 //! relative to it, with forward slashes, so a folder of media and project can be moved as one.
 
+use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
@@ -21,16 +22,21 @@ pub fn has_packages(root: &Path) -> bool {
     root.join("packages").join("gpufx").is_dir()
 }
 
-/// The first of the candidates that holds packages: next to the executable, the variable, the checkout.
-pub fn choose_package_root(exe_dir: Option<PathBuf>, variable: Option<PathBuf>, dev: PathBuf, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    [exe_dir, variable, Some(dev)].into_iter().flatten().find(|root| exists(root))
+/// The first of the candidates that holds packages: the variable, next to the executable, the checkout.
+pub fn choose_package_root(variable: Option<PathBuf>, exe_dir: Option<PathBuf>, dev: PathBuf, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    [variable, exe_dir, Some(dev)].into_iter().flatten().find(|root| exists(root))
+}
+
+/// The value of [`PACKAGE_ROOT_VARIABLE`]; an empty one counts as unset.
+fn package_root_variable(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 /// The package root of this run, or none when no candidate has packages.
 pub fn package_roots() -> Vec<PathBuf> {
     let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
-    let variable = std::env::var_os(PACKAGE_ROOT_VARIABLE).map(PathBuf::from);
-    choose_package_root(exe_dir, variable, PathBuf::from(DEV_PACKAGE_ROOT), has_packages).into_iter().collect()
+    let variable = package_root_variable(std::env::var_os(PACKAGE_ROOT_VARIABLE));
+    choose_package_root(variable, exe_dir, PathBuf::from(DEV_PACKAGE_ROOT), has_packages).into_iter().collect()
 }
 
 /// The paths of the project stored in `file`, or of an unsaved one.
@@ -242,21 +248,28 @@ mod tests {
     }
 
     #[test]
-    fn next_to_the_executable_wins() {
-        let chosen = choose_package_root(Some(root("exe")), Some(root("var")), root("dev"), |_| true);
-        assert_eq!(chosen, Some(root("exe")));
+    fn the_variable_wins() {
+        let chosen = choose_package_root(Some(root("var")), Some(root("exe")), root("dev"), |_| true);
+        assert_eq!(chosen, Some(root("var")));
     }
 
     #[test]
-    fn the_variable_comes_before_the_checkout() {
-        let chosen = choose_package_root(Some(root("exe")), Some(root("var")), root("dev"), |p| p != Path::new("exe"));
-        assert_eq!(chosen, Some(root("var")));
+    fn next_to_the_executable_comes_before_the_checkout() {
+        let chosen = choose_package_root(Some(root("var")), Some(root("exe")), root("dev"), |p| p != Path::new("var"));
+        assert_eq!(chosen, Some(root("exe")));
     }
 
     #[test]
     fn the_checkout_is_the_last_resort_and_may_be_missing() {
         assert_eq!(choose_package_root(None, None, root("dev"), |_| true), Some(root("dev")));
-        assert_eq!(choose_package_root(Some(root("exe")), None, root("dev"), |_| false), None);
+        assert_eq!(choose_package_root(None, Some(root("exe")), root("dev"), |_| false), None);
+    }
+
+    #[test]
+    fn an_empty_variable_counts_as_unset() {
+        assert_eq!(package_root_variable(Some(OsString::new())), None);
+        assert_eq!(package_root_variable(None), None);
+        assert_eq!(package_root_variable(Some(OsString::from("var"))), Some(root("var")));
     }
 
     #[test]
