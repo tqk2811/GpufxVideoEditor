@@ -40,6 +40,8 @@ pub struct EditorState {
     scrub_target: Option<Time>,
     playback_message: Option<String>,
     silence_ms: u64,
+    /// Why playback runs without sound; stays until a device opens.
+    no_sound: Option<String>,
     pub view: TimelineView,
     pub drag: Option<ClipDrag>,
 }
@@ -92,6 +94,7 @@ impl EditorState {
             scrub_target: None,
             playback_message: None,
             silence_ms: 0,
+            no_sound: None,
             view: TimelineView::default(),
             drag: None,
         }
@@ -131,6 +134,14 @@ impl EditorState {
 
     pub fn playback_message(&self) -> Option<&str> {
         self.playback_message.as_deref()
+    }
+
+    pub fn no_sound(&self) -> Option<&str> {
+        self.no_sound.as_deref()
+    }
+
+    pub fn set_no_sound(&mut self, reason: Option<String>) {
+        self.no_sound = reason;
     }
 
     pub fn silence_ms(&self) -> u64 {

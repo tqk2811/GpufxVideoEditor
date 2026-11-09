@@ -232,6 +232,7 @@ impl Session {
                         match Playback::open(self.state.project(), Arc::new(editor_paths())) {
                             Ok(playback) => {
                                 self.audio_revision = self.state.revision();
+                                self.state.set_no_sound(playback.no_sound().map(str::to_owned));
                                 self.playback = Some(playback);
                             }
                             Err(message) => {

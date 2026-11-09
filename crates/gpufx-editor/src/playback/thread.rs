@@ -4,17 +4,21 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use engine::render::{ClipKey, RenderError};
 use engine::{audio_channel, sample_position, AudioClock, AudioConsumer, AudioProducer, AudioSource, Project, Time, MIX_CHANNELS};
 
-use super::plan::{frames_to_prepare, gate_may_open, output_delay_frames, ClockReading, BLOCK_FRAMES, LEAD_FRAMES, RING_BLOCKS};
+use super::plan::{expand_stereo, frames_to_prepare, gate_may_open, output_delay_frames, timed_frames, ClockReading, BLOCK_FRAMES, LEAD_FRAMES, RING_BLOCKS};
 
 /// How long the thread sleeps when the lead is full. A seek or edit wakes it at once.
 const IDLE_WAIT: Duration = Duration::from_millis(10);
 /// Mixed in one go, so a command is looked at between steps of a long refill.
 const STEP_FRAMES: usize = 4 * BLOCK_FRAMES;
+/// How often the silent driver pulls when there is no device.
+const SILENT_TICK: Duration = Duration::from_millis(10);
+/// The most one silent pull takes, 100 ms: a stalled timer must not jump the clock.
+const SILENT_MAX_FRAMES: usize = 4_800;
 
 /// What the callback writes and everyone else reads. All wait-free.
 #[derive(Default)]
@@ -59,10 +63,17 @@ impl PlaybackShared {
 /// consumer does not see those frames; it only drops stale blocks, or the ring could fill up with
 /// them before the lead is ready and the gate would never open.
 pub fn fill_device_buffer(consumer: &mut AudioConsumer, shared: &PlaybackShared, out: &mut [f32], latency: Option<Duration>) {
+    if pull_stereo(consumer, shared, out) {
+        shared.delay.store(output_delay_frames(out.len() / MIX_CHANNELS, latency), Ordering::Relaxed);
+    }
+}
+
+/// Fills `out` and updates the totals. False when the gate was closed.
+fn pull_stereo(consumer: &mut AudioConsumer, shared: &PlaybackShared, out: &mut [f32]) -> bool {
     if !shared.gate.load(Ordering::Acquire) {
         out.fill(0.0);
         consumer.discard_stale();
-        return;
+        return false;
     }
     let report = consumer.pull(out);
     shared.played.fetch_add(report.played as u64, Ordering::Relaxed);
@@ -72,7 +83,72 @@ pub fn fill_device_buffer(consumer: &mut AudioConsumer, shared: &PlaybackShared,
     } else {
         shared.past_end.store(0, Ordering::Relaxed);
     }
-    shared.delay.store(output_delay_frames(out.len() / MIX_CHANNELS, latency), Ordering::Relaxed);
+    true
+}
+
+/// The device callback for a device of `channels`, 2 or more. `scratch` is allocated before the
+/// stream starts, and a callback larger than it is pulled in pieces. No lock, no allocation.
+pub fn fill_device_channels(consumer: &mut AudioConsumer, shared: &PlaybackShared, out: &mut [f32], channels: usize, scratch: &mut [f32], latency: Option<Duration>) {
+    if channels == MIX_CHANNELS {
+        fill_device_buffer(consumer, shared, out, latency);
+        return;
+    }
+    let piece_frames = scratch.len() / MIX_CHANNELS;
+    if channels < MIX_CHANNELS || piece_frames == 0 {
+        out.fill(0.0);
+        return;
+    }
+    let mut played = false;
+    for piece in out.chunks_mut(piece_frames * channels) {
+        let stereo = &mut scratch[..piece.len() / channels * MIX_CHANNELS];
+        played = pull_stereo(consumer, shared, stereo);
+        expand_stereo(stereo, piece, channels);
+    }
+    if played {
+        shared.delay.store(output_delay_frames(out.len() / channels, latency), Ordering::Relaxed);
+    }
+}
+
+/// Stands in for the device when there is none, so the clock and the picture still advance: pulls
+/// the consumer on a timer, at the rate of the mix, and throws the samples away.
+pub struct SilentDriver {
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl SilentDriver {
+    pub fn spawn(mut consumer: AudioConsumer, shared: Arc<PlaybackShared>) -> Result<Self, String> {
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let thread_stop = stop.clone();
+        let handle = thread::Builder::new()
+            .name("audio-silent".to_owned())
+            .spawn(move || {
+                let (lock, wake) = &*thread_stop;
+                let mut out = vec![0.0f32; SILENT_MAX_FRAMES * MIX_CHANNELS];
+                let (mut last, mut carry) = (Instant::now(), 0);
+                let mut stopped = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                while !*stopped {
+                    stopped = wake.wait_timeout(stopped, SILENT_TICK).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+                    let now = Instant::now();
+                    let (frames, left) = timed_frames(now - last, carry, SILENT_MAX_FRAMES);
+                    (last, carry) = (now, left);
+                    fill_device_buffer(&mut consumer, &shared, &mut out[..frames * MIX_CHANNELS], Some(Duration::ZERO));
+                }
+            })
+            .map_err(|e| format!("the silent playback thread could not start: {e}"))?;
+        Ok(Self { stop, handle: Some(handle) })
+    }
+}
+
+impl Drop for SilentDriver {
+    fn drop(&mut self) {
+        let (lock, wake) = &*self.stop;
+        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        wake.notify_all();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -279,7 +355,6 @@ mod tests {
     use super::*;
     use engine::{AudioOutput, Clip, Output, Track, TrackKind, SUPPORTED_VERSION};
     use std::sync::atomic::AtomicUsize;
-    use std::time::Instant;
 
     const TIMEOUT: Duration = Duration::from_secs(10);
     /// A device of ten millisecond buffers.
@@ -363,6 +438,11 @@ mod tests {
             self.used.load(Ordering::SeqCst)
         }
 
+        fn take(&self) -> bool {
+            let left = self.granted.load(Ordering::SeqCst);
+            left > 0 && self.granted.compare_exchange(left, left - 1, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        }
+
         fn wait_for(&self, used: usize) {
             wait_until(|| self.used() >= used, "the permitted reads");
         }
@@ -371,7 +451,7 @@ mod tests {
     impl AudioSource for Permits {
         fn read(&mut self, _key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
             let start = Instant::now();
-            while self.granted.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| (left > 0).then_some(left - 1)).is_err() && start.elapsed() < TIMEOUT {
+            while !self.take() && start.elapsed() < TIMEOUT {
                 thread::sleep(Duration::from_millis(1));
             }
             self.used.fetch_add(1, Ordering::SeqCst);
@@ -380,6 +460,69 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_six_channel_callback_larger_than_the_scratch_is_filled_in_pieces() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        thread.play(Time::from_seconds(1).unwrap());
+        open_gate(&thread);
+        let mut scratch = vec![0.0f32; 64 * MIX_CHANNELS];
+        let mut out = vec![1.0f32; 200 * 6];
+        fill_device_channels(&mut consumer, thread.shared(), &mut out, 6, &mut scratch, Some(Duration::ZERO));
+        for (i, frame) in out.chunks_exact(6).enumerate() {
+            assert_eq!(sample_of(frame[0]), 48_000 + i as i64, "frame {i}");
+            assert_eq!(sample_of(frame[1]), 48_000 + i as i64, "frame {i}");
+            assert_eq!(&frame[2..], &[0.0; 4], "frame {i}");
+        }
+        assert_eq!(thread.shared().stats().played, 200);
+        assert_eq!(thread.reading().delay, 200, "the whole callback, not the last piece");
+    }
+
+    #[test]
+    fn a_stereo_callback_does_not_need_the_scratch() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        thread.play(Time::ZERO);
+        open_gate(&thread);
+        let mut out = vec![1.0f32; 100 * 2];
+        fill_device_channels(&mut consumer, thread.shared(), &mut out, 2, &mut [], Some(Duration::ZERO));
+        assert_eq!(sample_of(out[198]), 99);
+    }
+
+    #[test]
+    fn a_six_channel_callback_is_silent_with_the_gate_closed() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        let mut scratch = vec![1.0f32; 64 * MIX_CHANNELS];
+        let mut out = vec![1.0f32; 200 * 6];
+        fill_device_channels(&mut consumer, thread.shared(), &mut out, 6, &mut scratch, Some(Duration::ZERO));
+        assert!(out.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn the_silent_driver_moves_the_clock_and_finishes() {
+        let (thread, consumer) = PreparingThread::spawn(&project(1, true, TrackKind::Video), Counting::default).unwrap();
+        let driver = SilentDriver::spawn(consumer, thread.shared().clone()).unwrap();
+        thread.play(Time::from_ticks(engine::TICKS_PER_SECOND - 30_000));
+        wait_until(|| thread.reading().finished(), "the end of the timeline");
+        assert_eq!(thread.reading().position, thread.reading().end);
+        drop(driver);
+    }
+
+    #[test]
+    fn the_silent_driver_keeps_the_gate_opening_after_seeks() {
+        let permits = Permits::default();
+        let source = permits.clone();
+        let (thread, consumer) = PreparingThread::spawn(&project(8, true, TrackKind::Video), move || source).unwrap();
+        let _driver = SilentDriver::spawn(consumer, thread.shared().clone()).unwrap();
+        thread.play(Time::ZERO);
+        for round in 0..RING_BLOCKS as i64 {
+            let used = permits.used();
+            permits.grant(4);
+            permits.wait_for(used + 4);
+            thread.seek(Time::from_seconds(1 + round % 5).unwrap());
+        }
+        permits.unlimited();
+        open_gate(&thread);
     }
 
     #[test]

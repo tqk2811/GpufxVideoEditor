@@ -106,14 +106,38 @@ pub struct FormatRange {
     pub is_f32: bool,
 }
 
-/// The index of the first offer of 48 kHz stereo floats, or the message for the status line. No
-/// other format is used: the mix would play at the wrong pitch or need converting.
+/// The index of the offer to use: 48 kHz floats, stereo if offered, otherwise the first with more
+/// channels (WASAPI offers only the channels of the mix format). Or the message for the status
+/// line. No other format is used: the mix would play at the wrong pitch or need converting.
 pub fn choose_format(offers: &[FormatRange]) -> Result<usize, String> {
-    let wanted = |offer: &FormatRange| offer.is_f32 && usize::from(offer.channels) == MIX_CHANNELS && (offer.min_rate..=offer.max_rate).contains(&MIX_SAMPLE_RATE);
-    offers.iter().position(wanted).ok_or_else(|| {
+    let usable = |offer: &FormatRange| offer.is_f32 && usize::from(offer.channels) >= MIX_CHANNELS && (offer.min_rate..=offer.max_rate).contains(&MIX_SAMPLE_RATE);
+    let stereo = offers.iter().position(|offer| usable(offer) && usize::from(offer.channels) == MIX_CHANNELS);
+    stereo.or_else(|| offers.iter().position(usable)).ok_or_else(|| {
         let offered: Vec<String> = offers.iter().map(|o| format!("{} ch {}-{} Hz{}", o.channels, o.min_rate, o.max_rate, if o.is_f32 { "" } else { " non-float" })).collect();
-        format!("the audio device does not offer 48 kHz stereo floats (offers: {}), so nothing is played", offered.join(", "))
+        format!("the audio device does not offer 48 kHz floats with 2 or more channels (offers: {})", offered.join(", "))
     })
+}
+
+/// Writes interleaved stereo to the first two channels of `out`, which has `channels` per frame,
+/// and zeroes the rest, including any incomplete frame at the end.
+pub fn expand_stereo(stereo: &[f32], out: &mut [f32], channels: usize) {
+    out.fill(0.0);
+    for (from, to) in stereo.chunks_exact(MIX_CHANNELS).zip(out.chunks_exact_mut(channels)) {
+        to[..MIX_CHANNELS].copy_from_slice(from);
+    }
+}
+
+/// The frames that `elapsed` is worth, and what is left over for the next call. More than `max` is
+/// cut to `max`: a stalled timer must not jump the clock.
+pub fn timed_frames(elapsed: Duration, carry: u64, max: usize) -> (usize, u64) {
+    const NANOS: u128 = 1_000_000_000;
+    let total = elapsed.as_nanos() * u128::from(MIX_SAMPLE_RATE) + u128::from(carry);
+    let frames = total / NANOS;
+    if frames > max as u128 {
+        (max, 0)
+    } else {
+        (frames as usize, (total % NANOS) as u64)
+    }
 }
 
 /// The length of `frames` of the mix in milliseconds.
@@ -235,9 +259,49 @@ mod tests {
     fn another_rate_or_layout_is_refused_with_what_is_offered() {
         for offers in [vec![offer(2, 44_100, 44_100, true)], vec![offer(1, 48_000, 48_000, true)], vec![offer(2, 48_000, 48_000, false)]] {
             let message = choose_format(&offers).expect_err("refused");
-            assert!(message.contains("nothing is played"), "{message}");
+            assert!(message.contains("does not offer"), "{message}");
         }
         assert!(choose_format(&[]).is_err(), "a device with no offers");
+    }
+
+    #[test]
+    fn a_surround_mix_format_is_accepted_when_stereo_is_not_offered() {
+        assert_eq!(choose_format(&[offer(1, 48_000, 48_000, true), offer(6, 48_000, 48_000, true)]), Ok(1));
+        assert_eq!(choose_format(&[offer(8, 48_000, 48_000, true), offer(2, 48_000, 48_000, true)]), Ok(1), "stereo is preferred");
+    }
+
+    #[test]
+    fn stereo_goes_to_the_first_two_channels_and_the_rest_is_zero() {
+        let mut out = [9.0; 12];
+        expand_stereo(&[0.1, 0.2, 0.3, 0.4], &mut out, 6);
+        assert_eq!(out, [0.1, 0.2, 0.0, 0.0, 0.0, 0.0, 0.3, 0.4, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn stereo_on_a_stereo_device_is_copied() {
+        let mut out = [9.0; 4];
+        expand_stereo(&[0.1, 0.2, 0.3, 0.4], &mut out, 2);
+        assert_eq!(out, [0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn an_incomplete_device_frame_is_zeroed() {
+        let mut out = [9.0; 8];
+        expand_stereo(&[0.1, 0.2], &mut out, 6);
+        assert_eq!(out, [0.1, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn a_timer_interval_converts_to_frames_and_keeps_the_remainder() {
+        assert_eq!(timed_frames(Duration::from_millis(10), 0, 4_800), (480, 0));
+        let (frames, carry) = timed_frames(Duration::from_micros(30), 0, 4_800);
+        assert_eq!(frames, 1, "1.44 frames");
+        assert_eq!(timed_frames(Duration::from_micros(30), carry, 4_800).0, 1, "0.88 frames adds up to 1.88");
+    }
+
+    #[test]
+    fn a_stalled_timer_does_not_jump_the_clock() {
+        assert_eq!(timed_frames(Duration::from_secs(5), 123, 4_800), (4_800, 0));
     }
 
     #[test]

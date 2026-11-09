@@ -132,6 +132,10 @@ fn status_line(ui: &mut egui::Ui, state: &EditorState) {
             ui.separator();
             ui.colored_label(REFUSED, format!("Audio: {message}"));
         }
+        if let Some(reason) = state.no_sound() {
+            ui.separator();
+            ui.colored_label(REFUSED, format!("No sound: {reason}"));
+        }
         if state.silence_ms() > 0 {
             ui.separator();
             ui.label(format!("Audio gaps: {} ms", state.silence_ms()));
