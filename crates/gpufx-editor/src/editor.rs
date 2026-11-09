@@ -8,12 +8,14 @@ use crate::packages::{Catalog, PickerState};
 use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{clamp_trim, ClipDrag, EditCommand};
 use crate::timeline::view::TimelineView;
+use crate::visuals::ClipVisuals;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted,
     set_transition_params, split_clip, trim_end, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
 use serde_json::{Map, Value};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 const UNDO_DEPTH: usize = 200;
@@ -72,6 +74,8 @@ pub struct EditorState {
     /// What this session imported and what the open project uses.
     pub library: MediaLibrary,
     pub ui: UiState,
+    /// Thumbnails and level bars; drawn from `&self`, so behind a cell.
+    pub visuals: RefCell<ClipVisuals>,
     language: Language,
 }
 
@@ -219,6 +223,7 @@ impl EditorState {
             hold_cancelled: false,
             library: MediaLibrary::default(),
             ui: UiState::default(),
+            visuals: RefCell::new(ClipVisuals::default()),
             language: Language::default(),
         }
     }

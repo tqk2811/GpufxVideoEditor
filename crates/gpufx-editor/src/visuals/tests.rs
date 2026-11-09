@@ -1,0 +1,241 @@
+use super::backend::FfmpegGenerator;
+use super::worker::{Done, Generator};
+use super::*;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use engine::Time;
+
+fn scratch_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("gpufx-visuals-unit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create the scratch directory");
+    dir
+}
+
+fn clip(name: &str, arguments: &[&str]) -> PathBuf {
+    let path = scratch_dir().join(name);
+    let tool = concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/ffmpeg/bin/ffmpeg.exe");
+    let status = std::process::Command::new(tool).args(["-hide_banner", "-y", "-v", "error"]).args(arguments).arg(&path).status().expect("ffmpeg runs");
+    assert!(status.success(), "generating {name} failed");
+    path
+}
+
+/// Runs frames of `visuals` until `done`; returns the longest time one frame took on this thread.
+fn run_frames(visuals: &mut ClipVisuals, ctx: &egui::Context, mut draw: impl FnMut(&mut ClipVisuals), mut done: impl FnMut(&mut ClipVisuals) -> bool) -> Duration {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut longest = Duration::ZERO;
+    loop {
+        let started = Instant::now();
+        visuals.begin_frame(ctx);
+        draw(visuals);
+        visuals.end_frame();
+        longest = longest.max(started.elapsed());
+        if done(visuals) {
+            return longest;
+        }
+        assert!(Instant::now() < deadline, "generation did not finish");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_known(visuals: &mut ClipVisuals, ctx: &egui::Context, source: &str) -> SourceView {
+    let slot = visuals.slot(source);
+    run_frames(visuals, ctx, |v| { v.view(slot); }, |v| v.slots[slot].view != SourceView::Pending);
+    visuals.view(slot)
+}
+
+fn peaks_of(path: &Path) -> Vec<f32> {
+    let mut all = Vec::new();
+    FfmpegGenerator.peaks(path, &mut |peaks| { all.extend_from_slice(peaks); true }).expect("read the audio");
+    all
+}
+
+#[test]
+fn silence_has_only_zero_peaks() {
+    let path = clip("silence.wav", &["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:d=1", "-c:a", "pcm_s16le"]);
+    let peaks = peaks_of(&path);
+    assert!((peaks.len() as i64 - 50).abs() <= 1, "{}", peaks.len());
+    assert!(peaks.iter().all(|peak| *peak == 0.0));
+}
+
+#[test]
+fn varying_audio_has_varying_peaks() {
+    let path = clip("varying.wav", &["-f", "lavfi", "-i", "aevalsrc='0.9*sin(440*2*PI*t)*gt(mod(t\\,1)\\,0.5)':s=48000:d=2", "-c:a", "pcm_s16le"]);
+    let peaks = peaks_of(&path);
+    let quiet = peaks.iter().take(20).copied().fold(0.0_f32, f32::max);
+    let loud = peaks.iter().skip(30).take(15).copied().fold(0.0_f32, f32::max);
+    assert!(quiet < 0.01, "{quiet}");
+    assert!(loud > 0.5, "{loud}");
+}
+
+#[test]
+fn a_file_without_audio_is_known_to_have_none() {
+    let path = clip("no-audio.mp4", &["-f", "lavfi", "-i", "testsrc=s=320x180:r=30:d=2", "-an", "-c:v", "mpeg4"]);
+    let ctx = egui::Context::default();
+    let mut visuals = ClipVisuals::default();
+    match wait_known(&mut visuals, &ctx, path.to_str().unwrap()) {
+        SourceView::Known(facts) => {
+            assert!(facts.has_video && !facts.has_audio);
+            assert!((facts.aspect - 16.0 / 9.0).abs() < 0.02, "{}", facts.aspect);
+        }
+        other => panic!("{other:?}"),
+    }
+    let slot = visuals.slot(path.to_str().unwrap());
+    assert!(visuals.peaks(slot).is_none());
+    assert!(visuals.wanted_audio.is_empty(), "no levels are asked of a file without sound");
+    visuals.end_frame();
+}
+
+#[test]
+fn a_corrupt_file_stays_failed_and_is_not_asked_again() {
+    let path = scratch_dir().join("corrupt.mp4");
+    std::fs::write(&path, [0x5A_u8; 8192]).expect("write");
+    let source = path.to_str().unwrap();
+    let ctx = egui::Context::default();
+    let mut visuals = ClipVisuals::default();
+    assert_eq!(wait_known(&mut visuals, &ctx, source), SourceView::Failed);
+    let slot = visuals.slot(source);
+    for _ in 0..5 {
+        visuals.begin_frame(&ctx);
+        assert_eq!(visuals.view(slot), SourceView::Failed);
+        assert_eq!(visuals.tile(slot, 0, TICKS_PER_SECOND), None);
+        assert!(visuals.wanted_frames.iter().all(|job| matches!(job.key, JobKey::Stamp(_))), "only the slow check of the file remains");
+        visuals.end_frame();
+    }
+}
+
+#[test]
+fn a_replaced_file_gets_new_pictures() {
+    let path = clip("replaced.mp4", &["-f", "lavfi", "-i", "color=c=red:s=320x180:r=30:d=1", "-an", "-c:v", "mpeg4"]);
+    let source = path.to_str().unwrap().to_owned();
+    let ctx = egui::Context::default();
+    let mut visuals = ClipVisuals::default();
+    wait_known(&mut visuals, &ctx, &source);
+    let slot = visuals.slot(&source);
+    let first = visuals.slots[slot].identity.expect("known");
+    clip("replaced.mp4", &["-f", "lavfi", "-i", "color=c=blue:s=320x180:r=30:d=5", "-an", "-c:v", "mpeg4"]);
+    visuals.slots[slot].checked = None;
+    run_frames(&mut visuals, &ctx, |v| { v.slot(&source); v.view(slot); }, |v| v.slots[slot].identity.is_some_and(|identity| identity != first));
+    assert!(!visuals.live_identities.contains(&first));
+}
+
+#[test]
+fn pictures_are_made_in_the_background_and_the_frame_stays_cheap() {
+    let path = clip("strip.mp4", &["-f", "lavfi", "-i", "testsrc=s=640x360:r=30:d=8", "-f", "lavfi", "-i", "sine=f=330:d=8", "-c:v", "mpeg4", "-c:a", "aac"]);
+    let source = path.to_str().unwrap().to_owned();
+    let ctx = egui::Context::default();
+    let mut visuals = ClipVisuals::default();
+    wait_known(&mut visuals, &ctx, &source);
+    let slot = visuals.slot(&source);
+    let step = TICKS_PER_SECOND;
+    let wanted: Vec<i64> = (0..8).map(|i| i * step).collect();
+    let mut frames_seen = 0;
+    let longest = run_frames(
+        &mut visuals,
+        &ctx,
+        |v| {
+            frames_seen += 1;
+            for bucket in &wanted {
+                v.tile(slot, *bucket, step);
+            }
+            v.peaks(slot);
+        },
+        |v| {
+            let identity = v.slots[slot].identity.expect("known");
+            let tiles = wanted.iter().all(|bucket| matches!(v.tiles.peek_mut((identity, *bucket)), Some(Tile::Ready(_))));
+            let levels = v.peaks.get(&identity).is_some_and(|entry| entry.finished);
+            tiles && levels
+        },
+    );
+    println!("visuals frame: longest {longest:?}, {frames_seen} frames");
+    assert!(longest < Duration::from_millis(100), "a frame took {longest:?}");
+    let identity = visuals.slots[slot].identity.expect("known");
+    assert!(visuals.peaks[&identity].data.len() >= 390, "{}", visuals.peaks[&identity].data.len());
+    let distinct: std::collections::HashSet<TextureId> = wanted.iter().filter_map(|bucket| visuals.tile(slot, *bucket, step)).collect();
+    assert_eq!(distinct.len(), wanted.len(), "every bucket has its own texture");
+    visuals.end_frame();
+}
+
+#[test]
+fn eviction_frees_the_egui_texture() {
+    let ctx = egui::Context::default();
+    let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+    output.textures_delta.clear();
+    let baseline = ctx.tex_manager().read().allocated().count();
+    let mut visuals = ClipVisuals::default();
+    visuals.tiles = TileCache::new(2);
+    visuals.live_identities.insert(7);
+    let image = ThumbnailImage { width: 2, height: 2, rgba: vec![9; 16] };
+    for bucket in 0..3 {
+        visuals.apply(Done::Frame { identity: 7, bucket, result: Ok(image.clone()) });
+        visuals.begin_frame(&ctx);
+    }
+    assert_eq!(visuals.tiles.len(), 2);
+    assert_eq!(ctx.tex_manager().read().allocated().count(), baseline + 2, "the evicted texture was released");
+}
+
+#[test]
+fn a_tile_borrows_a_neighbour_until_its_own_picture_arrives() {
+    let ctx = egui::Context::default();
+    let mut visuals = ClipVisuals::default();
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(3), view: SourceView::Pending, checked: None });
+    visuals.live_identities.insert(3);
+    let image = ThumbnailImage { width: 2, height: 2, rgba: vec![9; 16] };
+    visuals.apply(Done::Frame { identity: 3, bucket: 0, result: Ok(image) });
+    visuals.begin_frame(&ctx);
+    assert!(visuals.tile(0, TICKS_PER_SECOND, TICKS_PER_SECOND).is_some(), "the neighbour stands in");
+    assert_eq!(visuals.wanted_frames.len(), 1, "and the real picture is requested");
+    assert!(visuals.tile(0, 900 * TICKS_PER_SECOND, TICKS_PER_SECOND).is_none(), "too far to borrow");
+    visuals.end_frame();
+}
+
+#[test]
+fn a_failed_tile_is_not_requested_again() {
+    let ctx = egui::Context::default();
+    let mut visuals = ClipVisuals::default();
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(3), view: SourceView::Pending, checked: None });
+    visuals.live_identities.insert(3);
+    visuals.apply(Done::Frame { identity: 3, bucket: 0, result: Err("bad".to_owned()) });
+    visuals.begin_frame(&ctx);
+    assert!(visuals.tile(0, 0, TICKS_PER_SECOND).is_none());
+    assert!(visuals.wanted_frames.is_empty());
+    visuals.end_frame();
+}
+
+#[test]
+fn a_late_result_for_a_replaced_file_is_ignored() {
+    let mut visuals = ClipVisuals::default();
+    visuals.apply(Done::Frame { identity: 9, bucket: 0, result: Ok(ThumbnailImage { width: 1, height: 1, rgba: vec![0; 4] }) });
+    assert!(visuals.tiles.is_empty());
+    visuals.apply(Done::Peaks { identity: 9, peaks: vec![0.5], finished: true });
+    assert!(visuals.peaks.is_empty());
+}
+
+#[test]
+fn levels_of_a_clip_removed_from_the_project_are_dropped() {
+    let mut visuals = ClipVisuals::default();
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(1), view: SourceView::Pending, checked: None });
+    visuals.live_identities.insert(1);
+    visuals.apply(Done::Peaks { identity: 1, peaks: vec![0.1], finished: false });
+    let project = crate::editor::EditorState::default().project().clone();
+    visuals.sync_project(1, &project);
+    assert!(visuals.peaks.is_empty(), "the project does not use it");
+}
+
+#[test]
+fn the_same_file_spelled_differently_is_one_source() {
+    if !cfg!(windows) {
+        return;
+    }
+    let mut visuals = ClipVisuals::default();
+    assert_eq!(visuals.slot("C:/v/A.mp4"), visuals.slot("c:\\V\\a.MP4"));
+}
+
+#[test]
+fn a_library_tile_waits_for_the_source_to_be_known() {
+    let mut visuals = ClipVisuals::default();
+    assert_eq!(visuals.poster("a.mp4", None), None);
+    assert!(visuals.wanted_frames.iter().any(|job| matches!(job.key, JobKey::Inspect(_))));
+    let _: Time = Time::ZERO;
+    visuals.end_frame();
+}

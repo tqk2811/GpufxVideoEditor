@@ -19,4 +19,5 @@ pub mod tasks;
 pub mod timecode;
 pub mod timeline;
 pub mod ui;
+pub mod visuals;
 pub mod window;
