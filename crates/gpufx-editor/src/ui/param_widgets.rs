@@ -6,9 +6,45 @@ use super::theme;
 use crate::params::{bool_value, color_json, color_value, display_name, editable, enum_value, expression_value, number_json, number_value, vector_json, vector_value, widget_for, with_value, ParamWidget};
 use d3d12_backend::{expression_error, ParamInfo};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 
 const NUMBER_WIDTH: f32 = 64.0;
 const VECTOR_FIELD_WIDTH: f32 = 54.0;
+
+/// Text of an expression field that the project does not have yet.
+#[derive(Clone)]
+struct Draft {
+    text: String,
+    saved: String,
+}
+
+/// Every draft of the open inspector, kept in one place so that they can all be dropped together.
+type Drafts = HashMap<egui::Id, Draft>;
+
+fn drafts_id() -> egui::Id {
+    egui::Id::new("expression-drafts")
+}
+
+fn draft_text(ctx: &egui::Context, id: egui::Id) -> Option<String> {
+    ctx.data(|data| data.get_temp::<Drafts>(drafts_id()).and_then(|drafts| drafts.get(&id).map(|draft| draft.text.clone())))
+}
+
+fn store_draft(ctx: &egui::Context, id: egui::Id, text: String, saved: String) {
+    ctx.data_mut(|data| data.get_temp_mut_or_default::<Drafts>(drafts_id()).insert(id, Draft { text, saved }));
+}
+
+fn remove_draft(ctx: &egui::Context, id: egui::Id) {
+    ctx.data_mut(|data| data.get_temp_mut_or_default::<Drafts>(drafts_id()).remove(&id));
+}
+
+/// Forgets every draft and takes the focus from its field. The widget ids of the inspector name a
+/// clip by its position, so a draft cannot follow the clip to another one. True when text the
+/// project did not have was lost.
+pub(super) fn drop_expression_drafts(ctx: &egui::Context) -> bool {
+    let drafts = ctx.data_mut(|data| data.remove_temp::<Drafts>(drafts_id())).unwrap_or_default();
+    ctx.memory_mut(|memory| drafts.keys().for_each(|id| memory.surrender_focus(id.with("edit"))));
+    drafts.values().any(|draft| draft.text != draft.saved)
+}
 
 /// The rows of every editable parameter in `infos`, with `params` as their values.
 pub fn rows(ui: &mut egui::Ui, id: egui::Id, infos: &[ParamInfo], params: &Map<String, Value>) -> Option<Map<String, Value>> {
@@ -109,7 +145,7 @@ fn vector(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>, comp
 fn expression(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>) -> Option<Value> {
     let saved = expression_value(params, info);
     let id = ui.scope_id().with("expression-text");
-    let draft = ui.data(|data| data.get_temp::<String>(id));
+    let draft = draft_text(ui.ctx(), id);
     let had_draft = draft.is_some();
     let mut text = draft.unwrap_or_else(|| saved.clone());
     let response = ui.add(egui::TextEdit::singleline(&mut text).id(id.with("edit")).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
@@ -120,23 +156,33 @@ fn expression(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>) 
         ui.colored_label(theme::TEXT_DIM, format!("Biến: {}", info.vars.join(", ")));
     }
     if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-        ui.data_mut(|data| data.remove::<String>(id));
+        remove_draft(ui.ctx(), id);
         return None;
     }
     if response.has_focus() {
-        ui.data_mut(|data| data.insert_temp(id, text.clone()));
+        store_draft(ui.ctx(), id, text, saved);
         return None;
     }
     if response.lost_focus() && error.is_none() && text != saved {
-        ui.data_mut(|data| data.remove::<String>(id));
+        remove_draft(ui.ctx(), id);
         return Some(json!(text));
     }
     if error.is_some() && (response.lost_focus() || had_draft) {
-        ui.data_mut(|data| data.insert_temp(id, text.clone()));
+        store_draft(ui.ctx(), id, text, saved);
         return None;
     }
-    ui.data_mut(|data| data.remove::<String>(id));
+    remove_draft(ui.ctx(), id);
     None
+}
+
+#[cfg(test)]
+pub(super) fn store_test_draft(ctx: &egui::Context, text: &str, saved: &str) {
+    store_draft(ctx, egui::Id::new("test-draft"), text.to_owned(), saved.to_owned());
+}
+
+#[cfg(test)]
+pub(super) fn has_test_draft(ctx: &egui::Context) -> bool {
+    draft_text(ctx, egui::Id::new("test-draft")).is_some()
 }
 
 #[cfg(test)]
@@ -178,10 +224,32 @@ mod tests {
     fn escape_cancels_the_typing_and_writes_nothing() {
         let ctx = egui::Context::default();
         let id = focus_and_type(&ctx, "x", "1+");
-        assert_eq!(ctx.data(|data| data.get_temp::<String>(id)).as_deref(), Some("1+x"), "the test must really type");
+        assert_eq!(draft_text(&ctx, id).as_deref(), Some("1+x"), "the test must really type");
         let (result, _) = frame(&ctx, "x", vec![key(Key::Escape)]);
         assert_eq!(result, None);
-        assert_eq!(ctx.data(|data| data.get_temp::<String>(id)), None);
+        assert_eq!(draft_text(&ctx, id), None);
+    }
+
+    #[test]
+    fn dropping_the_drafts_clears_them_and_takes_the_focus() {
+        let ctx = egui::Context::default();
+        let id = focus_and_type(&ctx, "x", "1+");
+        assert!(ctx.memory(|memory| memory.has_focus(id.with("edit"))), "the test must really focus the field");
+        assert!(drop_expression_drafts(&ctx), "typed text was lost");
+        assert_eq!(draft_text(&ctx, id), None);
+        assert!(!ctx.memory(|memory| memory.has_focus(id.with("edit"))));
+        assert!(!drop_expression_drafts(&ctx), "nothing is left to lose");
+    }
+
+    #[test]
+    fn a_draft_equal_to_the_project_is_not_reported_as_lost() {
+        let ctx = egui::Context::default();
+        let (_, id) = frame(&ctx, "x", vec![]);
+        ctx.memory_mut(|memory| memory.request_focus(id.with("edit")));
+        frame(&ctx, "x", vec![]);
+        frame(&ctx, "x", vec![]);
+        assert_eq!(draft_text(&ctx, id).as_deref(), Some("x"));
+        assert!(!drop_expression_drafts(&ctx));
     }
 
     #[test]
@@ -200,7 +268,7 @@ mod tests {
         ctx.memory_mut(|memory| memory.surrender_focus(id.with("edit")));
         for _ in 0..3 {
             assert_eq!(frame(&ctx, "", vec![]).0, None);
-            assert_eq!(ctx.data(|data| data.get_temp::<String>(id)).as_deref(), Some("("), "the text is kept");
+            assert_eq!(draft_text(&ctx, id).as_deref(), Some("("), "the text is kept");
         }
     }
 }

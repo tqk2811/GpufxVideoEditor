@@ -104,6 +104,8 @@ pub struct UiState {
     pub fullscreen: bool,
     /// A time field being dragged; the clip changes on release.
     pub clip_field: Option<ClipField>,
+    /// The clip the inspector showed last, to notice when that changes.
+    pub inspector_clip: Option<(ClipKey, String, i64)>,
 }
 
 /// What may be chosen in the inspector's time fields. Waits for the release of a drag, as a clip
@@ -564,6 +566,14 @@ impl EditorState {
         self.commit_live();
         self.ui.clip_field = None;
         self.hold_cancelled = false;
+        if self.shows_hold_refusal() {
+            self.status = Status::Idle;
+        }
+    }
+
+    /// Whether the status says a request has to wait for the hold, which only the release ends.
+    fn shows_hold_refusal(&self) -> bool {
+        matches!(&self.status, Status::Info(message) if message == DRAG_FIRST)
     }
 
     /// The revision audio has to follow: live previews do not count, the release does.
@@ -592,7 +602,9 @@ impl EditorState {
                 if changed {
                     self.revision += 1;
                 }
-                self.status = Status::Idle;
+                if !self.shows_hold_refusal() {
+                    self.status = Status::Idle;
+                }
             }
             Err(error) => self.refuse(&error),
         }
@@ -1156,6 +1168,17 @@ mod tests {
         state.pointer_released();
         state.live_gain(-3.0);
         assert!(state.is_live(), "after the release a new hold works");
+    }
+
+    #[test]
+    fn a_refused_request_stays_on_the_status_line_until_the_hold_ends() {
+        let mut state = state_with_clip();
+        state.live_gain(-3.0);
+        assert!(state.refuse_while_live());
+        state.live_gain(-4.0);
+        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()), "the next step of the drag must not wipe it");
+        state.pointer_released();
+        assert_eq!(state.status(), &Status::Idle, "the release ends what it was waiting for");
     }
 
     #[test]

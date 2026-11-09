@@ -94,6 +94,12 @@ impl Presenter {
         self.state.on_window_event(&self.window, event).repaint
     }
 
+    /// The window lost the focus: every button still down counts as released from the next frame.
+    pub fn release_pointer(&mut self) {
+        let releases = crate::ui::pointer_release_events(&self.context);
+        self.state.egui_input_mut().events.extend(releases);
+    }
+
     /// Reconfigures the surface for a new window size. On failure the old size stays configured but
     /// the new one is kept as wanted, so the next resize, Outdated status or redraw tries it again.
     /// `None` when nothing was tried: the window is minimised, or the preview holds the submit gate

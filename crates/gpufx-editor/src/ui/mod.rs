@@ -14,7 +14,7 @@ mod top_bar;
 use crate::editor::{EditorState, Status};
 use crate::layout::{panels, Panels};
 use crate::presenter::PreviewTexture;
-use egui::{CornerRadius, Event, Key, Modifiers, Rect, Stroke, StrokeKind, UiBuilder};
+use egui::{CornerRadius, Event, Key, Modifiers, PointerButton, Rect, Stroke, StrokeKind, UiBuilder};
 
 /// Work the window does after the frame, outside the UI pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,19 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     }
 }
 
+/// The releases of every pointer button still down, for a window that lost the focus: no release
+/// reaches it then, and a hold would otherwise stay on until the next click.
+pub(crate) fn pointer_release_events(ctx: &egui::Context) -> Vec<Event> {
+    ctx.input(|input| {
+        let pos = input.pointer.latest_pos().or_else(|| input.pointer.interact_pos()).unwrap_or(egui::Pos2::ZERO);
+        [PointerButton::Primary, PointerButton::Secondary, PointerButton::Middle, PointerButton::Extra1, PointerButton::Extra2]
+            .into_iter()
+            .filter(|button| input.pointer.button_down(*button))
+            .map(|button| Event::PointerButton { pos, button, pressed: false, modifiers: Modifiers::NONE })
+            .collect()
+    })
+}
+
 fn in_rect(root: &mut egui::Ui, id: &str, rect: Rect, add_contents: impl FnOnce(&mut egui::Ui)) {
     root.scope_builder(UiBuilder::new().id_salt(id).max_rect(rect), |ui| {
         ui.set_clip_rect(rect);
@@ -80,20 +93,27 @@ fn consume_exact(input: &mut egui::InputState, wanted: Modifiers, key: Key) -> b
     input.modifiers.matches_exact(wanted) && input.consume_key(wanted, key)
 }
 
+/// Whether this frame's press of `key` is the auto-repeat of a key held down.
+fn is_repeat(input: &egui::InputState, wanted: Key) -> bool {
+    input.events.iter().any(|event| matches!(event, Event::Key { key, repeat: true, .. } if *key == wanted))
+}
+
 fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     // Only a text edit needs the keys. A focused button or slider must not turn them off.
     if ctx.text_edit_focused() {
         return;
     }
     ctx.input_mut(|input| {
-        if consume_exact(input, Modifiers::NONE, Key::Escape) {
+        let repeat = is_repeat(input, Key::Escape);
+        if consume_exact(input, Modifiers::NONE, Key::Escape) && !repeat {
             if state.is_holding() {
                 state.cancel_drag();
             } else if state.ui.fullscreen {
                 requests.push(UiRequest::ToggleFullscreen);
             }
         }
-        if consume_exact(input, Modifiers::NONE, Key::F11) && !state.is_holding() {
+        let repeat = is_repeat(input, Key::F11);
+        if consume_exact(input, Modifiers::NONE, Key::F11) && !repeat && !state.is_holding() {
             requests.push(UiRequest::ToggleFullscreen);
         }
         if consume_exact(input, Modifiers::COMMAND, Key::Z) {
@@ -118,7 +138,7 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
             state.delete_selected();
         }
         // Holding the key must not toggle again on each repeat.
-        let repeat = input.events.iter().any(|event| matches!(event, Event::Key { key: Key::Space, repeat: true, .. }));
+        let repeat = is_repeat(input, Key::Space);
         if consume_exact(input, Modifiers::NONE, Key::Space) && !repeat {
             state.toggle_playback();
         }
@@ -448,6 +468,94 @@ mod tests {
         assert_eq!(press(&mut state, Key::F11, Modifiers::NONE), vec![UiRequest::ToggleFullscreen]);
         state.live_gain(-6.0);
         assert!(press(&mut state, Key::F11, Modifiers::NONE).is_empty());
+    }
+
+    /// A press held for two frames, so egui marks the second as a repeat.
+    fn press_twice(state: &mut EditorState, key: Key) -> (Vec<UiRequest>, Vec<UiRequest>) {
+        let ctx = egui::Context::default();
+        let first = press_in(&ctx, state, key, Modifiers::NONE, |_| {});
+        let second = press_in(&ctx, state, key, Modifiers::NONE, |_| {});
+        (first, second)
+    }
+
+    #[test]
+    fn holding_f11_toggles_fullscreen_once() {
+        let mut state = state();
+        let (first, second) = press_twice(&mut state, Key::F11);
+        assert_eq!(first, vec![UiRequest::ToggleFullscreen]);
+        assert!(second.is_empty(), "a repeat is not a press");
+    }
+
+    #[test]
+    fn holding_escape_cancels_the_hold_and_stays_fullscreen() {
+        let mut state = state();
+        state.ui.fullscreen = true;
+        state.live_gain(-6.0);
+        let (first, second) = press_twice(&mut state, Key::Escape);
+        assert!(state.hold_cancelled());
+        assert!(first.is_empty() && second.is_empty(), "the repeat must not go on to leave fullscreen");
+    }
+
+    #[test]
+    fn holding_escape_in_fullscreen_asks_to_leave_once() {
+        let mut state = state();
+        state.ui.fullscreen = true;
+        let (first, second) = press_twice(&mut state, Key::Escape);
+        assert_eq!(first, vec![UiRequest::ToggleFullscreen]);
+        assert!(second.is_empty());
+    }
+
+    /// egui takes the focus from a text edit on Escape before the frame runs, so the shortcut is
+    /// not hidden by the text edit that had it.
+    #[test]
+    fn escape_cancels_a_hold_while_a_text_edit_has_the_focus() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let edit_id = egui::Id::unique("hold-edit");
+        for _ in 0..2 {
+            run_frame(&ctx, egui::RawInput::default(), |ui| {
+                ui.add(egui::TextEdit::singleline(&mut text).id(edit_id)).request_focus();
+            });
+        }
+        assert!(ctx.text_edit_focused(), "the test must really focus a text edit");
+        let mut state = state();
+        state.live_gain(-6.0);
+        let escape = Event::Key { key: Key::Escape, physical_key: Some(Key::Escape), pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let mut requests = Vec::new();
+        run_frame(&ctx, egui::RawInput { events: vec![escape], ..Default::default() }, |ui| {
+            handle_shortcuts(ui.ctx(), &mut state, &mut requests);
+            ui.add(egui::TextEdit::singleline(&mut text).id(edit_id));
+        });
+        assert!(!state.is_live(), "Escape cancels the hold");
+        assert!(state.hold_cancelled());
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, 0.0);
+    }
+
+    fn pointer_press(at: egui::Pos2) -> Vec<Event> {
+        vec![Event::PointerMoved(at), Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]
+    }
+
+    #[test]
+    fn losing_the_window_focus_counts_as_a_release() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let mut requests = Vec::new();
+        let at = egui::pos2(5.0, 5.0);
+        run_frame(&ctx, egui::RawInput { events: pointer_press(at), ..window_input(1280.0, 720.0) }, |ui| show(ui, &mut state, &mut requests, None));
+        state.live_gain(-6.0);
+        run_frame(&ctx, window_input(1280.0, 720.0), |ui| show(ui, &mut state, &mut requests, None));
+        assert!(state.is_live(), "the button is still down");
+
+        let events = pointer_release_events(&ctx);
+        assert_eq!(events.len(), 1, "only the button that is down");
+        run_frame(&ctx, egui::RawInput { events, ..window_input(1280.0, 720.0) }, |ui| show(ui, &mut state, &mut requests, None));
+        assert!(!state.is_live(), "the hold ended with the focus");
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, -6.0, "as a release, it keeps the edit");
+    }
+
+    #[test]
+    fn with_no_button_down_losing_the_focus_releases_nothing() {
+        assert!(pointer_release_events(&egui::Context::default()).is_empty());
     }
 
     #[test]

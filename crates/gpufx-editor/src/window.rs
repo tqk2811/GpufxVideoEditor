@@ -660,6 +660,10 @@ impl ApplicationHandler for EditorApp {
                     event_loop.exit();
                 }
             }
+            WindowEvent::Focused(false) => {
+                session.presenter.release_pointer();
+                session.presenter.window().request_redraw();
+            }
             WindowEvent::Resized(size) => {
                 // Nothing is said when nothing was tried (minimised, or the gate busy): an earlier
                 // failure stays until a resize really applied.

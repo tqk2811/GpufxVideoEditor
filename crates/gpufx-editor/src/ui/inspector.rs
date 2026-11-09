@@ -14,11 +14,13 @@ use serde_json::{Map, Value};
 const HEADER_HEIGHT: f32 = 34.0;
 /// As far up as a project may go; validation sets no floor.
 const GAIN_RANGE: std::ops::RangeInclusive<f64> = -60.0..=60.0;
+const EXPRESSION_DROPPED: &str = "The expression being typed was dropped: the clip changed";
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let rect = ui.max_rect();
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEADER_HEIGHT.min(rect.height())));
     let key = state.selection().filter(|key| clip_of(state, *key).is_some());
+    follow_clip(ui.ctx(), state, key);
     let title = if key.is_some() { "Clip" } else { "Dự án" };
     ui.painter_at(rect).text(header.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), theme::ACCENT_TEXT);
     ui.painter_at(rect).hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::BORDER));
@@ -32,6 +34,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
             None => project_summary(ui, state),
         });
     });
+}
+
+/// Notices that the inspector shows another clip, or the same one elsewhere. The expression
+/// drafts are about the clip they were typed for, so they go, and the status says so when that
+/// loses text.
+fn follow_clip(ctx: &egui::Context, state: &mut EditorState, key: Option<ClipKey>) {
+    let shown = key.and_then(|key| clip_of(state, key).map(|clip| clip_identity(key, clip)));
+    if state.ui.inspector_clip != shown {
+        state.ui.inspector_clip = shown;
+        if param_widgets::drop_expression_drafts(ctx) {
+            state.report_info(EXPRESSION_DROPPED.to_owned());
+        }
+    }
 }
 
 /// A slider that leaves an existing value outside its range alone until the user moves it.
@@ -231,7 +246,53 @@ fn transition_section(ui: &mut egui::Ui, state: &mut EditorState, track: usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::editor::new_clip;
+    use crate::editor::{new_clip, Status};
+    use std::path::Path;
+
+    fn frame(ctx: &egui::Context, state: &mut EditorState) {
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| show(ui, state));
+        output.textures_delta.clear();
+    }
+
+    fn selected_clip() -> EditorState {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("a.mp4"));
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        state
+    }
+
+    fn typed_draft(ctx: &egui::Context) {
+        ctx.data_mut(|_| ());
+        param_widgets::store_test_draft(ctx, "1+x", "x");
+    }
+
+    #[test]
+    fn moving_the_clip_drops_a_draft_and_says_so() {
+        let ctx = egui::Context::default();
+        let mut state = selected_clip();
+        frame(&ctx, &mut state);
+        typed_draft(&ctx);
+        frame(&ctx, &mut state);
+        assert!(param_widgets::has_test_draft(&ctx), "nothing about the clip changed");
+
+        let key = ClipKey { track: 0, clip: 0 };
+        state.finish_drag(crate::timeline::drag::EditCommand::Move { key, track: 0, desired_start: Time::from_ticks(90_000) });
+        frame(&ctx, &mut state);
+        assert!(!param_widgets::has_test_draft(&ctx), "no stale draft stays in memory");
+        assert_eq!(state.status(), &Status::Info(EXPRESSION_DROPPED.to_owned()));
+    }
+
+    #[test]
+    fn selecting_nothing_drops_a_draft() {
+        let ctx = egui::Context::default();
+        let mut state = selected_clip();
+        frame(&ctx, &mut state);
+        typed_draft(&ctx);
+        state.select(None);
+        frame(&ctx, &mut state);
+        assert!(!param_widgets::has_test_draft(&ctx));
+    }
 
     #[test]
     fn another_clip_at_the_same_index_has_another_identity() {
