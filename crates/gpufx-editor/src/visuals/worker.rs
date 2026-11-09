@@ -80,6 +80,8 @@ struct Queues {
     frames: Vec<Job>,
     audio: Vec<Job>,
     running: HashSet<JobKey>,
+    /// Finished, with the result still in `done`: the UI does not know yet and may ask again.
+    delivered: HashSet<JobKey>,
     done: Vec<Done>,
     /// Runs of peaks that are running and should stop: (identity, run).
     cancelled_peaks: HashSet<(u32, u32)>,
@@ -156,21 +158,25 @@ impl WorkerPool {
         Self { shared }
     }
 
-    /// Replaces the waiting jobs with `frames` and `audio`, minus what is already running.
+    /// Replaces the waiting jobs with `frames` and `audio`, minus what is running or finished
+    /// without the UI having taken the result.
     pub fn publish(&self, frames: Vec<Job>, audio: Vec<Job>) {
-        let mut queues = self.shared.lock();
-        let running = std::mem::take(&mut queues.running);
-        queues.frames = frames.into_iter().filter(|job| !running.contains(&job.key)).collect();
-        queues.audio = audio.into_iter().filter(|job| !running.contains(&job.key)).collect();
-        queues.running = running;
-        drop(queues);
+        let mut guard = self.shared.lock();
+        let queues = &mut *guard;
+        let (running, delivered) = (&queues.running, &queues.delivered);
+        let wanted = |job: &Job| !running.contains(&job.key) && !delivered.contains(&job.key);
+        queues.frames = frames.into_iter().filter(|job| wanted(job)).collect();
+        queues.audio = audio.into_iter().filter(|job| wanted(job)).collect();
+        drop(guard);
         self.shared.work.notify_all();
     }
 
     /// Takes what finished. A result delivered after the flag is cleared wakes the UI again.
     pub fn take_done(&self) -> Vec<Done> {
         self.shared.woken.store(false, Ordering::Release);
-        std::mem::take(&mut self.shared.lock().done)
+        let mut queues = self.shared.lock();
+        queues.delivered.clear();
+        std::mem::take(&mut queues.done)
     }
 
     /// Stops run `run` of the levels of `identity`, waiting or running: its clip is gone.
@@ -255,6 +261,7 @@ fn run_worker<G: Generator>(shared: &Shared, generator: &G, lane: Lane) {
         };
         let mut queues = shared.lock();
         queues.running.remove(&job.key);
+        queues.delivered.insert(job.key.clone());
         if let JobKey::Peaks(identity, run) = job.key {
             queues.cancelled_peaks.remove(&(identity, run));
         }
@@ -418,6 +425,20 @@ mod tests {
         assert_eq!(generator.calls.load(Ordering::SeqCst), 1);
         generator.block.store(false, Ordering::SeqCst);
         wait_for(|| pool.outstanding() == 0);
+    }
+
+    #[test]
+    fn a_finished_job_is_not_run_again_before_the_ui_has_its_result() {
+        let generator = Arc::new(Fake::default());
+        let pool = WorkerPool::start(generator.clone(), 1, 0, None);
+        pool.publish(vec![frame(1, 0)], Vec::new());
+        wait_for(|| pool.outstanding() == 0);
+        pool.publish(vec![frame(1, 0)], Vec::new());
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 1, "the same job ran again");
+        assert_eq!(pool.take_done().len(), 1);
+        pool.publish(vec![frame(1, 0)], Vec::new());
+        wait_for(|| generator.calls.load(Ordering::SeqCst) == 2);
     }
 
     #[test]
