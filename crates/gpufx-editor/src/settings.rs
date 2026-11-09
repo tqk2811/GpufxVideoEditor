@@ -11,6 +11,7 @@ const FOLDER: &str = "gpufx-editor";
 const FILE: &str = "settings.json";
 const LANGUAGE_KEY: &str = "language";
 const PANELS_KEY: &str = "panels";
+const AGENT_ACCESS_KEY: &str = "agent_access";
 
 /// `%APPDATA%\gpufx-editor\settings.json`, when the variable is set.
 pub fn settings_file() -> Option<PathBuf> {
@@ -149,9 +150,31 @@ pub fn save_panel_sizes(sizes: &PanelSizes) -> Result<(), String> {
     write_panel_sizes(&file, sizes)
 }
 
+/// Whether agents may control the window. Off unless the user turned it on.
+fn saved_agent_access(file: &Path) -> bool {
+    read_settings(file).get(AGENT_ACCESS_KEY).and_then(Value::as_bool).unwrap_or(false)
+}
+
+pub fn startup_agent_access() -> bool {
+    settings_file().is_some_and(|file| saved_agent_access(&file))
+}
+
+pub fn save_agent_access(enabled: bool) -> Result<(), String> {
+    let file = settings_file().ok_or("APPDATA is not set")?;
+    write_setting(&file, AGENT_ACCESS_KEY, json!(enabled))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_access_is_off_until_chosen() {
+        let file = temp_file("agent");
+        assert!(!saved_agent_access(&file));
+        write_setting(&file, AGENT_ACCESS_KEY, json!(true)).unwrap();
+        assert!(saved_agent_access(&file));
+    }
 
     fn temp_file(name: &str) -> PathBuf {
         let folder = std::env::temp_dir().join(format!("gpufx-settings-{name}-{}", std::process::id()));

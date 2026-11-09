@@ -376,6 +376,14 @@ impl D3d12Compositor {
         self.abort = Some((flag, grace));
     }
 
+    /// Runs `work` with no abort flag, so what it decodes is not stopped by a newer preview request.
+    pub fn without_abort<R>(&mut self, work: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.abort.take();
+        let result = work(self);
+        self.abort = saved;
+        result
+    }
+
     fn acquire(&mut self) -> Result<ImageId, String> {
         if let Some(index) = self.free.pop() {
             return Ok(ImageId(index));

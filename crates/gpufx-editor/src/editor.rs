@@ -77,6 +77,9 @@ pub struct EditorState {
     hold_cancelled: bool,
     /// What this session imported and what the open project uses.
     pub library: MediaLibrary,
+    /// Whether agents may reach this window, and whether one is connected now.
+    pub agent_access: bool,
+    pub agent_connected: bool,
     /// The last export an agent started, which it can ask about later.
     agent_export: Option<AgentExport>,
     agent_job_count: u64,
@@ -254,6 +257,8 @@ impl EditorState {
             live: None,
             hold_cancelled: false,
             library: MediaLibrary::default(),
+            agent_access: false,
+            agent_connected: false,
             agent_export: None,
             agent_job_count: 0,
             project_lock: None,

@@ -7,14 +7,16 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Fullscreen, Window, WindowId};
 
-use d3d12_backend::{encoder_exists, probe_media, read_package_info, ExportJob, Gpu, ProjectPaths};
+use d3d12_backend::{encoder_exists, probe_media, read_package_info, EncoderChoice, ExportJob, Gpu, ProjectPaths};
 use engine::Project;
 #[cfg(debug_assertions)]
 use engine::{Time, TrackKind};
 
+use crate::agent::gateway::{pipe_name, AgentGateway};
+use crate::agent::{execute, AgentError, AgentHost};
 use crate::editor::{EditorState, Status};
 use crate::export::{encoder_options, export_blocker, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
 use crate::i18n::{Language, Message};
@@ -26,6 +28,7 @@ use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::project_file::{load_project_file, package_roots, project_paths, save_project_file};
+use crate::project_lock::held_elsewhere;
 use crate::tasks::{run_guarded, Action, Arrival, FileDialog, Prompt, Request, TaskId, Tasks};
 use crate::ui::{self, UiRequest};
 
@@ -97,8 +100,16 @@ impl UiTimes {
     }
 }
 
+/// Sent to the event loop when the agent pipe has something. A redraw would not do: a minimised
+/// window gets none.
+#[derive(Debug, Clone, Copy)]
+struct AgentWake;
+
 /// Field order matters: the export, then the worker, stop before the presenter and device are dropped.
 struct Session {
+    /// The pipe agents reach this window through, while the user allows it.
+    gateway: Option<AgentGateway>,
+    proxy: EventLoopProxy<AgentWake>,
     export: Option<ExportWorker>,
     /// The file the running export writes to.
     export_out: Option<PathBuf>,
@@ -135,7 +146,7 @@ struct Session {
 }
 
 impl Session {
-    fn open(event_loop: &ActiveEventLoop) -> Result<Self, String> {
+    fn open(event_loop: &ActiveEventLoop, proxy: EventLoopProxy<AgentWake>) -> Result<Self, String> {
         let gpu = Arc::new(Gpu::create()?);
         let attributes = Window::default_attributes().with_title("gpufx editor").with_inner_size(winit::dpi::LogicalSize::new(1280, 720)).with_min_inner_size(winit::dpi::LogicalSize::new(800, 500));
         let window = Arc::new(event_loop.create_window(attributes).map_err(|e| format!("creating the window failed: {e}"))?);
@@ -170,7 +181,9 @@ impl Session {
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
         let (arrival_sender, arrivals) = channel();
-        Ok(Self {
+        let mut session = Self {
+            gateway: None,
+            proxy,
             export: None,
             export_out: None,
             window: session_window,
@@ -196,7 +209,48 @@ impl Session {
             exit_accepted: false,
             #[cfg(debug_assertions)]
             smoke,
-        })
+        };
+        if crate::settings::startup_agent_access() {
+            session.set_agent_access(true);
+        }
+        Ok(session)
+    }
+
+    /// Opens or closes the pipe. A pipe that cannot open leaves the access off and says why.
+    fn set_agent_access(&mut self, enabled: bool) {
+        self.gateway = None;
+        self.state.agent_connected = false;
+        self.state.agent_access = false;
+        if !enabled {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let wake = move || {
+            let _ = proxy.send_event(AgentWake);
+        };
+        match pipe_name().and_then(|name| AgentGateway::start(&name, self.package_roots.clone(), wake)) {
+            Ok(gateway) => {
+                self.gateway = Some(gateway);
+                self.state.agent_access = true;
+            }
+            Err(message) => self.state.report_error(Message::AgentAccessFailed(message)),
+        }
+    }
+
+    /// Runs what the agent asked, on this thread like any other edit, and applies what follows from it.
+    fn serve_agent(&mut self) {
+        let Some(gateway) = self.gateway.take() else { return };
+        while let Some(inbound) = gateway.next_request() {
+            let (prepared, reply) = inbound.split();
+            reply.respond(execute(self, prepared));
+            // Before the next request: a capture right after an open needs the paths of the new file.
+            self.sync_project_paths();
+            self.sync_audio_project();
+            self.apply_transport();
+        }
+        self.state.agent_connected = gateway.connected();
+        self.gateway = Some(gateway);
+        self.window.request_redraw();
     }
 
     fn apply_outcome(&mut self, Outcome { id, result }: Outcome<PreviewImage>) {
@@ -364,17 +418,17 @@ impl Session {
     /// Starts an export of the current project to `out` in a child process. Playback and the
     /// preview stop first, so the child has the GPU memory and decoders; it starts once the preview
     /// has let go.
-    fn start_export(&mut self, out: PathBuf) {
+    fn start_export(&mut self, out: PathBuf, encoder: Option<EncoderChoice>) {
         if let Some(reason) = export_blocker(self.state.project()) {
             self.state.report_error(reason);
             return;
         }
-        let Some(option) = self.state.encoders.get(self.state.encoder).cloned() else { return };
+        let Some(choice) = encoder.or_else(|| self.state.encoders.get(self.state.encoder).map(|option| option.choice.clone())) else { return };
         let total = engine::frame_count(self.state.project());
         self.state.begin_export(total);
         self.playback = None;
         let preview_released = self.preview.suspend();
-        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: option.choice, hashes: None };
+        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: choice, hashes: None };
         let window = self.window.clone();
         match ExportWorker::start(job, self.package_roots.clone(), sibling_render_exe(), preview_released, move || window.request_redraw()) {
             Ok(worker) => {
@@ -394,6 +448,7 @@ impl Session {
         self.state.set_export_progress(export.progress());
         let Some(outcome) = export.poll() else { return };
         self.export = None;
+        self.state.finish_agent_export(&outcome);
         let out = self.export_out.take().unwrap_or_default();
         let status = match outcome {
             ExportOutcome::Finished(report) => Status::Info(finished_message(&report, &out, self.state.project().output.audio.is_some())),
@@ -521,6 +576,14 @@ impl Session {
         if self.paths_file.as_deref() == self.state.project_file() {
             return;
         }
+        match self.state.project_file().map(Path::to_path_buf) {
+            Some(file) => {
+                if !self.state.claim_project_lock(&file) {
+                    self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
+                }
+            }
+            None => self.state.release_project_lock(),
+        }
         self.paths_file = self.state.project_file().map(Path::to_path_buf);
         self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
         self.state.visuals.get_mut().set_paths(self.paths.clone());
@@ -540,6 +603,10 @@ impl Session {
     }
 
     fn save_project(&mut self, file: PathBuf) {
+        if self.state.project_file() != Some(file.as_path()) && held_elsewhere(&file) {
+            self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
+            return;
+        }
         match save_project_file(self.state.project(), &file) {
             Ok(()) => self.state.mark_saved(file),
             Err(message) => self.state.report_error(Message::SaveFailed(message)),
@@ -605,13 +672,15 @@ impl Session {
             }),
             Action::ReadProject { load, file } => {
                 let roots = self.package_roots.clone();
+                let own = self.state.project_file() == Some(file.as_path());
+                let in_use = self.state.language().t(Message::ProjectInUse(file.display().to_string()));
                 self.spawn_task("project-read", TaskId::Load(load), move || {
-                    let result = load_project_file(&file, &roots);
+                    let result = if !own && held_elsewhere(&file) { Err(in_use) } else { load_project_file(&file, &roots) };
                     Arrival::ProjectRead { load, file, result }
                 });
             }
             Action::SaveTo(path) => self.save_project(path),
-            Action::StartExport(path) => self.start_export(path),
+            Action::StartExport(path) => self.start_export(path, None),
             Action::ProjectReplaced => self.playback = None,
             Action::Exit => self.exit_accepted = true,
         }
@@ -646,7 +715,7 @@ impl Session {
 
     /// Runs outside the frame, so what it starts cannot disturb the UI pass.
     fn handle(&mut self, request: UiRequest) {
-        if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport | UiRequest::ToggleFullscreen | UiRequest::SavePanelSizes) {
+        if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport | UiRequest::ToggleFullscreen | UiRequest::SavePanelSizes | UiRequest::SetAgentAccess(_)) {
             return;
         }
         match request {
@@ -669,6 +738,12 @@ impl Session {
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
             UiRequest::SetLanguage(language) => self.set_language(language),
+            UiRequest::SetAgentAccess(enabled) => {
+                self.set_agent_access(enabled);
+                if let Err(message) = crate::settings::save_agent_access(self.state.agent_access) {
+                    self.state.report_error(Message::AgentAccessFailed(message));
+                }
+            }
             UiRequest::SavePanelSizes => {
                 if let Err(message) = crate::settings::save_panel_sizes(&self.state.ui.panel_sizes) {
                     self.state.report_error(Message::PanelSizesSaveFailed(message));
@@ -688,6 +763,50 @@ impl Session {
     }
 }
 
+impl AgentHost for Session {
+    fn mode(&self) -> &'static str {
+        "live"
+    }
+
+    fn state(&mut self) -> &mut EditorState {
+        &mut self.state
+    }
+
+    fn capture(&mut self, project: Arc<Project>, frame: i64) -> Receiver<Result<Vec<u8>, AgentError>> {
+        let (sender, receiver) = channel();
+        let paths = self.paths.clone();
+        self.preview.run_on_thread(Box::new(move |producer: &mut D3d12Producer| {
+            let _ = sender.send(producer.capture(&project, &paths, frame).map_err(|message| AgentError::new("capture_failed", message)));
+        }));
+        receiver
+    }
+
+    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError> {
+        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: encoder.clone(), hashes: None };
+        job.check().map_err(|message| AgentError::new("invalid_output", message))?;
+        Session::start_export(self, out, Some(encoder));
+        if self.state.is_exporting() {
+            Ok(())
+        } else {
+            Err(AgentError::new("export_failed", "the export could not start"))
+        }
+    }
+
+    fn cancel_export(&mut self) {
+        if let Some(export) = &self.export {
+            export.cancel();
+        }
+    }
+
+    fn tasks_busy(&self) -> bool {
+        !self.tasks.is_idle()
+    }
+
+    fn project_replaced(&mut self) {
+        self.playback = None;
+    }
+}
+
 /// Reads the package manifests away from the UI thread: some packages hold large textures.
 fn spawn_catalog_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<Catalog> {
     let (sender, receiver) = channel();
@@ -701,8 +820,8 @@ fn spawn_catalog_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<Cata
     receiver
 }
 
-#[derive(Default)]
 struct EditorApp {
+    proxy: EventLoopProxy<AgentWake>,
     session: Option<Session>,
     error: Option<String>,
 }
@@ -714,12 +833,18 @@ impl EditorApp {
     }
 }
 
-impl ApplicationHandler for EditorApp {
+impl ApplicationHandler<AgentWake> for EditorApp {
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: AgentWake) {
+        if let Some(session) = self.session.as_mut() {
+            session.serve_agent();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.session.is_some() {
             return;
         }
-        match Session::open(event_loop) {
+        match Session::open(event_loop, self.proxy.clone()) {
             Ok(session) => {
                 session.presenter.window().request_redraw();
                 self.session = Some(session);
@@ -793,9 +918,9 @@ fn should_request_redraw(event: &WindowEvent, repaint: bool) -> bool {
 }
 
 pub fn run() -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|e| format!("creating the event loop failed: {e}"))?;
+    let event_loop = EventLoop::<AgentWake>::with_user_event().build().map_err(|e| format!("creating the event loop failed: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = EditorApp::default();
+    let mut app = EditorApp { proxy: event_loop.create_proxy(), session: None, error: None };
     event_loop.run_app(&mut app).map_err(|e| format!("the event loop failed: {e}"))?;
     app.error.map_or(Ok(()), Err)
 }

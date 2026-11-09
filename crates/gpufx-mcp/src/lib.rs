@@ -6,4 +6,4 @@
 pub mod session;
 pub mod tools;
 
-pub use session::{EditorSession, FileSession};
+pub use session::{EditorSession, FileSession, LiveSession};

@@ -8,6 +8,13 @@ struct State<T> {
     closed: bool,
 }
 
+/// Why [`LatestSlot::wait_or`] returned.
+pub enum SlotWait<T> {
+    Value(T),
+    Other,
+    Closed,
+}
+
 pub struct LatestSlot<T> {
     state: Mutex<State<T>>,
     ready: Condvar,
@@ -59,6 +66,31 @@ impl<T> LatestSlot<T> {
             }
             state = self.ready.wait(state).unwrap_or_else(|p| p.into_inner());
         }
+    }
+
+    /// Like [`Self::wait`], but also returns when `other_work` holds. It is looked at under the lock,
+    /// so a [`Self::notify`] after the work was queued cannot be missed.
+    pub fn wait_or(&self, other_work: impl Fn() -> bool) -> SlotWait<T> {
+        let mut state = self.lock();
+        loop {
+            if state.closed {
+                return SlotWait::Closed;
+            }
+            if let Some(value) = state.value.take() {
+                self.pending.store(false, Ordering::SeqCst);
+                return SlotWait::Value(value);
+            }
+            if other_work() {
+                return SlotWait::Other;
+            }
+            state = self.ready.wait(state).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+
+    /// Wakes a waiter without offering a value, so the work in progress is not told it is unwanted.
+    pub fn notify(&self) {
+        let _state = self.lock();
+        self.ready.notify_all();
     }
 
     /// Wakes every waiter; waits return `None` from now on.

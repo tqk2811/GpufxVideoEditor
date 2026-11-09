@@ -3,6 +3,7 @@
 //! come from the `gpufx-mcp` process, either directly (no window) or through the local pipe of an
 //! open window. See `docs/plans/spec-mcp-server-vi.md`.
 
+pub mod gateway;
 pub mod image;
 pub mod protocol;
 pub mod run;

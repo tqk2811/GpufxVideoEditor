@@ -191,6 +191,10 @@ pub enum Message {
     MenuSave,
     MenuSaveAs,
     MenuLanguage,
+    MenuAgentAccess,
+    AgentConnected,
+    ProjectInUse(String),
+    AgentAccessFailed(String),
     Cancel,
     ExportVideo,
 

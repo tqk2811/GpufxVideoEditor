@@ -14,7 +14,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let rect = ui.max_rect();
     ui.allocate_ui_with_layout(rect.size(), Layout::left_to_right(Align::Center), |ui| {
         ui.add_space(10.0);
-        ui.add_enabled_ui(!state.is_exporting(), |ui| file_menu(ui, state.language(), requests));
+        let (language, agent_access) = (state.language(), state.agent_access);
+        ui.add_enabled_ui(!state.is_exporting(), |ui| file_menu(ui, language, agent_access, requests));
+        if state.agent_connected {
+            ui.colored_label(theme::ACCENT, language.t(Message::AgentConnected));
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(10.0);
             export_area(ui, state, requests);
@@ -52,13 +56,19 @@ fn project_name(ui: &egui::Ui, state: &EditorState, rect: Rect, free: Rect) {
     }
 }
 
-fn file_menu(ui: &mut egui::Ui, language: Language, requests: &mut Vec<UiRequest>) {
+fn file_menu(ui: &mut egui::Ui, language: Language, agent_access: bool, requests: &mut Vec<UiRequest>) {
     ui.menu_button(language.t(Message::MenuFile), |ui| {
         for (label, request) in [(Message::MenuNewProject, UiRequest::NewProject), (Message::MenuOpen, UiRequest::OpenProject), (Message::MenuSave, UiRequest::SaveProject), (Message::MenuSaveAs, UiRequest::SaveProjectAs)] {
             if ui.button(language.t(label)).clicked() {
                 requests.push(request);
                 ui.close();
             }
+        }
+        ui.separator();
+        let mut access = agent_access;
+        if ui.checkbox(&mut access, language.t(Message::MenuAgentAccess)).clicked() {
+            requests.push(UiRequest::SetAgentAccess(access));
+            ui.close();
         }
         ui.separator();
         ui.menu_button(language.t(Message::MenuLanguage), |ui| {

@@ -31,6 +31,7 @@ pub enum UiRequest {
     ToggleFullscreen,
     SetLanguage(Language),
     SavePanelSizes,
+    SetAgentAccess(bool),
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {

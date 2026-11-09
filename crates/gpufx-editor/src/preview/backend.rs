@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use d3d12_backend::{is_cancelled, D3d12Compositor, Gpu, ProjectPaths, SharedImage};
-use engine::render::{FrameRenderer, RenderError};
+use engine::render::{Compositor, FrameRenderer, RenderError};
 use engine::{layers_at_frame, Project};
 
 use super::plan::RequestId;
@@ -67,6 +67,24 @@ impl D3d12Producer {
             self.renderer = FrameRenderer::default();
             self.paths = Some(paths.clone());
         }
+    }
+
+    /// Renders frame `frame` of `project` as RGBA for an agent. The decoders are its own, so the frames
+    /// the preview is on stay where they are, and nothing is published to the screen.
+    pub fn capture(&mut self, project: &Project, paths: &Arc<ProjectPaths>, frame: i64) -> Result<Vec<u8>, String> {
+        if let Some(message) = self.gpu.device_lost() {
+            return Err(format!("the GPU device was lost: {message}"));
+        }
+        self.use_paths(paths);
+        let (width, height) = (project.output.width, project.output.height);
+        let compositor = self.compositor_for(width, height)?;
+        let mut rgba = Vec::new();
+        let mut renderer = FrameRenderer::default();
+        let rendered = compositor.without_abort(|compositor| renderer.render_frame(project, compositor, frame, |compositor, image| compositor.read(image, &mut rgba)));
+        // A failed frame must not be blamed on the next one.
+        self.gpu.take_error();
+        rendered.map_err(|e| e.0)?;
+        Ok(rgba)
     }
 
     fn compositor_for(&mut self, width: u32, height: u32) -> Result<&mut D3d12Compositor, String> {

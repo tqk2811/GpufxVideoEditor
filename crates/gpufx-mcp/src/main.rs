@@ -1,6 +1,6 @@
 //! `gpufx-mcp`: the MCP server of the editor, over stdio.
 //!
-//! Without options it works on a project file with no window. Tools run one at a time on a thread
+//! Without options it works on a project file with no window; with `--live`, on an open window. Tools run one at a time on a thread
 //! of their own, because a session may hold GPU objects that stay on the thread that made them.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 
 use gpufx_editor::agent::{AgentError, AgentRequest, AgentResult};
-use gpufx_mcp::session::{EditorSession, FileSession};
+use gpufx_mcp::session::{EditorSession, FileSession, LiveSession};
 use gpufx_mcp::tools::{all_tools, ToolDef};
 use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig};
 use rmcp::service::{RequestContext, RoleServer};
@@ -78,16 +78,21 @@ impl ServerHandler for Server {
 
 struct Options {
     project: Option<PathBuf>,
+    live: bool,
 }
 
 fn parse_options() -> Result<Options, String> {
-    let mut options = Options { project: None };
+    let mut options = Options { project: None, live: false };
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
             "--project" => options.project = Some(PathBuf::from(arguments.next().ok_or("--project needs a file")?)),
-            other => return Err(format!("unknown argument {other}\nusage: gpufx-mcp [--project <file>]")),
+            "--live" => options.live = true,
+            other => return Err(format!("unknown argument {other}\nusage: gpufx-mcp [--project <file> | --live]")),
         }
+    }
+    if options.live && options.project.is_some() {
+        return Err("--live acts on the project open in the window, so it takes no --project".to_owned());
     }
     Ok(options)
 }
@@ -98,12 +103,21 @@ async fn run(options: Options) -> Result<(), String> {
     let (ready_sender, ready) = oneshot::channel();
     std::thread::Builder::new().name("session".to_owned()).spawn(move || {
         // Made here: a session holds things that cannot move to another thread.
-        let mut session = FileSession::new();
-        let opened = options.project.map_or(Ok(()), |path| session.call(AgentRequest::ProjectOpen { path, discard_changes: true }).map(|_| ()).map_err(|error| error.message));
-        let failed = opened.is_err();
-        let _ = ready_sender.send(opened);
-        if !failed {
-            run_session(Box::new(session), incoming);
+        let session: Result<Box<dyn EditorSession>, String> = if options.live {
+            LiveSession::new().map(|session| Box::new(session) as Box<dyn EditorSession>)
+        } else {
+            let mut session = FileSession::new();
+            let path = options.project;
+            path.map_or(Ok(()), |path| session.call(AgentRequest::ProjectOpen { path, discard_changes: true }).map(|_| ()).map_err(|error| error.message)).map(|()| Box::new(session) as Box<dyn EditorSession>)
+        };
+        match session {
+            Ok(session) => {
+                let _ = ready_sender.send(Ok(()));
+                run_session(session, incoming);
+            }
+            Err(message) => {
+                let _ = ready_sender.send(Err(message));
+            }
         }
     }).map_err(|e| e.to_string())?;
     ready.await.map_err(|_| "the session thread stopped".to_owned())??;

@@ -1,5 +1,7 @@
 //! Where the tools act: a project held in this process, or (see [`LiveSession`]) an open window.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
@@ -7,6 +9,7 @@ use std::sync::Arc;
 use d3d12_backend::{D3d12Compositor, EncoderChoice, ExportJob, Gpu, ProjectPaths};
 use engine::render::{Compositor, FrameRenderer, RenderError};
 use engine::{frame_count, Project};
+use gpufx_editor::agent::gateway::pipe_name;
 use gpufx_editor::agent::{execute, prepare, AgentError, AgentHost, AgentRequest, AgentResult, Step};
 use gpufx_editor::editor::{EditorState, Status};
 use gpufx_editor::export::{sibling_render_exe, ExportWorker};
@@ -150,6 +153,56 @@ impl EditorSession for FileSession {
         match execute(&mut self.host, prepare(request, &self.roots)) {
             Step::Done(result) => result,
             Step::Frame(frame) => frame.finish(),
+        }
+    }
+}
+
+/// An open editor window, reached through its local pipe. Connects when a tool needs it and again
+/// after the window was closed, so a missing window is an error of the tool and not of the server.
+pub struct LiveSession {
+    name: String,
+    connection: Option<BufReader<File>>,
+}
+
+fn no_app(detail: impl std::fmt::Display) -> AgentError {
+    AgentError::new("no_app", format!("no editor window is reachable: turn on agent access in its File menu ({detail})"))
+}
+
+impl LiveSession {
+    /// The pipe of this user's editor.
+    pub fn new() -> Result<Self, String> {
+        Ok(Self::on_pipe(pipe_name()?))
+    }
+
+    pub fn on_pipe(name: String) -> Self {
+        Self { name, connection: None }
+    }
+
+    fn exchange(&mut self, line: &[u8]) -> std::io::Result<AgentResult> {
+        if self.connection.is_none() {
+            let file = std::fs::OpenOptions::new().read(true).write(true).open(&self.name)?;
+            self.connection = Some(BufReader::new(file));
+        }
+        let connection = self.connection.as_mut().expect("just connected");
+        connection.get_mut().write_all(line)?;
+        let mut answer = String::new();
+        if connection.read_line(&mut answer)? == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(serde_json::from_str(&answer).unwrap_or_else(|e| Err(AgentError::new("internal", format!("an unreadable answer from the editor: {e}")))))
+    }
+}
+
+impl EditorSession for LiveSession {
+    fn call(&mut self, request: AgentRequest) -> AgentResult {
+        let mut line = serde_json::to_vec(&request).map_err(|e| AgentError::new("internal", e.to_string()))?;
+        line.push(b'\n');
+        match self.exchange(&line) {
+            Ok(result) => result,
+            Err(error) => {
+                self.connection = None;
+                Err(no_app(error))
+            }
         }
     }
 }

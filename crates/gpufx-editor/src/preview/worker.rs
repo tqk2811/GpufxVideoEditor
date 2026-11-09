@@ -3,11 +3,12 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use super::plan::RequestId;
-use super::slot::LatestSlot;
+use super::slot::{LatestSlot, SlotWait};
 
 /// What the thread runs. Created on the thread, so it need not be `Send`.
 pub trait FrameProducer {
@@ -63,7 +64,11 @@ enum Job<R> {
     Suspend(Sender<()>),
 }
 
+/// Work for the thread besides the newest frame; see [`PreviewWorker::run_on_thread`].
+type ThreadTask<P> = Box<dyn FnOnce(&mut P) + Send>;
+
 pub struct PreviewWorker<P: FrameProducer> {
+    tasks: Arc<Mutex<VecDeque<ThreadTask<P>>>>,
     requests: Arc<LatestSlot<Job<P::Request>>>,
     /// While set, requests are dropped: the producer must stay empty until [`Self::resume`].
     suspended: AtomicBool,
@@ -97,11 +102,24 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
         let (thread_requests, thread_results) = (requests.clone(), results.clone());
         let abort = requests.pending();
         let closing = requests.closing();
+        let tasks: Arc<Mutex<VecDeque<ThreadTask<P>>>> = Arc::default();
+        let thread_tasks = tasks.clone();
         let handle = thread::Builder::new().name("preview".to_owned()).spawn(move || {
             let mut producer = make();
             producer.set_abort(abort);
             producer.set_closing(closing);
-            while let Some(job) = thread_requests.wait() {
+            let next_task = || thread_tasks.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+            loop {
+                while let Some(task) = next_task() {
+                    if catch_unwind(AssertUnwindSafe(|| task(&mut producer))).is_err() {
+                        producer.reset();
+                    }
+                }
+                let job = match thread_requests.wait_or(|| !thread_tasks.lock().unwrap_or_else(|p| p.into_inner()).is_empty()) {
+                    SlotWait::Value(job) => job,
+                    SlotWait::Other => continue,
+                    SlotWait::Closed => break,
+                };
                 for frame in returned_frames.try_iter() {
                     recycle_guarded(&mut producer, frame);
                 }
@@ -132,7 +150,7 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
             }
         });
         let (handle, spawn_error) = spawned(handle);
-        Self { requests, suspended: AtomicBool::new(false), results, returned, handle, spawn_error }
+        Self { tasks, requests, suspended: AtomicBool::new(false), results, returned, handle, spawn_error }
     }
 
     /// Asks for `request` instead of whatever has not started yet. Never blocks on the work.
@@ -140,6 +158,13 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
         if !self.suspended.load(Ordering::SeqCst) {
             self.requests.put(Job::Frame(request));
         }
+    }
+
+    /// Runs `task` on the thread between frames, without replacing the wished frame or telling the
+    /// one in progress it is unwanted. A task that panics is dropped with what it held.
+    pub fn run_on_thread(&self, task: ThreadTask<P>) {
+        self.tasks.lock().unwrap_or_else(|p| p.into_inner()).push_back(task);
+        self.requests.notify();
     }
 
     /// Stops the preview so something else can use the GPU and decoders. Unstarted work is dropped;
@@ -327,6 +352,36 @@ mod tests {
         worker.request(4);
         assert_eq!(next(&worker, &wake), Ok(Some(4)));
         assert_eq!(log.produced_after_suspend.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_task_runs_between_frames_and_leaves_the_results_and_the_wished_frame_alone() {
+        let log = Arc::new(Log::default());
+        log.hold_first.store(true, Ordering::SeqCst);
+        let (worker, wake) = start(&log);
+        worker.request(1);
+        wait_for(&log.first_started);
+        worker.request(2);
+        let (ran, done) = channel();
+        worker.run_on_thread(Box::new(move |_| ran.send(()).unwrap()));
+        assert!(done.try_recv().is_err(), "not during a frame");
+        set(&log.release_first);
+        done.recv_timeout(TIMEOUT).expect("the task ran");
+        let mut results = Vec::new();
+        while results.last() != Some(&Ok(Some(2))) {
+            wake.recv_timeout(TIMEOUT).expect("a frame finished");
+            results.extend(worker.poll().map(|outcome| outcome.result));
+        }
+        assert_eq!(*log.produced.lock().unwrap(), vec![1, 2], "the wished frame was not replaced");
+    }
+
+    #[test]
+    fn a_panicking_task_does_not_end_the_thread() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.run_on_thread(Box::new(|_| panic!("deliberate test panic")));
+        worker.request(5);
+        assert_eq!(next(&worker, &wake), Ok(Some(5)));
     }
 
     #[test]
