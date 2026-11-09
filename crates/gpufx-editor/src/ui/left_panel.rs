@@ -123,7 +123,8 @@ fn empty_message(search: &str) -> Message {
 /// One tile of the grid, with a thumbnail of the file once it is made. True on a first click: the
 /// later clicks of a double click do not add the file again.
 fn media_cell(ui: &mut egui::Ui, state: &EditorState, item: &MediaItem, size: Vec2, kind: MediaKind) -> bool {
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    response.dnd_set_drag_payload(item.clone());
     let painter = ui.painter_at(rect);
     let radius = CornerRadius::same(theme::CONTROL_RADIUS);
     painter.rect_filled(rect, radius, theme::PANEL_RAISED);

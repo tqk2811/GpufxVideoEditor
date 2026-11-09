@@ -161,6 +161,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldDuration => "Thời lượng".to_owned(),
         Message::FieldSpeed => "Tốc độ".to_owned(),
         Message::FieldStart => "Bắt đầu trên timeline".to_owned(),
+        Message::DropOnTimeline => "Hãy thả tệp vào vùng timeline để thêm".to_owned(),
         Message::FieldSourceIn => "Bắt đầu video".to_owned(),
         Message::FieldVideoDuration => "Thời lượng video".to_owned(),
         Message::FieldVolume => "Âm lượng".to_owned(),

@@ -2,9 +2,10 @@
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
-use crate::editor::{clip_label, format_speed, EditorState};
+use crate::editor::{clip_label, format_speed, DropBatch, EditorState};
 use crate::i18n::{Language, Message};
-use crate::timeline::drag::{clamp_trim, drag_command};
+use crate::media::MediaItem;
+use crate::timeline::drag::{clamp_trim, drag_command, DragKind};
 use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
 use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
 use crate::timeline::view::{content_end, ViewArea, Wheel, TRACK_HEIGHT};
@@ -118,6 +119,8 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
 
     let tracks_response = ui.interact(tracks_rect, ui.scope_id().with("tracks"), Sense::click_and_drag());
     handle_tracks(ui, state, &tracks_response, tracks_rect);
+    let media_hint = handle_media_drop(ui, state, rect, tracks_rect);
+    resolve_file_drops(ui, state, rect, tracks_rect);
     // A drop can shrink the content, so the limits are measured again.
     state.view.clamp_scroll(&view_area(state, tracks_rect));
 
@@ -129,6 +132,66 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     headers(ui, state, header_rect, requests);
     painter.vline(tracks_left, rect.y_range(), Stroke::new(1.0, theme::BORDER));
     draw_playhead(&painter, state, ruler_rect, tracks_rect);
+    let moving_out = state.drag.is_some_and(|drag| matches!(drag.kind, DragKind::Move)) && ui.ctx().pointer_latest_pos().is_some_and(|pointer| outside_the_rows(state, tracks_rect, pointer));
+    if moving_out || media_hint {
+        draw_new_track_hint(ui, tracks_rect);
+    }
+}
+
+/// Whether `pointer` is on the ruler, which is always there, or in the track area but on no row:
+/// where a drop makes a new track.
+fn outside_the_rows(state: &EditorState, tracks_rect: Rect, pointer: Pos2) -> bool {
+    tracks_rect.with_min_y(tracks_rect.top() - RULER_HEIGHT).contains(pointer) && state.view.track_at_y(f64::from(pointer.y - tracks_rect.top()), state.project().tracks.len(), f64::from(tracks_rect.height())).is_none()
+}
+
+/// Where a drop at `pointer` goes: the row under it, or `None` for a new track, and the time.
+fn drop_target(state: &EditorState, tracks_rect: Rect, pointer: Pos2) -> (Option<usize>, Time) {
+    let track = state.view.track_at_y(f64::from(pointer.y - tracks_rect.top()), state.project().tracks.len(), f64::from(tracks_rect.height()));
+    (track, state.view.x_to_time(f64::from((pointer.x - tracks_rect.left()).max(0.0))))
+}
+
+/// Takes a file dragged from the library when it is released over the timeline. True while one is
+/// held over the place that would make a new track.
+fn handle_media_drop(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rect, tracks_rect: Rect) -> bool {
+    let ctx = ui.ctx().clone();
+    let Some(item) = egui::DragAndDrop::payload::<MediaItem>(&ctx) else { return false };
+    let Some(pointer) = ctx.pointer_latest_pos() else { return false };
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("media-drag"))).text(pointer + Vec2::new(14.0, 14.0), Align2::LEFT_TOP, &item.name, FontId::proportional(13.0), theme::TEXT);
+    if !timeline_rect.contains(pointer) {
+        return false;
+    }
+    let (track, at) = drop_target(state, tracks_rect, pointer);
+    if ctx.input(|input| input.pointer.any_released()) {
+        if egui::DragAndDrop::take_payload::<MediaItem>(&ctx).is_some() {
+            state.drop_media(&item, track, at);
+        }
+        return false;
+    }
+    track.is_none()
+}
+
+/// Turns the files the window was given into drops at the place they fell. Files of one drop share
+/// that place: each follows the one before it.
+fn resolve_file_drops(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rect, tracks_rect: Rect) {
+    let files = std::mem::take(&mut state.ui.files_dropped);
+    let Some((_, first)) = files.first() else { return };
+    if state.edits_blocked() {
+        return;
+    }
+    let points = ui.ctx().pixels_per_point();
+    let place = first.map(|at| Pos2::new(at.x / points, at.y / points)).or_else(|| ui.ctx().pointer_latest_pos());
+    let Some(pointer) = place.filter(|pointer| timeline_rect.contains(*pointer)) else {
+        state.report_info(Message::DropOnTimeline);
+        return;
+    };
+    let (track, at) = drop_target(state, tracks_rect, pointer);
+    state.ui.drop_batches.push_back(DropBatch { files: files.into_iter().map(|(path, _)| path).collect(), track, at });
+}
+
+/// The top row of the track area, where the new track a drop here makes will appear.
+fn draw_new_track_hint(ui: &egui::Ui, tracks_rect: Rect) {
+    let row = Rect::from_min_size(tracks_rect.left_top(), Vec2::new(tracks_rect.width(), TRACK_HEIGHT as f32)).shrink(1.0);
+    ui.painter_at(tracks_rect).rect_stroke(row, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
 }
 
 fn add_track_menu(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
@@ -207,8 +270,12 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     if response.drag_stopped_by(egui::PointerButton::Primary) {
         if let (Some(drag), Some(pointer)) = (state.drag, response.interact_pointer_pos()) {
             let (x, y) = local(pointer);
-            let command = clamp_trim(state.project(), drag_command(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height)));
-            state.finish_drag(command);
+            if outside_the_rows(state, tracks_rect, pointer) {
+                state.finish_drag_on_new_track(drag, state.view.x_to_time(x));
+            } else {
+                let command = clamp_trim(state.project(), drag_command(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height)));
+                state.finish_drag(command);
+            }
         }
         state.drag = None;
     }
@@ -412,6 +479,9 @@ fn span_rect(state: &EditorState, tracks_rect: Rect, row: Rect, start: Time, end
 fn draw_drag_preview(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
     let Some(drag) = state.drag else { return };
     let Some(pointer) = ui.ctx().pointer_latest_pos() else { return };
+    if matches!(drag.kind, DragKind::Move) && outside_the_rows(state, tracks_rect, pointer) {
+        return;
+    }
     let track_count = state.project().tracks.len();
     let height = f64::from(tracks_rect.height());
     let x = f64::from(pointer.x - tracks_rect.left());

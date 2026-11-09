@@ -310,3 +310,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Nút reset trong panel Clip vẫn sáng khi không đi được đâu
 
 `crates/gpufx-editor/src/ui/inspector.rs:104`: nút reset của Start of video và Duration of video vẫn bấm được khi clip kế tiếp đã sát cạnh hoặc clip có transition ở cạnh đó, bấm thì không đổi gì hoặc bị từ chối. Không hại dữ liệu; nên tính trạng thái nút từ giới hạn thật (`clamp_source_in`, `clamp_trim`). Clip trên track audio lấy tiếng từ file video cũng chưa có reset độ dài, vì thư viện chỉ giữ độ dài hình. Ghi ngày 2026-11-10.
+
+### [Thấp] Thả file có cả hình và tiếng lên track audio xử lý khác nhau theo nguồn
+
+`crates/gpufx-editor/src/editor.rs` `drop_media`: thả từ thư viện bị từ chối vì mục thư viện mang loại Video, còn thả từ Explorer thì nhận và lấy tiếng (`add_dropped_file`). Nên thống nhất, vì cùng một file mà kết quả khác nhau. Ghi ngày 2026-11-10.

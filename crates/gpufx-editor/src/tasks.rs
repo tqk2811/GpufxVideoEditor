@@ -75,6 +75,7 @@ pub enum Arrival {
     PromptAnswered { prompt: Prompt, accepted: bool },
     ClipProbed { load: u64, track: usize, path: PathBuf, result: Result<MediaProbe, String> },
     MediaProbed { load: u64, path: PathBuf, result: Result<MediaProbe, String> },
+    DropProbed { load: u64, path: PathBuf, result: Result<MediaProbe, String> },
     ProjectRead { load: u64, file: PathBuf, result: Result<Project, String> },
     /// The thread of a task panicked, so it will never deliver a result.
     TaskFailed { task: TaskId, message: String },
@@ -98,6 +99,7 @@ pub enum Action {
     ShowFileDialog(FileDialog),
     ShowPrompt(Prompt),
     ProbeClip { load: u64, track: usize, path: PathBuf },
+    ProbeDrop { load: u64, path: PathBuf },
     ProbeMedia { load: u64, path: PathBuf },
     ReadProject { load: u64, file: PathBuf },
     SaveTo(PathBuf),
@@ -127,6 +129,7 @@ struct Load {
 enum Finished {
     Clip { track: usize, path: PathBuf, result: Result<MediaProbe, String> },
     Media { path: PathBuf, result: Result<MediaProbe, String> },
+    Drop { path: PathBuf, result: Result<MediaProbe, String> },
     Project { file: PathBuf, result: Result<Project, String>, base_revision: Option<u64> },
 }
 
@@ -212,6 +215,20 @@ impl Tasks {
             Request::ImportMedia { audio_only } => self.start_dialog(FileDialog::ImportMedia { audio_only }),
             Request::Export => self.start_dialog(FileDialog::Export),
         }
+    }
+
+    /// Starts reading the next dropped file once nothing else is going on.
+    pub fn next_file_drop(&mut self, state: &mut EditorState) -> Action {
+        if self.modal.is_some() || self.load.is_some() || state.is_exporting() || state.is_holding() {
+            return Action::Nothing;
+        }
+        // A batch stays in the queue while its last file is read, for the place it says.
+        while state.ui.drop_batches.front().is_some_and(|batch| batch.files.is_empty()) {
+            state.ui.drop_batches.pop_front();
+        }
+        let Some(path) = state.ui.drop_batches.front_mut().and_then(|batch| batch.files.pop_front()) else { return Action::Nothing };
+        let load = self.start_load(state, &path, None);
+        Action::ProbeDrop { load, path }
     }
 
     /// The app is leaving: a load in the background is dropped, since it may hang on a slow file
@@ -301,6 +318,7 @@ impl Tasks {
             }
             Arrival::ClipProbed { load, track, path, result } => self.load_finished(state, load, Finished::Clip { track, path, result }),
             Arrival::MediaProbed { load, path, result } => self.load_finished(state, load, Finished::Media { path, result }),
+            Arrival::DropProbed { load, path, result } => self.load_finished(state, load, Finished::Drop { path, result }),
             Arrival::ProjectRead { load, file, result } => {
                 let base_revision = self.load.filter(|running| running.id == load).and_then(|running| running.base_revision);
                 self.load_finished(state, load, Finished::Project { file, result, base_revision })
@@ -342,6 +360,15 @@ impl Tasks {
             Finished::Clip { track, path, result } => {
                 match result {
                     Ok(probe) => state.add_probed_file(track, &path, &probe),
+                    Err(message) => state.report_refused(Message::Technical(message)),
+                }
+                Action::Nothing
+            }
+            Finished::Drop { path, result } => {
+                match result {
+                    Ok(probe) => {
+                        state.add_dropped_file(&path, &probe);
+                    }
                     Err(message) => state.report_refused(Message::Technical(message)),
                 }
                 Action::Nothing
@@ -417,6 +444,72 @@ mod tests {
             Action::ProbeClip { load, track: 0, path: started } if started == PathBuf::from(path) => load,
             other => panic!("expected a probe of {path}, got {other:?}"),
         }
+    }
+
+    fn queue_drop(state: &mut EditorState, files: &[&str], track: Option<usize>, at: engine::Time) {
+        state.ui.drop_batches.push_back(crate::editor::DropBatch { files: files.iter().map(PathBuf::from).collect(), track, at });
+    }
+
+    fn read_next(tasks: &mut Tasks, state: &mut EditorState, result: Result<MediaProbe, String>) {
+        let Action::ProbeDrop { load, path } = tasks.next_file_drop(state) else { panic!("a file should be read") };
+        assert_eq!(tasks.next_file_drop(state), Action::Nothing, "one read at a time");
+        tasks.on_arrival(state, Arrival::DropProbed { load, path, result });
+    }
+
+    #[test]
+    fn dropped_files_follow_each_other_on_one_track() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        queue_drop(&mut state, &["C:/a.mp4", "C:/b.mp4"], None, engine::Time::from_ticks(90_000));
+        read_next(&mut tasks, &mut state, Ok(probe(Some(5), Some(5))));
+        read_next(&mut tasks, &mut state, Ok(probe(Some(5), Some(5))));
+        assert_eq!(state.project().tracks.len(), 1);
+        let clips = &state.project().tracks[0].clips;
+        assert_eq!(clips[0].start, engine::Time::from_ticks(90_000));
+        assert_eq!(Some(clips[1].start), clips[0].end());
+    }
+
+    #[test]
+    fn an_unreadable_file_in_the_middle_keeps_the_batch_together() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        queue_drop(&mut state, &["C:/a.mp4", "C:/bad.mp4", "C:/c.mp4"], None, engine::Time::ZERO);
+        read_next(&mut tasks, &mut state, Ok(probe(Some(5), Some(5))));
+        read_next(&mut tasks, &mut state, Err("unreadable".to_owned()));
+        assert!(matches!(state.status(), crate::editor::Status::Refused(_)));
+        read_next(&mut tasks, &mut state, Ok(probe(Some(5), Some(5))));
+        assert_eq!(state.project().tracks.len(), 1, "the third file joins the first");
+        let clips = &state.project().tracks[0].clips;
+        assert_eq!(Some(clips[1].start), clips[0].end());
+    }
+
+    #[test]
+    fn a_later_file_of_another_kind_is_refused_on_the_track_of_the_batch() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        queue_drop(&mut state, &["C:/a.mp4", "C:/m.wav", "C:/c.mp4"], None, engine::Time::ZERO);
+        read_next(&mut tasks, &mut state, Ok(probe(Some(5), Some(5))));
+        read_next(&mut tasks, &mut state, Ok(probe(None, Some(5))));
+        assert!(matches!(state.status(), crate::editor::Status::Refused(_)));
+        read_next(&mut tasks, &mut state, Ok(probe(Some(5), Some(5))));
+        assert_eq!(state.project().tracks.len(), 1);
+        assert_eq!(state.project().tracks[0].clips.len(), 2);
+    }
+
+    #[test]
+    fn a_second_drop_keeps_its_own_place() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        queue_drop(&mut state, &["C:/a.mp4"], None, engine::Time::ZERO);
+        queue_drop(&mut state, &["C:/b.mp4"], None, engine::Time::ZERO);
+        read_next(&mut tasks, &mut state, Ok(probe(Some(5), Some(5))));
+        read_next(&mut tasks, &mut state, Ok(probe(Some(5), Some(5))));
+        assert_eq!(state.project().tracks.len(), 2, "each drop outside the rows makes its own track");
+        assert_eq!(state.project().tracks[1].clips[0].start, engine::Time::ZERO);
+    }
+
+    #[test]
+    fn a_new_project_forgets_the_drops_of_the_old_one() {
+        let mut state = EditorState::default();
+        queue_drop(&mut state, &["C:/a.mp4"], Some(3), engine::Time::ZERO);
+        state.new_project();
+        assert!(state.ui.drop_batches.is_empty());
     }
 
     fn probed(load: u64, path: &str, result: Result<MediaProbe, String>) -> Arrival {

@@ -522,13 +522,15 @@ impl Session {
             ui::show(root, state, &mut requests, preview);
             ui_time = started.elapsed();
         })?;
+        let next_drop = self.tasks.next_file_drop(&mut self.state);
+        self.perform(next_drop);
         #[cfg(debug_assertions)]
         self.record_smoke_ui(ui_time);
         #[cfg(not(debug_assertions))]
         let _ = ui_time;
         let delay = if self.state.is_exporting() {
             delay.min(EXPORT_REPAINT)
-        } else if self.state.is_playing() || self.tasks.has_waiting_load() || self.presenter.resize_pending() {
+        } else if self.state.is_playing() || self.tasks.has_waiting_load() || !self.state.ui.drop_batches.is_empty() || self.presenter.resize_pending() {
             delay.min(PLAYING_REPAINT)
         } else {
             delay
@@ -669,6 +671,10 @@ impl Session {
             Action::ProbeClip { load, track, path } => self.spawn_task("clip-probe", TaskId::Load(load), move || {
                 let result = probe_media(&path);
                 Arrival::ClipProbed { load, track, path, result }
+            }),
+            Action::ProbeDrop { load, path } => self.spawn_task("drop-probe", TaskId::Load(load), move || {
+                let result = probe_media(&path);
+                Arrival::DropProbed { load, path, result }
             }),
             Action::ProbeMedia { load, path } => self.spawn_task("media-probe", TaskId::Load(load), move || {
                 let result = probe_media(&path);
@@ -879,6 +885,14 @@ impl ApplicationHandler<AgentWake> for EditorApp {
                     event_loop.exit();
                 }
             }
+            WindowEvent::DroppedFile(path) => {
+                // The fullscreen player has no timeline to resolve a drop against.
+                if !session.state.ui.fullscreen {
+                    let at = cursor_in_window(session.presenter.window());
+                    session.state.ui.files_dropped.push((path, at));
+                    session.presenter.window().request_redraw();
+                }
+            }
             WindowEvent::Focused(false) => {
                 session.presenter.focus_lost(&mut session.state);
                 session.presenter.window().request_redraw();
@@ -921,6 +935,25 @@ impl ApplicationHandler<AgentWake> for EditorApp {
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
+}
+
+/// Where the pointer is in the window, in physical pixels. During a file drag the window gets no pointer
+/// moves, so the last position egui knows is from before the drag.
+#[cfg(windows)]
+fn cursor_in_window(window: &winit::window::Window) -> Option<egui::Pos2> {
+    use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+    let mut cursor = POINT { x: 0, y: 0 };
+    // SAFETY: `cursor` is a valid place for the call to write to.
+    if unsafe { GetCursorPos(&mut cursor) } == 0 {
+        return None;
+    }
+    let inner = window.inner_position().ok()?;
+    Some(egui::pos2((cursor.x - inner.x) as f32, (cursor.y - inner.y) as f32))
+}
+
+#[cfg(not(windows))]
+fn cursor_in_window(_window: &winit::window::Window) -> Option<egui::Pos2> {
+    None
 }
 
 /// Whether an event asks for another frame. egui-winit reports a repaint for the redraw event

@@ -7,17 +7,18 @@ use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, Track
 use crate::packages::{Catalog, PickerState};
 use crate::project_lock::ProjectLock;
 use crate::playback::plan::{start_time, TransportCommand};
-use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, ClipDrag, EditCommand};
+use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_command, ClipDrag, EditCommand};
 use crate::timeline::hit::ClipHit;
 use crate::timeline::view::TimelineView;
 use crate::visuals::ClipVisuals;
 use engine::{
-    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_speed,
+    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_speed,
     set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
 use serde_json::{Map, Value};
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use crate::layout::{PanelSizes, SplitterDrag};
@@ -176,6 +177,19 @@ pub struct UiState {
     pub panel_sizes: PanelSizes,
     /// The splitter in the user's hand. Not a hold: edits go on while it moves.
     pub splitter: Option<SplitterDrag>,
+    /// Files the window was given, with where the pointer was in physical pixels when known.
+    pub files_dropped: Vec<(PathBuf, Option<egui::Pos2>)>,
+    /// Drops on the timeline, the first being read one file at a time.
+    pub drop_batches: VecDeque<DropBatch>,
+}
+
+/// The files of one drop on the timeline and the place the next of them goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropBatch {
+    pub files: VecDeque<PathBuf>,
+    /// The track of the clips so far, or the row dropped on; `None` makes a new track.
+    pub track: Option<usize>,
+    pub at: Time,
 }
 
 impl UiState {
@@ -396,6 +410,7 @@ impl EditorState {
     /// Replaces the project with a new or opened one: a fresh history, and a new revision so preview
     /// and audio rebuild. The new project counts as saved.
     pub fn replace_project(&mut self, project: Project, file: Option<PathBuf>) {
+        self.ui.drop_batches.clear();
         if self.playing {
             self.transport.push(TransportCommand::Stop);
         }
@@ -581,7 +596,7 @@ impl EditorState {
     /// An export renders the project it started with, so edits wait for it. A drag holds a clip key,
     /// and any edit could make that key name another clip, so edits wait for the drop; the same
     /// goes for a held inspector control. True, with a status, while any is in progress.
-    fn edits_blocked(&mut self) -> bool {
+    pub(crate) fn edits_blocked(&mut self) -> bool {
         if self.export.is_some() {
             self.status = Status::Info(Message::ExportRunning);
             return true;
@@ -806,27 +821,58 @@ impl EditorState {
             self.refuse(&EditError::TrackNotFound { track });
             return;
         };
-        let (present, stated, needed, problem) = match kind {
-            TrackKind::Video => (probe.has_video, probe.video_duration, StreamKind::Video, probe.video_problem.as_deref()),
-            TrackKind::Audio => (probe.has_audio, probe.audio_duration, StreamKind::Audio, probe.audio_problem.as_deref()),
-        };
-        if !present {
-            self.status = Status::Refused(match problem {
-                Some(reason) => Message::StreamUnusable { name, stream: needed, reason: reason.to_owned() },
-                None => Message::StreamMissing { name, stream: needed },
-            });
-            return;
-        }
+        let Some(length) = self.stream_length(kind, &name, probe) else { return };
         if let Some(item) = item_from_probe(&path.to_string_lossy(), probe) {
             self.library.add(item);
         }
-        let length = stated.filter(|length| *length > Time::ZERO);
         if self.place_clip(track, path, length.unwrap_or(DEFAULT_CLIP_DURATION)) {
             self.status = Status::Info(match length {
                 Some(length) => Message::AddedWithLength { name, seconds: format!("{:.2}", length.ticks() as f64 / engine::TICKS_PER_SECOND as f64) },
                 None => Message::AddedNoLength { name, seconds: DEFAULT_CLIP_DURATION.ticks() / engine::TICKS_PER_SECOND },
             });
         }
+    }
+
+    /// The stated length of the stream a track of `kind` plays, `Some(None)` when it states none.
+    /// `None`, with a status, when the file has no such stream.
+    fn stream_length(&mut self, kind: TrackKind, name: &str, probe: &MediaProbe) -> Option<Option<Time>> {
+        let (present, stated, needed, problem) = match kind {
+            TrackKind::Video => (probe.has_video, probe.video_duration, StreamKind::Video, probe.video_problem.as_deref()),
+            TrackKind::Audio => (probe.has_audio, probe.audio_duration, StreamKind::Audio, probe.audio_problem.as_deref()),
+        };
+        if !present {
+            self.status = Status::Refused(match problem {
+                Some(reason) => Message::StreamUnusable { name: name.to_owned(), stream: needed, reason: reason.to_owned() },
+                None => Message::StreamMissing { name: name.to_owned(), stream: needed },
+            });
+            return None;
+        }
+        Some(stated.filter(|length| *length > Time::ZERO))
+    }
+
+    /// Adds a dropped file that has been read, at the place its batch has reached. A file that
+    /// cannot go there leaves the place as it is, for the next file of the batch.
+    pub fn add_dropped_file(&mut self, path: &Path, probe: &MediaProbe) -> Option<ClipKey> {
+        let (track, at) = self.ui.drop_batches.front().map(|batch| (batch.track, batch.at))?;
+        let name = clip_label(&path.to_string_lossy()).to_owned();
+        let own = if probe.has_video { TrackKind::Video } else { TrackKind::Audio };
+        let kind = track.and_then(|index| self.project().tracks.get(index)).map_or(own, |target| target.kind);
+        let duration = self.stream_length(kind, &name, probe)?;
+        if let Some(item) = item_from_probe(&path.to_string_lossy(), probe) {
+            self.library.add(item);
+        }
+        let media_kind = if kind == TrackKind::Video { crate::media::MediaKind::Video } else { crate::media::MediaKind::Audio };
+        let item = MediaItem { source: path.to_string_lossy().into_owned(), name: name.clone(), kind: media_kind, duration, estimated: false };
+        let key = self.drop_media(&item, track, at)?;
+        if duration.is_none() {
+            self.status = Status::Info(Message::AddedNoLength { name, seconds: DEFAULT_CLIP_DURATION.ticks() / engine::TICKS_PER_SECOND });
+        }
+        let end = self.project().tracks[key.track].clips[key.clip].end();
+        if let (Some(batch), Some(end)) = (self.ui.drop_batches.front_mut(), end) {
+            batch.track = Some(key.track);
+            batch.at = end;
+        }
+        Some(key)
     }
 
     /// Whether a drag of an inspector control is previewing.
@@ -1051,6 +1097,67 @@ impl EditorState {
         if added {
             self.selection = clip_at(self.project(), track, start);
             self.status = Status::Info(Message::Added(item.name.clone()));
+        }
+    }
+
+    /// Adds `item` where it was dropped: on `track`, as near `at` as the other clips allow, or on a
+    /// new track of its kind when `track` is `None`, which is one undo step. A track of the other
+    /// kind or a locked one refuses it. The key of the new clip when it was added.
+    pub fn drop_media(&mut self, item: &MediaItem, track: Option<usize>, at: Time) -> Option<ClipKey> {
+        if self.edits_blocked() {
+            return None;
+        }
+        let duration = item.duration.unwrap_or(DEFAULT_CLIP_DURATION);
+        let kind = item.kind.track_kind();
+        let at = at.max(Time::ZERO);
+        let (index, start) = match track {
+            Some(index) => {
+                let found = self.project().tracks.get(index).map(|target| (target.kind, target.locked, nearest_free_start(target, None, duration, at)));
+                let error = match found {
+                    None => EditError::TrackNotFound { track: index },
+                    Some((to, _, _)) if to != kind => EditError::TrackKindMismatch { from: kind, to },
+                    Some((_, true, _)) => EditError::TrackLocked { track: index },
+                    Some((_, false, Some(start))) => {
+                        return self.add_dropped(item, index, start, false, kind, duration);
+                    }
+                    Some((_, false, None)) => EditError::NoRoom { track: index },
+                };
+                self.refuse(&error);
+                return None;
+            }
+            None => (self.project().tracks.len(), at),
+        };
+        self.add_dropped(item, index, start, true, kind, duration)
+    }
+
+    fn add_dropped(&mut self, item: &MediaItem, track: usize, start: Time, new_track: bool, kind: TrackKind, duration: Time) -> Option<ClipKey> {
+        let clip = new_clip(&item.source, start, duration);
+        let added = self.run(|project| {
+            let with_track = if new_track { add_track(project, kind)? } else { project.clone() };
+            add_clip(&with_track, track, clip)
+        });
+        if !added {
+            return None;
+        }
+        self.library.adopt_project_media(self.history.current());
+        self.selection = clip_at(self.project(), track, start);
+        self.status = Status::Info(Message::Added(item.name.clone()));
+        self.selection
+    }
+
+    /// Ends a move dropped outside the track rows: the clip goes to a new track of its kind, as
+    /// one undo step. A drag that is not a move ends as it would anywhere else.
+    pub fn finish_drag_on_new_track(&mut self, drag: ClipDrag, pointer_time: Time) {
+        let command = drag_command(&drag, pointer_time, None);
+        let EditCommand::Move { key, desired_start, .. } = command else {
+            self.finish_drag(clamp_trim(self.project(), command));
+            return;
+        };
+        self.drag = None;
+        let Some(kind) = self.project().tracks.get(key.track).map(|track| track.kind) else { return };
+        let track = self.project().tracks.len();
+        if self.run(|project| move_clip(&add_track(project, kind)?, key, track, desired_start)) {
+            self.selection = clip_at(self.project(), track, desired_start);
         }
     }
 
@@ -2402,6 +2509,69 @@ mod tests {
         assert_eq!(state.selection(), Some(key(0)));
         state.apply_clip_field(ClipField::Duration(2.0));
         assert_eq!(clips(state.project(), 0), vec![(seconds(4), seconds(2))]);
+    }
+
+    #[test]
+    fn a_drop_with_no_track_makes_one_of_its_kind_in_one_undo_step() {
+        let mut state = EditorState::default();
+        let at = seconds(2);
+        let added = state.drop_media(&media("a.mp4", crate::media::MediaKind::Video, Some(3)), None, at).unwrap();
+        assert_eq!(added, ClipKey { track: 0, clip: 0 });
+        assert_eq!(state.project().tracks[0].kind, TrackKind::Video);
+        assert_eq!(clips(state.project(), 0), vec![(at, seconds(3))]);
+        assert_eq!(state.selection(), Some(added));
+        state.undo();
+        assert!(state.project().tracks.is_empty(), "the track goes with the clip");
+    }
+
+    #[test]
+    fn a_drop_on_a_track_lands_at_the_nearest_free_place() {
+        let mut state = state_with_clip();
+        let before = clips(state.project(), 0);
+        let added = state.drop_media(&media("b.mp4", crate::media::MediaKind::Video, Some(1)), Some(0), seconds(1)).unwrap();
+        assert_eq!(state.project().tracks.len(), 2, "no new track");
+        assert_eq!(added.track, 0);
+        assert_eq!(state.project().tracks[0].clips[added.clip].start, before[0].1, "after the clip it was dropped on");
+    }
+
+    #[test]
+    fn a_drop_on_the_wrong_kind_or_a_locked_track_is_refused_and_makes_no_track() {
+        let mut state = state_with_clip();
+        let before = state.project().clone();
+        assert_eq!(state.drop_media(&media("b.mp4", crate::media::MediaKind::Video, Some(1)), Some(1), seconds(1)), None);
+        assert!(matches!(state.status(), Status::Refused(_)));
+        state.toggle_track_locked(0);
+        let locked = state.project().clone();
+        assert_eq!(state.drop_media(&media("b.mp4", crate::media::MediaKind::Video, Some(1)), Some(0), seconds(30)), None);
+        assert_eq!(state.project(), &locked);
+        assert_eq!(locked.tracks.len(), before.tracks.len());
+    }
+
+    #[test]
+    fn a_clip_moved_outside_the_rows_gets_a_new_track_in_one_undo_step() {
+        let mut state = state_with_clip();
+        let before = state.project().clone();
+        let hit = ClipHit { key: key(0), zone: crate::timeline::hit::ClipZone::Body };
+        let drag = begin_drag(state.project(), hit, Time::ZERO).unwrap();
+        state.finish_drag_on_new_track(drag, seconds(4));
+        assert_eq!(state.project().tracks.len(), 3);
+        assert_eq!(state.project().tracks[2].kind, TrackKind::Video);
+        assert_eq!(clips(state.project(), 2), vec![(seconds(4), DEFAULT_CLIP_DURATION)]);
+        assert_eq!(state.selection(), Some(ClipKey { track: 2, clip: 0 }));
+        assert!(state.project().tracks[0].clips.is_empty());
+        state.undo();
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn a_clip_of_a_locked_track_stays_when_moved_outside_the_rows() {
+        let mut state = state_with_clip();
+        let hit = ClipHit { key: key(0), zone: crate::timeline::hit::ClipZone::Body };
+        let drag = begin_drag(state.project(), hit, Time::ZERO).unwrap();
+        state.toggle_track_locked(0);
+        let before = state.project().clone();
+        state.finish_drag_on_new_track(drag, seconds(4));
+        assert_eq!(state.project(), &before);
     }
 
     #[test]
