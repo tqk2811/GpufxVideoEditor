@@ -206,6 +206,35 @@ fn changing_a_size_parameter_of_a_clip_effect_keeps_the_preview_working() {
     }
 }
 
+/// A size parameter changed in the same update as a later effect's bad value must not leave the
+/// graph refusing every following frame.
+#[test]
+fn a_failed_update_after_a_size_change_does_not_leave_the_preview_stuck() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let mut producer = D3d12Producer::new(gpu.clone());
+    let seconds = Time::from_seconds(3).unwrap();
+    let with_effects = |first: engine::Effect, second: engine::Effect| {
+        let mut scaled = clip("clip-a.mp4", seconds);
+        scaled.effects.extend([first, second]);
+        project(vec![scaled])
+    };
+    let good = with_effects(scale_effect(320, 180), scale_effect(320, 180));
+    let frame = producer_frame(&mut producer, &good);
+    producer.recycle(frame);
+    let bad_params = serde_json::json!({ "w": { "not": "a number" }, "h": 180 });
+    let bad = engine::Effect { package: "packages/gpufx/ffmpeg/scale".to_owned(), params: bad_params.as_object().expect("an object").clone() };
+    let refused = producer.produce(&request(&with_effects(scale_effect(-1, 180), bad), 30));
+    assert!(refused.is_err(), "a value that is not a number is an error");
+    let fixed = with_effects(scale_effect(-1, 180), scale_effect(320, 180));
+    let frame = producer_frame(&mut producer, &fixed);
+    producer.recycle(frame);
+}
+
+fn producer_frame(producer: &mut D3d12Producer, timeline: &Arc<engine::Project>) -> gpufx_editor::preview::backend::PreviewImage {
+    producer.produce(&request(timeline, 30)).unwrap_or_else(|e| panic!("{}", describe(&e))).expect("a picture")
+}
+
 /// A transition number changing between frames is updated in place and still shows a picture.
 #[test]
 fn changing_a_transition_number_keeps_the_preview_working() {

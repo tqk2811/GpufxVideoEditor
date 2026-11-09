@@ -526,10 +526,20 @@ impl Compositor for D3d12Compositor {
         let mut render = || -> Result<(), String> {
             let built = clip_graphs.get_or_build(key, shape.as_slice(), &build)?;
             let mut changed = false;
+            let mut failure = None;
             for (index, effect) in effects.iter().enumerate() {
                 changed |= built.applied[index] != effect.params;
-                update_graph_params(&mut built.graph, &format!("fx{index}."), &effect.package, &built.applied[index], &effect.params)?;
+                if let Err(message) = update_graph_params(&mut built.graph, &format!("fx{index}."), &effect.package, &built.applied[index], &effect.params) {
+                    failure = Some(message);
+                    break;
+                }
                 built.applied[index].clone_from(&effect.params);
+            }
+            // A failure part way may have left an earlier size parameter changed, and `applied`
+            // then hides that from the next frame, so the graph goes as the transition's does.
+            if let Some(message) = failure {
+                clip_graphs.retain(|entry| entry != key);
+                return Err(message);
             }
             if changed && needs_rebuild(&built.graph, &pads) {
                 clip_graphs.retain(|entry| entry != key);
