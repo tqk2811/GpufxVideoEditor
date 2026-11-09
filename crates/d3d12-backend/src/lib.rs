@@ -17,6 +17,7 @@ mod ffi;
 mod gpu;
 mod packages;
 mod paths;
+mod probe;
 
 pub use audio::{AudioFileDecoder, AudioFiles};
 pub use compositor::{D3d12Compositor, SharedImage};
@@ -26,3 +27,4 @@ pub use export::{reserve_temporary, ExportControl, ExportError, ExportJob, Expor
 pub use gpu::Gpu;
 pub use packages::{read_package_info, PackageInfo};
 pub use paths::ProjectPaths;
+pub use probe::{probe_media, MediaProbe};
