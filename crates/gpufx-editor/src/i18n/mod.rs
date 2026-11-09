@@ -249,6 +249,29 @@ mod tests {
     }
 
     #[test]
+    fn english_counts_and_articles_read_right() {
+        let finished = |frames| Language::English.t(Message::ExportFinished { frames, path: "a.mp4".to_owned(), encoder: "x".to_owned() });
+        assert!(finished(1).contains("Exported 1 frame to"), "{}", finished(1));
+        assert!(finished(2).contains("Exported 2 frames to"), "{}", finished(2));
+        assert!(finished(0).contains("Exported 0 frames to"), "{}", finished(0));
+        assert!(Language::English.t(Message::ExportFinishedSilent { frames: 1, path: "a.mp4".to_owned(), encoder: "x".to_owned() }).contains("Exported 1 frame to"));
+        assert_eq!(Language::English.t(Message::PackageProblems(1)), "1 package could not be read");
+        assert_eq!(Language::English.t(Message::PackageProblems(3)), "3 packages could not be read");
+        let unusable = |stream| Language::English.t(Message::StreamUnusable { name: "a".to_owned(), stream, reason: "r".to_owned() });
+        assert_eq!(unusable(StreamKind::Audio), "a has an audio stream it cannot use: r");
+        assert_eq!(unusable(StreamKind::Video), "a has a video stream it cannot use: r");
+    }
+
+    #[test]
+    fn vietnamese_split_is_told_apart_from_trim() {
+        let vietnamese = Language::Vietnamese;
+        assert!(vietnamese.t(Message::SplitShortcut).contains("Tách"));
+        assert!(vietnamese.t(Message::SelectClip(ClipAction::Split)).contains("tách"));
+        assert!(vietnamese.t(Message::TrimBefore).contains("Cắt"));
+        assert_eq!(vietnamese.t(Message::AudioGapLine(5)), "Mất tiếng: 5 ms");
+    }
+
+    #[test]
     fn technical_text_is_passed_through_as_it_is() {
         for language in Language::ALL {
             assert_eq!(language.t(Message::Technical("avcodec failed".to_owned())), "avcodec failed");

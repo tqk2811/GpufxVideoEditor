@@ -11,7 +11,7 @@ fn stream_name(stream: StreamKind) -> &'static str {
 
 fn select_clip(action: ClipAction) -> &'static str {
     match action {
-        ClipAction::Split => "Hãy chọn một clip để cắt",
+        ClipAction::Split => "Hãy chọn một clip để tách",
         ClipAction::Delete => "Hãy chọn một clip để xóa",
         ClipAction::Change => "Hãy chọn một clip để thay đổi",
         ClipAction::Mute => "Hãy chọn một clip để tắt tiếng",
@@ -32,7 +32,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::PreviewLine(detail) => format!("Xem trước: {detail}"),
         Message::AudioLine(detail) => format!("Âm thanh: {detail}"),
         Message::NoSoundLine(detail) => format!("Không có tiếng: {detail}"),
-        Message::AudioGapLine(ms) => format!("Hụt âm thanh: {ms} ms"),
+        Message::AudioGapLine(ms) => format!("Mất tiếng: {ms} ms"),
         Message::FinishDragFirst => "Hãy thả chuột để kết thúc thao tác kéo trước".to_owned(),
         Message::ExportRunning => "Không sửa được khi đang xuất video".to_owned(),
         Message::NoNeighbour => "Chuyển cảnh cần một clip đã chọn liền kề với clip khác trên cùng track".to_owned(),
@@ -119,8 +119,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldVolume => "Âm lượng".to_owned(),
         Message::SelectClipHint => "Chọn một clip trên timeline để chỉnh.".to_owned(),
         Message::Mute => "Tắt tiếng".to_owned(),
-        Message::FadeIn => "Âm vào".to_owned(),
-        Message::FadeOut => "Âm ra".to_owned(),
+        Message::FadeIn => "Tăng dần âm lượng".to_owned(),
+        Message::FadeOut => "Giảm dần âm lượng".to_owned(),
         Message::NoEffectsYet => "Chưa có hiệu ứng. Thêm ở tab Hiệu ứng.".to_owned(),
         Message::Remove => "Xóa".to_owned(),
         Message::Reset => "Mặc định".to_owned(),
@@ -135,7 +135,7 @@ pub(super) fn text(message: &Message) -> String {
 
         Message::UndoShortcut => "Hoàn tác (Ctrl+Z)".to_owned(),
         Message::RedoShortcut => "Làm lại (Ctrl+Y)".to_owned(),
-        Message::SplitShortcut => "Cắt tại đầu phát (S)".to_owned(),
+        Message::SplitShortcut => "Tách tại đầu phát (S)".to_owned(),
         Message::TrimBefore => "Cắt phần trước đầu phát".to_owned(),
         Message::TrimAfter => "Cắt phần sau đầu phát".to_owned(),
         Message::DeleteShortcut => "Xóa clip (Delete)".to_owned(),

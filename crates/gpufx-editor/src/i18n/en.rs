@@ -9,6 +9,23 @@ fn stream_name(stream: StreamKind) -> &'static str {
     }
 }
 
+/// The stream with its article, for "has a video stream" and "has an audio stream".
+fn stream_with_article(stream: StreamKind) -> &'static str {
+    match stream {
+        StreamKind::Video => "a video",
+        StreamKind::Audio => "an audio",
+    }
+}
+
+/// `count` and `noun`, plural unless the count is one.
+fn counted(count: i64, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
 fn select_clip(action: ClipAction) -> &'static str {
     match action {
         ClipAction::Split => "Select a clip to split",
@@ -46,7 +63,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::Added(name) => format!("Added {name}"),
         Message::AddedWithLength { name, seconds } => format!("Added {name}, {seconds} s"),
         Message::AddedNoLength { name, seconds } => format!("Added {name}: it states no length, so it got {seconds} s"),
-        Message::StreamUnusable { name, stream, reason } => format!("{name} has a {} stream it cannot use: {reason}", stream_name(*stream)),
+        Message::StreamUnusable { name, stream, reason } => format!("{name} has {} stream it cannot use: {reason}", stream_with_article(*stream)),
         Message::StreamMissing { name, stream } => format!("{name} has no {} stream", stream_name(*stream)),
         Message::Imported(name) => format!("Imported {name}"),
         Message::NoUsableStream(name) => format!("{name} has no usable video or audio"),
@@ -69,8 +86,8 @@ pub(super) fn text(message: &Message) -> String {
 
         Message::NothingToExport => "Nothing to export: the timeline has no video frames".to_owned(),
         Message::ExportProgress { done, total } => format!("Exporting {done} / {total}"),
-        Message::ExportFinished { frames, path, encoder } => format!("Exported {frames} frames to {path} with {encoder}."),
-        Message::ExportFinishedSilent { frames, path, encoder } => format!("Exported {frames} frames to {path} with {encoder}. The project has no audio output, so the file has no sound."),
+        Message::ExportFinished { frames, path, encoder } => format!("Exported {} to {path} with {encoder}.", counted(*frames, "frame")),
+        Message::ExportFinishedSilent { frames, path, encoder } => format!("Exported {} to {path} with {encoder}. The project has no audio output, so the file has no sound.", counted(*frames, "frame")),
         Message::ExportCancelled => "Export cancelled; the partial file was removed".to_owned(),
         Message::ExportFailed(detail) => format!("Export failed: {detail}"),
         Message::EncoderAuto => "Auto".to_owned(),
@@ -107,7 +124,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::ReadingPackages => "Reading the package list...".to_owned(),
         Message::NoPackages(variable) => format!("No packages found. Set {variable}."),
         Message::AddToClip => "Add to selected clip".to_owned(),
-        Message::PackageProblems(count) => format!("{count} packages could not be read"),
+        Message::PackageProblems(count) => format!("{} could not be read", counted(*count as i64, "package")),
 
         Message::ClipTitle => "Clip".to_owned(),
         Message::ProjectTitle => "Project".to_owned(),
