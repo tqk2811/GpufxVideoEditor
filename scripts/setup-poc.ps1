@@ -17,7 +17,7 @@ $ffmpegRoot = Join-Path $repoRoot 'third_party\ffmpeg'
 $gplRoot = Join-Path $repoRoot 'third_party\ffmpeg-gpl'
 $gplAssetName = "$releaseTag-win64-gpl-shared.zip"
 # The same FFmpeg commit from upstream. Upstream removes old autobuilds, so this URL can expire.
-$gplUrl = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-08-12-35/$gplAssetName"
+$gplUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-11-08-12-35/$gplAssetName"
 $gplSha256 = '8e6372ef8382b9b0acc74ceddfebcff5627442d6d4330ab9c2ce8a8695d217e0'
 $toolsDir = Join-Path $repoRoot '.tools'
 $clipsDir = Join-Path $repoRoot 'test-clips'
