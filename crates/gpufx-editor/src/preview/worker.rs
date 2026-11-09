@@ -163,6 +163,10 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
     /// Runs `task` on the thread between frames, without replacing the wished frame or telling the
     /// one in progress it is unwanted. A task that panics is dropped with what it held.
     pub fn run_on_thread(&self, task: ThreadTask<P>) {
+        // A task nothing will run is dropped here, so whoever waits on what it holds is told.
+        if self.handle.as_ref().is_none_or(JoinHandle::is_finished) {
+            return;
+        }
         self.tasks.lock().unwrap_or_else(|p| p.into_inner()).push_back(task);
         self.requests.notify();
     }
@@ -433,6 +437,28 @@ mod tests {
         let (handle, message) = spawned(Err(std::io::Error::other("out of threads")));
         assert!(handle.is_none());
         assert!(message.expect("a message").contains("out of threads"));
+    }
+
+    #[test]
+    fn a_task_for_a_thread_that_never_started_is_dropped_and_its_caller_answered() {
+        let (returned, _) = channel();
+        let worker = PreviewWorker::<Fake> { tasks: Arc::default(), requests: Arc::default(), suspended: AtomicBool::new(false), results: Arc::default(), returned, handle: None, spawn_error: Some("no thread".to_owned()) };
+        let (answer, receiver) = channel::<()>();
+        worker.run_on_thread(Box::new(move |_| answer.send(()).unwrap()));
+        assert_eq!(receiver.recv_timeout(TIMEOUT), Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
+    }
+
+    #[test]
+    fn a_task_for_a_thread_that_died_at_start_is_dropped_too() {
+        let worker: PreviewWorker<Fake> = PreviewWorker::spawn(|| panic!("deliberate test panic"), || {});
+        let began = Instant::now();
+        while !worker.handle.as_ref().unwrap().is_finished() {
+            assert!(began.elapsed() < TIMEOUT);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (answer, receiver) = channel::<()>();
+        worker.run_on_thread(Box::new(move |_| answer.send(()).unwrap()));
+        assert_eq!(receiver.recv_timeout(TIMEOUT), Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
     }
 
     #[test]
