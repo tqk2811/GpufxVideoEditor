@@ -60,29 +60,44 @@ impl Generator for FfmpegGenerator {
 
     fn peaks(&self, path: &Path, emit: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String> {
         let mut decoder = AudioFileDecoder::open(path)?;
-        let frames_per_peak = i64::from(MIX_SAMPLE_RATE) / PEAKS_PER_SECOND;
-        let mut block = vec![0.0_f32; frames_per_peak as usize * MIX_CHANNELS];
-        let mut pending = Vec::new();
-        let mut position = 0;
-        let mut total = 0;
-        let mut reported = Instant::now();
-        while total < MAX_PEAKS && !decoder.finished() {
-            block.fill(0.0);
-            decoder.read(position, &mut block)?;
-            position += frames_per_peak;
-            pending.push(block.iter().fold(0.0_f32, |peak, sample| peak.max(sample.abs())));
-            total += 1;
-            if reported.elapsed().as_millis() >= PEAK_REPORT_INTERVAL_MS {
-                if !emit(&pending) {
-                    return Ok(());
+        read_peaks(&mut |position, block| if decoder.finished() { None } else { Some(decoder.read(position, block)) }, emit)
+    }
+}
+
+/// Turns blocks from `read` into peaks. `read` returns `None` at the end of the audio. What was
+/// read before an error is still handed over.
+pub(super) fn read_peaks(read: &mut dyn FnMut(i64, &mut [f32]) -> Option<Result<(), String>>, emit: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String> {
+    let frames_per_peak = i64::from(MIX_SAMPLE_RATE) / PEAKS_PER_SECOND;
+    let mut block = vec![0.0_f32; frames_per_peak as usize * MIX_CHANNELS];
+    let mut pending = Vec::new();
+    let mut position = 0;
+    let mut total = 0;
+    let mut reported = Instant::now();
+    while total < MAX_PEAKS {
+        block.fill(0.0);
+        match read(position, &mut block) {
+            None => break,
+            Some(Ok(())) => {}
+            Some(Err(reason)) => {
+                if !pending.is_empty() {
+                    emit(&pending);
                 }
-                pending.clear();
-                reported = Instant::now();
+                return Err(reason);
             }
         }
-        if !pending.is_empty() {
-            emit(&pending);
+        position += frames_per_peak;
+        pending.push(block.iter().fold(0.0_f32, |peak, sample| peak.max(sample.abs())));
+        total += 1;
+        if reported.elapsed().as_millis() >= PEAK_REPORT_INTERVAL_MS {
+            if !emit(&pending) {
+                return Ok(());
+            }
+            pending.clear();
+            reported = Instant::now();
         }
-        Ok(())
     }
+    if !pending.is_empty() {
+        emit(&pending);
+    }
+    Ok(())
 }

@@ -252,6 +252,81 @@ fn a_cancelled_run_of_levels_leaves_nothing_and_the_next_starts_over() {
     visuals.end_frame();
 }
 
+fn known_slot(visuals: &mut ClipVisuals, stamp: Option<FileStamp>, identity: u32) {
+    let facts = SourceFacts { has_video: true, has_audio: true, aspect: 1.0, length: None };
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp, identity: Some(identity), view: SourceView::Known(facts), checked: None });
+    visuals.live_identities.insert(identity);
+    visuals.interned.insert("a.mp4".to_owned(), visuals.slots.len() - 1);
+}
+
+#[test]
+fn a_moment_without_a_stamp_keeps_what_was_made_of_the_source() {
+    let stamp = FileStamp { size: 10, modified: None };
+    let mut visuals = ClipVisuals::default();
+    known_slot(&mut visuals, Some(stamp), 1);
+    visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: vec![0.1], finished: true });
+    visuals.apply(Done::Stamp { slot: 0, stamp: None });
+    assert_eq!(visuals.slots[0].identity, Some(1), "the file may be locked for a moment");
+    assert!(!visuals.peaks.is_empty());
+    visuals.apply(Done::Stamp { slot: 0, stamp: Some(stamp) });
+    assert_eq!(visuals.slots[0].identity, Some(1));
+    visuals.apply(Done::Stamp { slot: 0, stamp: Some(FileStamp { size: 11, modified: None }) });
+    assert_eq!(visuals.slots[0].identity, None, "a real change still forgets it");
+    assert!(visuals.peaks.is_empty());
+}
+
+#[test]
+fn a_stamp_request_lost_to_busy_workers_is_made_again() {
+    let wanted = |visuals: &ClipVisuals| visuals.wanted_frames.iter().any(|job| matches!(job.key, JobKey::Stamp(0)));
+    let mut visuals = ClipVisuals::default();
+    known_slot(&mut visuals, None, 1);
+    visuals.slot("a.mp4");
+    assert!(wanted(&visuals));
+    visuals.wanted_frames.clear();
+    visuals.wanted_keys.clear();
+    visuals.slot("a.mp4");
+    assert!(wanted(&visuals), "no answer came, so the next frame asks again");
+    visuals.wanted_frames.clear();
+    visuals.wanted_keys.clear();
+    visuals.apply(Done::Stamp { slot: 0, stamp: None });
+    visuals.slot("a.mp4");
+    assert!(!wanted(&visuals), "an answer waits for the next interval");
+}
+
+#[test]
+fn level_data_drawn_last_frame_is_not_evicted() {
+    let entry = |used| PeakEntry { data: { let mut data = PeakData::default(); data.append(&[0.1; 3]); data }, finished: true, used };
+    let mut visuals = ClipVisuals::default();
+    visuals.clock = 10;
+    visuals.peaks.insert(1, entry(9));
+    visuals.peaks.insert(2, entry(5));
+    visuals.peak_bytes_limit = 16;
+    visuals.enforce_peak_limit();
+    assert!(visuals.peaks.contains_key(&1) && !visuals.peaks.contains_key(&2), "the older one goes");
+    visuals.peak_bytes_limit = 0;
+    visuals.enforce_peak_limit();
+    assert!(visuals.peaks.contains_key(&1), "what is on screen stays, over the limit if need be");
+}
+
+#[test]
+fn levels_read_before_an_error_are_handed_over() {
+    let mut calls = 0;
+    let mut got = Vec::new();
+    let result = super::backend::read_peaks(
+        &mut |_, block| {
+            calls += 1;
+            block.fill(0.5);
+            Some(if calls <= 2 { Ok(()) } else { Err("damaged".to_owned()) })
+        },
+        &mut |peaks| {
+            got.extend_from_slice(peaks);
+            true
+        },
+    );
+    assert_eq!(result, Err("damaged".to_owned()));
+    assert_eq!(got, vec![0.5, 0.5]);
+}
+
 #[test]
 fn levels_of_a_clip_removed_from_the_project_are_dropped() {
     let mut visuals = ClipVisuals::default();

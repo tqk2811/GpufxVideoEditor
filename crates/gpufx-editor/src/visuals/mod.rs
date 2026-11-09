@@ -90,6 +90,7 @@ pub struct ClipVisuals {
     peaks: HashMap<u32, PeakEntry>,
     /// The current run of the levels of an identity; results of any other run are ignored.
     peak_runs: HashMap<u32, u32>,
+    peak_bytes_limit: usize,
     uploads: VecDeque<TileKey>,
     wanted_frames: Vec<Job>,
     wanted_audio: Vec<Job>,
@@ -121,6 +122,7 @@ impl ClipVisuals {
             tiles: TileCache::new(TILE_CACHE_ENTRIES),
             peaks: HashMap::new(),
             peak_runs: HashMap::new(),
+            peak_bytes_limit: PEAK_BYTES_LIMIT,
             uploads: VecDeque::new(),
             wanted_frames: Vec::new(),
             wanted_audio: Vec::new(),
@@ -224,7 +226,8 @@ impl ClipVisuals {
         let now = Instant::now();
         let due = self.slots[slot].view != SourceView::Pending && self.slots[slot].checked.is_none_or(|at| now.duration_since(at) >= STAMP_INTERVAL);
         if due {
-            self.slots[slot].checked = Some(now);
+            // Marked as checked when the answer comes: this request can be replaced before a
+            // worker is free, and the next frame then asks again.
             self.want(Job { key: JobKey::Stamp(slot as u32), path: self.slots[slot].path.clone() }, true);
         }
         slot
@@ -317,7 +320,9 @@ impl ClipVisuals {
         match done {
             Done::Stamp { slot, stamp } => {
                 let index = slot as usize;
-                if self.slots[index].stamp != stamp {
+                self.slots[index].checked = Some(Instant::now());
+                // No stamp means the file could not be read just now, not that it changed.
+                if stamp.is_some() && self.slots[index].stamp != stamp {
                     self.reset_slot(index);
                 }
             }
@@ -379,8 +384,9 @@ impl ClipVisuals {
 
     fn enforce_peak_limit(&mut self) {
         let mut total: usize = self.peaks.values().map(|entry| entry.data.bytes()).sum();
-        while total > PEAK_BYTES_LIMIT {
-            let oldest = self.peaks.iter().filter(|(_, entry)| entry.finished && entry.used < self.clock).min_by_key(|(_, entry)| entry.used).map(|(identity, _)| *identity);
+        while total > self.peak_bytes_limit {
+            // Runs after the clock moved on, so a source drawn last frame has `used == clock - 1`.
+            let oldest = self.peaks.iter().filter(|(_, entry)| entry.finished && entry.used + 1 < self.clock).min_by_key(|(_, entry)| entry.used).map(|(identity, _)| *identity);
             let Some(oldest) = oldest else { break };
             if let Some(entry) = self.peaks.remove(&oldest) {
                 total -= entry.data.bytes();

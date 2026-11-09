@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 /// A key of the cache: the identity of the source and the bucket time.
 pub type TileKey = (u32, i64);
 
+/// How many entries on each side a search for a stand-in looks at.
+const NEAREST_LOOK: usize = 16;
+
 /// A bounded map of tiles. A value is dropped on eviction, which frees an egui texture.
 pub struct TileCache<T> {
     entries: BTreeMap<TileKey, (u64, T)>,
@@ -56,10 +59,12 @@ impl<T> TileCache<T> {
     }
 
     /// The key nearest to `key` of the same source within `reach` ticks whose value `usable` accepts.
+    /// Looks at no more than [`NEAREST_LOOK`] entries each way, so a tile costs the same at every zoom.
     pub fn nearest(&self, key: TileKey, reach: i64, usable: impl Fn(&T) -> bool) -> Option<TileKey> {
         let (source, time) = key;
-        let range = (source, time.saturating_sub(reach))..=(source, time.saturating_add(reach));
-        self.entries.range(range).filter(|(_, (_, value))| usable(value)).min_by_key(|(candidate, _)| (candidate.1 - time).abs()).map(|(candidate, _)| *candidate)
+        let below = self.entries.range((source, time.saturating_sub(reach))..=key).rev().take(NEAREST_LOOK).find(|(_, (_, value))| usable(value));
+        let above = self.entries.range(key..=(source, time.saturating_add(reach))).take(NEAREST_LOOK).find(|(_, (_, value))| usable(value));
+        [below, above].into_iter().flatten().min_by_key(|(candidate, _)| (candidate.1 - time).abs()).map(|(candidate, _)| *candidate)
     }
 
     /// Forgets every tile of `source`.
@@ -113,6 +118,21 @@ mod tests {
         assert_eq!(cache.nearest((1, 180), 50, |_| true), None);
         assert_eq!(cache.nearest((1, 260), 1000, |_| true), Some((1, 300)));
         assert_eq!(cache.nearest((1, 260), 1000, |value| *value == "a"), Some((1, 100)), "only usable values");
+    }
+
+    #[test]
+    fn looking_for_a_neighbour_stays_cheap_among_many_tiles() {
+        let mut cache = TileCache::new(1024);
+        for time in 0..1000 {
+            cache.insert((1, time * 10), ());
+        }
+        let looked_at = std::cell::Cell::new(0);
+        let found = cache.nearest((1, 5000), 100_000, |_| {
+            looked_at.set(looked_at.get() + 1);
+            false
+        });
+        assert_eq!(found, None);
+        assert!(looked_at.get() <= 2 * NEAREST_LOOK, "{}", looked_at.get());
     }
 
     #[test]
