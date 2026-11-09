@@ -1,7 +1,7 @@
 //! Draws the editor and forwards input. Decisions live in `editor` and `timeline`.
 
 use crate::editor::{applied_to, clip_label, EditorState, Status};
-use crate::packages::{filter_entries, short_name, PackageKind};
+use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageKind};
 use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
 use crate::timeline::drag::{begin_drag, clamp_trim, drag_command};
@@ -215,13 +215,14 @@ fn selectable_row_height(ui: &egui::Ui) -> f32 {
 
 fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
     let row_height = selectable_row_height(ui);
+    let duplicates = duplicated_names(state.catalog.entries(state.picker.kind));
     let entries: Vec<_> = filter_entries(state.catalog.entries(state.picker.kind), &state.picker.filter).into_iter().cloned().collect();
     let list_height = (ui.available_height() - PICKER_FOOTER_HEIGHT).max(row_height * 3.0);
     let mut double_clicked = None;
     egui::ScrollArea::vertical().id_salt("package-list").max_height(list_height).auto_shrink([false, true]).show_rows(ui, row_height, entries.len(), |ui, rows| {
         for entry in &entries[rows] {
             let selected = state.picker.selected.as_deref() == Some(&entry.package);
-            let response = ui.selectable_label(selected, &entry.name).on_hover_text(if entry.description.is_empty() { entry.package.as_str() } else { entry.description.as_str() });
+            let response = ui.selectable_label(selected, list_label(entry, &duplicates)).on_hover_text(if entry.description.is_empty() { entry.package.as_str() } else { entry.description.as_str() });
             if response.clicked() {
                 state.picker.selected = Some(entry.package.clone());
             }

@@ -1,5 +1,6 @@
 //! The list of effect and transition packages read from the package roots. No window here.
 
+use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
@@ -120,6 +121,27 @@ pub fn filter_entries<'a>(entries: &'a [PackageEntry], filter: &str) -> Vec<&'a 
 /// The last part of a package name, for showing it.
 pub fn short_name(package: &str) -> &str {
     package.rsplit('/').next().unwrap_or(package)
+}
+
+/// The group of a package: its folders under `packages/gpufx`, or the path it was stored under.
+pub fn package_group(package: &str) -> &str {
+    let inside = package.strip_prefix("packages/gpufx/").unwrap_or(package);
+    inside.rsplit_once('/').map_or("", |(group, _)| group)
+}
+
+/// The names, lower-cased, that more than one of `entries` has.
+pub fn duplicated_names(entries: &[PackageEntry]) -> HashSet<String> {
+    let mut seen = HashSet::new();
+    entries.iter().map(|entry| entry.name.to_lowercase()).filter(|name| !seen.insert(name.clone())).collect()
+}
+
+/// How the list shows `entry`: the name, followed by the group when another package has that name.
+pub fn list_label(entry: &PackageEntry, duplicates: &HashSet<String>) -> String {
+    if duplicates.contains(&entry.name.to_lowercase()) {
+        format!("{} ({})", entry.name, package_group(&entry.package))
+    } else {
+        entry.name.clone()
+    }
 }
 
 /// What the picker shows: which list, the filter text and the highlighted package.
@@ -257,6 +279,16 @@ mod tests {
         picker.kind = PackageKind::Effect;
         picker.filter = "mix".to_owned();
         assert_eq!(picker.addable(&catalog), None, "a package hidden by the filter cannot be added");
+    }
+
+    #[test]
+    fn a_shared_name_shows_the_group_and_a_unique_one_does_not() {
+        let entry = |package: &str, name: &str| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind: PackageKind::Effect };
+        let entries = vec![entry("packages/gpufx/capcut/blur", "Blur"), entry("packages/gpufx/ffmpeg/deep/blur", "blur"), entry("packages/gpufx/capcut/snow", "Snow")];
+        let duplicates = duplicated_names(&entries);
+        assert_eq!(list_label(&entries[0], &duplicates), "Blur (capcut)");
+        assert_eq!(list_label(&entries[1], &duplicates), "blur (ffmpeg/deep)");
+        assert_eq!(list_label(&entries[2], &duplicates), "Snow");
     }
 
     #[test]
