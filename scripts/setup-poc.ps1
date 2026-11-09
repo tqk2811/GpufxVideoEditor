@@ -1,4 +1,5 @@
-# Downloads the LGPL FFmpeg build into third_party/ffmpeg and generates the POC test clips.
+# Downloads the LGPL and GPL FFmpeg builds into third_party/ffmpeg and third_party/ffmpeg-gpl,
+# and generates the POC test clips.
 # The clips are encoded by the ffmpeg on PATH (libx264 required). They are local test data
 # and are never distributed, so a GPL build is fine for this step only.
 [CmdletBinding()]
@@ -13,6 +14,11 @@ $releaseTag = 'ffmpeg-N-128691-gcc583787bb'
 $assetName = "$releaseTag-win64-lgpl-shared.zip"
 $releaseRepo = 'tqk2811/FFmpegGpuFilter'
 $ffmpegRoot = Join-Path $repoRoot 'third_party\ffmpeg'
+$gplRoot = Join-Path $repoRoot 'third_party\ffmpeg-gpl'
+$gplAssetName = "$releaseTag-win64-gpl-shared.zip"
+# The same FFmpeg commit from upstream. Upstream removes old autobuilds, so this URL can expire.
+$gplUrl = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-08-12-35/$gplAssetName"
+$gplSha256 = '8e6372ef8382b9b0acc74ceddfebcff5627442d6d4330ab9c2ce8a8695d217e0'
 $toolsDir = Join-Path $repoRoot '.tools'
 $clipsDir = Join-Path $repoRoot 'test-clips'
 
@@ -40,20 +46,47 @@ function Install-FFmpeg {
     if ($actual -ne $expected) { throw "SHA-256 mismatch: expected $expected, got $actual" }
     Write-Host "SHA-256 verified: $actual"
 
+    Expand-FFmpeg -Archive $archive -Destination $ffmpegRoot
+}
+
+function Install-GplFFmpeg {
+    if ((Test-Path (Join-Path $gplRoot 'include\libavcodec\avcodec.h')) -and -not $Force) {
+        Write-Host "FFmpeg already present at $gplRoot"
+        return
+    }
+
+    New-Item -ItemType Directory -Force $toolsDir | Out-Null
+    $archive = Join-Path $toolsDir $gplAssetName
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $gplUrl -OutFile $archive
+
+    $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+    if ($actual -ne $gplSha256) { throw "SHA-256 mismatch: expected $gplSha256, got $actual" }
+    Write-Host "SHA-256 verified: $actual"
+
+    Expand-FFmpeg -Archive $archive -Destination $gplRoot
+}
+
+function Expand-FFmpeg {
+    param(
+        [string]$Archive,
+        [string]$Destination
+    )
+
     $extractDir = Join-Path $toolsDir 'ffmpeg-extract'
     if (Test-Path $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force }
-    Expand-Archive -LiteralPath $archive -DestinationPath $extractDir
+    Expand-Archive -LiteralPath $Archive -DestinationPath $extractDir
 
     $inner = Get-ChildItem -LiteralPath $extractDir -Directory | Select-Object -First 1
     if (-not $inner -or -not (Test-Path (Join-Path $inner.FullName 'include'))) {
         throw 'Unexpected archive layout: no include directory'
     }
 
-    if (Test-Path $ffmpegRoot) { Remove-Item -LiteralPath $ffmpegRoot -Recurse -Force }
-    New-Item -ItemType Directory -Force (Split-Path -Parent $ffmpegRoot) | Out-Null
-    Move-Item -LiteralPath $inner.FullName -Destination $ffmpegRoot
+    if (Test-Path $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
+    New-Item -ItemType Directory -Force (Split-Path -Parent $Destination) | Out-Null
+    Move-Item -LiteralPath $inner.FullName -Destination $Destination
     Remove-Item -LiteralPath $extractDir -Recurse -Force
-    Write-Host "FFmpeg extracted to $ffmpegRoot"
+    Write-Host "FFmpeg extracted to $Destination"
 }
 
 function New-TestClip {
@@ -86,6 +119,7 @@ function New-TestClip {
 }
 
 Install-FFmpeg
+Install-GplFFmpeg
 
 New-Item -ItemType Directory -Force $clipsDir | Out-Null
 New-TestClip -Name 'clip-a.mp4' -Source 'testsrc2=size=1920x1080:rate=30'

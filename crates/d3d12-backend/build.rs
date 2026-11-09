@@ -1,4 +1,5 @@
-//! Links the import libraries of third_party/ffmpeg and copies its DLLs next to the executables.
+//! Links the import libraries of third_party/ffmpeg (LGPL) or, with feature `ffmpeg-gpl`,
+//! third_party/ffmpeg-gpl, and copies its DLLs next to the executables.
 
 use std::env;
 use std::fs;
@@ -10,7 +11,9 @@ const RUNTIME_DLL_PREFIXES: [&str; 5] = ["avcodec-", "avformat-", "avutil-", "sw
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let ffmpeg_root = manifest_dir.join("..").join("..").join("third_party").join("ffmpeg");
+    // The DLLs land in the target directory, so each variant needs its own (see scripts/build-variants.ps1).
+    let variant = if env::var_os("CARGO_FEATURE_FFMPEG_GPL").is_some() { "ffmpeg-gpl" } else { "ffmpeg" };
+    let ffmpeg_root = manifest_dir.join("..").join("..").join("third_party").join(variant);
     let lib_dir = ffmpeg_root.join("lib");
     if env::var("CARGO_CFG_WINDOWS").is_err() {
         return;

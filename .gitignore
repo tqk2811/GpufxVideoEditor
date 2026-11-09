@@ -1,4 +1,5 @@
 /target/
 /third_party/ffmpeg/
+/third_party/ffmpeg-gpl/
 /test-clips/
 /.tools/

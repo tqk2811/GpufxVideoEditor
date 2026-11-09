@@ -100,6 +100,39 @@ fn renders_a_file_that_ffprobe_accepts_and_repeats_exactly() {
     assert_eq!(read_frame_number(&rgba, CLIP_WIDTH), 0, "the encoded first frame is frame 0");
 }
 
+fn render_with_libx264(test: &str) -> (Output, PathBuf) {
+    let dir = scratch_dir(test);
+    let project = write_project(&dir, &two_clip_project());
+    let out = dir.join("x264.mp4");
+    let output = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).arg(&project).arg("--out").arg(&out).args(["--encoder", "libx264"]).output().expect("run gpufx-render");
+    (output, out)
+}
+
+#[cfg(feature = "ffmpeg-gpl")]
+#[test]
+fn the_gpl_build_exports_with_libx264() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let (output, out) = render_with_libx264("cli-x264");
+    assert!(output.status.success(), "render failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).lines().any(|l| l == "encoder: libx264"), "libx264 was not the encoder used");
+    assert_eq!(probe(&["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"], &out), "90");
+    assert_eq!(probe(&["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0"], &out), "h264");
+}
+
+#[cfg(not(feature = "ffmpeg-gpl"))]
+#[test]
+fn the_lgpl_build_has_no_libx264() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let (output, _) = render_with_libx264("cli-no-x264");
+    assert!(!output.status.success(), "the LGPL build must not be able to open libx264");
+}
+
 fn invalid_project(tracks: &str) -> String {
     format!(r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000}},"tracks":[{tracks}]}}"#)
 }

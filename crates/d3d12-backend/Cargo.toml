@@ -7,6 +7,10 @@ publish = false
 # Windows only: D3D12VA decoding, gpufx on a shared D3D12 device and libav encoding.
 # Kept out of `engine` so the project model and the scheduler stay free of GPU and FFmpeg code.
 
+[features]
+# Link third_party/ffmpeg-gpl instead of the LGPL build. A binary built this way is distributed under the GPL.
+ffmpeg-gpl = []
+
 [dependencies]
 engine = { path = "../engine" }
 serde_json = "1"

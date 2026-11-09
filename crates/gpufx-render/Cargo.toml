@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 publish = false
 
+[features]
+ffmpeg-gpl = ["d3d12-backend/ffmpeg-gpl"]
+
 [dependencies]
 engine = { path = "../engine" }
 d3d12-backend = { path = "../d3d12-backend" }
