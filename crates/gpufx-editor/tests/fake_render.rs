@@ -87,6 +87,14 @@ fn main() {
             say(r#"{"event":"error","message":"kept as errorcrash.1-0.tmp.mp4"}"#);
             std::process::exit(0xC000_0005_u32 as i32);
         }
+        "backlog" => {
+            start(&out);
+            let _partial = reserve(&out);
+            for frame in 1..=30_000 {
+                progress(frame);
+            }
+            say(r#"{"event":"error","message":"kept as backlog.1-0.tmp.mp4"}"#);
+        }
         "endhang" => {
             let partial = reserve(&out);
             finish(&partial, &out);

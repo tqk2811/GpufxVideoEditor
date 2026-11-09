@@ -211,10 +211,15 @@ fn join_within<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Option<T> {
     handle.join().ok()
 }
 
+fn take_line(machine: &mut ChildMachine, done: &AtomicI64, line: &[u8]) {
+    machine.take_line(line);
+    done.store(machine.frames(), Ordering::SeqCst);
+}
+
 /// Follows a started child until it is gone and works out the outcome. The child's pipes are
 /// read on threads of their own, so a full pipe never blocks it. `grace` is how long a child has
 /// to act on a cancel line, and to exit after reporting its end, before it is killed.
-fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Duration, outputs: &[&Path]) -> ExportOutcome {
+fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Duration, pipe_grace: Duration, outputs: &[&Path]) -> ExportOutcome {
     let mut stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
@@ -234,10 +239,7 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
     let mut gone_at: Option<Instant> = None;
     loop {
         match lines.recv_timeout(POLL) {
-            Ok(Incoming::Line(line)) => {
-                machine.take_line(&line);
-                done.store(machine.frames(), Ordering::SeqCst);
-            }
+            Ok(Incoming::Line(line)) => take_line(&mut machine, done, &line),
             Ok(Incoming::Closed) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
         }
@@ -259,13 +261,18 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
             let _ = child.kill();
             gone_at = Some(Instant::now());
         }
-        if gone_at.is_some_and(|at| at.elapsed() >= PIPE_GRACE) {
+        if gone_at.is_some_and(|at| at.elapsed() >= pipe_grace) {
             break;
         }
     }
     drop(stdin);
     let code = wait_for_exit(&mut child, EXIT_GRACE);
     let _ = join_within(pump, PIPE_GRACE);
+    // Lines the pump queued while the loop ended or the child was waited for are still unread, and
+    // an `error` line among them may name the only copy of the render.
+    while let Ok(Incoming::Line(line)) = lines.try_recv() {
+        take_line(&mut machine, done, &line);
+    }
     let stderr_tail = join_within(tail, PIPE_GRACE).unwrap_or_default();
     let cancelled = cancel_sent.is_some() || cancel.load(Ordering::SeqCst);
     let (outcome, partials) = machine.finish(cancelled, code, &stderr_tail);
@@ -294,6 +301,11 @@ fn render_arguments(project_file: &Path, job: &ExportJob, package_roots: &[PathB
 
 /// Exports `job` through the renderer at `tool`.
 pub fn run_child(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cancel: &AtomicBool, done: &AtomicI64, grace: Duration) -> ExportOutcome {
+    run_child_with(job, package_roots, tool, cancel, done, grace, PIPE_GRACE)
+}
+
+/// [`run_child`] with the time a gone child's stdout may stay open before it is no longer read.
+fn run_child_with(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cancel: &AtomicBool, done: &AtomicI64, grace: Duration, pipe_grace: Duration) -> ExportOutcome {
     let failed = |message: String| ExportOutcome::Failed(Message::ExportFailed(message));
     // The project file the child gets is a temporary one, so this check against the real one is here.
     if let Err(message) = job.check() {
@@ -325,7 +337,7 @@ pub fn run_child(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cancel
     }
     let mut outputs = vec![job.out.as_path()];
     outputs.extend(job.hashes.as_deref());
-    supervise(child, cancel, done, grace, &outputs)
+    supervise(child, cancel, done, grace, pipe_grace, &outputs)
 }
 
 #[cfg(test)]
@@ -469,6 +481,17 @@ mod tests {
         let outcome = run(&job(&dir, "error"), false, SHORT_GRACE);
         assert_eq!(outcome, ExportOutcome::Failed(Message::ExportFailed("kept as error.1-0.tmp.mp4".into())));
         assert!(dir.join("error.1-0.tmp.mp4").is_file(), "that file may be the only copy");
+    }
+
+    #[test]
+    fn an_error_still_queued_when_the_loop_ends_is_not_lost() {
+        let dir = scratch("backlog");
+        let job = job(&dir, "backlog");
+        // No wait for the pipe, and a long run of lines ahead of the error: the loop ends with the
+        // error still in the channel.
+        let outcome = run_child_with(&job, &[], &fake_tool(), &AtomicBool::new(false), &AtomicI64::new(0), SHORT_GRACE, Duration::ZERO);
+        assert_eq!(outcome, ExportOutcome::Failed(Message::ExportFailed("kept as backlog.1-0.tmp.mp4".into())));
+        assert!(dir.join("backlog.1-0.tmp.mp4").is_file(), "that file may be the only copy");
     }
 
     #[test]
