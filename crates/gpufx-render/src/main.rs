@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu, ProgressEvent, ProjectPaths, CANCEL_LINE, PROGRESS_PROTOCOL};
 use engine::{frame_count, Project};
@@ -19,6 +19,9 @@ const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--enco
     --progress  text (default), or json: one JSON event per stdout line, and a 'cancel' line on stdin stops the render\n\
     \x20           (see docs/plans/spec-mcp-server-vi.md)\n\
     --cancel-on-stdin-eof  with --progress json: the end of stdin stops the render, so a parent that dies stops it too";
+
+/// How long a render gets to stop by itself once stdin has ended, under `--cancel-on-stdin-eof`.
+const CANCEL_ON_EOF_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProgressMode {
@@ -113,9 +116,17 @@ fn watch_stdin(cancel: Arc<AtomicBool>, eof_cancels: bool) {
             }
         }
         if eof_cancels {
-            cancel.store(true, Ordering::SeqCst);
+            stop_after_eof(&cancel, CANCEL_ON_EOF_DEADLINE, || std::process::exit(1));
         }
     });
+}
+
+/// Asks the render to stop and gives it `deadline` to do so. A child stuck in a decode, an encode
+/// or the GPU never reads the flag, and with its parent gone no one would ever stop it.
+fn stop_after_eof(cancel: &AtomicBool, deadline: Duration, give_up: impl FnOnce()) {
+    cancel.store(true, Ordering::SeqCst);
+    std::thread::sleep(deadline);
+    give_up();
 }
 
 fn path_text(path: &Path) -> String {
@@ -201,5 +212,20 @@ fn main() -> ExitCode {
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn the_end_of_stdin_cancels_and_gives_up_after_the_deadline() {
+        let cancel = AtomicBool::new(false);
+        let gave_up = Cell::new(false);
+        stop_after_eof(&cancel, Duration::from_millis(1), || gave_up.set(true));
+        assert!(cancel.load(Ordering::SeqCst), "the render is asked to stop first");
+        assert!(gave_up.get(), "a render that did not stop is ended");
     }
 }
