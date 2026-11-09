@@ -246,12 +246,18 @@ fn layer_clips(content: &LayerContent<'_>, track: usize) -> Vec<ClipKey> {
 }
 
 /// Renders every frame of `project` (which must have passed [`crate::validate`]) into `sink`,
-/// without audio.
+/// without audio. A project with an audio output is refused, because the sink would get an audio
+/// stream with nothing in it; use [`render_with_audio`] for those.
 pub fn render<C: Compositor, S: FrameSink>(
     project: &Project,
     compositor: &mut C,
     sink: &mut S,
 ) -> Result<RenderSummary, RenderError> {
+    if project.output.audio.is_some() {
+        return Err(RenderError(
+            "the project has an audio output: render it with render_with_audio".to_owned(),
+        ));
+    }
     render_with_audio(project, compositor, sink, None)
 }
 
@@ -659,6 +665,20 @@ mod tests {
         let (sink, summary) = run_audio(&json, &mut FailingSource).expect("the source is not read");
         assert_eq!(sink.events, ["frame 0", "frame 1", "frame 2"]);
         assert_eq!(summary.audio_samples, 0);
+    }
+
+    #[test]
+    fn render_without_a_source_refuses_a_project_with_audio_output() {
+        let project = Project::from_json(WITH_AUDIO).expect("valid json");
+        let journal = Rc::new(RefCell::new(Journal::default()));
+        let mut compositor = FakeCompositor { journal: journal.clone() };
+        let mut sink = AudioSink::default();
+        let error = render(&project, &mut compositor, &mut sink)
+            .err()
+            .expect("must be refused");
+        assert!(error.0.contains("render_with_audio"), "{}", error.0);
+        assert!(sink.events.is_empty(), "nothing is rendered: {:?}", sink.events);
+        assert!(journal.borrow().events.is_empty(), "no decoder is opened");
     }
 
     #[test]
