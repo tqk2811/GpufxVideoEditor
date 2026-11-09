@@ -6,7 +6,7 @@ use common::*;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, audio_segments, clip_at,
     delete_clip, frame_count, layers_at_frame, move_clip, nearest_free_start, remove_effect,
-    remove_transition, set_fades, set_gain, set_muted, split_clip, trim_end, trim_start, validate,
+    remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_transition_params, split_clip, trim_end, trim_start, validate,
     AcceptAll, ClipKey, EditError, EditHistory, Effect, LayerContent, Project, SourceSample, Time,
     TrackKind, ValidationError,
 };
@@ -749,4 +749,54 @@ fn a_zero_depth_history_has_no_undo() {
     assert!(!history.can_undo());
     assert!(!history.undo());
     assert_eq!(history.current().tracks.len(), 4);
+}
+
+fn params(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    value.as_object().unwrap().clone()
+}
+
+fn with_effect() -> Project {
+    let effect = Effect { package: "blur".into(), params: params(serde_json::json!({ "radius": 2 })) };
+    add_effect(&chain(), key(0, 0), effect).unwrap()
+}
+
+#[test]
+fn effect_params_replace_only_that_effect() {
+    let base = with_effect();
+    let two = add_effect(&base, key(0, 0), Effect { package: "b".into(), params: Default::default() }).unwrap();
+    let next = set_effect_params(&two, key(0, 0), 1, params(serde_json::json!({ "x": 1.5 }))).unwrap();
+    let effects = &next.tracks[0].clips[0].effects;
+    assert_eq!(effects[0], two.tracks[0].clips[0].effects[0], "the other effect stays");
+    assert_eq!(effects[1].params, params(serde_json::json!({ "x": 1.5 })));
+    assert_eq!(effects[1].package, "b");
+    assert_valid(&next);
+}
+
+#[test]
+fn effect_params_refuse_a_missing_target() {
+    let base = with_effect();
+    assert_eq!(set_effect_params(&base, key(0, 0), 3, Default::default()), Err(EditError::EffectNotFound { key: key(0, 0), effect: 3 }));
+    assert_eq!(set_effect_params(&base, key(0, 9), 0, Default::default()), Err(EditError::ClipNotFound { key: key(0, 9) }));
+}
+
+#[test]
+fn a_transition_takes_new_params_and_a_new_duration() {
+    let base = chain();
+    let after_clip = base.tracks[0].transitions[0].after_clip;
+    let next = set_transition_params(&base, 0, after_clip, params(serde_json::json!({ "smooth": 0.3 })), t(9_000)).unwrap();
+    let transition = &next.tracks[0].transitions[0];
+    assert_eq!(transition.duration, t(9_000));
+    assert_eq!(transition.params, params(serde_json::json!({ "smooth": 0.3 })));
+    assert_eq!(transition.package, base.tracks[0].transitions[0].package);
+    assert_valid(&next);
+}
+
+#[test]
+fn a_transition_edit_refuses_a_duration_the_clips_cannot_hold() {
+    let base = chain();
+    let after_clip = base.tracks[0].transitions[0].after_clip;
+    assert!(matches!(set_transition_params(&base, 0, after_clip, Default::default(), t(0)), Err(EditError::Invalid(_))));
+    assert!(matches!(set_transition_params(&base, 0, after_clip, Default::default(), t(90_000 * 3600)), Err(EditError::Invalid(_))));
+    assert_eq!(set_transition_params(&base, 0, 42, Default::default(), t(9_000)), Err(EditError::TransitionNotFound { track: 0, after_clip: 42 }));
+    assert_eq!(set_transition_params(&base, 7, 0, Default::default(), t(9_000)), Err(EditError::TrackNotFound { track: 7 }));
 }

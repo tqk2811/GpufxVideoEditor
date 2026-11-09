@@ -25,6 +25,7 @@ use crate::project::{Clip, Effect, Project, Track, TrackKind, Transition};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
+use serde_json::{Map, Value};
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -527,6 +528,42 @@ pub fn set_fades(
     let clip = clip_mut(&mut next, key)?;
     clip.fade_in = fade_in;
     clip.fade_out = fade_out;
+    finish(next)
+}
+
+/// Replaces the parameters of effect `effect` of a clip.
+pub fn set_effect_params(
+    project: &Project,
+    key: ClipKey,
+    effect: usize,
+    params: Map<String, Value>,
+) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    let clip = clip_mut(&mut next, key)?;
+    clip.effects
+        .get_mut(effect)
+        .ok_or(EditError::EffectNotFound { key, effect })?
+        .params = params;
+    finish(next)
+}
+
+/// Replaces the parameters and the duration of the transition after clip `after_clip`.
+/// Validation refuses a duration the two clips cannot hold.
+pub fn set_transition_params(
+    project: &Project,
+    track: usize,
+    after_clip: usize,
+    params: Map<String, Value>,
+    duration: Time,
+) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    let transition = track_mut(&mut next, track)?
+        .transitions
+        .iter_mut()
+        .find(|tr| tr.after_clip == after_clip)
+        .ok_or(EditError::TransitionNotFound { track, after_clip })?;
+    transition.params = params;
+    transition.duration = duration;
     finish(next)
 }
 
