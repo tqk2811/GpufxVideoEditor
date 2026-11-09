@@ -139,6 +139,8 @@ pub enum Message {
     /// The validator's own list, which stays in English under a translated prefix.
     EditInvalid(String),
     LanguageSaveFailed(String),
+    PanelSizesSaveFailed(String),
+    ResizePanelHint,
 
     // Background work.
     DialogOpen,

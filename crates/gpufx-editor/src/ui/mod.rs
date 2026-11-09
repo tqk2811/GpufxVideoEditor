@@ -13,9 +13,9 @@ mod top_bar;
 
 use crate::editor::{EditorState, Status};
 use crate::i18n::{Language, Message};
-use crate::layout::{panels, Panels};
+use crate::layout::{panels, Panels, Splitter, SplitterDrag};
 use crate::presenter::PreviewTexture;
-use egui::{CornerRadius, Event, Key, Modifiers, Rect, Stroke, StrokeKind, UiBuilder};
+use egui::{CornerRadius, CursorIcon, Event, Key, Modifiers, Rect, Sense, Stroke, StrokeKind, UiBuilder};
 
 /// Work the window does after the frame, outside the UI pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,7 @@ pub enum UiRequest {
     CancelExport,
     ToggleFullscreen,
     SetLanguage(Language),
+    SavePanelSizes,
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
@@ -38,7 +39,8 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     state.visuals.borrow_mut().sync_project(state.revision(), state.project());
     handle_shortcuts(root.ctx(), state, requests);
     let screen = root.max_rect();
-    let Panels { top_bar, left, center, right, timeline, status } = panels(screen.size());
+    let layout = panels(screen.size(), &state.ui.panel_sizes);
+    let Panels { top_bar, left, center, right, timeline, status } = layout;
     root.painter().rect_filled(screen, CornerRadius::ZERO, theme::BACKGROUND);
     let enabled = !state.is_exporting();
     in_rect(root, "top-bar", top_bar, |ui| top_bar::show(ui, state, requests));
@@ -53,10 +55,14 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
         ui.add_enabled_ui(enabled, |ui| timeline_panel::show(ui, state, requests));
     });
     in_rect(root, "status-line", status, |ui| status_line(ui, state));
+    splitters(root, state, requests, &layout);
     // A release ends a held control wherever the pointer went, and a click or key press is
     // finished in the frame that made it.
     if !root.ctx().input(|input| input.pointer.any_down()) {
         state.pointer_released();
+        if state.ui.splitter.take().is_some_and(|drag| drag.before != state.ui.panel_sizes) {
+            requests.push(UiRequest::SavePanelSizes);
+        }
     }
     // After the panels and the shortcuts: Stop in this frame must release the pool in this frame,
     // because nothing may ask for another one.
@@ -71,6 +77,7 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
 /// starts from a clean state; a release that does arrive later finds no button to end.
 pub(crate) fn focus_lost(ctx: &egui::Context, state: &mut EditorState) {
     state.cancel_drag();
+    state.ui.cancel_splitter();
     if ctx.input(|input| input.pointer.any_down()) {
         ctx.input_mut(|input| input.pointer = egui::PointerState::default());
         ctx.stop_dragging();
@@ -95,6 +102,52 @@ fn panel(root: &mut egui::Ui, id: &str, rect: Rect, add_contents: impl FnOnce(&m
     in_rect(root, id, rect.shrink(1.0), add_contents);
 }
 
+/// How far past the gap a splitter can be grabbed on each side.
+const SPLITTER_GRAB_MARGIN: f32 = 2.0;
+
+/// The bars in the gaps between the panels. They are drawn last so they sit over the panel edges
+/// they overlap by their grab margin.
+fn splitters(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, layout: &Panels) {
+    let window = root.max_rect().size();
+    let hint = state.language().t(Message::ResizePanelHint);
+    for splitter in Splitter::ALL {
+        let gap = splitter.rect_in(layout);
+        if gap.width() <= 0.0 || gap.height() <= 0.0 {
+            continue;
+        }
+        let margin = if splitter.is_vertical_bar() { egui::vec2(SPLITTER_GRAB_MARGIN, 0.0) } else { egui::vec2(0.0, SPLITTER_GRAB_MARGIN) };
+        let cursor = if splitter.is_vertical_bar() { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical };
+        let response = root.interact(gap.expand2(margin), root.scope_id().with(("splitter", splitter)), Sense::click_and_drag());
+        if response.drag_started() {
+            state.ui.splitter = Some(SplitterDrag { splitter, start_size: splitter.size_in(layout), before: state.ui.panel_sizes });
+        }
+        // A cancelled drag is still dragged for egui until the release, but no longer here.
+        let active = state.ui.splitter.filter(|drag| drag.splitter == splitter && response.dragged());
+        if let Some(drag) = active {
+            let moved = root.ctx().input(|input| input.pointer.press_origin().zip(input.pointer.latest_pos()).map(|(from, to)| to - from));
+            if let Some(moved) = moved {
+                state.ui.panel_sizes = drag.before.dragged_to(window, splitter, drag.start_size + splitter.growth(moved));
+                root.ctx().request_repaint();
+            }
+        }
+        if response.hovered() || active.is_some() {
+            let line = if splitter.is_vertical_bar() { Rect::from_center_size(gap.center(), egui::vec2(2.0, gap.height())) } else { Rect::from_center_size(gap.center(), egui::vec2(gap.width(), 2.0)) };
+            root.painter().rect_filled(line, CornerRadius::ZERO, theme::ACCENT);
+        }
+        if response.double_clicked() {
+            let reset = match splitter {
+                Splitter::Left => &mut state.ui.panel_sizes.left,
+                Splitter::Right => &mut state.ui.panel_sizes.right,
+                Splitter::Timeline => &mut state.ui.panel_sizes.timeline,
+            };
+            if reset.take().is_some() {
+                requests.push(UiRequest::SavePanelSizes);
+            }
+        }
+        response.on_hover_text(hint.as_str()).on_hover_and_drag_cursor(cursor);
+    }
+}
+
 /// Consumes `key` only when exactly the `wanted` modifiers are down. egui's own matching ignores
 /// an extra Shift or Alt, which would make Shift+S or Alt+Delete fire the plain shortcut.
 fn consume_exact(input: &mut egui::InputState, wanted: Modifiers, key: Key) -> bool {
@@ -114,14 +167,16 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
     ctx.input_mut(|input| {
         let repeat = is_repeat(input, Key::Escape);
         if consume_exact(input, Modifiers::NONE, Key::Escape) && !repeat {
-            if state.is_holding() {
+            if state.ui.splitter.is_some() {
+                state.ui.cancel_splitter();
+            } else if state.is_holding() {
                 state.cancel_drag();
             } else if state.ui.fullscreen {
                 requests.push(UiRequest::ToggleFullscreen);
             }
         }
         let repeat = is_repeat(input, Key::F11);
-        if consume_exact(input, Modifiers::NONE, Key::F11) && !repeat && !state.is_holding() {
+        if consume_exact(input, Modifiers::NONE, Key::F11) && !repeat && !state.is_holding() && state.ui.splitter.is_none() {
             requests.push(UiRequest::ToggleFullscreen);
         }
         if consume_exact(input, Modifiers::COMMAND, Key::Z) {
@@ -229,6 +284,11 @@ mod tests {
     use engine::{ClipKey, Time, TrackKind};
     use std::path::Path;
 
+    /// The layout before any panel was dragged.
+    fn panels(size: egui::Vec2) -> Panels {
+        crate::layout::panels(size, &Default::default())
+    }
+
     fn seconds(value: i64) -> Time {
         Time::from_seconds(value).unwrap()
     }
@@ -292,6 +352,118 @@ mod tests {
             run_frame(ctx, raw, |ui| show(ui, state, &mut requests, None));
         }
         requests
+    }
+
+    fn window() -> egui::Vec2 {
+        egui::vec2(1280.0, 720.0)
+    }
+
+    fn splitter_center(state: &EditorState, splitter: Splitter) -> egui::Pos2 {
+        splitter.rect_in(&crate::layout::panels(window(), &state.ui.panel_sizes)).center()
+    }
+
+    fn show_frame(ctx: &egui::Context, state: &mut EditorState, events: Vec<Event>) -> Vec<UiRequest> {
+        let mut requests = Vec::new();
+        run_frame(ctx, egui::RawInput { events, ..window_input(1280.0, 720.0) }, |ui| show(ui, state, &mut requests, None));
+        requests
+    }
+
+    /// Presses on the bar and moves by `by`, leaving the button down.
+    fn start_splitter_drag(ctx: &egui::Context, state: &mut EditorState, splitter: Splitter, by: egui::Vec2) -> egui::Pos2 {
+        let at = splitter_center(state, splitter);
+        show_frame(ctx, state, vec![]);
+        show_frame(ctx, state, vec![Event::PointerMoved(at)]);
+        show_frame(ctx, state, pointer_press(at));
+        show_frame(ctx, state, vec![Event::PointerMoved(at + by)]);
+        at + by
+    }
+
+    #[test]
+    fn dragging_each_splitter_resizes_its_panel_and_saves_on_release() {
+        let cases = [(Splitter::Left, egui::vec2(40.0, 0.0), 40.0), (Splitter::Right, egui::vec2(-30.0, 0.0), 30.0), (Splitter::Timeline, egui::vec2(0.0, -25.0), 25.0)];
+        for (splitter, by, growth) in cases {
+            let mut state = state();
+            let ctx = egui::Context::default();
+            let size_before = splitter.size_in(&panels(window()));
+            let end = start_splitter_drag(&ctx, &mut state, splitter, by);
+            assert!(state.ui.splitter.is_some(), "{splitter:?}");
+            let requests = show_frame(&ctx, &mut state, pointer_release(end));
+            assert_eq!(requests, vec![UiRequest::SavePanelSizes], "{splitter:?}");
+            assert_eq!(state.ui.splitter, None);
+            let after = crate::layout::panels(window(), &state.ui.panel_sizes);
+            assert!((splitter.size_in(&after) - size_before - growth).abs() < 0.5, "{splitter:?} {after:?}");
+        }
+    }
+
+    #[test]
+    fn a_splitter_drag_is_no_hold_and_does_not_touch_the_project() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let before = state.project().clone();
+        let end = start_splitter_drag(&ctx, &mut state, Splitter::Left, egui::vec2(40.0, 0.0));
+        assert!(!state.is_holding());
+        assert_eq!(state.project(), &before);
+        show_frame(&ctx, &mut state, pointer_release(end));
+        press(&mut state, Key::S, Modifiers::NONE);
+        assert_eq!(state.project().tracks[0].clips.len(), 2, "edits go on after the release");
+        assert_ne!(state.status(), &Status::Info(Message::FinishDragFirst));
+    }
+
+    #[test]
+    fn losing_the_focus_cancels_a_splitter_drag_and_saves_nothing() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let end = start_splitter_drag(&ctx, &mut state, Splitter::Timeline, egui::vec2(0.0, -40.0));
+        assert_ne!(state.ui.panel_sizes, Default::default());
+        focus_lost(&ctx, &mut state);
+        assert_eq!(state.ui.panel_sizes, Default::default(), "the panels go back");
+        assert!(show_frame(&ctx, &mut state, vec![]).is_empty());
+        assert!(show_frame(&ctx, &mut state, pointer_release(end)).is_empty(), "a late release saves nothing");
+        assert_eq!(state.ui.panel_sizes, Default::default());
+        assert_eq!(state.ui.splitter, None);
+    }
+
+    #[test]
+    fn escape_cancels_a_splitter_drag_and_later_moves_do_nothing() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let end = start_splitter_drag(&ctx, &mut state, Splitter::Left, egui::vec2(40.0, 0.0));
+        let escape = Event::Key { key: Key::Escape, physical_key: Some(Key::Escape), pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        show_frame(&ctx, &mut state, vec![escape]);
+        assert_eq!(state.ui.panel_sizes, Default::default());
+        show_frame(&ctx, &mut state, vec![Event::PointerMoved(end + egui::vec2(50.0, 0.0))]);
+        assert_eq!(state.ui.panel_sizes, Default::default());
+        assert!(show_frame(&ctx, &mut state, pointer_release(end)).is_empty());
+    }
+
+    #[test]
+    fn double_clicking_a_splitter_goes_back_to_following_the_window() {
+        let mut state = state();
+        state.ui.panel_sizes.left = Some(300.0);
+        let ctx = egui::Context::default();
+        let at = splitter_center(&state, Splitter::Left);
+        show_frame(&ctx, &mut state, vec![Event::PointerMoved(at)]);
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            requests.extend(show_frame(&ctx, &mut state, pointer_press(at)));
+            requests.extend(show_frame(&ctx, &mut state, pointer_release(at)));
+        }
+        assert_eq!(state.ui.panel_sizes.left, None);
+        assert_eq!(requests, vec![UiRequest::SavePanelSizes]);
+    }
+
+    #[test]
+    fn hovering_a_splitter_shows_the_resize_cursor() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        for (splitter, cursor) in [(Splitter::Left, CursorIcon::ResizeHorizontal), (Splitter::Timeline, CursorIcon::ResizeVertical)] {
+            let at = splitter_center(&state, splitter);
+            show_frame(&ctx, &mut state, vec![Event::PointerMoved(at)]);
+            let mut requests = Vec::new();
+            let mut output = ctx.run_ui(egui::RawInput { events: vec![Event::PointerMoved(at)], ..window_input(1280.0, 720.0) }, |ui| show(ui, &mut state, &mut requests, None));
+            output.textures_delta.clear();
+            assert_eq!(output.platform_output.cursor_icon, cursor, "{splitter:?}");
+        }
     }
 
     #[test]

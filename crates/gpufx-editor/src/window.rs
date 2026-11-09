@@ -146,6 +146,7 @@ impl Session {
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
         let mut state = EditorState::default();
         state.set_language(crate::settings::startup_language());
+        state.ui.panel_sizes = crate::settings::startup_panel_sizes();
         #[cfg(debug_assertions)]
         let smoke = {
             let mut smoke = Smoke::default();
@@ -644,7 +645,7 @@ impl Session {
 
     /// Runs outside the frame, so what it starts cannot disturb the UI pass.
     fn handle(&mut self, request: UiRequest) {
-        if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport | UiRequest::ToggleFullscreen) {
+        if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport | UiRequest::ToggleFullscreen | UiRequest::SavePanelSizes) {
             return;
         }
         match request {
@@ -667,6 +668,11 @@ impl Session {
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
             UiRequest::SetLanguage(language) => self.set_language(language),
+            UiRequest::SavePanelSizes => {
+                if let Err(message) = crate::settings::save_panel_sizes(&self.state.ui.panel_sizes) {
+                    self.state.report_error(Message::PanelSizesSaveFailed(message));
+                }
+            }
             UiRequest::ToggleFullscreen => {
                 let window = self.presenter.window();
                 let next = if window.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) };

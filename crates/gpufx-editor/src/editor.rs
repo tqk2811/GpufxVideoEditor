@@ -19,6 +19,8 @@ use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
+use crate::layout::{PanelSizes, SplitterDrag};
+
 const UNDO_DEPTH: usize = 200;
 
 /// Length given to a clip whose file states none, and to a clip added without a probe.
@@ -151,6 +153,18 @@ pub struct UiState {
     pub clip_field: Option<ClipField>,
     /// The clip the inspector showed last, to notice when that changes.
     pub inspector_clip: Option<(ClipKey, String, i64)>,
+    pub panel_sizes: PanelSizes,
+    /// The splitter in the user's hand. Not a hold: edits go on while it moves.
+    pub splitter: Option<SplitterDrag>,
+}
+
+impl UiState {
+    /// Puts the panels back as they were before the drag, if one was going on.
+    pub fn cancel_splitter(&mut self) {
+        if let Some(drag) = self.splitter.take() {
+            self.panel_sizes = drag.before;
+        }
+    }
 }
 
 /// What may be chosen in the inspector's time fields. Waits for the release of a drag, as a clip

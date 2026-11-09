@@ -78,6 +78,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::SelectClip(action) => select_clip(*action).to_owned(),
         Message::ExpressionDropped => "The expression being typed was dropped: the clip changed".to_owned(),
         Message::LanguageSaveFailed(detail) => format!("The language could not be saved: {detail}"),
+        Message::PanelSizesSaveFailed(detail) => format!("The panel sizes could not be saved: {detail}"),
+        Message::ResizePanelHint => "Drag to resize, double-click to reset".to_owned(),
 
         Message::EditTrackNotFound(number) => format!("Track {number} does not exist"),
         Message::EditClipNotFound { track, clip } => format!("{}: clip {clip} does not exist", track_label(*track)),

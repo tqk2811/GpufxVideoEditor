@@ -61,6 +61,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::SelectClip(action) => select_clip(*action).to_owned(),
         Message::ExpressionDropped => "Đã bỏ biểu thức đang nhập vì clip đã thay đổi".to_owned(),
         Message::LanguageSaveFailed(detail) => format!("Không lưu được ngôn ngữ: {detail}"),
+        Message::PanelSizesSaveFailed(detail) => format!("Không lưu được kích thước panel: {detail}"),
+        Message::ResizePanelHint => "Kéo để đổi cỡ, nhấp đúp để đặt lại".to_owned(),
 
         Message::EditTrackNotFound(number) => format!("Track {number} không tồn tại"),
         Message::EditClipNotFound { track, clip } => format!("{}: clip {clip} không tồn tại", track_label(*track)),

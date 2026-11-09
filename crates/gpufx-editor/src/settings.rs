@@ -5,10 +5,12 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::i18n::Language;
+use crate::layout::PanelSizes;
 
 const FOLDER: &str = "gpufx-editor";
 const FILE: &str = "settings.json";
 const LANGUAGE_KEY: &str = "language";
+const PANELS_KEY: &str = "panels";
 
 /// `%APPDATA%\gpufx-editor\settings.json`, when the variable is set.
 pub fn settings_file() -> Option<PathBuf> {
@@ -41,10 +43,10 @@ fn temporary_file(file: &Path) -> PathBuf {
     file.with_extension(format!("json.{}.tmp", std::process::id()))
 }
 
-/// Records `language` in `file`, through a temporary file and keeping any other setting.
-fn write_language(file: &Path, language: Language) -> Result<(), String> {
+/// Records `value` under `key` in `file`, through a temporary file and keeping any other setting.
+fn write_setting(file: &Path, key: &str, value: Value) -> Result<(), String> {
     let mut settings = read_settings(file);
-    settings.insert(LANGUAGE_KEY.to_owned(), json!(language.code()));
+    settings.insert(key.to_owned(), value);
     let text = serde_json::to_string_pretty(&Value::Object(settings)).map_err(|e| e.to_string())?;
     if let Some(folder) = file.parent() {
         std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
@@ -56,10 +58,46 @@ fn write_language(file: &Path, language: Language) -> Result<(), String> {
     })
 }
 
+fn write_language(file: &Path, language: Language) -> Result<(), String> {
+    write_setting(file, LANGUAGE_KEY, json!(language.code()))
+}
+
 /// Saves the choice in the settings file of this user.
 pub fn save_language(language: Language) -> Result<(), String> {
     let file = settings_file().ok_or("APPDATA is not set")?;
     write_language(&file, language)
+}
+
+fn panel_size(panels: &Value, name: &str) -> Option<f32> {
+    panels.get(name).and_then(Value::as_f64).map(|size| size as f32).filter(|size| size.is_finite() && *size > 0.0)
+}
+
+/// The dragged panel sizes in `file`. Anything unusable counts as not dragged.
+fn saved_panel_sizes(file: &Path) -> PanelSizes {
+    let settings = read_settings(file);
+    let Some(panels) = settings.get(PANELS_KEY) else { return PanelSizes::default() };
+    PanelSizes { left: panel_size(panels, "left"), right: panel_size(panels, "right"), timeline: panel_size(panels, "timeline") }
+}
+
+fn write_panel_sizes(file: &Path, sizes: &PanelSizes) -> Result<(), String> {
+    let mut panels = Map::new();
+    for (name, size) in [("left", sizes.left), ("right", sizes.right), ("timeline", sizes.timeline)] {
+        if let Some(size) = size {
+            panels.insert(name.to_owned(), json!(size));
+        }
+    }
+    write_setting(file, PANELS_KEY, Value::Object(panels))
+}
+
+/// The panel sizes to start with.
+pub fn startup_panel_sizes() -> PanelSizes {
+    settings_file().map_or_else(PanelSizes::default, |file| saved_panel_sizes(&file))
+}
+
+/// Saves the dragged sizes in the settings file of this user.
+pub fn save_panel_sizes(sizes: &PanelSizes) -> Result<(), String> {
+    let file = settings_file().ok_or("APPDATA is not set")?;
+    write_panel_sizes(&file, sizes)
 }
 
 #[cfg(test)]
@@ -79,6 +117,30 @@ mod tests {
         assert_eq!(language_or_default(None), Language::English);
         write_language(&file, Language::Vietnamese).unwrap();
         assert_eq!(language_or_default(Some(&file)), Language::Vietnamese);
+    }
+
+    #[test]
+    fn panel_sizes_are_read_back_and_a_reset_panel_is_left_out() {
+        let file = temp_file("panels");
+        assert_eq!(saved_panel_sizes(&file), PanelSizes::default());
+        let sizes = PanelSizes { left: Some(300.0), right: None, timeline: Some(250.5) };
+        write_panel_sizes(&file, &sizes).unwrap();
+        assert_eq!(saved_panel_sizes(&file), sizes);
+        write_language(&file, Language::Vietnamese).unwrap();
+        assert_eq!(saved_panel_sizes(&file), sizes, "saving the language keeps the sizes");
+        write_panel_sizes(&file, &PanelSizes::default()).unwrap();
+        assert_eq!(saved_panel_sizes(&file), PanelSizes::default());
+        assert_eq!(saved_language(&file), Some(Language::Vietnamese), "saving the sizes keeps the language");
+    }
+
+    #[test]
+    fn unusable_panel_sizes_count_as_not_dragged() {
+        let file = temp_file("panels-bad");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, r#"{"panels":{"left":"wide","right":-5,"timeline":1e300}}"#).unwrap();
+        assert_eq!(saved_panel_sizes(&file), PanelSizes::default());
+        std::fs::write(&file, r#"{"panels":3}"#).unwrap();
+        assert_eq!(saved_panel_sizes(&file), PanelSizes::default());
     }
 
     #[test]
