@@ -435,6 +435,61 @@ fn levels_of_a_clip_removed_from_the_project_are_dropped() {
     assert!(visuals.peaks.is_empty(), "the project does not use it");
 }
 
+/// Blocks the read of levels before it says anything, until told to go on.
+#[derive(Default)]
+struct SilentUntilReleased {
+    started: std::sync::atomic::AtomicBool,
+    release: std::sync::atomic::AtomicBool,
+}
+
+impl Generator for SilentUntilReleased {
+    type Local = ();
+
+    fn stamp(&self, _: &Path) -> Option<FileStamp> {
+        None
+    }
+
+    fn inspect(&self, _: &Path) -> Result<SourceFacts, String> {
+        Err("unused".to_owned())
+    }
+
+    fn frame(&self, _: &mut (), _: u32, _: &Path, _: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {
+        Err(ThumbnailError::Failed("unused".to_owned()))
+    }
+
+    fn peaks(&self, _: &Path, emit: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String> {
+        self.started.store(true, std::sync::atomic::Ordering::SeqCst);
+        while !self.release.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        emit(&[0.5]);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_run_of_a_removed_source_ends_even_before_it_has_said_anything() {
+    use std::sync::atomic::Ordering;
+    let ctx = egui::Context::default();
+    let generator = Arc::new(SilentUntilReleased::default());
+    let mut visuals = ClipVisuals::with_generator(generator.clone());
+    known_slot(&mut visuals, None, 1);
+    visuals.peaks(0);
+    visuals.end_frame();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !generator.started.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the read never started");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(visuals.peaks.is_empty(), "no entry exists yet");
+    let project = crate::editor::EditorState::default().project().clone();
+    visuals.sync_project(1, &project);
+    generator.release.store(true, Ordering::SeqCst);
+    run_frames(&mut visuals, &ctx, |_| {}, |v| v.pool.as_ref().expect("started").outstanding() == 0);
+    visuals.begin_frame(&ctx);
+    assert!(visuals.peaks.is_empty(), "what the cancelled run still said is ignored");
+}
+
 #[test]
 fn the_same_file_spelled_differently_is_one_source() {
     if !cfg!(windows) {

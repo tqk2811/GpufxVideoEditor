@@ -107,11 +107,6 @@ impl Shared {
         self.queues.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn deliver(&self, done: Done) {
-        self.lock().done.push(done);
-        self.wake();
-    }
-
     fn wake(&self) {
         if !self.woken.swap(true, Ordering::AcqRel) {
             if let Some(waker) = &self.waker {
@@ -196,7 +191,16 @@ impl WorkerPool {
         queues.audio.retain(|job| job.key != key);
         if queues.running.contains(&key) {
             queues.cancelled_peaks.insert((identity, run));
+            drop(queues);
+            // A read waiting out a pause has to see this.
+            self.shared.work.notify_all();
         }
+    }
+
+    /// The identities whose levels are being read right now.
+    pub fn running_peak_identities(&self) -> Vec<u32> {
+        let queues = self.shared.lock();
+        queues.running.iter().filter_map(|key| if let JobKey::Peaks(identity, _) = key { Some(*identity) } else { None }).collect()
     }
 
     /// How many jobs wait or run, for tests and the frame report.
@@ -331,10 +335,20 @@ fn run_job<G: Generator>(shared: &Shared, generator: &G, local: &mut G::Local, j
         JobKey::Peaks(identity, run) => {
             // What was read before an error is kept and drawn; only a cancel leaves it unfinished.
             let _ = generator.peaks(&job.path, &mut |peaks| {
-                if shared.shutdown.load(Ordering::Acquire) || shared.lock().cancelled_peaks.contains(&(identity, run)) {
-                    return false;
+                let mut queues = shared.lock();
+                loop {
+                    if shared.shutdown.load(Ordering::Acquire) || queues.cancelled_peaks.contains(&(identity, run)) {
+                        return false;
+                    }
+                    if !queues.paused {
+                        break;
+                    }
+                    // Playback and export have the machine: the read waits here, at a chunk.
+                    queues = shared.work.wait(queues).unwrap_or_else(|poisoned| poisoned.into_inner());
                 }
-                shared.deliver(Done::Peaks { identity, run, peaks: peaks.to_vec(), finished: false });
+                queues.done.push(Done::Peaks { identity, run, peaks: peaks.to_vec(), finished: false });
+                drop(queues);
+                shared.wake();
                 true
             });
             let cancelled = shared.lock().cancelled_peaks.contains(&(identity, run));
@@ -629,6 +643,53 @@ mod tests {
         pool.set_paused(false);
         wait_for(|| generator.calls.load(Ordering::SeqCst) == 1);
         pool.cancel_peaks(3, 0);
+    }
+
+    fn peaks_delivered(pool: &WorkerPool) -> usize {
+        pool.lock_for_test().done.iter().filter(|d| matches!(d, Done::Peaks { .. })).count()
+    }
+
+    fn pool_reading_levels() -> (Arc<Fake>, WorkerPool) {
+        let generator = Arc::new(Fake::default());
+        let pool = WorkerPool::start(generator.clone(), 0, 1, None);
+        pool.publish(Vec::new(), vec![Job { key: JobKey::Peaks(3, 0), path: Path::new("a.mp4").into() }]);
+        wait_for(|| peaks_delivered(&pool) > 0);
+        (generator, pool)
+    }
+
+    #[test]
+    fn a_running_read_of_levels_waits_while_paused_and_goes_on_after() {
+        let (_generator, pool) = pool_reading_levels();
+        pool.set_paused(true);
+        std::thread::sleep(Duration::from_millis(30));
+        let held = peaks_delivered(&pool);
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(peaks_delivered(&pool), held, "no more is read during playback");
+        pool.set_paused(false);
+        wait_for(|| peaks_delivered(&pool) > held);
+        pool.cancel_peaks(3, 0);
+        wait_for(|| pool.outstanding() == 0);
+    }
+
+    #[test]
+    fn cancelling_a_paused_read_of_levels_ends_it() {
+        let (_generator, pool) = pool_reading_levels();
+        pool.set_paused(true);
+        std::thread::sleep(Duration::from_millis(30));
+        pool.cancel_peaks(3, 0);
+        wait_for(|| pool.outstanding() == 0);
+        assert!(!pool.take_done().iter().any(|d| matches!(d, Done::Peaks { finished: true, .. })));
+    }
+
+    #[test]
+    fn dropping_the_pool_ends_a_paused_read_of_levels() {
+        let (generator, pool) = pool_reading_levels();
+        pool.set_paused(true);
+        std::thread::sleep(Duration::from_millis(30));
+        let shared = pool.shared.clone();
+        drop(pool);
+        wait_for(|| shared.alive.load(Ordering::Acquire) == 0);
+        drop(generator);
     }
 
     #[test]

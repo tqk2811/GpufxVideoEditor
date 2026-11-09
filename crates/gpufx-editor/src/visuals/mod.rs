@@ -225,7 +225,11 @@ impl ClipVisuals {
                 used.insert(identity);
             }
         }
-        let abandoned: Vec<u32> = self.peaks.iter().filter(|(identity, entry)| !entry.finished && !used.contains(identity)).map(|(identity, _)| *identity).collect();
+        let mut abandoned: HashSet<u32> = self.peaks.iter().filter(|(identity, entry)| !entry.finished && !used.contains(identity)).map(|(identity, _)| *identity).collect();
+        // A run that has not reported anything yet has no entry to be found by.
+        if let Some(pool) = &self.pool {
+            abandoned.extend(pool.running_peak_identities().into_iter().filter(|identity| !used.contains(identity)));
+        }
         for identity in abandoned {
             self.peaks.remove(&identity);
             self.cancel_peak_run(identity);
