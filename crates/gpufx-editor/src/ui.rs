@@ -16,6 +16,7 @@ const RULER_HEIGHT: f32 = 28.0;
 const LINE_SCROLL_POINTS: f32 = 50.0;
 const PREVIEW_SHARE: f32 = 0.55;
 const MIN_TIMELINE_HEIGHT: f32 = 140.0;
+const EXPORT_BAR_WIDTH: f32 = 220.0;
 const PICKER_WIDTH: f32 = 260.0;
 /// Space kept under the list for the Add button, the problems and what the clip has.
 const PICKER_FOOTER_HEIGHT: f32 = 170.0;
@@ -40,18 +41,24 @@ pub enum UiRequest {
     OpenProject,
     SaveProject,
     SaveProjectAs,
+    Export,
+    CancelExport,
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     handle_shortcuts(root.ctx(), state, requests);
     egui::Panel::top("toolbar").show(root, |ui| toolbar(ui, state, requests));
-    egui::Panel::bottom("status").show(root, |ui| status_line(ui, state));
-    egui::Panel::right("packages").default_size(PICKER_WIDTH).show(root, |ui| picker(ui, state));
+    egui::Panel::bottom("status").show(root, |ui| status_line(ui, state, requests));
+    egui::Panel::right("packages").default_size(PICKER_WIDTH).show(root, |ui| {
+        ui.add_enabled_ui(!state.is_exporting(), |ui| picker(ui, state));
+    });
     egui::CentralPanel::default().show(root, |ui| {
         let area = ui.available_rect_before_wrap();
         let (preview_rect, timeline_rect) = split_area(area);
         preview_area(ui, preview_rect, preview);
-        ui.scope_builder(UiBuilder::new().max_rect(timeline_rect), |ui| timeline(ui, state, requests));
+        ui.scope_builder(UiBuilder::new().max_rect(timeline_rect), |ui| {
+            ui.add_enabled_ui(!state.is_exporting(), |ui| timeline(ui, state, requests));
+        });
     });
 }
 
@@ -117,11 +124,25 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
 }
 
 fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
+    let exporting = state.is_exporting();
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(!exporting, |ui| toolbar_contents(ui, state, requests));
+        ui.separator();
+        ui.label(format!("Playhead {}", format_time(state.playhead(), 1)));
+    });
+}
+
+fn toolbar_contents(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     ui.horizontal(|ui| {
         for (label, request) in [("New", UiRequest::NewProject), ("Open", UiRequest::OpenProject), ("Save", UiRequest::SaveProject), ("Save As", UiRequest::SaveProjectAs)] {
             if ui.button(label).clicked() {
                 requests.push(request);
             }
+        }
+        ui.separator();
+        encoder_combo(ui, state);
+        if ui.button("Export").clicked() {
+            requests.push(UiRequest::Export);
         }
         ui.separator();
         if ui.button("Add video track").clicked() {
@@ -137,8 +158,18 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
         if ui.add_enabled(state.can_redo(), egui::Button::new("Redo")).clicked() {
             state.redo();
         }
-        ui.separator();
-        ui.label(format!("Playhead {}", format_time(state.playhead(), 1)));
+    });
+}
+
+fn encoder_combo(ui: &mut egui::Ui, state: &mut EditorState) {
+    let selected = state.encoders.get(state.encoder).map_or_else(String::new, |option| option.label.clone());
+    let options = state.encoders.clone();
+    egui::ComboBox::from_id_salt("encoder").selected_text(selected).show_ui(ui, |ui| {
+        for (index, option) in options.iter().enumerate() {
+            ui.add_enabled_ui(option.available, |ui| {
+                ui.selectable_value(&mut state.encoder, index, &option.label);
+            });
+        }
     });
 }
 
@@ -239,8 +270,15 @@ fn applied_list(ui: &mut egui::Ui, state: &mut EditorState) {
     }
 }
 
-fn status_line(ui: &mut egui::Ui, state: &EditorState) {
+fn status_line(ui: &mut egui::Ui, state: &EditorState, requests: &mut Vec<UiRequest>) {
     ui.horizontal(|ui| {
+        if let Some(progress) = state.export_progress() {
+            ui.add(egui::ProgressBar::new(progress.fraction()).desired_width(EXPORT_BAR_WIDTH).text(format!("{} / {}", progress.done, progress.total)));
+            if ui.button("Cancel").clicked() {
+                requests.push(UiRequest::CancelExport);
+            }
+            ui.separator();
+        }
         match state.status() {
             Status::Idle => ui.label("Ready"),
             Status::Info(message) => ui.label(message),

@@ -4,6 +4,7 @@
 #![cfg(windows)]
 
 pub mod editor;
+pub mod export;
 pub mod packages;
 pub mod playback;
 pub mod presenter;

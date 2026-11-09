@@ -1,6 +1,7 @@
 //! Editor state without a window: the project history, the selection and the status line. The UI
 //! calls these methods and draws the result; every timeline change goes through an engine command.
 
+use crate::export::{EncoderOption, ExportProgress};
 use crate::packages::{Catalog, PickerState};
 use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{ClipDrag, EditCommand};
@@ -14,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 const UNDO_DEPTH: usize = 200;
 const DRAG_FIRST: &str = "Finish the drag first";
+const EXPORT_RUNNING: &str = "Editing is off while an export runs";
 const NO_NEIGHBOUR: &str = "A transition needs a selected clip that touches another clip on its track";
 const NOTHING_TO_PLAY: &str = "Nothing to play: playback length follows the video frames, and audio alone has none yet";
 
@@ -56,6 +58,10 @@ pub struct EditorState {
     pub drag: Option<ClipDrag>,
     pub catalog: Catalog,
     pub picker: PickerState,
+    pub encoders: Vec<EncoderOption>,
+    pub encoder: usize,
+    /// The running export, which turns editing, playback and scrubbing off.
+    export: Option<ExportProgress>,
 }
 
 /// A clip of the whole default length at `start`, with no effects.
@@ -113,6 +119,9 @@ impl EditorState {
             drag: None,
             catalog: Catalog::default(),
             picker: PickerState::default(),
+            encoders: Vec::new(),
+            encoder: 0,
+            export: None,
         }
     }
 
@@ -189,6 +198,35 @@ impl EditorState {
         self.replace_project(default_project(), None);
     }
 
+    pub fn is_exporting(&self) -> bool {
+        self.export.is_some()
+    }
+
+    pub fn export_progress(&self) -> Option<ExportProgress> {
+        self.export
+    }
+
+    /// Stops playback and turns editing off until [`Self::end_export`].
+    pub fn begin_export(&mut self, total: i64) {
+        if self.playing {
+            self.transport.push(TransportCommand::Stop);
+        }
+        self.playing = false;
+        self.scrub_target = None;
+        self.drag = None;
+        self.export = Some(ExportProgress { done: 0, total });
+        self.status = Status::Info("Exporting".to_owned());
+    }
+
+    pub fn set_export_progress(&mut self, progress: ExportProgress) {
+        self.export = Some(progress);
+    }
+
+    pub fn end_export(&mut self, status: Status) {
+        self.export = None;
+        self.status = status;
+    }
+
     pub fn set_preview_error(&mut self, error: Option<String>) {
         self.preview_error = error;
     }
@@ -219,6 +257,10 @@ impl EditorState {
 
     /// Space: starts from the playhead or stops where it is. A timeline with no samples cannot play.
     pub fn toggle_playback(&mut self) {
+        if self.is_exporting() {
+            self.status = Status::Info(EXPORT_RUNNING.to_owned());
+            return;
+        }
         if self.playing {
             self.playing = false;
             self.transport.push(TransportCommand::Stop);
@@ -243,6 +285,9 @@ impl EditorState {
 
     /// A ruler press at `time`. Moves the playhead and, while playing, seeks once per new place.
     pub fn scrub_to(&mut self, time: Time) {
+        if self.is_exporting() {
+            return;
+        }
         self.set_playhead(time);
         let time = self.playhead;
         if self.playing && self.scrub_target != Some(time) {
@@ -291,9 +336,14 @@ impl EditorState {
         self.status = Status::Refused(error.to_string());
     }
 
-    /// A drag holds a clip key, and any edit could make that key name another clip, so edits wait
-    /// for the drop. True, with a status, while a drag is in progress.
-    fn drag_blocks_edits(&mut self) -> bool {
+    /// An export renders the project it started with, so edits wait for it. A drag holds a clip key,
+    /// and any edit could make that key name another clip, so edits wait for the drop. True, with a
+    /// status, while either is in progress.
+    fn edits_blocked(&mut self) -> bool {
+        if self.export.is_some() {
+            self.status = Status::Info(EXPORT_RUNNING.to_owned());
+            return true;
+        }
         if self.drag.is_none() {
             return false;
         }
@@ -306,7 +356,7 @@ impl EditorState {
     where
         F: FnOnce(&Project) -> Result<Project, EditError>,
     {
-        if self.drag_blocks_edits() {
+        if self.edits_blocked() {
             return false;
         }
         let before = self.project().clone();
@@ -332,7 +382,7 @@ impl EditorState {
     /// Adds a clip of [`DEFAULT_CLIP_DURATION`] for `path` to `track`, at the free position nearest
     /// the playhead.
     pub fn add_clip_from_file(&mut self, track: usize, path: &Path) {
-        if self.drag_blocks_edits() {
+        if self.edits_blocked() {
             return;
         }
         let Some(target) = self.project().tracks.get(track) else {
@@ -424,7 +474,7 @@ impl EditorState {
     }
 
     pub fn undo(&mut self) {
-        if self.drag_blocks_edits() {
+        if self.edits_blocked() {
             return;
         }
         if self.history.undo() {
@@ -435,7 +485,7 @@ impl EditorState {
     }
 
     pub fn redo(&mut self) {
-        if self.drag_blocks_edits() {
+        if self.edits_blocked() {
             return;
         }
         if self.history.redo() {
@@ -981,6 +1031,47 @@ mod tests {
         state.new_project();
         assert_eq!(state.project_file(), None);
         assert!(state.project().tracks.is_empty());
+    }
+
+    #[test]
+    fn an_export_stops_playback_and_turns_editing_off() {
+        let mut state = two_touching_clips();
+        state.toggle_playback();
+        state.take_transport();
+        let before = state.project().clone();
+        state.begin_export(90);
+
+        assert!(!state.is_playing());
+        assert_eq!(state.take_transport(), vec![TransportCommand::Stop]);
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("c.mp4"));
+        state.select(Some(key(0)));
+        state.add_effect_package("a");
+        state.split_selected();
+        state.delete_selected();
+        state.undo();
+        state.redo();
+        assert_eq!(state.project(), &before);
+        assert_eq!(state.status(), &Status::Info(EXPORT_RUNNING.to_owned()));
+        state.toggle_playback();
+        assert!(!state.is_playing());
+        state.scrub_to(seconds(4));
+        assert_eq!(state.playhead(), Time::ZERO);
+
+        state.end_export(Status::Idle);
+        state.add_track(TrackKind::Video);
+        assert_ne!(state.project(), &before);
+    }
+
+    #[test]
+    fn export_progress_is_shown_until_the_export_ends() {
+        let mut state = EditorState::default();
+        state.begin_export(10);
+        state.set_export_progress(ExportProgress { done: 3, total: 10 });
+        assert_eq!(state.export_progress().unwrap().fraction(), 0.3);
+        state.end_export(Status::Error("disk full".to_owned()));
+        assert_eq!(state.export_progress(), None);
+        assert_eq!(state.status(), &Status::Error("disk full".to_owned()));
     }
 
     #[test]

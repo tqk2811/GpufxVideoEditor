@@ -1,8 +1,8 @@
 //! The preview thread: runs the newest request, publishes the newest result, wakes the UI.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -25,6 +25,12 @@ pub trait FrameProducer {
 
     /// Called after a panic, to drop whatever the panic may have left half done.
     fn reset(&mut self) {}
+
+    /// Drops what `produce` built (decoders, images), for [`PreviewWorker::suspend`]. It is built
+    /// again by the next request.
+    fn suspend(&mut self) {
+        self.reset();
+    }
 
     /// Receives, once, the flag that is set when the request in progress is no longer wanted: a
     /// newer one waits or the app is closing. A long `produce` should watch it.
@@ -50,8 +56,17 @@ pub struct Outcome<F> {
     pub result: Result<Option<F>, String>,
 }
 
+/// What the thread is asked to do. A suspension replaces a frame that has not started.
+enum Job<R> {
+    Frame(R),
+    /// Drop what the producer holds, then say so.
+    Suspend(Sender<()>),
+}
+
 pub struct PreviewWorker<P: FrameProducer> {
-    requests: Arc<LatestSlot<P::Request>>,
+    requests: Arc<LatestSlot<Job<P::Request>>>,
+    /// While set, requests are dropped: the producer must stay empty until [`Self::resume`].
+    suspended: AtomicBool,
     results: Arc<LatestSlot<Outcome<P::Frame>>>,
     returned: Sender<P::Frame>,
     handle: Option<JoinHandle<()>>,
@@ -76,7 +91,7 @@ fn spawned(result: std::io::Result<JoinHandle<()>>) -> (Option<JoinHandle<()>>, 
 impl<P: FrameProducer + 'static> PreviewWorker<P> {
     /// Starts the thread. `make` runs on it; `wake` is called after each finished request.
     pub fn spawn(make: impl FnOnce() -> P + Send + 'static, wake: impl Fn() + Send + 'static) -> Self {
-        let requests: Arc<LatestSlot<P::Request>> = Arc::default();
+        let requests: Arc<LatestSlot<Job<P::Request>>> = Arc::default();
         let results: Arc<LatestSlot<Outcome<P::Frame>>> = Arc::default();
         let (returned, returned_frames) = channel::<P::Frame>();
         let (thread_requests, thread_results) = (requests.clone(), results.clone());
@@ -86,10 +101,20 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
             let mut producer = make();
             producer.set_abort(abort);
             producer.set_closing(closing);
-            while let Some(request) = thread_requests.wait() {
+            while let Some(job) = thread_requests.wait() {
                 for frame in returned_frames.try_iter() {
                     recycle_guarded(&mut producer, frame);
                 }
+                let request = match job {
+                    Job::Frame(request) => request,
+                    Job::Suspend(done) => {
+                        if catch_unwind(AssertUnwindSafe(|| producer.suspend())).is_err() {
+                            producer.reset();
+                        }
+                        let _ = done.send(());
+                        continue;
+                    }
+                };
                 let result = match catch_unwind(AssertUnwindSafe(|| producer.produce(&request))) {
                     Ok(Ok(frame)) => Ok(frame),
                     Ok(Err(ProduceError::Failed(message))) => Err(message),
@@ -107,12 +132,31 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
             }
         });
         let (handle, spawn_error) = spawned(handle);
-        Self { requests, results, returned, handle, spawn_error }
+        Self { requests, suspended: AtomicBool::new(false), results, returned, handle, spawn_error }
     }
 
     /// Asks for `request` instead of whatever has not started yet. Never blocks on the work.
     pub fn request(&self, request: P::Request) {
-        self.requests.put(request);
+        if !self.suspended.load(Ordering::SeqCst) {
+            self.requests.put(Job::Frame(request));
+        }
+    }
+
+    /// Stops the preview so something else can use the GPU and decoders. Unstarted work is dropped;
+    /// the frame in progress is told it is no longer wanted. The returned receiver fires once the
+    /// producer has dropped its decoders and images. Requests are ignored until [`Self::resume`].
+    pub fn suspend(&self) -> Receiver<()> {
+        let (done, released) = channel();
+        self.suspended.store(true, Ordering::SeqCst);
+        if self.handle.is_some() {
+            self.requests.put(Job::Suspend(done));
+        }
+        released
+    }
+
+    /// Lets requests through again; the producer rebuilds what it dropped on the next one.
+    pub fn resume(&self) {
+        self.suspended.store(false, Ordering::SeqCst);
     }
 
     /// The newest finished result, if one arrived since the last call.
@@ -144,7 +188,7 @@ impl<P: FrameProducer> Drop for PreviewWorker<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
 
@@ -160,6 +204,9 @@ mod tests {
     struct Log {
         produced: Mutex<Vec<i32>>,
         recycled: AtomicUsize,
+        suspended: AtomicUsize,
+        /// Frames produced after the last suspension.
+        produced_after_suspend: AtomicUsize,
         hold_first: AtomicBool,
         long_started: (Mutex<bool>, Condvar),
         first_started: (Mutex<bool>, Condvar),
@@ -205,6 +252,7 @@ mod tests {
                 wait_for(&self.0.release_first);
             }
             self.0.produced.lock().unwrap().push(*request);
+            self.0.produced_after_suspend.fetch_add(1, Ordering::SeqCst);
             match request {
                 -1 => Err(ProduceError::Failed("broken frame".to_owned())),
                 -2 => panic!("deliberate test panic"),
@@ -221,6 +269,11 @@ mod tests {
         fn set_abort(&mut self, abort: Arc<AtomicBool>) {
             self.1 = Some(abort);
         }
+
+        fn suspend(&mut self) {
+            self.0.suspended.fetch_add(1, Ordering::SeqCst);
+            self.0.produced_after_suspend.store(0, Ordering::SeqCst);
+        }
     }
 
     fn start(log: &Arc<Log>) -> (PreviewWorker<Fake>, std::sync::mpsc::Receiver<()>) {
@@ -235,6 +288,45 @@ mod tests {
     fn next(worker: &PreviewWorker<Fake>, wake: &std::sync::mpsc::Receiver<()>) -> Result<Option<i32>, String> {
         wake.recv_timeout(TIMEOUT).expect("the worker finished a request");
         worker.poll().expect("a result waits after a wake").result
+    }
+
+    #[test]
+    fn suspend_drops_the_producer_state_after_the_frame_in_progress() {
+        let log = Arc::new(Log::default());
+        log.hold_first.store(true, Ordering::SeqCst);
+        let (worker, wake) = start(&log);
+        worker.request(1);
+        wait_for(&log.first_started);
+        let released = worker.suspend();
+        assert!(released.try_recv().is_err(), "not before the frame finished");
+        assert_eq!(log.suspended.load(Ordering::SeqCst), 0);
+        set(&log.release_first);
+        assert_eq!(next(&worker, &wake), Ok(Some(1)));
+        released.recv_timeout(TIMEOUT).expect("released after the frame");
+        assert_eq!(log.suspended.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn suspend_replaces_a_frame_that_has_not_started_and_ignores_requests_until_resume() {
+        let log = Arc::new(Log::default());
+        log.hold_first.store(true, Ordering::SeqCst);
+        let (worker, wake) = start(&log);
+        worker.request(1);
+        wait_for(&log.first_started);
+        worker.request(2);
+        let released = worker.suspend();
+        set(&log.release_first);
+        released.recv_timeout(TIMEOUT).expect("released");
+        worker.request(3);
+        assert_eq!(*log.produced.lock().unwrap(), vec![1], "2 was replaced");
+        let _ = wake.try_iter().count();
+        assert_eq!(worker.poll().map(|outcome| outcome.result), Some(Ok(Some(1))));
+        assert_eq!(log.produced_after_suspend.load(Ordering::SeqCst), 0, "3 did not run while suspended");
+
+        worker.resume();
+        worker.request(4);
+        assert_eq!(next(&worker, &wake), Ok(Some(4)));
+        assert_eq!(log.produced_after_suspend.load(Ordering::SeqCst), 1);
     }
 
     #[test]

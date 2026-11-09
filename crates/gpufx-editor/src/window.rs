@@ -10,12 +10,13 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use d3d12_backend::{read_package_info, Gpu, ProjectPaths};
+use d3d12_backend::{encoder_exists, read_package_info, ExportJob, Gpu, ProjectPaths};
 use engine::Project;
 #[cfg(debug_assertions)]
 use engine::{Time, TrackKind};
 
-use crate::editor::EditorState;
+use crate::editor::{EditorState, Status};
+use crate::export::{encoder_options, export_blocker, finished_message, ExportOutcome, ExportWorker};
 use crate::packages::{scan, Catalog};
 use crate::playback::device::Playback;
 use crate::playback::plan::{frames_to_ms, TransportCommand};
@@ -28,6 +29,8 @@ use crate::ui::{self, UiRequest};
 
 /// How often the playhead moves while playing.
 const PLAYING_REPAINT: Duration = Duration::from_millis(16);
+/// How often the export bar moves.
+const EXPORT_REPAINT: Duration = Duration::from_millis(100);
 
 const MEDIA_EXTENSIONS: [&str; 10] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac"];
 
@@ -55,8 +58,12 @@ struct Smoke {
     underrun_before_seek: u64,
 }
 
-/// Field order matters: the worker stops before the presenter and device are dropped.
+/// Field order matters: the export, then the worker, stop before the presenter and device are dropped.
 struct Session {
+    export: Option<ExportWorker>,
+    /// The file the running export writes to.
+    export_out: Option<PathBuf>,
+    window: Arc<Window>,
     playback: Option<Playback>,
     preview: PreviewWorker<D3d12Producer>,
     gpu: Arc<Gpu>,
@@ -91,6 +98,7 @@ impl Session {
         let presenter = Presenter::new(&gpu, window.clone())?;
         let producer_gpu = gpu.clone();
         let window_for_scan = window.clone();
+        let session_window = window.clone();
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
         #[cfg_attr(not(debug_assertions), expect(unused_mut))]
         let mut state = EditorState::default();
@@ -109,7 +117,11 @@ impl Session {
         let package_roots = package_roots();
         let paths = Arc::new(project_paths(None, &package_roots));
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
+        state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
         Ok(Self {
+            export: None,
+            export_out: None,
+            window: session_window,
             playback: None,
             preview,
             gpu,
@@ -288,8 +300,58 @@ impl Session {
         }
     }
 
+    /// Starts an export of the current project to a chosen file. Playback and the preview stop
+    /// first, so the export has the GPU and decoders to itself; the thread waits for the preview to
+    /// let go.
+    fn start_export(&mut self) {
+        if let Some(reason) = export_blocker(self.state.project()) {
+            self.state.report_error(reason.to_owned());
+            return;
+        }
+        let Some(out) = rfd::FileDialog::new().add_filter("MP4", &["mp4"]).set_file_name("export.mp4").set_parent(self.presenter.window()).save_file() else { return };
+        let Some(option) = self.state.encoders.get(self.state.encoder).cloned() else { return };
+        let total = engine::frame_count(self.state.project());
+        self.state.begin_export(total);
+        self.playback = None;
+        let preview_released = self.preview.suspend();
+        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: option.choice, hashes: None };
+        let window = self.window.clone();
+        match ExportWorker::start(job, self.gpu.clone(), preview_released, move || window.request_redraw()) {
+            Ok(worker) => {
+                self.export = Some(worker);
+                self.export_out = Some(out);
+            }
+            Err(message) => {
+                self.preview.resume();
+                self.state.end_export(Status::Error(message));
+            }
+        }
+    }
+
+    /// Follows the running export. When it ends, the preview comes back.
+    fn poll_export(&mut self) {
+        let Some(export) = &mut self.export else { return };
+        self.state.set_export_progress(export.progress());
+        let Some(outcome) = export.poll() else { return };
+        self.export = None;
+        let out = self.export_out.take().unwrap_or_default();
+        let status = match outcome {
+            ExportOutcome::Finished(report) => Status::Info(finished_message(&report, &out, self.state.project().output.audio.is_some())),
+            ExportOutcome::Cancelled => Status::Info("Export cancelled; the partial file was removed".to_owned()),
+            ExportOutcome::Failed(message) => Status::Error(format!("Export failed: {message}")),
+        };
+        self.state.end_export(status);
+        self.preview.resume();
+        // The last wish was dropped with the suspension, so it is sent again.
+        self.tracker = RequestTracker::default();
+        self.shown = None;
+    }
+
     /// Asks for the frame under the playhead when the wish changed since the last request.
     fn request_preview(&mut self) {
+        if self.state.is_exporting() {
+            return;
+        }
         let revision = self.state.revision();
         let frame = frame_index(self.state.project(), self.state.playhead());
         if !self.tracker.should_send(revision, frame) {
@@ -318,6 +380,7 @@ impl Session {
 
     fn redraw(&mut self) -> Result<(), String> {
         self.collect_catalog();
+        self.poll_export();
         self.collect_preview();
         self.poll_playback();
         #[cfg(debug_assertions)]
@@ -328,7 +391,13 @@ impl Session {
         let mut requests = Vec::new();
         let state = &mut self.state;
         let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
-        let delay = if self.state.is_playing() { delay.min(PLAYING_REPAINT) } else { delay };
+        let delay = if self.state.is_exporting() {
+            delay.min(EXPORT_REPAINT)
+        } else if self.state.is_playing() {
+            delay.min(PLAYING_REPAINT)
+        } else {
+            delay
+        };
         self.next_repaint = self.smoke_exit_at().filter(|_| !self.state.is_playing()).or_else(|| Instant::now().checked_add(delay));
         for request in requests {
             self.handle(request);
@@ -376,6 +445,14 @@ impl Session {
         }
     }
 
+    /// A close stops a running export and removes its partial file, so that is asked first.
+    fn close_accepted(&self) -> bool {
+        if self.state.is_exporting() && !confirm(self.presenter.window(), "An export is running. Cancel it and close?") {
+            return false;
+        }
+        self.discard_accepted("Close")
+    }
+
     /// Whether the user accepts losing `action`'s unsaved changes; asked only when there are some.
     fn discard_accepted(&self, action: &str) -> bool {
         !self.state.is_dirty() || confirm(self.presenter.window(), &format!("The project has unsaved changes. {action} anyway and lose them?"))
@@ -407,7 +484,16 @@ impl Session {
 
     /// Runs outside the frame, because the file dialog blocks this thread.
     fn handle(&mut self, request: UiRequest) {
+        if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport) {
+            return;
+        }
         match request {
+            UiRequest::Export => self.start_export(),
+            UiRequest::CancelExport => {
+                if let Some(export) = &self.export {
+                    export.cancel();
+                }
+            }
             UiRequest::NewProject => {
                 if self.discard_accepted("Start a new project") {
                     self.state.new_project();
@@ -484,7 +570,7 @@ impl ApplicationHandler for EditorApp {
         }
         match event {
             WindowEvent::CloseRequested => {
-                if session.discard_accepted("Close") {
+                if session.close_accepted() {
                     event_loop.exit();
                 }
             }
