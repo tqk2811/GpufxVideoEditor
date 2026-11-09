@@ -18,7 +18,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use d3d12_backend::{ProjectPaths, ThumbnailImage};
+use d3d12_backend::{ProjectPaths, ThumbnailError, ThumbnailImage};
 use egui::{ColorImage, TextureHandle, TextureId, TextureOptions};
 use engine::{Project, Time, TICKS_PER_SECOND};
 
@@ -42,6 +42,10 @@ const AUDIO_WORKERS: usize = 1;
 const MAX_WANTED_FRAMES: usize = 128;
 /// A tile not ready borrows a neighbour within this many steps.
 const BORROW_STEPS: i64 = 4;
+/// How often a tile that ran out of time is tried again before it counts as failed.
+const MAX_TIMEOUT_RETRIES: u32 = 3;
+/// The wait before the first of those tries, doubling for each one after it.
+const TIMEOUT_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// What is known of a source.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,6 +58,9 @@ pub enum SourceView {
 enum Tile {
     /// No picture can be made; never asked for again until the file changes.
     Failed,
+    /// The decoder ran out of time, which may only mean a busy machine: asked for again after
+    /// `not_before`, a few times.
+    Retry { attempts: u32, not_before: Instant },
     Uploading(ColorImage),
     Ready(TextureHandle),
 }
@@ -101,6 +108,8 @@ pub struct ClipVisuals {
     published: Vec<JobKey>,
     clock: u64,
     project_revision: Option<u64>,
+    /// Asks for a repaint when a tile waiting to be tried again falls due.
+    ctx: Option<egui::Context>,
 }
 
 impl Default for ClipVisuals {
@@ -134,6 +143,7 @@ impl ClipVisuals {
             published: Vec::new(),
             clock: 0,
             project_revision: None,
+            ctx: None,
         }
     }
 
@@ -166,6 +176,7 @@ impl ClipVisuals {
     /// Takes finished work and uploads a few textures. Call once before anything is drawn.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         self.clock += 1;
+        self.ctx = Some(ctx.clone());
         if let Some(pool) = &self.pool {
             for done in pool.take_done() {
                 self.apply(done);
@@ -280,11 +291,19 @@ impl ClipVisuals {
     pub fn tile(&mut self, slot: usize, bucket: i64, step: i64) -> Option<TextureId> {
         let identity = self.slots[slot].identity?;
         let key = (identity, bucket);
-        if let Some(entry) = self.tiles.touch(key) {
-            if let Tile::Ready(handle) = entry {
-                return Some(handle.id());
+        let now = Instant::now();
+        let ask = match self.tiles.touch(key) {
+            Some(Tile::Ready(handle)) => return Some(handle.id()),
+            Some(Tile::Retry { not_before, .. }) if *not_before > now => {
+                if let Some(ctx) = &self.ctx {
+                    ctx.request_repaint_after(not_before.saturating_duration_since(now));
+                }
+                false
             }
-        } else if self.wanted_frames.len() < MAX_WANTED_FRAMES {
+            Some(Tile::Retry { .. }) | None => true,
+            Some(_) => false,
+        };
+        if ask && self.wanted_frames.len() < MAX_WANTED_FRAMES {
             self.want(Job { key: JobKey::Frame(identity, bucket), path: self.slots[slot].path.clone() }, false);
         }
         let neighbour = self.tiles.nearest(key, step.saturating_mul(BORROW_STEPS), |tile| matches!(tile, Tile::Ready(_)))?;
@@ -375,7 +394,15 @@ impl ClipVisuals {
                         self.tiles.insert(key, Tile::Uploading(color_image(&image)));
                         self.uploads.push_back(key);
                     }
-                    Err(_) => self.tiles.insert(key, Tile::Failed),
+                    Err(ThumbnailError::Failed(_)) => self.tiles.insert(key, Tile::Failed),
+                    Err(ThumbnailError::TimedOut) => {
+                        let attempts = match self.tiles.peek_mut(key) {
+                            Some(Tile::Retry { attempts, .. }) => *attempts + 1,
+                            _ => 1,
+                        };
+                        let tile = if attempts > MAX_TIMEOUT_RETRIES { Tile::Failed } else { Tile::Retry { attempts, not_before: Instant::now() + TIMEOUT_RETRY_DELAY * (1 << (attempts - 1)) } };
+                        self.tiles.insert(key, tile);
+                    }
                 }
             }
             Done::Peaks { identity, run, peaks, finished } => {

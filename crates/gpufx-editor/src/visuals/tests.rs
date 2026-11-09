@@ -216,11 +216,51 @@ fn a_failed_tile_is_not_requested_again() {
     let mut visuals = ClipVisuals::default();
     visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(3), view: SourceView::Pending, checked: None, stamp_lost: false });
     visuals.live_identities.insert(3);
-    visuals.apply(Done::Frame { identity: 3, bucket: 0, result: Err("bad".to_owned()) });
+    visuals.apply(Done::Frame { identity: 3, bucket: 0, result: Err(ThumbnailError::Failed("bad".to_owned())) });
     visuals.begin_frame(&ctx);
     assert!(visuals.tile(0, 0, TICKS_PER_SECOND).is_none());
     assert!(visuals.wanted_frames.is_empty());
     visuals.end_frame();
+}
+
+#[test]
+fn a_tile_that_ran_out_of_time_is_tried_again_a_bounded_number_of_times() {
+    let mut visuals = ClipVisuals::default();
+    known_slot(&mut visuals, None, 3);
+    let timed_out = || Done::Frame { identity: 3, bucket: 0, result: Err(ThumbnailError::TimedOut) };
+    let wanted = |visuals: &mut ClipVisuals| {
+        visuals.wanted_frames.clear();
+        visuals.wanted_keys.clear();
+        visuals.tile(0, 0, TICKS_PER_SECOND);
+        visuals.wanted_frames.iter().any(|job| job.key == JobKey::Frame(3, 0))
+    };
+    let due = |visuals: &mut ClipVisuals| match visuals.tiles.peek_mut((3, 0)) {
+        Some(Tile::Retry { not_before, .. }) => *not_before = Instant::now(),
+        _ => panic!("a retry is pending"),
+    };
+    visuals.apply(timed_out());
+    assert!(matches!(visuals.tiles.peek_mut((3, 0)), Some(Tile::Retry { .. })), "a timeout is not a failure");
+    assert!(!wanted(&mut visuals), "not at once, so it cannot spin");
+    for _ in 1..=MAX_TIMEOUT_RETRIES {
+        due(&mut visuals);
+        assert!(wanted(&mut visuals), "asked again when it falls due");
+        visuals.apply(timed_out());
+    }
+    assert!(matches!(visuals.tiles.peek_mut((3, 0)), Some(Tile::Failed)), "the retries end");
+    assert!(!wanted(&mut visuals));
+    visuals.wanted_frames.clear();
+}
+
+#[test]
+fn a_retried_tile_keeps_its_picture_when_it_finally_comes() {
+    let ctx = egui::Context::default();
+    let mut visuals = ClipVisuals::default();
+    known_slot(&mut visuals, None, 3);
+    visuals.apply(Done::Frame { identity: 3, bucket: 0, result: Err(ThumbnailError::TimedOut) });
+    visuals.apply(Done::Frame { identity: 3, bucket: 0, result: Ok(ThumbnailImage { width: 1, height: 1, rgba: vec![0; 4] }) });
+    visuals.begin_frame(&ctx);
+    assert!(visuals.tile(0, 0, TICKS_PER_SECOND).is_some());
+    visuals.wanted_frames.clear();
 }
 
 #[test]

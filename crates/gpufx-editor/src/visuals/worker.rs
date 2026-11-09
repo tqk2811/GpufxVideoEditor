@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
-use d3d12_backend::ThumbnailImage;
+use d3d12_backend::{ThumbnailError, ThumbnailImage};
 use engine::Time;
 
 /// A worker with nothing to do closes its decoder after this long: an open file cannot be renamed
@@ -45,7 +45,7 @@ pub trait Generator: Send + Sync + 'static {
     fn stamp(&self, path: &Path) -> Option<FileStamp>;
     fn inspect(&self, path: &Path) -> Result<SourceFacts, String>;
     /// A picture of `path`, which `identity` names: another identity on the same path is another file.
-    fn frame(&self, local: &mut Self::Local, identity: u32, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, String>;
+    fn frame(&self, local: &mut Self::Local, identity: u32, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError>;
     /// Calls `emit` with further peaks until it returns false or the audio ends.
     fn peaks(&self, path: &Path, emit: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String>;
 }
@@ -72,7 +72,7 @@ pub struct Job {
 pub enum Done {
     Stamp { slot: u32, stamp: Option<FileStamp> },
     Inspected { slot: u32, stamp: Option<FileStamp>, result: Result<SourceFacts, String> },
-    Frame { identity: u32, bucket: i64, result: Result<ThumbnailImage, String> },
+    Frame { identity: u32, bucket: i64, result: Result<ThumbnailImage, ThumbnailError> },
     Peaks { identity: u32, run: u32, peaks: Vec<f32>, finished: bool },
 }
 
@@ -347,7 +347,7 @@ fn failure(job: &Job, message: &str) -> Done {
     match job.key {
         JobKey::Stamp(slot) => Done::Stamp { slot, stamp: None },
         JobKey::Inspect(slot) => Done::Inspected { slot, stamp: None, result: Err(message.to_owned()) },
-        JobKey::Frame(identity, bucket) => Done::Frame { identity, bucket, result: Err(message.to_owned()) },
+        JobKey::Frame(identity, bucket) => Done::Frame { identity, bucket, result: Err(ThumbnailError::Failed(message.to_owned())) },
         JobKey::Peaks(identity, run) => Done::Peaks { identity, run, peaks: Vec::new(), finished: true },
     }
 }
@@ -381,7 +381,7 @@ mod tests {
             Ok(SourceFacts { has_video: true, has_audio: false, aspect: 1.0, length: None })
         }
 
-        fn frame(&self, _: &mut (), _: u32, _: &Path, at: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+        fn frame(&self, _: &mut (), _: u32, _: &Path, at: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {
             assert_ne!(Some(at.ticks()), self.panic_at, "boom");
             self.calls.fetch_add(1, Ordering::SeqCst);
             while self.block.load(Ordering::SeqCst) {
@@ -570,7 +570,7 @@ mod tests {
             Err("unused".to_owned())
         }
 
-        fn frame(&self, _: &mut HeldDecoder, _: u32, _: &Path, _: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+        fn frame(&self, _: &mut HeldDecoder, _: u32, _: &Path, _: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {
             Ok(ThumbnailImage { width: 1, height: 1, rgba: vec![0; 4] })
         }
 
@@ -597,7 +597,7 @@ mod tests {
             Err("unused".to_owned())
         }
 
-        fn frame(&self, _: &mut (), _: u32, _: &Path, _: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+        fn frame(&self, _: &mut (), _: u32, _: &Path, _: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {
             // SAFETY: the pseudo handle always names the calling thread.
             self.0.store(unsafe { GetThreadPriority(GetCurrentThread()) }, Ordering::SeqCst);
             Ok(ThumbnailImage { width: 1, height: 1, rgba: vec![0; 4] })

@@ -29,4 +29,4 @@ pub use gpu::Gpu;
 pub use packages::{expression_error, read_package_info, PackageInfo, ParamInfo, ParamKind};
 pub use paths::ProjectPaths;
 pub use probe::{probe_media, MediaProbe};
-pub use thumbnail::{FrameSampler, ThumbnailImage};
+pub use thumbnail::{FrameSampler, ThumbnailError, ThumbnailImage};

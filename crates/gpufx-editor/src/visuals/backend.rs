@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use d3d12_backend::{probe_media, AudioFileDecoder, FrameSampler, ThumbnailImage};
+use d3d12_backend::{probe_media, AudioFileDecoder, FrameSampler, ThumbnailError, ThumbnailImage};
 use engine::{Time, MIX_CHANNELS, MIX_SAMPLE_RATE};
 
 use super::levels::PEAKS_PER_SECOND;
@@ -48,14 +48,19 @@ impl Generator for FfmpegGenerator {
         Ok(SourceFacts { has_video, has_audio: probe.has_audio, aspect, length: probe.video_duration.or(probe.audio_duration) })
     }
 
-    fn frame(&self, local: &mut Self::Local, identity: u32, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+    fn frame(&self, local: &mut Self::Local, identity: u32, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {
         if local.as_ref().is_none_or(|(open, _)| *open != identity) {
             // Closed first: a sampler still open on a replaced file must not outlive this call.
             *local = None;
             *local = Some((identity, FrameSampler::open(path, THUMBNAIL_HEIGHT)?));
         }
         let (_, sampler) = local.as_mut().expect("opened above");
-        sampler.picture_at(at, cancelled)
+        let result = sampler.picture_at(at, cancelled);
+        if matches!(result, Err(ThumbnailError::Failed(_))) {
+            // A decoder that lost its file stays lost; the next request opens it again.
+            *local = None;
+        }
+        result
     }
 
     fn peaks(&self, path: &Path, emit: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String> {

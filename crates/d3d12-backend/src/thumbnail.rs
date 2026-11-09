@@ -31,6 +31,39 @@ pub struct ThumbnailImage {
     pub rgba: Vec<u8>,
 }
 
+/// Why no picture came. A timeout says only that the machine was too busy this time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThumbnailError {
+    /// The time budget ended before any frame was decoded; a later attempt may succeed.
+    TimedOut,
+    /// The file cannot give this picture.
+    Failed(String),
+}
+
+impl std::fmt::Display for ThumbnailError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TimedOut => write!(f, "no frame within the time budget"),
+            Self::Failed(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+
+impl From<String> for ThumbnailError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+/// How a search for a frame ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Search {
+    Found,
+    /// The stream ended, or the frame quota did, with nothing to show.
+    NothingDecoded,
+    OutOfTime,
+}
+
 /// The display size of a thumbnail `height` tall for a stored `width`x`height` picture.
 fn scaled_width(width: i32, height: i32, sample_aspect: ffi::AVRational, target_height: u32) -> u32 {
     let aspect = if sample_aspect.num > 0 && sample_aspect.den > 0 { f64::from(sample_aspect.num) / f64::from(sample_aspect.den) } else { 1.0 };
@@ -147,34 +180,41 @@ impl FrameSampler {
 
     /// The picture at source position `at` (the origin is the first video timestamp), or the
     /// nearest one the stream has. `cancelled` is polled between packets.
-    pub fn picture_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+    pub fn picture_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {
         let target = to_stream_pts(at, self.start_pts, self.time_base);
         // SAFETY: the contexts are valid after open.
         unsafe {
-            let mut found = self.search(target, cancelled)?;
-            if !found && (*self.codec_context).skip_frame != ffi::AVDISCARD_DEFAULT {
+            let mut outcome = self.search(target, cancelled)?;
+            if outcome == Search::NothingDecoded && (*self.codec_context).skip_frame != ffi::AVDISCARD_DEFAULT {
                 // A stream of almost only non-reference frames shows nothing while they are
                 // skipped. It stays off for this sampler, so later requests do not wait again.
+                // Running out of time proves nothing about the stream, so it does not count.
                 (*self.codec_context).skip_frame = ffi::AVDISCARD_DEFAULT;
-                found = self.search(target, cancelled)?;
+                outcome = self.search(target, cancelled)?;
             }
-            if !found {
-                return Err(format!("{}: no frame could be decoded", self.path));
+            match outcome {
+                Search::Found => Ok(self.convert_kept()?),
+                Search::OutOfTime => Err(ThumbnailError::TimedOut),
+                Search::NothingDecoded => Err(ThumbnailError::Failed(format!("{}: no frame could be decoded", self.path))),
             }
-            self.convert_kept()
         }
     }
 
-    /// Decodes towards `target` within the budget; true when there is a frame to show.
-    unsafe fn search(&mut self, target: i64, cancelled: &dyn Fn() -> bool) -> Result<bool, String> {
+    /// Decodes towards `target` within the budget.
+    unsafe fn search(&mut self, target: i64, cancelled: &dyn Fn() -> bool) -> Result<Search, String> {
         self.position(target)?;
         let started = Instant::now();
         let mut decoded = 0;
+        let mut out_of_time = false;
         loop {
             if cancelled() {
                 return Err("cancelled".to_owned());
             }
-            if self.finished || decoded >= MAX_DECODED_PER_REQUEST || started.elapsed() > self.decode_budget {
+            if self.finished || decoded >= MAX_DECODED_PER_REQUEST {
+                break;
+            }
+            if started.elapsed() > self.decode_budget {
+                out_of_time = true;
                 break;
             }
             if self.decode_one()? {
@@ -184,7 +224,13 @@ impl FrameSampler {
                 }
             }
         }
-        Ok(self.last_pts.is_some())
+        Ok(if self.last_pts.is_some() {
+            Search::Found
+        } else if out_of_time {
+            Search::OutOfTime
+        } else {
+            Search::NothingDecoded
+        })
     }
 
     /// Seeks unless `target` can be reached by decoding on.
@@ -368,8 +414,9 @@ mod tests {
         let mut sampler = FrameSampler::open(&path, 16).expect("open");
         unsafe { (*sampler.codec_context).skip_frame = ffi::AVDISCARD_ALL };
         sampler.decode_budget = Duration::ZERO;
-        assert!(sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND), &never).is_err(), "out of time and no frame is a failure");
+        assert_eq!(sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND), &never), Err(ThumbnailError::TimedOut), "out of time is told apart from a broken file");
         assert!(!sampler.finished, "it read the file to the end instead of giving up");
+        assert_eq!(unsafe { (*sampler.codec_context).skip_frame }, ffi::AVDISCARD_ALL, "running out of time does not turn the skipping off");
     }
 
     /// Encodes with the GPL build, which has x264 and x265; `None` when it is not installed.
@@ -437,6 +484,6 @@ mod tests {
     fn cancelling_stops_the_search() {
         let path = clip("cancel.mp4", &["-f", "lavfi", "-i", "testsrc=s=64x64:r=30:d=2", "-c:v", "mpeg4"]);
         let mut sampler = FrameSampler::open(&path, 16).expect("open");
-        assert_eq!(sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND), &|| true), Err("cancelled".to_owned()));
+        assert_eq!(sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND), &|| true), Err(ThumbnailError::Failed("cancelled".to_owned())));
     }
 }
