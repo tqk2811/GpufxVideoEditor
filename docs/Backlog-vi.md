@@ -225,6 +225,3 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/engine/src/project.rs:74,78` (`locked`, `hidden`): phiên bản project vẫn là 2 và `Track` không có `deny_unknown_fields`, nên bản dựng cũ mở project mới sẽ bỏ qua hai trường này không báo gì, rồi xuất luôn track đã ẩn. Nên tăng phiên bản project hoặc cho bản cũ từ chối trường lạ. Ghi ngày 2026-11-09.
 
-### [Thấp] Khoá track là một bước undo nên khoá xong thì mất redo và Ctrl+Z lặng lẽ mở khoá
-
-`crates/engine/src/edit.rs:663`: `set_track_locked` đi qua lịch sử như mọi sửa đổi, nên khoá track xoá ngăn xếp redo và Ctrl+Z kế tiếp mở khoá thay vì hoàn tác việc sửa trước đó. Cân nhắc coi khoá là trạng thái không undo được; người dùng chưa quyết định. Ghi ngày 2026-11-09.

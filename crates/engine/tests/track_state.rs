@@ -80,17 +80,64 @@ fn a_missing_track_or_clip_is_still_named() {
 }
 
 #[test]
-fn locking_and_hiding_are_undone_like_any_edit() {
+fn hiding_is_undone_like_any_edit() {
     let mut history = EditHistory::new(timeline(), 10);
-    history.apply(|p| set_track_locked(p, 0, true)).unwrap();
     history.apply(|p| set_track_hidden(p, 0, true)).unwrap();
-    assert!(history.current().tracks[0].locked && history.current().tracks[0].hidden);
     assert!(history.undo());
-    assert!(history.current().tracks[0].locked && !history.current().tracks[0].hidden, "hiding is undone first");
-    assert!(history.undo());
-    assert!(!history.current().tracks[0].locked);
+    assert!(!history.current().tracks[0].hidden);
     assert!(history.redo());
+    assert!(history.current().tracks[0].hidden);
+}
+
+#[test]
+fn locking_adds_no_undo_step_and_keeps_the_redo_stack() {
+    let mut history = EditHistory::new(timeline(), 10);
+    history.set_track_locked(0, true).unwrap();
     assert!(history.current().tracks[0].locked);
+    assert!(!history.can_undo(), "no step to undo");
+
+    history.apply(|p| trim_end(p, key(1, 0), t(60_000))).unwrap();
+    assert!(history.undo());
+    history.set_track_locked(0, false).unwrap();
+    assert!(history.can_redo(), "unlocking leaves the redo step");
+}
+
+#[test]
+fn undo_and_redo_keep_the_lock_as_it_is_now() {
+    let mut history = EditHistory::new(timeline(), 10);
+    history.apply(|p| trim_end(p, key(1, 0), t(60_000))).unwrap();
+    history.apply(|p| trim_end(p, key(1, 0), t(45_000))).unwrap();
+    assert!(history.undo());
+    history.set_track_locked(1, true).unwrap();
+
+    assert!(history.undo());
+    assert!(history.current().tracks[1].locked, "the older snapshot does not unlock");
+    assert_eq!(history.current().tracks[1].clips[0].duration, t(90_000), "the content is restored on a locked track");
+    assert!(history.redo());
+    assert!(history.redo());
+    assert!(history.current().tracks[1].locked);
+    assert_eq!(history.current().tracks[1].clips[0].duration, t(45_000));
+
+    history.set_track_locked(1, false).unwrap();
+    assert!(history.undo());
+    assert!(!history.current().tracks[1].locked, "unlocked stays unlocked too");
+}
+
+#[test]
+fn the_lock_of_a_track_survives_undoing_and_redoing_its_creation() {
+    let mut history = EditHistory::new(timeline(), 10);
+    history.apply(|p| add_track(p, TrackKind::Video)).unwrap();
+    history.set_track_locked(3, true).unwrap();
+    assert!(history.undo());
+    assert_eq!(history.current().tracks.len(), 3);
+    assert!(history.redo());
+    assert!(history.current().tracks[3].locked);
+}
+
+#[test]
+fn locking_a_missing_track_is_refused() {
+    let mut history = EditHistory::new(timeline(), 10);
+    assert_eq!(history.set_track_locked(9, true), Err(EditError::TrackNotFound { track: 9 }));
 }
 
 #[test]

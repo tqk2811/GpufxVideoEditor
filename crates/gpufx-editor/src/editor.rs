@@ -12,7 +12,7 @@ use crate::timeline::view::TimelineView;
 use crate::visuals::ClipVisuals;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted,
-    set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
+    set_track_hidden, set_transition_params, split_clip, trim_end, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
 use serde_json::{Map, Value};
@@ -86,18 +86,6 @@ struct LiveEdit {
     shown: Project,
     /// Whether the project was clean when the drag began.
     was_clean: bool,
-}
-
-/// Whether two projects are equal when the `locked` flag of every track is ignored.
-fn same_ignoring_locked(a: &Project, b: &Project) -> bool {
-    if a.tracks.len() != b.tracks.len() {
-        return false;
-    }
-    let (mut a, mut b) = (a.clone(), b.clone());
-    for track in a.tracks.iter_mut().chain(b.tracks.iter_mut()) {
-        track.locked = false;
-    }
-    a == b
 }
 
 fn stream_of(kind: TrackKind) -> StreamKind {
@@ -524,10 +512,7 @@ impl EditorState {
             Ok(after) => {
                 if *after != before {
                     self.revision += 1;
-                    // Locking a track changes nothing that is heard, so it must not flush the audio ring.
-                    if !same_ignoring_locked(after, &before) {
-                        self.audio_revision = self.revision;
-                    }
+                    self.audio_revision = self.revision;
                 }
                 self.status = Status::Idle;
                 true
@@ -552,9 +537,20 @@ impl EditorState {
         self.selection.is_some_and(|key| self.is_track_locked(key.track))
     }
 
+    /// Not an undo step. The project is dirty, because the flag is saved with it, but nothing that
+    /// is heard changed, so the audio ring stays.
     pub fn toggle_track_locked(&mut self, track: usize) {
+        if self.edits_blocked() {
+            return;
+        }
         let locked = self.is_track_locked(track);
-        self.run(|project| set_track_locked(project, track, !locked));
+        match self.history.set_track_locked(track, !locked) {
+            Ok(()) => {
+                self.revision += 1;
+                self.status = Status::Idle;
+            }
+            Err(error) => self.refuse(&error),
+        }
     }
 
     pub fn toggle_track_hidden(&mut self, track: usize) {
@@ -1037,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn locking_and_hiding_are_undoable_steps() {
+    fn hiding_is_an_undoable_step_and_the_lock_stays_through_it() {
         let mut state = state_with_clip();
         state.toggle_track_locked(0);
         state.toggle_track_hidden(0);
@@ -1046,8 +1042,50 @@ mod tests {
         state.undo();
         assert!(state.revision() > revision);
         assert!(state.project().tracks[0].locked && !state.project().tracks[0].hidden);
+    }
+
+    #[test]
+    fn ctrl_z_after_locking_undoes_the_earlier_edit_and_leaves_the_lock() {
+        let mut state = state_with_clip();
+        state.toggle_track_hidden(0);
+        state.toggle_track_locked(0);
         state.undo();
-        assert!(!state.project().tracks[0].locked);
+        assert!(!state.project().tracks[0].hidden, "the step before the lock");
+        assert!(state.project().tracks[0].locked, "the lock is not undone");
+    }
+
+    #[test]
+    fn locking_does_not_clear_redo_and_undo_keeps_the_lock_state_of_now() {
+        let mut state = state_with_clip();
+        state.toggle_track_hidden(0);
+        state.undo();
+        state.toggle_track_locked(0);
+        assert!(state.can_redo(), "the lock is not an edit that replaces the future");
+        state.redo();
+        assert!(state.project().tracks[0].hidden);
+        assert!(state.project().tracks[0].locked);
+    }
+
+    #[test]
+    fn a_lock_dirties_the_project_is_saved_with_it_and_stays_out_of_the_audio() {
+        let mut state = state_with_clip();
+        state.mark_saved(PathBuf::from("a.json"));
+        let audio = state.audio_revision();
+        state.toggle_track_locked(0);
+        assert!(state.is_dirty());
+        assert_eq!(state.audio_revision(), audio);
+        let text = serde_json::to_string(state.project()).unwrap();
+        assert!(text.contains(r#""locked":true"#), "{text}");
+    }
+
+    #[test]
+    fn locking_waits_for_a_held_control() {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        state.live_gain(-6.0);
+        state.toggle_track_locked(0);
+        assert!(!state.is_track_locked(0));
+        assert_eq!(state.status(), &Status::Info(Message::FinishDragFirst));
     }
 
     #[test]

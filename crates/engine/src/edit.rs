@@ -665,6 +665,21 @@ impl EditHistory {
         Ok(&self.current)
     }
 
+    /// Locks or unlocks `track` without an undo step: the redo stack stays, and no later undo or
+    /// redo changes the flag. Tracks are only ever appended, so an index names the same track in
+    /// every snapshot; one that predates the track simply does not have it. Undo still restores
+    /// the content of a locked track, because the lock refuses new edits and says nothing about
+    /// the past.
+    pub fn set_track_locked(&mut self, track: usize, locked: bool) -> Result<(), EditError> {
+        track_mut(&mut self.current, track)?.locked = locked;
+        for snapshot in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            if let Some(target) = snapshot.tracks.get_mut(track) {
+                target.locked = locked;
+            }
+        }
+        Ok(())
+    }
+
     /// Goes back one step. Returns whether there was a step.
     pub fn undo(&mut self) -> bool {
         let Some(previous) = self.undo.pop_back() else {
