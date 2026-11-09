@@ -1,6 +1,6 @@
 //! English strings. No `_` arm: a new message must be given text here.
 
-use super::{ClipAction, Message, StreamKind};
+use super::{ClipAction, ClipEdge, Message, StreamKind, TrackLabel};
 
 fn stream_name(stream: StreamKind) -> &'static str {
     match stream {
@@ -23,6 +23,14 @@ fn counted(count: i64, noun: &str) -> String {
         format!("1 {noun}")
     } else {
         format!("{count} {noun}s")
+    }
+}
+
+fn track_label(track: TrackLabel) -> String {
+    match track {
+        TrackLabel::Video(number) => format!("Video track {number}"),
+        TrackLabel::Audio(number) => format!("Audio track {number}"),
+        TrackLabel::Position(number) => format!("Track {number}"),
     }
 }
 
@@ -70,6 +78,28 @@ pub(super) fn text(message: &Message) -> String {
         Message::SelectClip(action) => select_clip(*action).to_owned(),
         Message::ExpressionDropped => "The expression being typed was dropped: the clip changed".to_owned(),
         Message::LanguageSaveFailed(detail) => format!("The language could not be saved: {detail}"),
+
+        Message::EditTrackNotFound(number) => format!("Track {number} does not exist"),
+        Message::EditClipNotFound { track, clip } => format!("{}: clip {clip} does not exist", track_label(*track)),
+        Message::EditEffectNotFound { track, clip, effect } => format!("{}, clip {clip}: effect {effect} does not exist", track_label(*track)),
+        Message::EditTransitionNotFound { track, after_clip } => format!("{}: no transition after clip {after_clip}", track_label(*track)),
+        Message::EditTrackKindMismatch { from, to } => format!("A clip cannot move from {} track to {} track", stream_with_article(*from), stream_with_article(*to)),
+        Message::EditNoRoom(track) => format!("{}: no room for the clip", track_label(*track)),
+        Message::EditOverlap { track, start, end } => format!("{}: {start} s to {end} s overlaps another clip", track_label(*track)),
+        Message::EditTimeOverflow { track, clip } => format!("{}, clip {clip}: the time is out of range", track_label(*track)),
+        Message::EditTransitionOnEdge { track, edge } => format!(
+            "{}: the {} of the clip holds a transition, so it cannot be trimmed. Remove the transition first",
+            track_label(*track),
+            match edge {
+                ClipEdge::Start => "start",
+                ClipEdge::End => "end",
+            }
+        ),
+        Message::EditBeforeSourceStart(track) => format!("{}: the clip cannot start before the beginning of its source", track_label(*track)),
+        Message::EditSplitOutsideClip { track, at } => format!("{}: cannot split at {at} s", track_label(*track)),
+        Message::EditSplitInsideFade { track, at } => format!("{}: {at} s is inside a fade", track_label(*track)),
+        Message::EditSplitInsideTransition { track, at } => format!("{}: {at} s is inside a transition", track_label(*track)),
+        Message::EditInvalid(detail) => format!("The result is not valid: {detail}"),
 
         Message::DialogOpen => "Close the open dialog first".to_owned(),
         Message::LoadRunning => "Wait for the current load to finish".to_owned(),

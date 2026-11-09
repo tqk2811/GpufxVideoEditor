@@ -2,7 +2,7 @@
 //! calls these methods and draws the result; every timeline change goes through an engine command.
 
 use crate::export::{EncoderOption, ExportProgress};
-use crate::i18n::{ClipAction, Language, Message, StreamKind};
+use crate::i18n::{ClipAction, ClipEdge, Language, Message, StreamKind, TrackLabel};
 use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, TrackChoice};
 use crate::packages::{Catalog, PickerState};
 use crate::playback::plan::{start_time, TransportCommand};
@@ -81,6 +81,48 @@ struct LiveEdit {
     shown: Project,
     /// Whether the project was clean when the drag began.
     was_clean: bool,
+}
+
+fn stream_of(kind: TrackKind) -> StreamKind {
+    match kind {
+        TrackKind::Video => StreamKind::Video,
+        TrackKind::Audio => StreamKind::Audio,
+    }
+}
+
+/// Track `index` as the timeline labels it, numbered within its kind from 1.
+fn track_label(project: &Project, index: usize) -> TrackLabel {
+    let Some(track) = project.tracks.get(index) else { return TrackLabel::Position(index + 1) };
+    let number = project.tracks[..=index].iter().filter(|other| other.kind == track.kind).count();
+    match track.kind {
+        TrackKind::Video => TrackLabel::Video(number),
+        TrackKind::Audio => TrackLabel::Audio(number),
+    }
+}
+
+fn seconds_text(time: Time) -> String {
+    format!("{:.2}", crate::timecode::to_seconds(time))
+}
+
+/// What the status line says for a refused edit. No `_` arm: a new reason must be given a message.
+fn refusal_message(project: &Project, error: &EditError) -> Message {
+    let label = |track: usize| track_label(project, track);
+    match error {
+        EditError::TrackNotFound { track } => Message::EditTrackNotFound(track + 1),
+        EditError::ClipNotFound { key } => Message::EditClipNotFound { track: label(key.track), clip: key.clip + 1 },
+        EditError::EffectNotFound { key, effect } => Message::EditEffectNotFound { track: label(key.track), clip: key.clip + 1, effect: effect + 1 },
+        EditError::TransitionNotFound { track, after_clip } => Message::EditTransitionNotFound { track: label(*track), after_clip: after_clip + 1 },
+        EditError::TrackKindMismatch { from, to } => Message::EditTrackKindMismatch { from: stream_of(*from), to: stream_of(*to) },
+        EditError::NoRoom { track } => Message::EditNoRoom(label(*track)),
+        EditError::Overlap { track, start, end } => Message::EditOverlap { track: label(*track), start: seconds_text(*start), end: seconds_text(*end) },
+        EditError::TimeOverflow { key } => Message::EditTimeOverflow { track: label(key.track), clip: key.clip + 1 },
+        EditError::TransitionOnEdge { key, edge } => Message::EditTransitionOnEdge { track: label(key.track), edge: if *edge == "start" { ClipEdge::Start } else { ClipEdge::End } },
+        EditError::BeforeSourceStart { key, .. } => Message::EditBeforeSourceStart(label(key.track)),
+        EditError::SplitOutsideClip { key, at } => Message::EditSplitOutsideClip { track: label(key.track), at: seconds_text(*at) },
+        EditError::SplitInsideFade { key, at } => Message::EditSplitInsideFade { track: label(key.track), at: seconds_text(*at) },
+        EditError::SplitInsideTransition { key, at } => Message::EditSplitInsideTransition { track: label(key.track), at: seconds_text(*at) },
+        EditError::Invalid(errors) => Message::EditInvalid(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
+    }
 }
 
 /// The tab of the left panel.
@@ -432,7 +474,7 @@ impl EditorState {
     }
 
     fn refuse(&mut self, error: &EditError) {
-        self.status = Status::Refused(Message::Technical(error.to_string()));
+        self.status = Status::Refused(refusal_message(self.project(), error));
     }
 
     /// An export renders the project it started with, so edits wait for it. A drag holds a clip key,
@@ -989,6 +1031,55 @@ mod tests {
         state.add_probed_file(0, Path::new("raw.h264"), &unknown);
         assert_eq!(state.project().tracks[0].clips[0].duration, DEFAULT_CLIP_DURATION);
         assert!(matches!(state.status(), Status::Info(Message::AddedNoLength { .. })), "{:?}", state.status());
+    }
+
+    #[test]
+    fn a_refused_edit_is_told_in_the_language_of_the_editor() {
+        let mut state = EditorState::default();
+        state.set_language(Language::Vietnamese);
+        state.add_clip_from_file(7, Path::new("a.mp4"));
+        assert_eq!(state.status(), &Status::Refused(Message::EditTrackNotFound(8)));
+        assert_eq!(Language::Vietnamese.text(&Message::EditTrackNotFound(8)), "Track 8 không tồn tại");
+    }
+
+    #[test]
+    fn every_edit_refusal_has_text_and_names_its_track_as_the_timeline_does() {
+        let mut project = EditorState::default().project().clone();
+        for kind in [TrackKind::Video, TrackKind::Audio, TrackKind::Video] {
+            project.tracks.push(engine::Track { kind, clips: Vec::new(), transitions: Vec::new() });
+        }
+        let key = ClipKey { track: 2, clip: 0 };
+        let at = Time::from_seconds(3).unwrap();
+        let errors = [
+            EditError::ClipNotFound { key },
+            EditError::EffectNotFound { key, effect: 0 },
+            EditError::TransitionNotFound { track: 2, after_clip: 0 },
+            EditError::NoRoom { track: 2 },
+            EditError::Overlap { track: 2, start: at, end: at },
+            EditError::TimeOverflow { key },
+            EditError::TransitionOnEdge { key, edge: "start" },
+            EditError::TransitionOnEdge { key, edge: "end" },
+            EditError::BeforeSourceStart { key, source_in: at },
+            EditError::SplitOutsideClip { key, at },
+            EditError::SplitInsideFade { key, at },
+            EditError::SplitInsideTransition { key, at },
+        ];
+        for error in &errors {
+            let message = refusal_message(&project, error);
+            assert!(!matches!(message, Message::Technical(_)), "{error:?}");
+            assert!(Language::English.text(&message).starts_with("Video track 2"), "{error:?}");
+            assert!(Language::Vietnamese.text(&message).starts_with("Track video 2"), "{error:?}");
+        }
+        let start = refusal_message(&project, &EditError::TransitionOnEdge { key, edge: "start" });
+        let end = refusal_message(&project, &EditError::TransitionOnEdge { key, edge: "end" });
+        assert_ne!(Language::Vietnamese.text(&start), Language::Vietnamese.text(&end));
+
+        let mismatch = refusal_message(&project, &EditError::TrackKindMismatch { from: TrackKind::Audio, to: TrackKind::Video });
+        assert_eq!(Language::English.text(&mismatch), "A clip cannot move from an audio track to a video track");
+        assert_eq!(Language::Vietnamese.text(&mismatch), "Không thể chuyển clip từ track âm thanh sang track video");
+        assert_eq!(refusal_message(&project, &EditError::TrackNotFound { track: 9 }), Message::EditTrackNotFound(10));
+        let invalid = refusal_message(&project, &EditError::Invalid(Vec::new()));
+        assert!(Language::Vietnamese.text(&invalid).starts_with("Kết quả không hợp lệ"));
     }
 
     #[test]

@@ -1,11 +1,19 @@
 //! Vietnamese strings. No `_` arm: a new message must be given text here.
 
-use super::{ClipAction, Message, StreamKind};
+use super::{ClipAction, ClipEdge, Message, StreamKind, TrackLabel};
 
 fn stream_name(stream: StreamKind) -> &'static str {
     match stream {
         StreamKind::Video => "video",
         StreamKind::Audio => "âm thanh",
+    }
+}
+
+fn track_label(track: TrackLabel) -> String {
+    match track {
+        TrackLabel::Video(number) => format!("Track video {number}"),
+        TrackLabel::Audio(number) => format!("Track âm thanh {number}"),
+        TrackLabel::Position(number) => format!("Track {number}"),
     }
 }
 
@@ -53,6 +61,28 @@ pub(super) fn text(message: &Message) -> String {
         Message::SelectClip(action) => select_clip(*action).to_owned(),
         Message::ExpressionDropped => "Đã bỏ biểu thức đang nhập vì clip đã thay đổi".to_owned(),
         Message::LanguageSaveFailed(detail) => format!("Không lưu được ngôn ngữ: {detail}"),
+
+        Message::EditTrackNotFound(number) => format!("Track {number} không tồn tại"),
+        Message::EditClipNotFound { track, clip } => format!("{}: clip {clip} không tồn tại", track_label(*track)),
+        Message::EditEffectNotFound { track, clip, effect } => format!("{}, clip {clip}: hiệu ứng {effect} không tồn tại", track_label(*track)),
+        Message::EditTransitionNotFound { track, after_clip } => format!("{}: không có chuyển cảnh sau clip {after_clip}", track_label(*track)),
+        Message::EditTrackKindMismatch { from, to } => format!("Không thể chuyển clip từ track {} sang track {}", stream_name(*from), stream_name(*to)),
+        Message::EditNoRoom(track) => format!("{}: không còn chỗ cho clip", track_label(*track)),
+        Message::EditOverlap { track, start, end } => format!("{}: đoạn từ {start} đến {end} giây chồng lên clip khác", track_label(*track)),
+        Message::EditTimeOverflow { track, clip } => format!("{}, clip {clip}: thời gian vượt quá giới hạn", track_label(*track)),
+        Message::EditTransitionOnEdge { track, edge } => format!(
+            "{}: {} clip đang có chuyển cảnh nên không cắt được. Hãy xóa chuyển cảnh trước",
+            track_label(*track),
+            match edge {
+                ClipEdge::Start => "đầu",
+                ClipEdge::End => "cuối",
+            }
+        ),
+        Message::EditBeforeSourceStart(track) => format!("{}: clip không thể bắt đầu trước đầu tệp nguồn", track_label(*track)),
+        Message::EditSplitOutsideClip { track, at } => format!("{}: không thể tách tại {at} giây", track_label(*track)),
+        Message::EditSplitInsideFade { track, at } => format!("{}: {at} giây nằm trong đoạn tăng hoặc giảm dần âm lượng", track_label(*track)),
+        Message::EditSplitInsideTransition { track, at } => format!("{}: {at} giây nằm trong chuyển cảnh", track_label(*track)),
+        Message::EditInvalid(detail) => format!("Kết quả không hợp lệ: {detail}"),
 
         Message::DialogOpen => "Hãy đóng hộp thoại đang mở trước".to_owned(),
         Message::LoadRunning => "Hãy chờ nạp xong tệp hiện tại".to_owned(),

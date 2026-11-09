@@ -1,7 +1,8 @@
 //! Every text the editor shows. A [`Message`] says what to tell the user; each language is one table
 //! with an exhaustive `match`, so a language lacking a string does not compile. Adding a language
-//! is one table and one line in [`Language`]. Technical detail from the engine or FFmpeg travels
-//! as [`Message::Technical`] or as the argument of a translated prefix, in English.
+//! is one table and one line in [`Language`]. Detail from an encoder, FFmpeg or a media probe
+//! travels as [`Message::Technical`] or as the argument of a translated prefix, in English. A
+//! refused edit has a message of its own for each reason.
 
 mod en;
 mod vi;
@@ -57,6 +58,21 @@ pub enum StreamKind {
     Audio,
 }
 
+/// A track named in a message: as the timeline labels it, or by position when it does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackLabel {
+    Video(usize),
+    Audio(usize),
+    Position(usize),
+}
+
+/// The edge of a clip that an edit was refused on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipEdge {
+    Start,
+    End,
+}
+
 /// What a selected clip was needed for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipAction {
@@ -74,7 +90,7 @@ pub enum ClipAction {
 /// language change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
-    /// Text that is not translated: an encoder name, or engine detail under a translated prefix.
+    /// Text that is not translated: an encoder name, or FFmpeg or media probe detail.
     Technical(String),
 
     // Status line.
@@ -104,6 +120,23 @@ pub enum Message {
     NoUsableStream(String),
     SelectClip(ClipAction),
     ExpressionDropped,
+
+    // Refused edits, one for each reason the engine has. Clip numbers count from 1.
+    EditTrackNotFound(usize),
+    EditClipNotFound { track: TrackLabel, clip: usize },
+    EditEffectNotFound { track: TrackLabel, clip: usize, effect: usize },
+    EditTransitionNotFound { track: TrackLabel, after_clip: usize },
+    EditTrackKindMismatch { from: StreamKind, to: StreamKind },
+    EditNoRoom(TrackLabel),
+    EditOverlap { track: TrackLabel, start: String, end: String },
+    EditTimeOverflow { track: TrackLabel, clip: usize },
+    EditTransitionOnEdge { track: TrackLabel, edge: ClipEdge },
+    EditBeforeSourceStart(TrackLabel),
+    EditSplitOutsideClip { track: TrackLabel, at: String },
+    EditSplitInsideFade { track: TrackLabel, at: String },
+    EditSplitInsideTransition { track: TrackLabel, at: String },
+    /// The validator's own list, which stays in English under a translated prefix.
+    EditInvalid(String),
     LanguageSaveFailed(String),
 
     // Background work.
