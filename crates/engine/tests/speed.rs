@@ -399,6 +399,38 @@ fn past_the_end_of_the_file_is_silent_and_a_silent_file_stays_silent() {
     assert!(silent.iter().all(|sample| *sample == 0.0), "digital silence is not boosted");
 }
 
+/// How far a windowed RMS falls below the steady level, in dB, at the worst key grain.
+fn worst_key_dip(speed: f64, hz: f64) -> f64 {
+    const GRAIN_HOP: usize = 1024;
+    const KEY: usize = 64;
+    let frames = 12 * 48_000;
+    let project = project_of(vec![sped_clip(0, 20 * SECOND, 12 * SECOND, speed)]);
+    let out = mix_tone(&project, hz, frames);
+    let window = |from: usize| rms(&out[from * 2..(from + 256) * 2]);
+    let mut worst = 0.0f64;
+    let mut key = KEY * GRAIN_HOP;
+    while key + 8192 < frames {
+        let steady = (0..8).map(|i| window(key + 4096 + i * 512)).fold(0.0, f32::max);
+        let lowest = (0..3 * 2048).step_by(32).map(|step| window(key - 3072 + step)).fold(f32::MAX, f32::min);
+        worst = worst.max(20.0 * f64::from(steady / lowest).log10());
+        key += KEY * GRAIN_HOP;
+    }
+    worst
+}
+
+/// Key grains are not aligned, so that a seek replays little; two grains out of phase used to
+/// cancel by up to 18 dB in their overlap. 3 dB is where a dip starts to be heard on a tone, and
+/// the worst measured after the join gain is 1.7 dB.
+#[test]
+fn a_key_grain_does_not_dip_the_level() {
+    for speed in [0.5, 0.1, 2.0] {
+        for hz in [110.0, 233.0, 440.0, 1000.0, 3000.0] {
+            let dip = worst_key_dip(speed, hz);
+            assert!(dip < 3.0, "{speed}x {hz} Hz: {dip:.2} dB at a key");
+        }
+    }
+}
+
 fn long_mix(project: &Project, hz: f64, frames: usize, block: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; frames * 2];
     let mut states = StretchStates::default();

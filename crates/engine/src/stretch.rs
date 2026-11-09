@@ -23,7 +23,9 @@
 //! Every [`KEY_INTERVAL`] grains the position is the nominal one, so the alignment of any grain
 //! depends on at most [`KEY_INTERVAL`] grains before it, and a seek replays only those. Grain
 //! positions are kept between blocks, which is only memoisation: rebuilding them gives the same
-//! numbers. A clip cut in two starts a new grid at each half.
+//! numbers. A clip cut in two starts a new grid at each half. A key grain is not in phase with
+//! the grain before it, and where the two overlap the level is held by dividing out what their
+//! correlation says they cancel, so the join is a phase jump and no dip.
 
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::PI;
@@ -50,6 +52,8 @@ const KEPT_POSITIONS: usize = 3;
 const MIN_WEIGHT: f32 = 0.01;
 /// From this sum of window weights the sample is complete.
 const FULL_WEIGHT: f32 = 0.999;
+/// The strongest correction of the join at a key grain, a limit on how far a cancellation is undone.
+const MAX_JOIN_GAIN: f32 = 8.0;
 
 /// Where a stretched segment reads from. Equal specs produce equal audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +89,8 @@ struct ClipStretch {
     candidates: Vec<f32>,
     /// The window weights that went into each output sample.
     weights: Vec<f32>,
+    /// The key grains of this block with what came before them: `(grain, correlation)`.
+    joins: Vec<(i64, f32)>,
 }
 
 /// The stretchers of the clips being mixed. Keep one for a whole render or playback.
@@ -111,7 +117,7 @@ impl StretchStates {
 
 impl ClipStretch {
     fn new(spec: Stretch, source: &str) -> Self {
-        Self { spec, source: source.to_owned(), window: Vec::new(), window_start: 0, positions: VecDeque::new(), source_end: None, reference: Vec::new(), candidates: Vec::new(), weights: Vec::new() }
+        Self { spec, source: source.to_owned(), window: Vec::new(), window_start: 0, positions: VecDeque::new(), source_end: None, reference: Vec::new(), candidates: Vec::new(), weights: Vec::new(), joins: Vec::new() }
     }
 
     fn nominal(&self, grain: i64) -> i64 {
@@ -127,10 +133,17 @@ impl ClipStretch {
         let mut weights = std::mem::take(&mut self.weights);
         weights.clear();
         weights.resize(frames as usize, 0.0);
+        let mut joins = std::mem::take(&mut self.joins);
+        joins.clear();
+        let mut before = None;
         for grain in first..=last {
             let centre = self.position_of(source, key, grain)?;
             let from = centre - GRAIN / 2;
             self.ensure(source, key, from, from + GRAIN)?;
+            if let (0, Some(previous)) = (grain.rem_euclid(KEY_INTERVAL), before) {
+                joins.push((grain, self.join_correlation(previous, centre)));
+            }
+            before = Some(centre);
             let output_from = grain * HOP - GRAIN / 2;
             for i in 0..GRAIN {
                 let timeline = output_from + i;
@@ -155,7 +168,11 @@ impl ClipStretch {
                 frame[1] *= scale;
             }
         }
+        for &(grain, correlation) in &joins {
+            apply_join_gain(out, begin, grain, correlation);
+        }
         self.weights = weights;
+        self.joins = joins;
         self.trim();
         Ok(())
     }
@@ -244,6 +261,22 @@ impl ClipStretch {
         Ok(nominal - SEARCH + best.1)
     }
 
+    /// How alike grain `centre` and the grain before it, at `previous`, sound where they overlap,
+    /// from -1 to 1. Silence counts as alike, so that it is left alone.
+    fn join_correlation(&self, previous: i64, centre: i64) -> f32 {
+        let (mut dot, mut before_energy, mut after_energy) = (0.0, 0.0, 0.0);
+        for offset in (0..HOP).step_by(2) {
+            let (before, after) = (self.mono_sample(previous + offset), self.mono_sample(centre - HOP + offset));
+            dot += before * after;
+            before_energy += before * before;
+            after_energy += after * after;
+        }
+        if before_energy < 1e-9 || after_energy < 1e-9 {
+            return 1.0;
+        }
+        dot / (before_energy * after_energy).sqrt()
+    }
+
     fn full_rate_correlation(&self, reference_start: i64, candidate_start: i64) -> f32 {
         let mut dot = 0.0;
         let mut energy = 1e-12;
@@ -324,6 +357,24 @@ impl ClipStretch {
 /// The periodic Hann window at sample `i` of a grain.
 fn hann(i: i64) -> f32 {
     0.5 - 0.5 * (2.0 * PI * i as f32 / GRAIN as f32).cos()
+}
+
+/// Keeps the level through the join at key grain `grain`, whose alignment does not depend on the
+/// grain before it. Two grains that are not in phase cancel in their overlap: with correlation `c`
+/// their windows `a` and `b` sum to a power of `a * a + b * b + 2 * a * b * c`, which this divides
+/// back out. A phase jump remains, but no dip in the level.
+fn apply_join_gain(out: &mut [f32], begin: i64, grain: i64, correlation: f32) {
+    let overlap_start = grain * HOP - GRAIN / 2;
+    let frames = (out.len() / MIX_CHANNELS) as i64;
+    for timeline in overlap_start.max(begin)..(overlap_start + HOP).min(begin + frames) {
+        let offset = timeline - overlap_start;
+        let (before, after) = (hann(offset + HOP), hann(offset));
+        let power = before * before + after * after + 2.0 * before * after * correlation;
+        let gain = (1.0 / power.max(0.0).sqrt()).min(MAX_JOIN_GAIN);
+        let at = (timeline - begin) as usize * MIX_CHANNELS;
+        out[at] *= gain;
+        out[at + 1] *= gain;
+    }
 }
 
 /// How alike two blocks are, not caring about the level of `candidate`.

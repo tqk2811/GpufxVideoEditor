@@ -293,7 +293,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Thấp] Đoạn ghép không căn pha mỗi 1,4 giây trong bộ giãn tiếng
 
-`crates/engine/src/stretch.rs:39` đặt mỗi 64 grain một grain không căn với grain trước, để tua chỉ phải dựng lại tối đa 1,4 giây. Tại đó có một đoạn 21 ms có thể lệch pha, nghe như một chỗ nhấp nhẹ ở âm liên tục. Chưa nghe thử trên nhạc thật; nếu lộ rõ thì tăng khoảng hoặc giữ vị trí grain xuyên suốt clip. Ghi ngày 2026-11-10.
+`crates/engine/src/stretch.rs:39` đặt mỗi 64 grain một grain không căn với grain trước, để tua chỉ phải dựng lại tối đa 1,4 giây. Đo sine với RMS cửa sổ 256 mẫu: trước khi xử lý, hụt tới 18 dB tại đó (110 Hz ở 4x, phổ biến 2 đến 10 dB); sau `apply_join_gain` còn tối đa 1,7 dB ở 0,5x, 0,1x, 2x và test `a_key_grain_does_not_dip_the_level` giữ ngưỡng 3 dB. Riêng 110 Hz ở 4x còn đo được 8,2 dB (cửa sổ ngắn hơn một chu kỳ tín hiệu; chưa tách được khỏi gợn của WSOLA). Còn lại là một chỗ nhảy pha, nghe như tiếng nhấp nhẹ ở âm liên tục. Chưa nghe thử trên nhạc thật; nếu lộ rõ thì tăng khoảng hoặc giữ vị trí grain xuyên suốt clip. Ghi ngày 2026-11-10.
 
 ### [Thấp] Tách hoặc cắt clip đang tua có một mẫu lệch vị trí nguồn tiếng
 
