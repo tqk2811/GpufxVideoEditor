@@ -219,7 +219,7 @@ fn streams_with_a_crop_offset_are_rejected() {
     let mut capture = Capture::new(&[]);
     let error = render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect_err("the crop offset must be rejected");
     assert!(error.0.contains("crop offset"), "{}", error.0);
-    assert!(error.0.contains("clip-cropped.mp4"), "the message names the file: {}", error.0);
+    assert!(error.0.contains("cropped-clip-a"), "the message names the file: {}", error.0);
 }
 
 #[test]

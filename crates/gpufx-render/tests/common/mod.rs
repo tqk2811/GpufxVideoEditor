@@ -38,7 +38,7 @@ fn third_party_tool(name: &str) -> PathBuf {
 fn encoder_tool() -> (PathBuf, &'static str, Vec<String>) {
     if let Ok(output) = Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output() {
         if String::from_utf8_lossy(&output.stdout).contains("libx264") {
-            return (PathBuf::from("ffmpeg"), "libx264", vec!["-bf".into(), "2".into(), "-g".into(), "30".into(), "-sc_threshold".into(), "0".into(), "-crf".into(), "16".into()]);
+            return (PathBuf::from("ffmpeg"), "libx264", vec!["-bf".into(), "2".into(), "-b_strategy".into(), "0".into(), "-g".into(), "30".into(), "-sc_threshold".into(), "0".into(), "-crf".into(), "16".into()]);
         }
     }
     (third_party_tool("ffmpeg.exe"), "libopenh264", vec!["-b:v".into(), "4M".into(), "-g".into(), "30".into()])
@@ -65,18 +65,37 @@ fn generate_clip(path: &Path, grey: i32) {
     assert!(status.success(), "generating {} failed", path.display());
 }
 
+/// Whether `path` has a B-frame, by the picture types ffprobe reports.
+fn has_b_frames(path: &Path) -> bool {
+    let output = Command::new(ffprobe_tool())
+        .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pict_type", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .expect("run ffprobe");
+    assert!(output.status.success(), "ffprobe failed on {}: {}", path.display(), String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| line.trim().starts_with('B'))
+}
+
 /// Generates the test clips once per run; returns the paths of clip A and clip B.
+///
+/// The file names carry the encoder, so clips cached by an earlier run with another encoder (a
+/// different profile, with or without B-frames) are never reused. When the clips have no
+/// B-frames, a warning says the frame-accuracy tests do not cover B-frame reordering.
 pub fn test_clips() -> (PathBuf, PathBuf) {
     static CLIPS: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
     CLIPS
         .get_or_init(|| {
             let dir = clips_dir();
             std::fs::create_dir_all(&dir).expect("create the clips directory");
-            let (a, b) = (dir.join("clip-a.mp4"), dir.join("clip-b.mp4"));
+            let (_, codec, _) = encoder_tool();
+            let (a, b) = (dir.join(format!("clip-a-{codec}.mp4")), dir.join(format!("clip-b-{codec}.mp4")));
             for (path, grey) in [(&a, GREY_A), (&b, GREY_B)] {
                 if !path.is_file() {
                     generate_clip(path, grey);
                 }
+            }
+            if !has_b_frames(&a) {
+                eprintln!("WARNING: the test clips were made with {codec} and contain no B-frames, so the frame-accuracy tests do NOT cover B-frame (presentation order) decoding. Put an ffmpeg with libx264 on PATH.");
             }
             (a, b)
         })
@@ -86,7 +105,7 @@ pub fn test_clips() -> (PathBuf, PathBuf) {
 /// A copy of clip A whose H.264 headers carry a non-zero left crop.
 pub fn cropped_clip() -> PathBuf {
     let (a, _) = test_clips();
-    let path = clips_dir().join("clip-cropped.mp4");
+    let path = clips_dir().join(a.file_name().map(|n| format!("cropped-{}", n.to_string_lossy())).unwrap_or_else(|| "cropped.mp4".into()));
     if !path.is_file() {
         let status = Command::new(third_party_tool("ffmpeg.exe"))
             .args(["-hide_banner", "-y", "-v", "error", "-i"])
