@@ -11,13 +11,14 @@ use std::time::Instant;
 use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu, ProgressEvent, ProjectPaths, CANCEL_LINE, PROGRESS_PROTOCOL};
 use engine::{frame_count, Project};
 
-const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]... [--progress <text|json>]\n\
+const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]... [--progress <text|json>] [--cancel-on-stdin-eof]\n\
     \n\
     --encoder   H.264 encoder: auto (default), libx264, h264_nvenc, h264_amf, h264_qsv, h264_mf or any encoder name FFmpeg accepts\n\
     --hashes    write 'frame sha256-of-RGBA' lines to a file\n\
     --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>\n\
     --progress  text (default), or json: one JSON event per stdout line, and a 'cancel' line on stdin stops the render\n\
-    \x20           (see docs/plans/spec-mcp-server-vi.md)";
+    \x20           (see docs/plans/spec-mcp-server-vi.md)\n\
+    --cancel-on-stdin-eof  with --progress json: the end of stdin stops the render, so a parent that dies stops it too";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProgressMode {
@@ -32,6 +33,7 @@ struct Arguments {
     hashes: Option<PathBuf>,
     package_roots: Vec<PathBuf>,
     progress: ProgressMode,
+    cancel_on_stdin_eof: bool,
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
@@ -41,6 +43,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut hashes = None;
     let mut package_roots = Vec::new();
     let mut progress = ProgressMode::Text;
+    let mut cancel_on_stdin_eof = false;
     // Paths need not be Unicode on Windows, so the arguments stay OS strings until they are read as text.
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -61,6 +64,7 @@ fn parse_arguments() -> Result<Arguments, String> {
                     other => return Err(format!("--progress must be text or json, not {other}")),
                 }
             }
+            "--cancel-on-stdin-eof" => cancel_on_stdin_eof = true,
             "-h" | "--help" => return Err(USAGE.to_owned()),
             other if project.is_none() && !other.starts_with("--") => project = Some(PathBuf::from(&argument)),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
@@ -70,7 +74,10 @@ fn parse_arguments() -> Result<Arguments, String> {
         // Running from a checkout: the packages of the submodule.
         package_roots.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/FFmpegGpuFilter")));
     }
-    Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, package_roots, progress })
+    if cancel_on_stdin_eof && progress != ProgressMode::Json {
+        return Err("--cancel-on-stdin-eof needs --progress json".to_owned());
+    }
+    Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, package_roots, progress, cancel_on_stdin_eof })
 }
 
 /// Why a run wrote no file.
@@ -94,16 +101,19 @@ fn emit(event: &ProgressEvent) {
     let _ = stdout.flush();
 }
 
-/// Sets `cancel` when a cancel line arrives. The end of stdin means nothing: a caller may simply
-/// have no use for it.
-fn watch_stdin(cancel: Arc<AtomicBool>) {
+/// Sets `cancel` when a cancel line arrives. The end of stdin means nothing unless `eof_cancels`:
+/// a caller may simply have no use for it.
+fn watch_stdin(cancel: Arc<AtomicBool>, eof_cancels: bool) {
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
             match line {
                 Ok(line) if line.trim() == CANCEL_LINE => cancel.store(true, Ordering::SeqCst),
                 Ok(_) => {}
-                Err(_) => return,
+                Err(_) => break,
             }
+        }
+        if eof_cancels {
+            cancel.store(true, Ordering::SeqCst);
         }
     });
 }
@@ -119,7 +129,7 @@ fn run() -> Result<(), Failure> {
     let json = arguments.progress == ProgressMode::Json;
     let cancel: Arc<AtomicBool> = Arc::default();
     if json {
-        watch_stdin(cancel.clone());
+        watch_stdin(cancel.clone(), arguments.cancel_on_stdin_eof);
     }
 
     let paths = Arc::new(ProjectPaths::new(&arguments.project, arguments.package_roots.clone()));

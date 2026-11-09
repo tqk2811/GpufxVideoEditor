@@ -538,6 +538,38 @@ fn a_json_run_reports_a_project_that_cannot_be_read() {
 }
 
 #[test]
+fn the_end_of_stdin_stops_a_run_that_asked_for_it() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("cli-json-stdin-eof");
+    let project = write_project(&dir, &two_clip_project());
+    let out = dir.join("eof.mp4");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).arg(&project).arg("--out").arg(&out).args(["--progress", "json", "--cancel-on-stdin-eof"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().expect("run gpufx-render");
+    let stdin = child.stdin.take().expect("stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    for line in lines.by_ref() {
+        if matches!(ProgressEvent::parse(&line.expect("read a line")), Some(ProgressEvent::Progress { frame: 3, .. })) {
+            break;
+        }
+    }
+    drop(stdin);
+    let rest: Vec<ProgressEvent> = lines.map(|line| ProgressEvent::parse(&line.expect("read a line")).expect("an event")).collect();
+    assert!(!child.wait().expect("wait").success());
+    assert_eq!(rest.last(), Some(&ProgressEvent::Cancelled), "{rest:?}");
+    assert!(!out.exists());
+    assert_eq!(temporary_files(&dir), Vec::<String>::new());
+}
+
+#[test]
+fn stopping_at_the_end_of_stdin_needs_json_progress() {
+    let run = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).args(["a.json", "--out", "b.mp4", "--cancel-on-stdin-eof"]).output().expect("run gpufx-render");
+    assert!(!run.status.success());
+    assert!(String::from_utf8_lossy(&run.stderr).contains("--progress json"));
+}
+
+#[test]
 fn a_non_unicode_path_is_an_ordinary_error() {
     use std::os::windows::ffi::OsStringExt;
     // An unpaired surrogate is a valid file name on Windows and not valid Unicode.
