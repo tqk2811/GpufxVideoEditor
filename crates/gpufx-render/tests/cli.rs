@@ -280,6 +280,16 @@ fn expect_rejected(test: &str, tracks: &str, message: &str) {
 }
 
 #[test]
+fn more_than_60_fps_is_rejected() {
+    let dir = scratch_dir("reject-fps");
+    let project = write_project(&dir, r#"{"version":1,"output":{"width":64,"height":64,"frame_duration":1000},"tracks":[]}"#);
+    let output = render(&project, &dir.join("out.mp4"), &dir.join("hashes.txt"));
+    assert!(!output.status.success(), "the project must be rejected");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("not valid") && stderr.contains("60 fps"), "{stderr}");
+}
+
+#[test]
 fn a_missing_source_is_rejected_with_its_location() {
     expect_rejected("reject-source", r#"{"clips":[{"source":"nope.mp4","start":0,"source_in":0,"duration":3000}]}"#, "track 0, clip 0: source 'nope.mp4' not found");
 }

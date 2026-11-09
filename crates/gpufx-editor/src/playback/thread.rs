@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 use engine::render::{ClipKey, RenderError};
 use engine::{audio_channel, sample_position, AudioClock, AudioConsumer, AudioProducer, AudioSource, Project, Time, MIX_CHANNELS};
 
+/// Shared by every audio thread, so one reopened in the middle of playing starts a different run.
+static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
+
 use super::plan::{expand_stereo, frames_to_prepare, gate_may_open, output_delay_frames, timed_frames, ClockReading, BLOCK_FRAMES, LEAD_FRAMES, RING_BLOCKS};
 
 /// How long the thread sleeps when the lead is full. A seek or edit wakes it at once.
@@ -33,6 +36,8 @@ pub struct PlaybackShared {
     past_end: AtomicU64,
     delay: AtomicU64,
     anchor: AtomicI64,
+    /// The latest start or seek: each is a new run of the clock.
+    runs: AtomicU64,
 }
 
 /// Running totals of the callback.
@@ -69,6 +74,12 @@ impl PlaybackShared {
     fn begin(&self, anchor: i64) {
         self.past_end.store(0, Ordering::Relaxed);
         self.anchor.store(anchor, Ordering::Relaxed);
+        self.runs.store(NEXT_RUN.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    /// Changes with every play and seek, even one to the place the last one went to.
+    pub fn run(&self) -> u64 {
+        self.runs.load(Ordering::Relaxed)
     }
 }
 
@@ -671,6 +682,26 @@ mod tests {
             "the gate after the seeks",
         );
         assert_eq!(sample_of(first.unwrap()), sample_position(target));
+    }
+
+    #[test]
+    fn a_new_audio_thread_does_not_repeat_the_run_of_the_last_one() {
+        let (first, _first_consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        first.play(Time::ZERO);
+        let (second, _second_consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        second.play(Time::ZERO);
+        assert_ne!(first.shared().run(), second.shared().run());
+    }
+
+    #[test]
+    fn every_play_and_seek_is_a_new_run_even_to_the_same_place() {
+        let (thread, _consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        let before = thread.shared().run();
+        thread.play(Time::ZERO);
+        let played = thread.shared().run();
+        assert_ne!(played, before);
+        thread.seek(Time::ZERO);
+        assert_ne!(thread.shared().run(), played, "the same place again");
     }
 
     #[test]

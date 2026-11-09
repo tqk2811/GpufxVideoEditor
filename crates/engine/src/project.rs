@@ -177,6 +177,8 @@ impl PlacedRect {
 pub const MIN_SPEED: f64 = 0.1;
 /// The fastest playback speed of a clip.
 pub const MAX_SPEED: f64 = 10.0;
+/// The shortest output frame in ticks: 60 fps is the highest output rate.
+pub const MIN_FRAME_DURATION: Time = Time::from_ticks(1500);
 /// A speed is used as a whole number of these parts: the mapping is exact in integers and never
 /// accumulates rounding, however long the clip. See [`Clip::source_offset`].
 pub const SPEED_SCALE: i64 = 1000;

@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use d3d12_backend::{reserve_temporary, ProjectPaths};
-use engine::{validate, Project, Resolver};
+use engine::{validate, Project, Resolver, MIN_FRAME_DURATION};
 
 /// Names a directory holding `packages/gpufx`, for an install that keeps them elsewhere.
 pub const PACKAGE_ROOT_VARIABLE: &str = "GPUFX_PACKAGE_ROOT";
@@ -112,10 +112,21 @@ pub fn save_project_file(project: &Project, file: &Path) -> Result<(), String> {
     })
 }
 
+/// Brings a file written by hand above 60 fps down to 60, so it still opens. The app never wrote one.
+/// Times are in ticks, so no clip moves; the file itself changes only if the user saves.
+fn limit_frame_rate(project: &mut Project, file: &Path) {
+    let output = &mut project.output;
+    if output.frame_duration > engine::Time::ZERO && output.frame_duration < MIN_FRAME_DURATION {
+        eprintln!("{}: frame_duration {} is more than 60 fps, using {MIN_FRAME_DURATION}", file.display(), output.frame_duration);
+        output.frame_duration = MIN_FRAME_DURATION;
+    }
+}
+
 /// Parses `text` as the project stored in `file` and validates it, reporting at most a few problems.
 pub fn parse_project(text: &str, file: &Path, resolver: &dyn Resolver) -> Result<Project, String> {
     let project = Project::from_json(text).map_err(|e| format!("{}: {e}", file.display()))?;
-    let project = with_absolute_sources(project, file);
+    let mut project = with_absolute_sources(project, file);
+    limit_frame_rate(&mut project, file);
     let errors = validate(&project, resolver);
     if let Some(first) = errors.first() {
         return Err(format!("{}: {first} ({} problems in all)", file.display(), errors.len()));
@@ -235,6 +246,26 @@ mod tests {
         let text = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[]}]}"#;
         let opened = parse_project(text, Path::new(r"D:\p.json"), &AcceptAll).unwrap();
         assert_eq!(opened.version, SUPPORTED_VERSION);
+    }
+
+    fn project_at(frame_duration: i64) -> String {
+        format!(r#"{{"version":2,"output":{{"width":16,"height":16,"frame_duration":{frame_duration}}},"tracks":[]}}"#)
+    }
+
+    #[test]
+    fn a_file_above_60_fps_still_opens_at_60() {
+        let file = Path::new(r"D:\p.json");
+        let opened = parse_project(&project_at(1_000), file, &AcceptAll).expect("it opens");
+        assert_eq!(opened.output.frame_duration, MIN_FRAME_DURATION);
+    }
+
+    #[test]
+    fn a_file_at_or_below_60_fps_keeps_its_rate_and_a_broken_one_is_still_refused() {
+        let file = Path::new(r"D:\p.json");
+        for ticks in [1_500, 3_003] {
+            assert_eq!(parse_project(&project_at(ticks), file, &AcceptAll).unwrap().output.frame_duration.ticks(), ticks);
+        }
+        assert!(parse_project(&project_at(0), file, &AcceptAll).is_err(), "not a rate at all");
     }
 
     #[test]

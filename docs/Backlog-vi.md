@@ -289,7 +289,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Vừa] Preview ở tốc độ cao có thể không kịp giải mã
 
-Ở 10x mỗi khung xuất cần `crates/d3d12-backend/src/decoder.rs:525` giải mã xuyên qua khoảng 10 khung nguồn, trừ khi nhảy quá 2 giây tới keyframe. Nguồn 4K dễ không kịp thời gian thực và preview sẽ rớt khung (xuất file vẫn đúng). Cần đo trên máy thật và cân nhắc giải mã chỉ khung intra khi tua nhanh. Ghi ngày 2026-11-10.
+Ở 10x mỗi khung xuất cần `crates/d3d12-backend/src/decoder.rs:525` giải mã xuyên qua khoảng 10 khung nguồn, trừ khi nhảy quá 2 giây tới keyframe. Nguồn 4K dễ không kịp thời gian thực và preview sẽ rớt khung (xuất file vẫn đúng). Cần đo trên máy thật và cân nhắc giải mã chỉ khung intra khi tua nhanh. Khung không kịp đã được bỏ qua không tốn GPU (`LatestSlot`, `crates/gpufx-editor/src/preview/worker.rs:118`), nhưng giải mã chậm hơn thời gian thực trên clip GOP dài thì độ trễ của hình tăng dần tới khi `forward_seek_pays` cho tua; trong lúc phát, `ABORT_GRACE` 150 ms (`crates/gpufx-editor/src/preview/backend.rs:19`) còn huỷ lượt giải mã nếu vừa có khung trong 500 ms (`PUBLISH_FRESH_WITHIN`, `crates/d3d12-backend/src/decoder.rs:42`), nên ca này chỉ cập nhật hình khoảng mỗi nửa giây (suy từ đọc code, chưa đo). Ghi ngày 2026-11-10.
 
 ### [Thấp] Đoạn ghép không căn pha mỗi 1,4 giây trong bộ giãn tiếng
 
@@ -330,3 +330,11 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Chưa có tool MCP đặt placement của clip
 
 `crates/gpufx-mcp/src/`: agent không đặt hay xoá được `Clip.placement` (vị trí và cỡ clip trong khung); chỉ người dùng làm được bằng khung đỏ trên player và nút Default ở panel Clip. Nên thêm tool theo mẫu các tool sửa clip khác, dùng `set_placement` của engine. Ghi ngày 2026-11-10.
+
+### [Thấp] Kẹp file trên 60 fps về 60 fps mà người dùng không biết
+
+`crates/gpufx-editor/src/project_file.rs:120`: mở file có `frame_duration` dưới 1500 tick chỉ ghi stderr, project không bị đánh dấu chưa lưu, nên có thể xuất 60 fps mà không hay. Nên báo ở thanh trạng thái hoặc đánh dấu chưa lưu. CLI `gpufx-render` thì từ chối chính file đó, chờ user chốt có dùng chung cách kẹp không. Ghi ngày 2026-11-10.
+
+### [Thấp] Test preview bỏ khung chưa chứng minh được `LatestSlot`
+
+`crates/gpufx-editor/tests/preview_drop.rs:109`: đồng hồ giả chỉ tăng trong `produce`, nên mỗi lần render chỉ có một yêu cầu mới, thay slot bằng hàng đợi FIFO thì test vẫn xanh. Nên gửi nhiều yêu cầu trong lúc `produce` đang chặn rồi khẳng định khung giữa không được render. Ghi ngày 2026-11-10.

@@ -55,6 +55,41 @@ impl RequestTracker {
     }
 }
 
+/// One stretch of playback over one project state. A play, a seek or an edit starts another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackRun {
+    pub started: u64,
+    pub revision: u64,
+}
+
+/// Picks the frame to ask for from the frame the clock says is due.
+///
+/// Lateness needs no decision here: the request is always the frame due now and
+/// [`super::slot::LatestSlot`] drops what has not started, so a frame nobody got to costs nothing and
+/// the worker is busy on the newest one. What the clock can do is step back: the device delay it
+/// subtracts varies between callbacks, which at a frame boundary would ask for, and show, the
+/// previous frame. Within a run that is held off; outside a run every frame is exact.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PlaybackFrames {
+    latest: Option<(PlaybackRun, i64)>,
+}
+
+impl PlaybackFrames {
+    /// The frame to ask for when `due` is due. `run` is `None` while not playing.
+    pub fn pick(&mut self, run: Option<PlaybackRun>, due: i64) -> i64 {
+        let Some(run) = run else {
+            self.latest = None;
+            return due;
+        };
+        let frame = match self.latest {
+            Some((known, latest)) if known == run => latest.max(due),
+            _ => due,
+        };
+        self.latest = Some((run, frame));
+        frame
+    }
+}
+
 /// The size of a picture of `image` pixels fitted inside `available` points, keeping its aspect
 /// ratio. Zero when either has no area.
 pub fn fit_size(image: (u32, u32), available: (f32, f32)) -> (f32, f32) {
@@ -144,6 +179,62 @@ mod tests {
         assert_eq!(tracker.wanted(), None);
         tracker.should_send(1, 2);
         assert_eq!(tracker.wanted(), Some(id(1, 2)));
+    }
+
+    const RUN: Option<PlaybackRun> = Some(PlaybackRun { started: 1, revision: 1 });
+
+    #[test]
+    fn on_time_every_frame_is_asked_for() {
+        let mut frames = PlaybackFrames::default();
+        assert_eq!((0..5).map(|due| frames.pick(RUN, due)).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn behind_by_several_frames_it_jumps_to_the_one_due_now() {
+        let mut frames = PlaybackFrames::default();
+        assert_eq!(frames.pick(RUN, 10), 10);
+        assert_eq!(frames.pick(RUN, 17), 17, "11 to 16 were never asked for");
+    }
+
+    #[test]
+    fn sustained_overload_keeps_moving_the_picture() {
+        let mut frames = PlaybackFrames::default();
+        let (mut wanted, mut shown) = (None, None);
+        for due in (0..600).step_by(9) {
+            let frame = frames.pick(RUN, due);
+            assert_eq!(frame, due, "the frame due now, not a queue of old ones");
+            wanted = Some(id(1, frame));
+            assert!(is_current(wanted, shown, id(1, frame)), "frame {frame} reaches the screen");
+            shown = wanted;
+        }
+        assert_eq!(wanted, Some(id(1, 594)));
+    }
+
+    #[test]
+    fn a_clock_stepping_back_does_not_move_the_picture_back() {
+        let mut frames = PlaybackFrames::default();
+        assert_eq!(frames.pick(RUN, 30), 30);
+        assert_eq!(frames.pick(RUN, 29), 30, "the device delay grew a little");
+        assert_eq!(frames.pick(RUN, 28), 30);
+        assert_eq!(frames.pick(RUN, 31), 31, "and it goes on when the clock passes it");
+    }
+
+    #[test]
+    fn a_seek_or_an_edit_may_go_back() {
+        let mut frames = PlaybackFrames::default();
+        frames.pick(RUN, 300);
+        assert_eq!(frames.pick(Some(PlaybackRun { started: 2, revision: 1 }), 10), 10, "a seek while playing");
+        frames.pick(RUN, 300);
+        assert_eq!(frames.pick(Some(PlaybackRun { started: 1, revision: 2 }), 150), 150, "an edit, such as a new frame rate");
+    }
+
+    #[test]
+    fn while_paused_every_frame_is_exact() {
+        let mut frames = PlaybackFrames::default();
+        frames.pick(RUN, 300);
+        assert_eq!(frames.pick(None, 10), 10);
+        assert_eq!(frames.pick(None, 9), 9, "a scrub backward");
+        assert_eq!(frames.pick(RUN, 8), 8, "and no memory of the run before it");
     }
 
     #[test]

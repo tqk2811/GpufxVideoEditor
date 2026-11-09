@@ -250,6 +250,15 @@ fn non_positive_frame_duration() {
 }
 
 #[test]
+fn more_than_60_fps_is_refused_and_60_is_not() {
+    let p = project(1_499, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])]);
+    assert_eq!(only(&p), vec![E::FrameDurationTooShort { frame_duration: t(1_499) }]);
+    let message = only(&p)[0].to_string();
+    assert!(message.contains("60 fps"), "{message}");
+    assert_eq!(only(&project(1_500, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])])), vec![]);
+}
+
+#[test]
 fn zero_output_size() {
     let mut p = valid_pair();
     p.output.width = 0;

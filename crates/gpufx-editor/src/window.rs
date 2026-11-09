@@ -25,7 +25,7 @@ use crate::playback::device::Playback;
 use crate::playback::plan::{frames_to_ms, TransportCommand};
 use crate::presenter::Presenter;
 use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
-use crate::preview::plan::{frame_index, is_current, RequestId, RequestTracker};
+use crate::preview::plan::{frame_index, is_current, PlaybackFrames, PlaybackRun, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::project_file::{load_project_file, package_roots, project_paths, save_project_file};
 use crate::project_lock::held_elsewhere;
@@ -121,6 +121,7 @@ struct Session {
     state: EditorState,
     next_repaint: Option<Instant>,
     tracker: RequestTracker,
+    playback_frames: PlaybackFrames,
     /// The request behind the frame on screen.
     shown: Option<RequestId>,
     snapshot: Option<(u64, Arc<Project>)>,
@@ -195,6 +196,7 @@ impl Session {
             state,
             next_repaint: None,
             tracker: RequestTracker::default(),
+            playback_frames: PlaybackFrames::default(),
             shown: None,
             snapshot: None,
             surface_error: None,
@@ -478,7 +480,9 @@ impl Session {
             return;
         }
         let revision = self.state.revision();
-        let frame = frame_index(self.state.project(), self.state.playhead());
+        let due = frame_index(self.state.project(), self.state.playhead());
+        let run = self.playback.as_ref().filter(|_| self.state.is_playing()).map(|playback| PlaybackRun { started: playback.thread().shared().run(), revision });
+        let frame = self.playback_frames.pick(run, due);
         if !self.tracker.should_send(revision, frame) {
             return;
         }

@@ -28,6 +28,7 @@ fn the_frame_duration_changes_and_zero_is_refused() {
     let start = project(3_000, vec![]);
     assert_eq!(set_frame_duration(&start, t(1_500)).unwrap().output.frame_duration, t(1_500));
     assert!(matches!(set_frame_duration(&start, t(0)), Err(EditError::Invalid(_))));
+    assert!(matches!(set_frame_duration(&start, t(1_499)), Err(EditError::Invalid(_))), "more than 60 fps");
 }
 
 #[test]

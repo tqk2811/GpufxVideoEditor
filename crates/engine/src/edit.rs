@@ -685,7 +685,7 @@ pub fn set_placement(project: &Project, key: ClipKey, placement: Option<ClipPlac
     finish(next)
 }
 
-/// Changes how long one output frame lasts.
+/// Changes how long one output frame lasts. Anything above 60 fps is refused.
 pub fn set_frame_duration(project: &Project, frame_duration: Time) -> Result<Project, EditError> {
     let mut next = project.clone();
     next.output.frame_duration = frame_duration;

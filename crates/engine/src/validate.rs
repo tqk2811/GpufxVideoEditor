@@ -1,6 +1,6 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
-use crate::project::{speed_in_range, Project, MAX_SPEED, MIN_SPEED};
+use crate::project::{speed_in_range, Project, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;
@@ -38,6 +38,8 @@ pub enum ValidationError {
     InvalidOutputSize { width: u32, height: u32 },
     /// `output.frame_duration` is zero or negative.
     NonPositiveFrameDuration { frame_duration: Time },
+    /// `output.frame_duration` is shorter than [`MIN_FRAME_DURATION`]: more than 60 fps.
+    FrameDurationTooShort { frame_duration: Time },
     /// `output.audio.sample_rate` is not 48000.
     UnsupportedSampleRate { sample_rate: u32 },
     /// `output.audio.channels` is not 2.
@@ -176,6 +178,9 @@ impl fmt::Display for ValidationError {
             NonPositiveFrameDuration { frame_duration } => {
                 write!(f, "output: frame_duration {frame_duration} must be positive")
             }
+            FrameDurationTooShort { frame_duration } => {
+                write!(f, "output: frame_duration {frame_duration} is more than 60 fps, it must be at least {MIN_FRAME_DURATION} ticks")
+            }
             UnsupportedSampleRate { sample_rate } => {
                 write!(f, "output: audio sample_rate {sample_rate} must be 48000")
             }
@@ -281,6 +286,10 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
     }
     if project.output.frame_duration <= Time::ZERO {
         errors.push(NonPositiveFrameDuration {
+            frame_duration: project.output.frame_duration,
+        });
+    } else if project.output.frame_duration < MIN_FRAME_DURATION {
+        errors.push(FrameDurationTooShort {
             frame_duration: project.output.frame_duration,
         });
     }
