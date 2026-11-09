@@ -1,7 +1,9 @@
 //! The window and its event loop.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+#[cfg(debug_assertions)]
+use std::time::Duration;
+use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -9,7 +11,9 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 use d3d12_backend::Gpu;
-use engine::{Project, Time, TrackKind};
+use engine::Project;
+#[cfg(debug_assertions)]
+use engine::{Time, TrackKind};
 
 use crate::editor::EditorState;
 use crate::presenter::Presenter;
@@ -21,10 +25,13 @@ use crate::ui::{self, UiRequest};
 const MEDIA_EXTENSIONS: [&str; 10] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac"];
 
 /// Hidden check of the frame path: names a media file to open at one second, and the app reports
-/// the first frame it shows on stdout and exits a few seconds later.
+/// the first frame it shows on stdout and exits a few seconds later. Debug builds only.
+#[cfg(debug_assertions)]
 const SMOKE_VARIABLE: &str = "GPUFX_EDITOR_SMOKE";
+#[cfg(debug_assertions)]
 const SMOKE_LINGER: Duration = Duration::from_secs(4);
 
+#[cfg(debug_assertions)]
 #[derive(Default)]
 struct Smoke {
     enabled: bool,
@@ -43,6 +50,7 @@ struct Session {
     /// The request behind the frame on screen.
     shown: Option<RequestId>,
     snapshot: Option<(u64, Arc<Project>)>,
+    #[cfg(debug_assertions)]
     smoke: Smoke,
 }
 
@@ -54,15 +62,31 @@ impl Session {
         let presenter = Presenter::new(&gpu, window.clone())?;
         let producer_gpu = gpu.clone();
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
+        #[cfg_attr(not(debug_assertions), expect(unused_mut))]
         let mut state = EditorState::default();
-        let mut smoke = Smoke::default();
-        if let Some(path) = std::env::var_os(SMOKE_VARIABLE) {
-            smoke.enabled = true;
-            state.add_track(TrackKind::Video);
-            state.add_clip_from_file(0, std::path::Path::new(&path));
-            state.set_playhead(Time::from_ticks(engine::TICKS_PER_SECOND));
-        }
-        Ok(Self { preview, gpu, presenter, state, next_repaint: None, tracker: RequestTracker::default(), shown: None, snapshot: None, smoke })
+        #[cfg(debug_assertions)]
+        let smoke = {
+            let mut smoke = Smoke::default();
+            if let Some(path) = std::env::var_os(SMOKE_VARIABLE) {
+                smoke.enabled = true;
+                state.add_track(TrackKind::Video);
+                state.add_clip_from_file(0, std::path::Path::new(&path));
+                state.set_playhead(Time::from_ticks(engine::TICKS_PER_SECOND));
+            }
+            smoke
+        };
+        Ok(Self {
+            preview,
+            gpu,
+            presenter,
+            state,
+            next_repaint: None,
+            tracker: RequestTracker::default(),
+            shown: None,
+            snapshot: None,
+            #[cfg(debug_assertions)]
+            smoke,
+        })
     }
 
     fn apply_outcome(&mut self, Outcome { id, result }: Outcome<PreviewImage>) {
@@ -80,9 +104,11 @@ impl Session {
                 if let Some(old) = self.presenter.set_frame(&self.gpu, frame) {
                     self.preview.give_back(old);
                 }
+                #[cfg(debug_assertions)]
                 self.report_smoke_frame();
             }
             Err(message) => {
+                #[cfg(debug_assertions)]
                 if self.smoke.enabled {
                     println!("smoke error: {message}");
                 }
@@ -104,6 +130,7 @@ impl Session {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn report_smoke_frame(&mut self) {
         if !self.smoke.enabled || self.smoke.reported {
             return;
@@ -142,10 +169,7 @@ impl Session {
         let mut requests = Vec::new();
         let state = &mut self.state;
         let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
-        self.next_repaint = match self.smoke.exit_at {
-            Some(at) => Some(at),
-            None => Instant::now().checked_add(delay),
-        };
+        self.next_repaint = self.smoke_exit_at().or_else(|| Instant::now().checked_add(delay));
         for request in requests {
             self.handle(request);
         }
@@ -153,8 +177,19 @@ impl Session {
         Ok(())
     }
 
+    /// When a running smoke check will end the app.
+    #[cfg(debug_assertions)]
+    fn smoke_exit_at(&self) -> Option<Instant> {
+        self.smoke.exit_at
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn smoke_exit_at(&self) -> Option<Instant> {
+        None
+    }
+
     fn smoke_finished(&self) -> bool {
-        self.smoke.exit_at.is_some_and(|at| at <= Instant::now())
+        self.smoke_exit_at().is_some_and(|at| at <= Instant::now())
     }
 
     /// Runs outside the frame, because the file dialog blocks this thread.
