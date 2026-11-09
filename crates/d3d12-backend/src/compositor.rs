@@ -7,7 +7,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
 use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
 use engine::schedule::Progress;
@@ -283,13 +285,20 @@ pub struct D3d12Compositor {
     transition_graphs: HashMap<String, EffectGraph>,
     overlay: EffectGraph,
     readback: Option<wgpu::Buffer>,
+    /// Passed to every decoder this compositor opens; see [`SequentialDecoder::set_abort`].
+    abort: Option<(Arc<AtomicBool>, Duration)>,
 }
 
 impl D3d12Compositor {
     /// A compositor writing images of `width` x `height`.
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, readback: None })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, readback: None, abort: None })
+    }
+
+    /// Lets `flag` stop the decoders opened from now on; see [`SequentialDecoder::set_abort`].
+    pub fn set_abort(&mut self, flag: Arc<AtomicBool>, grace: Duration) {
+        self.abort = Some((flag, grace));
     }
 
     fn acquire(&mut self) -> Result<ImageId, String> {
@@ -415,7 +424,11 @@ impl Compositor for D3d12Compositor {
     type Image = ImageId;
 
     fn open_decoder(&mut self, source: &str) -> Result<SequentialDecoder, RenderError> {
-        Ok(SequentialDecoder::open(&self.paths.source_path(source), self.gpu.raw_device())?)
+        let mut decoder = SequentialDecoder::open(&self.paths.source_path(source), self.gpu.raw_device())?;
+        if let Some((flag, grace)) = &self.abort {
+            decoder.set_abort(flag.clone(), *grace);
+        }
+        Ok(decoder)
     }
 
     fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SequentialDecoder as Decoder>::Frame, effects: &[ProjectEffect], at: FrameContext) -> Result<ImageId, RenderError> {

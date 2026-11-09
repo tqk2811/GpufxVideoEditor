@@ -18,7 +18,7 @@ mod paths;
 
 pub use audio::{AudioFileDecoder, AudioFiles};
 pub use compositor::{D3d12Compositor, SharedImage};
-pub use decoder::{DecodedFrame, SequentialDecoder};
+pub use decoder::{is_cancelled, DecodedFrame, SequentialDecoder};
 pub use encoder::{EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
 pub use gpu::Gpu;
 pub use paths::ProjectPaths;

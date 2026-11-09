@@ -9,7 +9,7 @@ use std::sync::Arc;
 use d3d12_backend::Gpu;
 use engine::{Clip, Output, Project, Time, Track, TrackKind, SUPPORTED_VERSION};
 use gpufx_editor::preview::backend::{D3d12Producer, PreviewRequest};
-use gpufx_editor::preview::worker::FrameProducer;
+use gpufx_editor::preview::worker::{FrameProducer, ProduceError};
 
 fn clip(name: &str, duration: Time) -> Clip {
     let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-clips")).join(name);
@@ -58,8 +58,11 @@ fn frames_errors_edits_and_blanks_through_one_producer() {
     producer.recycle(frame);
 
     let missing = project(vec![clip("no-such-file.mp4", seconds)]);
-    let error = producer.produce(&request(&missing, 30)).err().expect("a missing file fails");
-    assert!(error.contains("no-such-file"), "{error}");
+    match producer.produce(&request(&missing, 30)) {
+        Err(ProduceError::Failed(error)) => assert!(error.contains("no-such-file"), "{error}"),
+        Err(ProduceError::Cancelled) => panic!("nothing cancelled this frame"),
+        Ok(_) => panic!("a missing file fails"),
+    }
 
     let frame = producer.produce(&request(&first, 30)).expect("the next request works").expect("a picture");
     assert_eq!(frame.image.read_rgba(&gpu).expect("read"), picture_a, "the same frame gives the same picture");

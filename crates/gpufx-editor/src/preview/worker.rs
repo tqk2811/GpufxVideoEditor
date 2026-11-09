@@ -1,6 +1,7 @@
 //! The preview thread: runs the newest request, publishes the newest result, wakes the UI.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -13,13 +14,25 @@ pub trait FrameProducer {
     type Frame: Send + 'static;
 
     /// The frame for `request`; `None` shows black.
-    fn produce(&mut self, request: &Self::Request) -> Result<Option<Self::Frame>, String>;
+    fn produce(&mut self, request: &Self::Request) -> Result<Option<Self::Frame>, ProduceError>;
 
     /// Takes back a frame the UI no longer shows.
     fn recycle(&mut self, frame: Self::Frame);
 
     /// Called after a panic, to drop whatever the panic may have left half done.
     fn reset(&mut self) {}
+
+    /// Receives, once, the flag that is set when the request in progress is no longer wanted: a
+    /// newer one waits or the app is closing. A long `produce` should watch it.
+    fn set_abort(&mut self, _abort: Arc<AtomicBool>) {}
+}
+
+/// Why `produce` returned no frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProduceError {
+    Failed(String),
+    /// Stopped because the frame is no longer wanted. Not an error, and nothing is reported.
+    Cancelled,
 }
 
 pub type Outcome<F> = Result<Option<F>, String>;
@@ -38,16 +51,23 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
         let results: Arc<LatestSlot<Outcome<P::Frame>>> = Arc::default();
         let (returned, returned_frames) = channel::<P::Frame>();
         let (thread_requests, thread_results) = (requests.clone(), results.clone());
+        let abort = requests.pending();
         let handle = thread::Builder::new().name("preview".to_owned()).spawn(move || {
             let mut producer = make();
+            producer.set_abort(abort);
             while let Some(request) = thread_requests.wait() {
                 for frame in returned_frames.try_iter() {
                     producer.recycle(frame);
                 }
-                let outcome = catch_unwind(AssertUnwindSafe(|| producer.produce(&request))).unwrap_or_else(|_| {
-                    producer.reset();
-                    Err("the preview thread hit an internal error on this frame".to_owned())
-                });
+                let outcome = match catch_unwind(AssertUnwindSafe(|| producer.produce(&request))) {
+                    Ok(Ok(frame)) => Ok(frame),
+                    Ok(Err(ProduceError::Failed(message))) => Err(message),
+                    Ok(Err(ProduceError::Cancelled)) => continue,
+                    Err(_) => {
+                        producer.reset();
+                        Err("the preview thread hit an internal error on this frame".to_owned())
+                    }
+                };
                 if let Some(Ok(Some(unread))) = thread_results.put(outcome) {
                     producer.recycle(unread);
                 }
@@ -88,15 +108,20 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const TIMEOUT: Duration = Duration::from_secs(10);
+    /// How long the fake's long frame runs when nothing stops it.
+    const LONG_FRAME: Duration = Duration::from_secs(5);
+    /// The request of the fake's long frame.
+    const LONG: i32 = -3;
 
     #[derive(Default)]
     struct Log {
         produced: Mutex<Vec<i32>>,
         recycled: AtomicUsize,
         hold_first: AtomicBool,
+        long_started: (Mutex<bool>, Condvar),
         first_started: (Mutex<bool>, Condvar),
         release_first: (Mutex<bool>, Condvar),
     }
@@ -112,20 +137,32 @@ mod tests {
         assert!(*guard && !timed_out.timed_out(), "timed out");
     }
 
-    struct Fake(Arc<Log>);
+    struct Fake(Arc<Log>, Option<Arc<AtomicBool>>);
 
     impl FrameProducer for Fake {
         type Request = i32;
         type Frame = i32;
 
-        fn produce(&mut self, request: &i32) -> Result<Option<i32>, String> {
+        fn produce(&mut self, request: &i32) -> Result<Option<i32>, ProduceError> {
+            if *request == LONG {
+                set(&self.0.long_started);
+                let deadline = Instant::now() + LONG_FRAME;
+                while Instant::now() < deadline {
+                    if self.1.as_ref().is_some_and(|abort| abort.load(Ordering::SeqCst)) {
+                        return Err(ProduceError::Cancelled);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                self.0.produced.lock().unwrap().push(LONG);
+                return Ok(Some(LONG));
+            }
             if self.0.hold_first.swap(false, Ordering::SeqCst) {
                 set(&self.0.first_started);
                 wait_for(&self.0.release_first);
             }
             self.0.produced.lock().unwrap().push(*request);
             match request {
-                -1 => Err("broken frame".to_owned()),
+                -1 => Err(ProduceError::Failed("broken frame".to_owned())),
                 -2 => panic!("deliberate test panic"),
                 0 => Ok(None),
                 value => Ok(Some(*value)),
@@ -135,12 +172,16 @@ mod tests {
         fn recycle(&mut self, _frame: i32) {
             self.0.recycled.fetch_add(1, Ordering::SeqCst);
         }
+
+        fn set_abort(&mut self, abort: Arc<AtomicBool>) {
+            self.1 = Some(abort);
+        }
     }
 
     fn start(log: &Arc<Log>) -> (PreviewWorker<Fake>, std::sync::mpsc::Receiver<()>) {
         let (woken, wake_rx) = channel();
         let producer_log = log.clone();
-        let worker = PreviewWorker::spawn(move || Fake(producer_log), move || {
+        let worker = PreviewWorker::spawn(move || Fake(producer_log, None), move || {
             let _ = woken.send(());
         });
         (worker, wake_rx)
@@ -182,6 +223,30 @@ mod tests {
         worker.request(2);
         assert_eq!(worker.poll(), None);
         set(&log.release_first);
+    }
+
+    #[test]
+    fn closing_during_a_long_frame_returns_promptly() {
+        let log = Arc::new(Log::default());
+        let (worker, _wake) = start(&log);
+        worker.request(LONG);
+        wait_for(&log.long_started);
+        let closing = Instant::now();
+        drop(worker);
+        assert!(closing.elapsed() < LONG_FRAME / 2, "close waited {:?}", closing.elapsed());
+    }
+
+    #[test]
+    fn a_newer_request_cancels_a_long_frame_silently_and_runs_next() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.request(LONG);
+        wait_for(&log.long_started);
+        worker.request(4);
+        // The first thing the UI hears of is the newer frame: no outcome for the cancelled one.
+        assert_eq!(next(&worker, &wake), Ok(Some(4)));
+        assert_eq!(*log.produced.lock().unwrap(), vec![4]);
+        assert_eq!(worker.poll(), None);
     }
 
     #[test]

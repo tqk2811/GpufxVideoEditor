@@ -1,6 +1,7 @@
 //! A one-value mailbox: a new value replaces the one waiting, so stale work is dropped, not queued.
 
-use std::sync::{Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 struct State<T> {
     value: Option<T>,
@@ -10,11 +11,13 @@ struct State<T> {
 pub struct LatestSlot<T> {
     state: Mutex<State<T>>,
     ready: Condvar,
+    /// True while a value waits and once the slot is closed.
+    pending: Arc<AtomicBool>,
 }
 
 impl<T> Default for LatestSlot<T> {
     fn default() -> Self {
-        Self { state: Mutex::new(State { value: None, closed: false }), ready: Condvar::new() }
+        Self { state: Mutex::new(State { value: None, closed: false }), ready: Condvar::new(), pending: Arc::default() }
     }
 }
 
@@ -25,14 +28,20 @@ impl<T> LatestSlot<T> {
 
     /// Stores `value` and returns the unread value it replaced.
     pub fn put(&self, value: T) -> Option<T> {
-        let replaced = self.lock().value.replace(value);
+        let replaced = {
+            let mut state = self.lock();
+            self.pending.store(true, Ordering::SeqCst);
+            state.value.replace(value)
+        };
         self.ready.notify_one();
         replaced
     }
 
     /// Takes the waiting value without blocking.
     pub fn take(&self) -> Option<T> {
-        self.lock().value.take()
+        let mut state = self.lock();
+        self.pending.store(state.closed, Ordering::SeqCst);
+        state.value.take()
     }
 
     /// Blocks until a value is waiting. `None` once the slot is closed.
@@ -43,6 +52,7 @@ impl<T> LatestSlot<T> {
                 return None;
             }
             if let Some(value) = state.value.take() {
+                self.pending.store(false, Ordering::SeqCst);
                 return Some(value);
             }
             state = self.ready.wait(state).unwrap_or_else(|p| p.into_inner());
@@ -51,8 +61,17 @@ impl<T> LatestSlot<T> {
 
     /// Wakes every waiter; waits return `None` from now on.
     pub fn close(&self) {
-        self.lock().closed = true;
+        let mut state = self.lock();
+        state.closed = true;
+        self.pending.store(true, Ordering::SeqCst);
+        drop(state);
         self.ready.notify_all();
+    }
+
+    /// A flag true while a value waits and once the slot is closed: the holder of the value
+    /// being worked on can see that its work is no longer wanted.
+    pub fn pending(&self) -> Arc<AtomicBool> {
+        self.pending.clone()
     }
 }
 
@@ -78,6 +97,21 @@ mod tests {
         let handle = thread::spawn(move || sender.put(7));
         assert_eq!(slot.wait(), Some(7));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn the_pending_flag_follows_the_waiting_value_and_stays_set_after_close() {
+        let slot = LatestSlot::default();
+        let pending = slot.pending();
+        assert!(!pending.load(Ordering::SeqCst));
+        slot.put(1);
+        assert!(pending.load(Ordering::SeqCst));
+        assert_eq!(slot.wait(), Some(1));
+        assert!(!pending.load(Ordering::SeqCst), "the value is being worked on, nothing newer waits");
+        slot.close();
+        assert!(pending.load(Ordering::SeqCst));
+        assert_eq!(slot.wait(), None);
+        assert!(pending.load(Ordering::SeqCst), "close is permanent");
     }
 
     #[test]

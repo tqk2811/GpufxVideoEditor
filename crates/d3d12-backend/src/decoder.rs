@@ -8,6 +8,9 @@
 use std::ffi::{c_void, CStr, CString};
 use std::path::Path;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use engine::render::{Decoder, RenderError};
 use engine::Time;
@@ -24,6 +27,19 @@ const TICKS_PER_SECOND: i128 = engine::TICKS_PER_SECOND as i128;
 /// How far ahead of the decoded position, in seconds of stream time, a request may be and still be
 /// reached by decoding through instead of seeking.
 const FORWARD_SEEK_SECONDS: i64 = 2;
+
+/// The end of the error text of a decode stopped through [`SequentialDecoder::set_abort`].
+const DECODE_CANCELLED: &str = "decoding was cancelled";
+
+/// Whether `message`, possibly with context added in front of it, reports a cancelled decode.
+pub fn is_cancelled(message: &str) -> bool {
+    message.ends_with(DECODE_CANCELLED)
+}
+
+/// Whether a decode that has run for `elapsed` should stop.
+fn should_abort(flag: bool, elapsed: Duration, grace: Duration) -> bool {
+    flag && elapsed >= grace
+}
 
 /// The stream timestamp of `ticks` of source time, rounded to the nearest unit of the time base
 /// `num / den` (flooring would pick the frame before when the stream rounds its timestamps up, as
@@ -201,6 +217,11 @@ pub struct SequentialDecoder {
     /// The longest jump so far whose seek landed at or behind the decoded position, because the
     /// keyframes are further apart than it. Shorter jumps decode through instead.
     min_forward_seek: Option<i64>,
+    /// Set by the owner to stop the decode in progress. Absent for the export path.
+    abort: Option<Arc<AtomicBool>>,
+    /// How long a request runs before the flag can stop it.
+    abort_grace: Duration,
+    request_started: Instant,
     path: String,
 }
 
@@ -224,6 +245,9 @@ impl SequentialDecoder {
             seek_target: None,
             landing_pts: None,
             min_forward_seek: None,
+            abort: None,
+            abort_grace: Duration::ZERO,
+            request_started: Instant::now(),
             path: path_text.to_owned(),
         };
         // SAFETY: on error, Drop releases whatever has been created so far.
@@ -273,6 +297,22 @@ impl SequentialDecoder {
         self.packet = ffi::av_packet_alloc();
         if self.packet.is_null() {
             return Err("av_packet_alloc failed".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Makes `frame_at` stop with a cancelled error while `flag` is set, once a request has run for
+    /// `grace`. The grace lets short requests finish during a continuous scrub, where a newer one
+    /// is always about to arrive and would otherwise cancel every frame.
+    pub fn set_abort(&mut self, flag: Arc<AtomicBool>, grace: Duration) {
+        self.abort = Some(flag);
+        self.abort_grace = grace;
+    }
+
+    fn check_abort(&self) -> Result<(), String> {
+        let flag = self.abort.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed));
+        if should_abort(flag, self.request_started.elapsed(), self.abort_grace) {
+            return Err(DECODE_CANCELLED.to_owned());
         }
         Ok(())
     }
@@ -426,6 +466,7 @@ impl SequentialDecoder {
                 Err(_) if point == target => return Ok(()),
                 other => other?,
             }
+            self.check_abort()?;
             let landing = self.fill_lookahead()?;
             match forward_retry_point(landing, target, point, origin, threshold) {
                 Some(earlier) => point = earlier,
@@ -443,6 +484,7 @@ impl SequentialDecoder {
     /// Moves `held` to the frame shown at `target`: the last frame not after it.
     fn advance_to(&mut self, target: i64) -> Result<(), String> {
         loop {
+            self.check_abort()?;
             self.fill_lookahead()?;
             match &self.lookahead {
                 // The first frame after a seek is taken even if later than the target: the
@@ -457,6 +499,7 @@ impl SequentialDecoder {
     }
 
     fn frame_at_inner(&mut self, time: Time) -> Result<DecodedFrame, String> {
+        self.request_started = Instant::now();
         let target = self.target_pts(time);
         let cannot_continue = match (&self.held, self.seek_target) {
             (_, None) => true,
@@ -524,6 +567,20 @@ mod tests {
     use super::*;
 
     const THRESHOLD: i64 = 2000;
+
+    #[test]
+    fn the_abort_flag_stops_a_decode_only_after_the_grace() {
+        let grace = Duration::from_millis(100);
+        assert!(!should_abort(false, Duration::from_secs(9), grace));
+        assert!(!should_abort(true, Duration::from_millis(99), grace));
+        assert!(should_abort(true, Duration::from_millis(100), grace));
+    }
+
+    #[test]
+    fn a_cancellation_is_recognised_under_added_context() {
+        assert!(is_cancelled(&format!("frame 3, track 0: c:/a.mp4: {DECODE_CANCELLED}")));
+        assert!(!is_cancelled("frame 3: avcodec_receive_frame failed"));
+    }
 
     fn pays(position: i64, target: i64, keyframe: Option<i64>, min_distance: Option<i64>) -> bool {
         forward_seek_pays(position, target, THRESHOLD, min_distance, || keyframe)
