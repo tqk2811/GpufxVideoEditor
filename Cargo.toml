@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/poc"]
+members = ["crates/poc", "crates/engine"]
 # gpufx-core belongs to the workspace of its own repository (it inherits package fields from it).
 exclude = ["external/FFmpegGpuFilter"]
 

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "output": { "width": 1920, "height": 1080, "frame_duration": 3000 },
+  "tracks": [
+    {
+      "clips": [
+        { "source": "a.mp4", "start": 0, "source_in": 90000, "duration": 450000, "effects": [] },
+        {
+          "source": "b.mp4",
+          "start": 450000,
+          "source_in": 0,
+          "duration": 270000,
+          "effects": [{ "package": "blur", "params": { "radius": 4 } }]
+        }
+      ],
+      "transitions": [
+        { "after_clip": 0, "package": "mix", "duration": 45000, "params": {} }
+      ]
+    },
+    {
+      "clips": [
+        { "source": "overlay.png", "start": 90000, "source_in": 0, "duration": 180000 }
+      ]
+    }
+  ]
+}
