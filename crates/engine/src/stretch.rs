@@ -141,6 +141,17 @@ impl ClipStretch {
         let resume = self.positions.back().copied().filter(|&(known, _)| known >= start && known < grain);
         let (mut next, mut previous) = match resume {
             Some((known, centre)) => (known + 1, centre),
+            // A key right after the grain held last: that grain may be asked for again by the next
+            // block, so its audio and position stay. Reading up to the key here keeps the reads
+            // contiguous instead of jumping over what the grain before it does not need.
+            None if grain == start && self.positions.back().is_some_and(|&(known, _)| known == grain - 1) => {
+                let centre = self.nominal(start);
+                if let Some(&(_, held)) = self.positions.back() {
+                    self.ensure(source, key, held - GRAIN / 2, centre + GRAIN / 2)?;
+                }
+                self.remember(start, centre);
+                return Ok(centre);
+            }
             None => {
                 self.positions.clear();
                 let centre = self.nominal(start);

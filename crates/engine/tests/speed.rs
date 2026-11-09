@@ -291,6 +291,48 @@ fn the_stretch_reads_forward_and_stays_with_the_picture() {
     assert!((end - 16 * 48_000).abs() < 16_000, "read to {end}");
 }
 
+/// A tone that records which source regions were asked for.
+struct RecordedTone {
+    tone: Tone,
+    reads: Vec<(i64, usize)>,
+}
+
+impl AudioSource for RecordedTone {
+    fn read(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        self.reads.push((position, out.len() / 2));
+        self.tone.read(key, source, position, out)
+    }
+}
+
+/// A real decoder seeks on any read that goes backwards, which is what makes playback at a high
+/// speed fall behind. Key grains used to throw away the audio of the grain before them, and a
+/// block whose first grain is that one read it again.
+#[test]
+fn small_blocks_across_key_grains_never_read_backwards() {
+    for speed in [10.0, 4.0, 0.5] {
+        for block in [1600, 800] {
+            let project = project_of(vec![sped_clip(0, 0, 6 * SECOND, speed)]);
+            let frames = 6 * 48_000;
+            let mut source = RecordedTone { tone: Tone { hz: 440.0 }, reads: Vec::new() };
+            let mut states = StretchStates::default();
+            let mut out = vec![0.0f32; block * 2];
+            let mut start = 0i64;
+            while start < frames {
+                mix_audio_with(&project, &mut source, &mut states, start, &mut out).unwrap();
+                start += block as i64;
+            }
+            let mut end = 0;
+            for (position, length) in &source.reads {
+                assert!(*position >= end, "{speed}x, block {block}: read {position} goes back before {end}");
+                end = position + *length as i64;
+            }
+            let decoded: i64 = source.reads.iter().map(|(_, length)| *length as i64).sum();
+            let span = source.reads.last().map_or(0, |(position, length)| position + *length as i64);
+            assert_eq!(decoded, span, "{speed}x, block {block}: nothing is decoded twice");
+        }
+    }
+}
+
 fn long_mix(project: &Project, hz: f64, frames: usize, block: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; frames * 2];
     let mut states = StretchStates::default();
