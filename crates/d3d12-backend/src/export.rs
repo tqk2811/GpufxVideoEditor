@@ -109,26 +109,27 @@ pub fn reserve_temporary(target: &Path) -> std::io::Result<PathBuf> {
 struct PendingFile {
     temporary: PathBuf,
     target: PathBuf,
-    committed: bool,
+    keep: bool,
 }
 
 impl PendingFile {
     fn new(target: &Path) -> Result<Self, String> {
         let temporary = reserve_temporary(target).map_err(|e| format!("reserving a temporary file next to {}: {e}", target.display()))?;
-        Ok(Self { temporary, target: target.to_path_buf(), committed: false })
+        Ok(Self { temporary, target: target.to_path_buf(), keep: false })
     }
 
-    /// Renames the finished temporary file over the target. Close the file first.
+    /// Renames the finished temporary file over the target. Close the file first. When the rename
+    /// fails (a player holds the target open) the finished file is kept and named in the error.
     fn commit(&mut self) -> Result<(), String> {
-        std::fs::rename(&self.temporary, &self.target).map_err(|e| format!("renaming {} to {}: {e}", self.temporary.display(), self.target.display()))?;
-        self.committed = true;
-        Ok(())
+        let renamed = std::fs::rename(&self.temporary, &self.target);
+        self.keep = true;
+        renamed.map_err(|e| format!("the finished file was kept as {}: renaming it to {} failed: {e}", self.temporary.display(), self.target.display()))
     }
 }
 
 impl Drop for PendingFile {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.keep {
             let _ = std::fs::remove_file(&self.temporary);
         }
     }
@@ -275,6 +276,25 @@ mod tests {
         let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn a_failed_rename_keeps_the_finished_file_and_names_it() {
+        let dir = scratch("locked");
+        let target = dir.join("out.mp4");
+        std::fs::write(&target, b"old").unwrap();
+        let mut pending = PendingFile::new(&target).unwrap();
+        std::fs::write(&pending.temporary, b"finished").unwrap();
+        let temporary = pending.temporary.clone();
+        // A player holding the target open without sharing: the rename over it fails.
+        let lock = std::os::windows::fs::OpenOptionsExt::share_mode(&mut std::fs::OpenOptions::new(), 0).read(true).open(&target).unwrap();
+        let message = pending.commit().unwrap_err();
+        drop(pending);
+        drop(lock);
+        assert!(message.contains(&temporary.display().to_string()), "{message}");
+        assert_eq!(std::fs::read(&temporary).unwrap(), b"finished");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
