@@ -266,6 +266,8 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
         }
     }
     drop(stdin);
+    // A child that cannot be killed has no exit code here, and may keep its output file and its
+    // VRAM until the job object ends it when the editor exits.
     let code = wait_for_exit(&mut child, EXIT_GRACE);
     let _ = join_within(pump, PIPE_GRACE);
     // Lines the pump queued while the loop ended or the child was waited for are still unread, and
@@ -276,6 +278,8 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
     let stderr_tail = join_within(tail, PIPE_GRACE).unwrap_or_default();
     let cancelled = cancel_sent.is_some() || cancel.load(Ordering::SeqCst);
     let (outcome, partials) = machine.finish(cancelled, code, &stderr_tail);
+    // Removing a file that a child which could not be killed still holds open may fail, which
+    // leaves the file behind.
     for partial in partials.iter().filter(|partial| is_own_partial(partial, outputs)) {
         let _ = std::fs::remove_file(partial);
     }
