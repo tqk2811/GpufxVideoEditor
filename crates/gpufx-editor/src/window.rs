@@ -88,7 +88,8 @@ impl ApplicationHandler for EditorApp {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window: WindowId, event: WindowEvent) {
         let Some(session) = self.session.as_mut() else { return };
-        if session.presenter.on_window_event(&event) {
+        let repaint = session.presenter.on_window_event(&event);
+        if should_request_redraw(&event, repaint) {
             session.presenter.window().request_redraw();
         }
         match event {
@@ -117,10 +118,32 @@ impl ApplicationHandler for EditorApp {
     }
 }
 
+/// Whether an event asks for another frame. egui-winit reports a repaint for the redraw event
+/// itself, and answering that with another redraw request would keep the loop busy forever.
+fn should_request_redraw(event: &WindowEvent, repaint: bool) -> bool {
+    repaint && !matches!(event, WindowEvent::RedrawRequested)
+}
+
 pub fn run() -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| format!("creating the event loop failed: {e}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = EditorApp::default();
     event_loop.run_app(&mut app).map_err(|e| format!("the event loop failed: {e}"))?;
     app.error.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_redraw_event_never_asks_for_another_redraw() {
+        assert!(!should_request_redraw(&WindowEvent::RedrawRequested, true));
+    }
+
+    #[test]
+    fn other_events_ask_only_when_egui_wants_a_repaint() {
+        assert!(should_request_redraw(&WindowEvent::Focused(true), true));
+        assert!(!should_request_redraw(&WindowEvent::Focused(true), false));
+    }
 }

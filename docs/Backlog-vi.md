@@ -83,3 +83,15 @@ Seek về đầu của AAC trong MKV vẫn sai khoảng 1024 mẫu đầu (đo �
 ### [Vừa] Nhánh feat/editor-api của submodule chưa vào master của FFmpegGpuFilter
 
 `master` của repo này trỏ `external/FFmpegGpuFilter` tới commit `9f751c8`, commit này chỉ nằm trên nhánh `feat/editor-api` của submodule. User đã yêu cầu merge ngày 2026-11-09, nhưng không có phiên FFmpegGpuFilter nào đang mở để nhận việc và repo này không được sửa submodule. Cần merge nhánh đó vào `master` của FFmpegGpuFilter; xoá nhánh trước khi merge sẽ làm clone mới không lấy được submodule. Ghi ngày 2026-11-09.
+
+### [Thấp] Kéo clip tới mép timeline không tự cuộn
+
+Khi kéo clip hoặc cạnh trim tới mép trái/phải của vùng track, view đứng yên nên không kéo được tới phần đang ngoài màn hình; phải thả, cuộn rồi kéo lại (`crates/gpufx-editor/src/ui.rs`, `handle_tracks`). Ghi ngày 2026-11-09.
+
+### [Thấp] Vị trí thả clip chưa làm tròn theo frame_duration
+
+Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, không làm tròn về bội của `frame_duration` (`crates/gpufx-editor/src/timeline/drag.rs`, `drag_command`). Clip có thể bắt đầu giữa hai khung. Cần quyết định trước khi xuất video. Ghi ngày 2026-11-09.
+
+### [Thấp] POC duyệt TexturesDelta không drain
+
+`crates/poc/src/presenter.rs:132` duyệt `TexturesDelta` mà không `drain`. Cùng kiểu mã này đã panic ("Dropped TexturesDelta with unapplied deltas") ở bản debug của editor; chưa xác nhận trong POC. Ghi ngày 2026-11-09.

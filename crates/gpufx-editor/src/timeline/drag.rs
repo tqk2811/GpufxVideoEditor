@@ -59,6 +59,37 @@ pub fn drag_command(drag: &ClipDrag, pointer_time: Time, pointer_track: Option<u
     }
 }
 
+/// Pulls a trim into the range the engine accepts, so a drag that overshoots lands on the limit
+/// instead of being refused whole. A move is returned as it is. A transition on the edge is not
+/// handled here: the engine refuses that and the editor shows why.
+pub fn clamp_trim(project: &Project, command: EditCommand) -> EditCommand {
+    let key = command.key();
+    let Some(track) = project.tracks.get(key.track) else { return command };
+    let Some(clip) = track.clips.get(key.clip) else { return command };
+    let Some(end) = clip.end() else { return command };
+    let minimum = clip.fade_in.saturating_add(clip.fade_out).max(project.output.frame_duration);
+    match command {
+        EditCommand::TrimStart { new_start, .. } => {
+            let previous_end = key.clip.checked_sub(1).and_then(|index| track.clips.get(index)).and_then(|previous| previous.end()).unwrap_or(Time::ZERO);
+            // The source cannot be read before its first frame.
+            let source_limit = clip.start.saturating_sub(clip.source_in).max(Time::ZERO);
+            let lower = previous_end.max(source_limit);
+            // A clip already shorter than the minimum is not shrunk further.
+            let upper = end.saturating_sub(minimum).max(clip.start);
+            EditCommand::TrimStart { key, new_start: new_start.max(lower).min(upper) }
+        }
+        EditCommand::TrimEnd { new_end, .. } => {
+            let lower = clip.start.saturating_add(minimum).min(end);
+            let mut clamped = new_end.max(lower);
+            if let Some(next) = track.clips.get(key.clip + 1) {
+                clamped = clamped.min(next.start);
+            }
+            EditCommand::TrimEnd { key, new_end: clamped }
+        }
+        EditCommand::Move { .. } => command,
+    }
+}
+
 impl EditCommand {
     pub fn apply(&self, project: &Project) -> Result<Project, EditError> {
         match *self {
@@ -175,6 +206,84 @@ mod tests {
         let command = EditCommand::Move { key: key(0), track: 2, desired_start: seconds(1) };
         assert_eq!(command.landing(&project), None);
         assert!(matches!(command.apply(&project), Err(EditError::TrackKindMismatch { .. })));
+    }
+
+    fn limits_project() -> Project {
+        // Track 0: a at 2 to 4 (source_in 1 s), b at 6 to 8 (source_in 0), c at 10 to 12.
+        let mut project = project();
+        let clips = &mut project.tracks[0].clips;
+        clips[0].source_in = seconds(1);
+        let mut middle = new_clip("m.mp4", seconds(6), seconds(2));
+        middle.source_in = seconds(5);
+        clips.insert(1, middle);
+        project
+    }
+
+    #[test]
+    fn a_start_trim_stops_at_the_previous_clip_and_at_the_source_start() {
+        let project = limits_project();
+        // The middle clip cannot reach back past the end of the clip before it (4 s).
+        let command = EditCommand::TrimStart { key: key(1), new_start: seconds(3) };
+        assert_eq!(clamp_trim(&project, command), EditCommand::TrimStart { key: key(1), new_start: seconds(4) });
+        assert!(clamp_trim(&project, command).apply(&project).is_ok());
+        // The first clip has 1 s of source before it, so it can start at 1 s and not before.
+        let command = EditCommand::TrimStart { key: key(0), new_start: Time::ZERO };
+        assert_eq!(clamp_trim(&project, command), EditCommand::TrimStart { key: key(0), new_start: seconds(1) });
+        assert!(clamp_trim(&project, command).apply(&project).is_ok());
+    }
+
+    #[test]
+    fn a_start_trim_keeps_the_minimum_duration() {
+        let project = limits_project();
+        let command = EditCommand::TrimStart { key: key(1), new_start: seconds(9) };
+        let clamped = clamp_trim(&project, command);
+        assert_eq!(clamped, EditCommand::TrimStart { key: key(1), new_start: seconds(8).saturating_sub(Time::from_ticks(3000)) });
+        assert!(clamped.apply(&project).is_ok());
+    }
+
+    #[test]
+    fn the_minimum_duration_covers_both_fades() {
+        let mut project = limits_project();
+        project.tracks[0].clips[1].fade_in = Time::from_ticks(9000);
+        project.tracks[0].clips[1].fade_out = Time::from_ticks(6000);
+        let command = EditCommand::TrimEnd { key: key(1), new_end: seconds(6) };
+        assert_eq!(clamp_trim(&project, command), EditCommand::TrimEnd { key: key(1), new_end: seconds(6).saturating_add(Time::from_ticks(15_000)) });
+    }
+
+    #[test]
+    fn an_end_trim_stops_at_the_next_clip_and_has_no_upper_bound_on_the_last() {
+        let project = limits_project();
+        let command = EditCommand::TrimEnd { key: key(1), new_end: seconds(11) };
+        assert_eq!(clamp_trim(&project, command), EditCommand::TrimEnd { key: key(1), new_end: seconds(10) });
+        assert!(clamp_trim(&project, command).apply(&project).is_ok());
+        let last = EditCommand::TrimEnd { key: key(2), new_end: seconds(500) };
+        assert_eq!(clamp_trim(&project, last), last);
+        let short = EditCommand::TrimEnd { key: key(2), new_end: seconds(10) };
+        assert_eq!(clamp_trim(&project, short), EditCommand::TrimEnd { key: key(2), new_end: seconds(10).saturating_add(Time::from_ticks(3000)) });
+    }
+
+    #[test]
+    fn a_trim_inside_the_limits_and_a_move_pass_through() {
+        let project = limits_project();
+        let trim = EditCommand::TrimEnd { key: key(1), new_end: seconds(7) };
+        assert_eq!(clamp_trim(&project, trim), trim);
+        let moved = EditCommand::Move { key: key(1), track: 0, desired_start: seconds(99) };
+        assert_eq!(clamp_trim(&project, moved), moved);
+        let stale = EditCommand::TrimEnd { key: key(9), new_end: seconds(7) };
+        assert_eq!(clamp_trim(&project, stale), stale);
+    }
+
+    #[test]
+    fn a_transition_on_the_edge_is_still_refused_after_clamping() {
+        let mut project = limits_project();
+        project.tracks[0].transitions.push(engine::Transition {
+            after_clip: 1,
+            package: "fade".to_owned(),
+            duration: Time::from_ticks(3000),
+            params: Default::default(),
+        });
+        let command = clamp_trim(&project, EditCommand::TrimEnd { key: key(1), new_end: seconds(7) });
+        assert!(matches!(command.apply(&project), Err(EditError::TransitionOnEdge { .. })));
     }
 
     #[test]

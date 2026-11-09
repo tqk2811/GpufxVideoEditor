@@ -137,7 +137,9 @@ impl TimelineView {
             let amount = if wheel.delta_y != 0.0 { wheel.delta_y } else { wheel.delta_x };
             return self.scroll_x_by(-amount, area);
         }
-        if wheel.delta_x != 0.0 {
+        // A diagonal swipe goes along the axis it mostly follows, so a vertical one is not lost to
+        // a small sideways drift when the view is at its left limit.
+        if wheel.delta_x.abs() > wheel.delta_y.abs() {
             return self.scroll_x_by(-wheel.delta_x, area);
         }
         self.scroll_y_by(-wheel.delta_y, area)
@@ -148,8 +150,12 @@ impl TimelineView {
         (track_count - 1 - track) as f64 * TRACK_HEIGHT - self.scroll_y
     }
 
-    /// The track whose row contains `y`.
-    pub fn track_at_y(&self, y: f64, track_count: usize) -> Option<usize> {
+    /// The track whose row contains `y`, or `None` when `y` is outside the visible area of
+    /// `height` points, so a pointer over the ruler does not reach a track scrolled out of sight.
+    pub fn track_at_y(&self, y: f64, track_count: usize, height: f64) -> Option<usize> {
+        if y < 0.0 || y >= height {
+            return None;
+        }
         let row = ((y + self.scroll_y) / TRACK_HEIGHT).floor();
         if row < 0.0 || row >= track_count as f64 {
             return None;
@@ -300,12 +306,34 @@ mod tests {
     }
 
     #[test]
+    fn a_pointer_outside_the_visible_rows_hits_no_track() {
+        let view = TimelineView { pixels_per_second: 80.0, scroll_x: 0.0, scroll_y: TRACK_HEIGHT };
+        // Over the ruler: y is negative, but y + scroll_y still lands in a row scrolled out of sight.
+        assert_eq!(view.track_at_y(-10.0, 3, 100.0), None);
+        assert_eq!(view.track_at_y(0.0, 3, 100.0), Some(1));
+        assert_eq!(view.track_at_y(99.0, 3, 100.0), Some(0));
+        assert_eq!(view.track_at_y(100.0, 3, 100.0), None);
+    }
+
+    #[test]
+    fn a_mostly_vertical_swipe_scrolls_vertically_at_the_left_limit() {
+        let tall = area();
+        let mut view = view(80.0, 0.0);
+        let swipe = Wheel { ctrl: false, shift: false, delta_x: 3.0, delta_y: -40.0, cursor_x: 100.0 };
+        assert!(view.apply_wheel(swipe, &tall));
+        assert_eq!(view.scroll_y(), 40.0);
+        let sideways = Wheel { ctrl: false, shift: false, delta_x: -40.0, delta_y: 3.0, cursor_x: 100.0 };
+        assert!(view.apply_wheel(sideways, &tall));
+        assert_eq!(view.scroll_x(), 40.0);
+    }
+
+    #[test]
     fn track_rows_put_track_zero_at_the_bottom() {
         let view = TimelineView::default();
-        assert_eq!(view.track_at_y(1.0, 3), Some(2));
-        assert_eq!(view.track_at_y(TRACK_HEIGHT * 2.5, 3), Some(0));
-        assert_eq!(view.track_at_y(-1.0, 3), None);
-        assert_eq!(view.track_at_y(TRACK_HEIGHT * 3.0, 3), None);
+        assert_eq!(view.track_at_y(1.0, 3, 1000.0), Some(2));
+        assert_eq!(view.track_at_y(TRACK_HEIGHT * 2.5, 3, 1000.0), Some(0));
+        assert_eq!(view.track_at_y(-1.0, 3, 1000.0), None);
+        assert_eq!(view.track_at_y(TRACK_HEIGHT * 3.0, 3, 1000.0), None);
         assert_eq!(view.track_top(2, 3), 0.0);
         assert_eq!(view.track_top(0, 3), TRACK_HEIGHT * 2.0);
     }

@@ -3,6 +3,9 @@
 use super::view::TimelineView;
 use engine::{ClipKey, Project};
 
+/// The narrowest a clip is drawn, so one thinner than this can still be grabbed where it shows.
+pub const MIN_CLIP_WIDTH: f64 = 1.0;
+
 /// Width of the zone at each clip edge that trims instead of moving.
 pub const EDGE_GRAB: f64 = 6.0;
 
@@ -39,7 +42,7 @@ pub fn clip_zone(x: f64, left: f64, right: f64) -> Option<ClipZone> {
 pub fn hit_test(project: &Project, view: &TimelineView, track: usize, x: f64) -> Option<ClipHit> {
     project.tracks.get(track)?.clips.iter().enumerate().find_map(|(clip, c)| {
         let left = view.time_to_x(c.start);
-        let right = view.time_to_x(c.start.saturating_add(c.duration));
+        let right = view.time_to_x(c.start.saturating_add(c.duration)).max(left + MIN_CLIP_WIDTH);
         clip_zone(x, left, right).map(|zone| ClipHit { key: ClipKey { track, clip }, zone })
     })
 }
@@ -104,6 +107,17 @@ mod tests {
         let x = view.time_to_x(Time::from_seconds(1).unwrap());
         let hit = hit_test(&project, &view, 0, x).unwrap();
         assert_eq!(hit.key.clip, 1);
+    }
+
+    #[test]
+    fn a_clip_thinner_than_a_point_can_still_be_hit() {
+        let project = project();
+        let view = TimelineView::default();
+        let thin = engine::Time::from_ticks(1);
+        let mut thin_project = project.clone();
+        thin_project.tracks[0].clips[0].duration = thin;
+        let x = view.time_to_x(engine::Time::ZERO) + 0.5;
+        assert_eq!(hit_test(&thin_project, &view, 0, x).map(|hit| hit.key.clip), Some(0));
     }
 
     #[test]

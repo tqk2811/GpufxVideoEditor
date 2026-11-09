@@ -10,6 +10,7 @@ use engine::{
 use std::path::Path;
 
 const UNDO_DEPTH: usize = 200;
+const DRAG_FIRST: &str = "Finish the drag first";
 
 /// Length given to a new clip. The project does not record source lengths and no backend call
 /// reports one without opening a decoder.
@@ -114,11 +115,24 @@ impl EditorState {
         self.status = Status::Refused(error.to_string());
     }
 
+    /// A drag holds a clip key, and any edit could make that key name another clip, so edits wait
+    /// for the drop. True, with a status, while a drag is in progress.
+    fn drag_blocks_edits(&mut self) -> bool {
+        if self.drag.is_none() {
+            return false;
+        }
+        self.status = Status::Info(DRAG_FIRST.to_owned());
+        true
+    }
+
     /// Runs a command. A refusal goes to the status line and the result is false.
     fn run<F>(&mut self, command: F) -> bool
     where
         F: FnOnce(&Project) -> Result<Project, EditError>,
     {
+        if self.drag_blocks_edits() {
+            return false;
+        }
         match self.history.apply(command) {
             Ok(_) => {
                 self.status = Status::Idle;
@@ -138,6 +152,9 @@ impl EditorState {
     /// Adds a clip of [`DEFAULT_CLIP_DURATION`] for `path` to `track`, at the free position nearest
     /// the playhead.
     pub fn add_clip_from_file(&mut self, track: usize, path: &Path) {
+        if self.drag_blocks_edits() {
+            return;
+        }
         let Some(target) = self.project().tracks.get(track) else {
             self.refuse(&EditError::TrackNotFound { track });
             return;
@@ -184,7 +201,17 @@ impl EditorState {
         }
     }
 
+    /// Drops the drag in progress without any edit.
+    pub fn cancel_drag(&mut self) {
+        if self.drag.take().is_some() {
+            self.status = Status::Idle;
+        }
+    }
+
     pub fn undo(&mut self) {
+        if self.drag_blocks_edits() {
+            return;
+        }
         if self.history.undo() {
             self.after_history_step();
         } else {
@@ -193,6 +220,9 @@ impl EditorState {
     }
 
     pub fn redo(&mut self) {
+        if self.drag_blocks_edits() {
+            return;
+        }
         if self.history.redo() {
             self.after_history_step();
         } else {
@@ -200,10 +230,10 @@ impl EditorState {
         }
     }
 
-    /// Clip keys name clips of one project, so neither survives a step back or forward.
+    /// Clip keys name clips of one project, so the selection does not survive a step back or
+    /// forward. There is no drag to drop here, because both steps wait for it.
     fn after_history_step(&mut self) {
         self.selection = None;
-        self.drag = None;
         self.status = Status::Idle;
     }
 }
@@ -216,7 +246,7 @@ pub fn clip_label(source: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timeline::drag::EditCommand;
+    use crate::timeline::drag::{ClipDrag, DragKind, EditCommand};
     use engine::{Project, TICKS_PER_SECOND};
 
     fn seconds(value: i64) -> Time {
@@ -368,13 +398,79 @@ mod tests {
     #[test]
     fn a_drop_on_the_same_place_adds_no_undo_step() {
         let mut state = state_with_clip();
+        state.add_clip_from_file(0, Path::new("b.mp4"));
+        state.undo();
+        assert!(state.can_redo(), "the redo step must be alive before the drop");
+        state.select(Some(key(0)));
+        state.finish_drag(EditCommand::Move { key: key(0), track: 0, desired_start: Time::ZERO });
+        assert!(state.can_redo(), "a drop that changes nothing must not clear the redo stack");
+        assert_eq!(state.selection(), Some(key(0)));
+    }
+
+    fn state_with_two_clips_and_a_drag_on_the_first() -> EditorState {
+        let mut state = state_with_clip();
+        state.set_playhead(seconds(30));
+        state.add_clip_from_file(0, Path::new("b.mp4"));
+        state.select(Some(key(0)));
+        state.drag = Some(ClipDrag { key: key(0), kind: DragKind::Move, grab_offset: Time::ZERO });
+        state
+    }
+
+    #[test]
+    fn editing_during_a_drag_changes_nothing_and_says_why() {
+        let mut state = state_with_two_clips_and_a_drag_on_the_first();
+        let before = state.project().clone();
+        let drag = state.drag;
+        state.delete_selected();
+        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+        state.set_playhead(seconds(5));
+        state.split_selected();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("c.mp4"));
         state.undo();
         state.redo();
-        state.select(Some(key(0)));
-        let can_redo = state.can_redo();
-        state.finish_drag(EditCommand::Move { key: key(0), track: 0, desired_start: Time::ZERO });
-        assert_eq!(state.can_redo(), can_redo);
+        assert_eq!(state.project(), &before);
+        assert_eq!(state.drag, drag);
         assert_eq!(state.selection(), Some(key(0)));
+        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+    }
+
+    #[test]
+    fn undo_and_redo_do_not_cancel_a_drag() {
+        let mut state = state_with_two_clips_and_a_drag_on_the_first();
+        let drag = state.drag;
+        state.undo();
+        assert_eq!(state.drag, drag);
+        state.redo();
+        assert_eq!(state.drag, drag);
+    }
+
+    #[test]
+    fn a_key_in_range_that_names_another_clip_does_not_move_that_clip() {
+        let mut state = state_with_two_clips_and_a_drag_on_the_first();
+        // Delete pressed in the middle of the drag of a.mp4. If it went through, key 0 would name
+        // b.mp4 and the release would move that clip instead.
+        state.delete_selected();
+        state.finish_drag(EditCommand::Move { key: key(0), track: 0, desired_start: seconds(60) });
+        let placed: Vec<(String, Time)> = state.project().tracks[0].clips.iter().map(|clip| (clip.source.clone(), clip.start)).collect();
+        assert_eq!(placed, vec![("b.mp4".to_owned(), seconds(30)), ("C:/media/a.mp4".to_owned(), seconds(60))]);
+    }
+
+    #[test]
+    fn cancel_drag_drops_the_drag_without_an_edit() {
+        let mut state = state_with_two_clips_and_a_drag_on_the_first();
+        let before = state.project().clone();
+        state.cancel_drag();
+        assert_eq!(state.drag, None);
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn a_finished_drag_still_edits() {
+        let mut state = state_with_two_clips_and_a_drag_on_the_first();
+        state.finish_drag(EditCommand::Move { key: key(0), track: 0, desired_start: seconds(60) });
+        assert_eq!(state.drag, None);
+        assert_eq!(clips(state.project(), 0)[1].0, seconds(60));
     }
 
     #[test]
