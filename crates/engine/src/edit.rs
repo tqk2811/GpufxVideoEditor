@@ -669,6 +669,14 @@ pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project,
     finish(next)
 }
 
+/// Changes the size of the output frames.
+pub fn set_output_size(project: &Project, width: u32, height: u32) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    next.output.width = width;
+    next.output.height = height;
+    finish(next)
+}
+
 /// Replaces the parameters of effect `effect` of a clip.
 pub fn set_effect_params(
     project: &Project,

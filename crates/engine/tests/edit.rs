@@ -6,13 +6,21 @@ use common::*;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, audio_segments, clip_at,
     delete_clip, frame_count, layers_at_frame, move_clip, nearest_free_start, remove_effect,
-    remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, validate,
+    remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_output_size, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, validate,
     AcceptAll, ClipKey, EditError, EditHistory, Effect, LayerContent, Project, SourceSample, Time,
     TrackKind, ValidationError,
 };
 
 fn key(track: usize, clip: usize) -> ClipKey {
     ClipKey { track, clip }
+}
+
+#[test]
+fn the_output_size_changes_and_zero_is_refused() {
+    let start = project(3_000, vec![]);
+    let changed = set_output_size(&start, 1080, 1920).unwrap();
+    assert_eq!((changed.output.width, changed.output.height), (1080, 1920));
+    assert!(matches!(set_output_size(&start, 0, 1080), Err(EditError::Invalid(_))));
 }
 
 #[test]

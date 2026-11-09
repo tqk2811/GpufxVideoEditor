@@ -229,6 +229,8 @@ pub enum Message {
     FieldSourceIn,
     FieldVideoDuration,
     DropOnTimeline,
+    OutputSizeCustom,
+    Apply,
     FieldVolume,
     SelectClipHint,
     Mute,

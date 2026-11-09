@@ -2,7 +2,7 @@
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
-use crate::editor::{EditorState, Status};
+use crate::editor::{EditorState, Status, OUTPUT_PRESETS};
 use crate::i18n::Message;
 use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
@@ -117,13 +117,13 @@ fn transport_fit(beside_play: f32, current: f32, total: f32, aspect: f32, gap: f
 fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, controls: Rect) {
     let output = &state.project().output;
     let frame_duration = output.frame_duration;
-    let aspect = aspect_label(output.width, output.height);
+    let size = size_label(output.width, output.height);
     let current = format_timecode(state.playhead(), frame_duration);
     let total = format_timecode(content_end(state.project()), frame_duration);
     let total = format!("/ {total}");
     let width_of = |text: &str, style: egui::TextStyle| ui.painter().layout_no_wrap(text.to_owned(), style.resolve(ui.style()), theme::TEXT).size().x;
     let beside_play = controls.width() / 2.0 - PLAY_HALF_WIDTH - ui.spacing().item_spacing.x;
-    let (show_total, show_aspect) = transport_fit(beside_play, width_of(&current, egui::TextStyle::Monospace), width_of(&total, egui::TextStyle::Monospace), width_of(&aspect, egui::TextStyle::Body), ui.spacing().item_spacing.x);
+    let (show_total, show_aspect) = transport_fit(beside_play, width_of(&current, egui::TextStyle::Monospace), width_of(&total, egui::TextStyle::Monospace), width_of(&size, egui::TextStyle::Body), ui.spacing().item_spacing.x);
     ui.allocate_ui_with_layout(ui.max_rect().size(), Layout::left_to_right(Align::Center), |ui| {
         ui.colored_label(theme::ACCENT_TEXT, egui::RichText::new(current).monospace());
         if show_total {
@@ -135,7 +135,7 @@ fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
                 requests.push(UiRequest::ToggleFullscreen);
             }
             if show_aspect {
-                ui.colored_label(theme::TEXT_DIM, aspect);
+                output_size_menu(ui, state, size);
             }
         });
     });
@@ -150,6 +150,46 @@ fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
     icons::paint(ui.painter(), button.shrink(7.0), icon, tint);
     if response.on_hover_text(state.language().t(if state.is_playing() { Message::StopShortcut } else { Message::PlayShortcut })).clicked() {
         state.toggle_playback();
+    }
+}
+
+fn size_label(width: u32, height: u32) -> String {
+    format!("{width}\u{d7}{height}")
+}
+
+/// The size of the output: a list of usual sizes and a width and height to type.
+fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
+    let (width, height) = (state.project().output.width, state.project().output.height);
+    let language = state.language();
+    let draft_id = ui.scope_id().with("output-size-draft");
+    let enabled = !state.is_exporting();
+    let menu = ui.add_enabled_ui(enabled, |ui| {
+        ui.menu_button(label, |ui| {
+            for (preset_width, preset_height) in OUTPUT_PRESETS {
+                let text = format!("{}  ({})", size_label(preset_width, preset_height), aspect_label(preset_width, preset_height));
+                if ui.selectable_label((preset_width, preset_height) == (width, height), text).clicked() {
+                    state.set_output_size(preset_width, preset_height);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            ui.colored_label(theme::TEXT_DIM, language.t(Message::OutputSizeCustom));
+            let (mut draft_width, mut draft_height) = ui.data(|data| data.get_temp::<(u32, u32)>(draft_id)).unwrap_or((width, height));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut draft_width).range(2..=7680).speed(2));
+                ui.label("\u{d7}");
+                ui.add(egui::DragValue::new(&mut draft_height).range(2..=7680).speed(2));
+            });
+            ui.data_mut(|data| data.insert_temp(draft_id, (draft_width, draft_height)));
+            if ui.button(language.t(Message::Apply)).clicked() {
+                state.set_output_size(draft_width, draft_height);
+                ui.close();
+            }
+        })
+    });
+    // What was typed and not applied does not come back the next time the menu opens.
+    if menu.inner.inner.is_none() {
+        ui.data_mut(|data| data.remove_temp::<(u32, u32)>(draft_id));
     }
 }
 
