@@ -339,9 +339,27 @@ impl D3d12Compositor {
         Ok(())
     }
 
+    /// `output` if wgpu reported nothing, otherwise an error, with `output` given back.
+    fn checked_output(&mut self, output: ImageId) -> Result<ImageId, RenderError> {
+        let check = self.gpu.check_errors();
+        keep_output_unless(check, output, |image| self.release_image(image))
+    }
+
     fn release_image(&mut self, image: ImageId) {
         if image != BLANK_IMAGE {
             self.free.push(image.0);
+        }
+    }
+}
+
+/// `output` when `check` passed. Otherwise the image goes to `release`, because the caller gets no
+/// handle to release (the contract of [`Compositor`]).
+fn keep_output_unless<I>(check: Result<(), String>, output: I, release: impl FnOnce(I)) -> Result<I, RenderError> {
+    match check {
+        Ok(()) => Ok(output),
+        Err(message) => {
+            release(output);
+            Err(RenderError(message))
         }
     }
 }
@@ -415,8 +433,7 @@ impl Compositor for D3d12Compositor {
             return Err(RenderError(e));
         }
         frame.raise_fence_value(inputs[0].fence_value);
-        self.gpu.check_errors()?;
-        Ok(output)
+        self.checked_output(output)
     }
 
     fn transition(&mut self, package: &str, params: &Map<String, Value>, from: ImageId, to: ImageId, progress: Progress, at: FrameContext) -> Result<ImageId, RenderError> {
@@ -444,8 +461,7 @@ impl Compositor for D3d12Compositor {
         }
         self.images[from.0].fence_value = inputs[0].fence_value;
         self.images[to.0].fence_value = inputs[1].fence_value;
-        self.gpu.check_errors()?;
-        Ok(output)
+        self.checked_output(output)
     }
 
     fn composite(&mut self, base: ImageId, top: ImageId, at: FrameContext) -> Result<ImageId, RenderError> {
@@ -460,8 +476,7 @@ impl Compositor for D3d12Compositor {
         }
         self.images[base.0].fence_value = inputs[0].fence_value;
         self.images[top.0].fence_value = inputs[1].fence_value;
-        self.gpu.check_errors()?;
-        Ok(output)
+        self.checked_output(output)
     }
 
     fn blank(&mut self) -> Result<ImageId, RenderError> {
@@ -487,5 +502,27 @@ impl Compositor for D3d12Compositor {
 
     fn release(&mut self, image: ImageId) {
         self.release_image(image);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn a_failed_check_releases_the_output() {
+        let released = Cell::new(None);
+        let result = keep_output_unless(Err("wgpu error".to_owned()), 7, |image| released.set(Some(image)));
+        assert_eq!(result, Err(RenderError("wgpu error".to_owned())));
+        assert_eq!(released.get(), Some(7), "the caller has no handle to release");
+    }
+
+    #[test]
+    fn a_passed_check_keeps_the_output() {
+        let released = Cell::new(None);
+        let result = keep_output_unless(Ok(()), 7, |image: i32| released.set(Some(image)));
+        assert_eq!(result, Ok(7));
+        assert_eq!(released.get(), None);
     }
 }
