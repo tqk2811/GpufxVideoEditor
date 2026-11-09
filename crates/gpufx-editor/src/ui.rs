@@ -288,13 +288,29 @@ fn status_line(ui: &mut egui::Ui, state: &EditorState, requests: &mut Vec<UiRequ
             }
             ui.separator();
         }
+        // The load is shown beside the status, which may say why a request meanwhile was not taken.
+        let loading = state.loading();
+        if let Some(name) = loading {
+            ui.label(format!("Loading {name}\u{2026}"));
+            if !matches!(state.status(), Status::Idle) {
+                ui.separator();
+            }
+        }
         match state.status() {
-            _ if state.loading().is_some() => ui.label(format!("Loading {}\u{2026}", state.loading().unwrap_or_default())),
-            Status::Idle => ui.label("Ready"),
-            Status::Info(message) => ui.label(message),
-            Status::Refused(message) => ui.colored_label(REFUSED, format!("Refused: {message}")),
-            Status::Error(message) => ui.colored_label(REFUSED, message),
-        };
+            Status::Idle if loading.is_some() => {}
+            Status::Idle => {
+                ui.label("Ready");
+            }
+            Status::Info(message) => {
+                ui.label(message);
+            }
+            Status::Refused(message) => {
+                ui.colored_label(REFUSED, format!("Refused: {message}"));
+            }
+            Status::Error(message) => {
+                ui.colored_label(REFUSED, message);
+            }
+        }
         if let Some(message) = state.preview_error() {
             ui.separator();
             ui.colored_label(REFUSED, format!("Preview: {message}"));
