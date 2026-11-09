@@ -60,7 +60,13 @@ impl ChildMachine {
                 self.mismatched = protocol != PROGRESS_PROTOCOL;
             }
             ProgressEvent::OutputReserved { path } => self.reserved.push(PathBuf::from(path)),
-            ProgressEvent::Progress { frame, .. } => self.frames = frame,
+            ProgressEvent::Progress { frame, total, .. } => {
+                self.frames = frame;
+                // A garbled `started` line must not hide the total.
+                if self.total <= 0 {
+                    self.total = total;
+                }
+            }
             event if event.is_terminal() => self.end = Some(event),
             _ => {}
         }
@@ -231,6 +237,17 @@ mod tests {
             assert_eq!(outcome, ExportOutcome::Failed(Message::ExportResultUnknown("a.tmp.mp4".into())));
             assert!(remove.is_empty(), "it may be the only copy of the render");
         }
+    }
+
+    #[test]
+    fn a_garbled_started_line_does_not_hide_that_every_frame_was_written() {
+        let mut machine = ChildMachine::default();
+        machine.take_line(b"{\"event\":\"star");
+        feed(&mut machine, &[reserved("a.tmp.mp4"), ProgressEvent::Progress { frame: 3, total: 3, elapsed_ms: 1 }]);
+        machine.take_line(b"{\"event\":\"err");
+        let (outcome, remove) = machine.finish(false, Some(1), "");
+        assert_eq!(outcome, ExportOutcome::Failed(Message::ExportResultUnknown("a.tmp.mp4".into())));
+        assert!(remove.is_empty(), "it may be the only copy of the render");
     }
 
     #[test]
