@@ -265,6 +265,12 @@ impl AudioFileDecoder {
         Ok(())
     }
 
+    /// Whether a read from here on would only be silence: the stream ended and everything decoded
+    /// was consumed. A file without an audio stream is finished from the start.
+    pub fn finished(&self) -> bool {
+        self.stream_index.is_none() || (self.end_of_stream && self.pending.len() < CHANNELS)
+    }
+
     fn needs_seek(&self, target: i64) -> bool {
         if target < self.pending_start {
             return self.floor != Some(self.pending_start);

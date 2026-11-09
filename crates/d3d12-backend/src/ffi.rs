@@ -35,6 +35,12 @@ pub struct AVIndexEntry {
     pub min_distance: core::ffi::c_int,
 }
 
+/// libswscale's opaque context.
+#[repr(C)]
+pub struct SwsContext {
+    _unused: [u8; 0],
+}
+
 /// libswresample's opaque context.
 #[repr(C)]
 pub struct SwrContext {
@@ -46,6 +52,29 @@ unsafe extern "C" {
     pub fn av_index_search_timestamp(stream: *mut AVStream, timestamp: i64, flags: core::ffi::c_int) -> core::ffi::c_int;
     pub fn avformat_index_get_entries_count(stream: *const AVStream) -> core::ffi::c_int;
     pub fn avformat_index_get_entry(stream: *mut AVStream, index: core::ffi::c_int) -> *const AVIndexEntry;
+    pub fn sws_getContext(
+        source_width: core::ffi::c_int,
+        source_height: core::ffi::c_int,
+        source_format: core::ffi::c_int,
+        destination_width: core::ffi::c_int,
+        destination_height: core::ffi::c_int,
+        destination_format: core::ffi::c_int,
+        flags: core::ffi::c_int,
+        source_filter: *mut core::ffi::c_void,
+        destination_filter: *mut core::ffi::c_void,
+        parameters: *const f64,
+    ) -> *mut SwsContext;
+    pub fn sws_scale(
+        context: *mut SwsContext,
+        source: *const *const u8,
+        source_stride: *const core::ffi::c_int,
+        slice_y: core::ffi::c_int,
+        slice_height: core::ffi::c_int,
+        destination: *const *mut u8,
+        destination_stride: *const core::ffi::c_int,
+    ) -> core::ffi::c_int;
+    pub fn sws_freeContext(context: *mut SwsContext);
+    pub fn av_frame_move_ref(destination: *mut AVFrame, source: *mut AVFrame);
     pub fn swr_alloc_set_opts2(
         context: *mut *mut SwrContext,
         out_layout: *const AVChannelLayout,

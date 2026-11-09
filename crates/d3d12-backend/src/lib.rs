@@ -18,6 +18,7 @@ mod gpu;
 mod packages;
 mod paths;
 mod probe;
+mod thumbnail;
 
 pub use audio::{AudioFileDecoder, AudioFiles};
 pub use compositor::{D3d12Compositor, SharedImage};
@@ -28,3 +29,4 @@ pub use gpu::Gpu;
 pub use packages::{expression_error, read_package_info, PackageInfo, ParamInfo, ParamKind};
 pub use paths::ProjectPaths;
 pub use probe::{probe_media, MediaProbe};
+pub use thumbnail::{FrameSampler, ThumbnailImage};
