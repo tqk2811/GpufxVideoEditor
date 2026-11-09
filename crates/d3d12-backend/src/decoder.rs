@@ -1,8 +1,9 @@
 //! Sequential H.264 decoding with D3D12VA through libav*. Same approach as the POC's decoder,
 //! reduced to what the renderer needs; there is deliberately no software path.
 //!
-//! [`SequentialDecoder::frame_at`] walks forward and seeks only when the time asked for cannot be
-//! reached going forward. Times outside the source hold its first or last frame.
+//! [`SequentialDecoder::frame_at`] walks forward, and seeks when the time asked for cannot be reached
+//! going forward or is far enough ahead that decoding everything in between would stall. Times
+//! outside the source hold its first or last frame.
 
 use std::ffi::{c_void, CStr, CString};
 use std::path::Path;
@@ -20,6 +21,9 @@ use crate::ffi::{self, check, describe_error};
 /// Frames the consumer may hold on top of what the decoder needs for references.
 const EXTRA_HW_FRAMES: i32 = 8;
 const TICKS_PER_SECOND: i128 = engine::TICKS_PER_SECOND as i128;
+/// How far ahead of the decoded position, in seconds of stream time, a request may be and still be
+/// reached by decoding through instead of seeking.
+const FORWARD_SEEK_SECONDS: i64 = 2;
 
 /// The stream timestamp of `ticks` of source time, rounded to the nearest unit of the time base
 /// `num / den` (flooring would pick the frame before when the stream rounds its timestamps up, as
@@ -28,6 +32,30 @@ fn stream_pts(ticks: i64, num: i32, den: i32, start_pts: i64) -> i64 {
     let k = TICKS_PER_SECOND * i128::from(num);
     let offset = (2 * i128::from(ticks) * i128::from(den) + k).div_euclid(2 * k);
     start_pts.saturating_add(offset as i64)
+}
+
+/// Whether seeking to `target` beats decoding forward from `position`, the newest decoded frame.
+/// `keyframe` looks up the keyframe a seek would land on, when the demuxer's index knows it; a seek
+/// landing at or behind `position` would decode frames already decoded. `min_distance` is the
+/// distance below which a seek has already been seen to land behind the position.
+fn forward_seek_pays(position: i64, target: i64, threshold: i64, min_distance: Option<i64>, keyframe: impl FnOnce() -> Option<i64>) -> bool {
+    let distance = target.saturating_sub(position);
+    if distance <= threshold || min_distance.is_some_and(|min| distance <= min) {
+        return false;
+    }
+    keyframe().is_none_or(|keyframe| keyframe > position)
+}
+
+/// Decides what follows a forward seek to `point` for `target`, given the first decoded frame:
+/// `Some(next)` seeks again to the earlier `next`, because the frame shown at `target` lies before
+/// the landing and decoding forward would have shown it. `origin` is the frame held before the seek:
+/// a keyframe not after it always exists, so going there ends the search.
+fn forward_retry_point(landing: Option<i64>, target: i64, point: i64, origin: i64, threshold: i64) -> Option<i64> {
+    if landing.is_some_and(|landing| landing <= target) || point <= origin {
+        return None;
+    }
+    let retreat = target.saturating_sub(point).max(threshold).saturating_mul(2);
+    Some(target.saturating_sub(retreat).max(origin))
 }
 
 unsafe extern "C" fn choose_d3d12_format(_context: *mut ffi::AVCodecContext, formats: *const ffi::AVPixelFormat) -> ffi::AVPixelFormat {
@@ -170,6 +198,9 @@ pub struct SequentialDecoder {
     seek_target: Option<i64>,
     /// The timestamp of the first frame decoded after the last seek.
     landing_pts: Option<i64>,
+    /// The longest jump so far whose seek landed at or behind the decoded position, because the
+    /// keyframes are further apart than it. Shorter jumps decode through instead.
+    min_forward_seek: Option<i64>,
     path: String,
 }
 
@@ -192,6 +223,7 @@ impl SequentialDecoder {
             end_of_stream: false,
             seek_target: None,
             landing_pts: None,
+            min_forward_seek: None,
             path: path_text.to_owned(),
         };
         // SAFETY: on error, Drop releases whatever has been created so far.
@@ -349,13 +381,69 @@ impl SequentialDecoder {
         Ok(())
     }
 
+    /// The timestamp of the keyframe a backward seek to `target` lands on, when the index knows it.
+    /// The last entry does not count: an index still being built ends there and proves nothing.
+    fn keyframe_before(&self, target: i64) -> Option<i64> {
+        // SAFETY: the contexts are valid after open, stream_index names a stream of the file, and
+        // the entry pointer is read before the index can change.
+        unsafe {
+            let stream = *(*self.format_context).streams.add(self.stream_index as usize);
+            let count = ffi::avformat_index_get_entries_count(stream);
+            let index = ffi::av_index_search_timestamp(stream, target, ffi::AVSEEK_FLAG_BACKWARD as i32);
+            if index < 0 || index >= count - 1 {
+                return None;
+            }
+            let entry = ffi::avformat_index_get_entry(stream, index);
+            (!entry.is_null()).then(|| (*entry).timestamp)
+        }
+    }
+
+    /// Decodes the next frame into `lookahead` when there is none, and returns its timestamp.
+    fn fill_lookahead(&mut self) -> Result<Option<i64>, String> {
+        if self.lookahead.is_none() && !self.end_of_stream {
+            self.lookahead = self.next_frame()?;
+            self.end_of_stream = self.lookahead.is_none();
+        }
+        Ok(self.lookahead.as_ref().map(|frame| frame.pts))
+    }
+
+    /// Seeks when `target` is far ahead. Afterwards the decoder is positioned as if it had decoded
+    /// forward to just before `target`: a landing after `target` is retried further back.
+    fn skip_ahead(&mut self, target: i64) -> Result<(), String> {
+        let Some(origin) = self.held.as_ref().map(|held| held.pts) else { return Ok(()) };
+        if self.end_of_stream {
+            return Ok(());
+        }
+        let position = self.lookahead.as_ref().map_or(origin, |frame| frame.pts);
+        let threshold = stream_pts(FORWARD_SEEK_SECONDS * engine::TICKS_PER_SECOND, self.time_base.num, self.time_base.den, 0);
+        if !forward_seek_pays(position, target, threshold, self.min_forward_seek, || self.keyframe_before(target)) {
+            return Ok(());
+        }
+        let mut point = target;
+        let landing = loop {
+            match self.seek(point) {
+                // Nothing has changed yet, so decoding forward still works.
+                Err(_) if point == target => return Ok(()),
+                other => other?,
+            }
+            let landing = self.fill_lookahead()?;
+            match forward_retry_point(landing, target, point, origin, threshold) {
+                Some(earlier) => point = earlier,
+                None => break landing,
+            }
+        };
+        if let Some(landing) = landing.filter(|landing| *landing <= position) {
+            self.min_forward_seek = Some(self.min_forward_seek.unwrap_or(0).max(target - landing));
+        }
+        // A seek for target, so the first frame is not mistaken for the start of the source.
+        self.seek_target = Some(target);
+        Ok(())
+    }
+
     /// Moves `held` to the frame shown at `target`: the last frame not after it.
     fn advance_to(&mut self, target: i64) -> Result<(), String> {
         loop {
-            if self.lookahead.is_none() && !self.end_of_stream {
-                self.lookahead = self.next_frame()?;
-                self.end_of_stream = self.lookahead.is_none();
-            }
+            self.fill_lookahead()?;
             match &self.lookahead {
                 // The first frame after a seek is taken even if later than the target: the
                 // source has nothing earlier (a time before the first frame holds that frame).
@@ -377,10 +465,14 @@ impl SequentialDecoder {
             (Some(held), Some(seek_target)) => held.pts > target && !(target >= seek_target && self.landing_pts == Some(held.pts)),
             (None, Some(_)) => false,
         };
-        if cannot_continue {
-            self.seek(target)?;
+        let moved = if cannot_continue { self.seek(target) } else { self.skip_ahead(target) };
+        let moved = moved.and_then(|()| self.advance_to(target));
+        if moved.is_err() && self.held.is_none() {
+            // Interrupted right after a seek: the next request must seek again, not continue from
+            // a landing that was meant for another target.
+            self.seek_target = None;
         }
-        self.advance_to(target)?;
+        moved?;
         let held = self.held.as_ref().ok_or("no frame could be decoded")?;
         held.reference()
     }
@@ -430,6 +522,64 @@ impl Drop for SequentialDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const THRESHOLD: i64 = 2000;
+
+    fn pays(position: i64, target: i64, keyframe: Option<i64>, min_distance: Option<i64>) -> bool {
+        forward_seek_pays(position, target, THRESHOLD, min_distance, || keyframe)
+    }
+
+    #[test]
+    fn a_near_target_is_decoded_through() {
+        assert!(!pays(1000, 1000 + THRESHOLD, Some(2500), None), "exactly the threshold is near");
+        assert!(!pays(1000, 500, None, None), "a backward target is not a forward seek");
+    }
+
+    #[test]
+    fn a_far_target_seeks() {
+        assert!(pays(1000, 1000 + THRESHOLD + 1, Some(2500), None));
+        assert!(pays(1000, 3_600_000, None, None), "no index: try it");
+    }
+
+    #[test]
+    fn a_keyframe_behind_the_position_is_not_worth_seeking_to() {
+        // A keyframe interval longer than the threshold: the seek would redo decoded frames.
+        assert!(!pays(5000, 8000, Some(5000), None));
+        assert!(!pays(5000, 8000, Some(1000), None));
+        assert!(pays(5000, 8000, Some(5001), None));
+    }
+
+    #[test]
+    fn a_jump_as_short_as_one_that_landed_behind_does_not_seek_again() {
+        assert!(!pays(5000, 8000, None, Some(3000)));
+        assert!(pays(5000, 8001, None, Some(3000)), "a longer jump may reach the next keyframe");
+    }
+
+    #[test]
+    fn a_landing_not_after_the_target_is_accepted() {
+        assert_eq!(forward_retry_point(Some(9000), 10_000, 10_000, 1000, THRESHOLD), None);
+        assert_eq!(forward_retry_point(Some(10_000), 10_000, 10_000, 1000, THRESHOLD), None);
+    }
+
+    #[test]
+    fn a_landing_after_the_target_is_retried_further_back() {
+        let first = forward_retry_point(Some(10_500), 10_000, 10_000, 1000, THRESHOLD).expect("retry");
+        assert!(first < 10_000 && first >= 1000, "{first}");
+        let second = forward_retry_point(Some(10_500), 10_000, first, 1000, THRESHOLD).expect("retry");
+        assert!(second < first, "each retry goes further back: {first} then {second}");
+    }
+
+    #[test]
+    fn a_retry_stops_at_the_held_frame() {
+        assert_eq!(forward_retry_point(Some(10_500), 10_000, 9800, 9500, THRESHOLD), Some(9500));
+        assert_eq!(forward_retry_point(Some(10_500), 10_000, 9500, 9500, THRESHOLD), None, "nothing earlier to try");
+    }
+
+    #[test]
+    fn a_seek_that_decodes_nothing_is_retried_from_the_held_frame() {
+        assert!(forward_retry_point(None, 10_000, 10_000, 1000, THRESHOLD).is_some());
+        assert_eq!(forward_retry_point(None, 10_000, 1000, 1000, THRESHOLD), None);
+    }
 
     #[test]
     fn rounds_to_the_nearest_unit_of_a_rounded_time_base() {

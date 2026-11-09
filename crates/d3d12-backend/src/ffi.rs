@@ -25,6 +25,16 @@ pub const AVERROR_STREAM_NOT_FOUND: i32 = -(0xF8 | (0x53 << 8) | (0x54 << 16) | 
 /// `AVERROR_DECODER_NOT_FOUND`, that is `FFERRTAG(0xF8, 'D', 'E', 'C')`.
 pub const AVERROR_DECODER_NOT_FOUND: i32 = -(0xF8 | (0x44 << 8) | (0x45 << 16) | (0x43 << 24));
 
+/// One seek point of a stream, as `avformat_index_get_entry` returns it.
+#[repr(C)]
+pub struct AVIndexEntry {
+    pub pos: i64,
+    pub timestamp: i64,
+    /// `flags:2` and `size:30`, which nothing here reads.
+    flags_and_size: core::ffi::c_int,
+    pub min_distance: core::ffi::c_int,
+}
+
 /// libswresample's opaque context.
 #[repr(C)]
 pub struct SwrContext {
@@ -33,6 +43,9 @@ pub struct SwrContext {
 
 unsafe extern "C" {
     pub fn avcodec_get_name(id: AVCodecID) -> *const core::ffi::c_char;
+    pub fn av_index_search_timestamp(stream: *mut AVStream, timestamp: i64, flags: core::ffi::c_int) -> core::ffi::c_int;
+    pub fn avformat_index_get_entries_count(stream: *const AVStream) -> core::ffi::c_int;
+    pub fn avformat_index_get_entry(stream: *mut AVStream, index: core::ffi::c_int) -> *const AVIndexEntry;
     pub fn swr_alloc_set_opts2(
         context: *mut *mut SwrContext,
         out_layout: *const AVChannelLayout,
