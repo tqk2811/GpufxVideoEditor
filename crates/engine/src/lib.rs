@@ -25,7 +25,9 @@ pub mod schedule;
 pub mod time;
 pub mod validate;
 
-pub use audio_clock::{sample_time, AudioClock, PullReport};
+pub use audio_clock::{
+    audio_channel, sample_time, AudioClock, AudioConsumer, AudioProducer, PrepareReport, PullReport,
+};
 pub use audio_mix::{mix_audio, AudioSource, MixReport};
 pub use audio_schedule::{
     audio_sample_count, audio_segments, sample_position, AudioSegment, GainEnvelope, MIX_CHANNELS,

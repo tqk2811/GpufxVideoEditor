@@ -1,8 +1,12 @@
 //! Audio clock and pull API, independent of any playback device.
 //!
-//! A device (real or fake) asks for samples with [`AudioClock::pull`]; the caller keeps samples
-//! ready with [`AudioClock::prepare`]. The clock's [`AudioClock::time`] counts only the samples the
-//! device consumed, so it is what a preview follows as its master clock.
+//! [`audio_channel`] splits the audio path into three handles over a single-producer
+//! single-consumer ring of fixed blocks:
+//!
+//! * [`AudioProducer`], on a preparing thread, decodes and mixes. It may allocate and take time.
+//! * [`AudioConsumer`], in the device callback. [`AudioConsumer::pull`] never locks, never
+//!   allocates and finishes in a bounded number of steps, so it cannot wait for the producer.
+//! * [`AudioClock`], for everyone else, reads the position and asks for seeks.
 //!
 //! # Rules
 //!
@@ -11,21 +15,52 @@
 //! * **Time.** Sample `s` maps to `ceil(s * 15 / 8)` ticks, the earliest tick with
 //!   `sample_position(tick) == s`, see [`sample_time`].
 //! * **Seek.** [`AudioClock::seek`] moves the position to the sample of the time asked for, limited
-//!   to the timeline, and discards every prepared sample. Nothing prepared before a seek can be
-//!   heard after it.
+//!   to the timeline. Nothing prepared before a seek can be heard after it, see below.
 //! * **Underrun.** When fewer samples are prepared than the device asks for, the missing part of
 //!   its buffer is silence and the clock stands still for it: the next real sample continues where
 //!   the audio stopped, so a stall delays the audio and never skips it. [`PullReport::underrun`]
 //!   counts those frames.
 //! * **End of the timeline.** After the last sample, a pull is silence that is not an underrun.
 //!   The clock stays at the end until a seek.
+//! * **Timeline change.** [`AudioProducer::set_project`] rebuilds the clock from the new project:
+//!   it takes the new end, drops what was mixed from the old project and resumes at the same
+//!   position, limited to the new timeline.
+//!
+//! # Why a seek needs no lock
+//!
+//! A seek bumps a generation counter stored together with the target position in one atomic. Every
+//! block carries the generation it was mixed for. The consumer plays only blocks of the generation
+//! it follows and drops the others. It adopts a new generation at the start of a pull, and also
+//! when it meets a block of another generation: the producer read that generation before
+//! publishing the block, so re-reading the atomic after seeing the block cannot return something
+//! older. A block that still differs after that re-read is stale and is dropped.
+//!
+//! The ring holds whole blocks, so stale blocks occupy it until the consumer drops them on its
+//! next pull; [`AudioProducer::prepare`] writes less while the ring is full. Generations wrap at
+//! 2^20: a stale block could only be taken for current if it survived that many seeks unconsumed.
 
 use crate::audio_mix::{mix_audio, AudioSource, MixReport};
 use crate::audio_schedule::{audio_sample_count, sample_position, MIX_CHANNELS};
 use crate::project::Project;
 use crate::render::RenderError;
 use crate::time::Time;
-use std::collections::VecDeque;
+use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+const POSITION_BITS: u32 = 44;
+const POSITION_MASK: u64 = (1 << POSITION_BITS) - 1;
+const GENERATION_MASK: u32 = (1 << 20) - 1;
+
+/// Positions must fit next to the generation; 2^44 samples are over eleven years of audio.
+const MAX_POSITION: i64 = POSITION_MASK as i64;
+
+fn pack(generation: u32, position: i64) -> u64 {
+    (u64::from(generation) << POSITION_BITS) | (position as u64 & POSITION_MASK)
+}
+
+fn unpack(value: u64) -> (u32, i64) {
+    ((value >> POSITION_BITS) as u32, (value & POSITION_MASK) as i64)
+}
 
 /// The earliest time whose [`sample_position`] is `sample`, computed with integers only.
 pub fn sample_time(sample: i64) -> Time {
@@ -33,7 +68,7 @@ pub fn sample_time(sample: i64) -> Time {
     Time::from_ticks(ticks as i64)
 }
 
-/// What one [`AudioClock::pull`] did. The three counts add up to the frames asked for.
+/// What one [`AudioConsumer::pull`] did. The three counts add up to the frames asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PullReport {
     /// Frames of real audio handed to the device.
@@ -44,77 +79,312 @@ pub struct PullReport {
     pub past_end: usize,
 }
 
-/// Tracks what a device has consumed and holds the samples prepared for it.
-#[derive(Debug, Clone)]
-pub struct AudioClock {
-    position: i64,
-    end: i64,
-    /// Interleaved stereo samples from `position` on.
-    prepared: VecDeque<f32>,
+/// What one [`AudioProducer::prepare`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PrepareReport {
+    /// Frames written to the ring; fewer than asked when the ring is full or the timeline ends.
+    pub frames: usize,
+    /// What the mixer reported, summed over those frames.
+    pub mix: MixReport,
 }
 
-impl AudioClock {
-    /// A clock at the start of `project`.
-    pub fn new(project: &Project) -> Self {
-        Self {
-            position: 0,
-            end: audio_sample_count(project),
-            prepared: VecDeque::new(),
+/// One slot of the ring. Ownership passes between the two threads through `head` and `tail`; the
+/// fields are atomics only so that this needs no unsafe code, and relaxed access is enough.
+struct Block {
+    generation: AtomicU32,
+    start: AtomicI64,
+    frames: AtomicUsize,
+    samples: Box<[AtomicU32]>,
+}
+
+struct Shared {
+    blocks: Box<[Block]>,
+    block_frames: usize,
+    /// Blocks consumed so far, written by the consumer. Wraps; compared with `wrapping_sub`.
+    head: AtomicUsize,
+    /// Blocks published so far, written by the producer.
+    tail: AtomicUsize,
+    /// The newest seek: generation and target position.
+    seek: AtomicU64,
+    /// What the consumer follows: generation and the position it consumes next.
+    consumed: AtomicU64,
+    end: AtomicI64,
+}
+
+impl Shared {
+    fn position(&self) -> i64 {
+        let (seek_generation, seek_position) = unpack(self.seek.load(Ordering::Acquire));
+        let (generation, position) = unpack(self.consumed.load(Ordering::Acquire));
+        if generation == seek_generation {
+            position
+        } else {
+            seek_position
         }
     }
 
-    /// The timeline sample the device consumes next.
+    fn publish_seek(&self, position: i64) {
+        let position = position.clamp(0, self.end.load(Ordering::Acquire));
+        let mut current = self.seek.load(Ordering::Relaxed);
+        loop {
+            let generation = unpack(current).0.wrapping_add(1) & GENERATION_MASK;
+            match self.seek.compare_exchange_weak(
+                current,
+                pack(generation, position),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+fn end_of(project: &Project) -> i64 {
+    audio_sample_count(project).clamp(0, MAX_POSITION)
+}
+
+/// Builds the three handles for `project`. The ring holds `block_count` blocks of `block_frames`
+/// frames, allocated here and never again; both counts are at least 1.
+pub fn audio_channel(
+    project: Project,
+    block_frames: usize,
+    block_count: usize,
+) -> (AudioProducer, AudioConsumer, AudioClock) {
+    let block_frames = block_frames.max(1);
+    let end = end_of(&project);
+    let blocks = (0..block_count.max(1))
+        .map(|_| Block {
+            generation: AtomicU32::new(0),
+            start: AtomicI64::new(0),
+            frames: AtomicUsize::new(0),
+            samples: (0..block_frames * MIX_CHANNELS).map(|_| AtomicU32::new(0)).collect(),
+        })
+        .collect();
+    let shared = Arc::new(Shared {
+        blocks,
+        block_frames,
+        head: AtomicUsize::new(0),
+        tail: AtomicUsize::new(0),
+        seek: AtomicU64::new(pack(0, 0)),
+        consumed: AtomicU64::new(pack(0, 0)),
+        end: AtomicI64::new(end),
+    });
+    let producer = AudioProducer {
+        shared: Arc::clone(&shared),
+        project,
+        end,
+        generation: 0,
+        next: 0,
+        tail: 0,
+        scratch: Vec::new(),
+    };
+    let consumer = AudioConsumer {
+        shared: Arc::clone(&shared),
+        generation: 0,
+        position: 0,
+        head: 0,
+        offset: 0,
+    };
+    (producer, consumer, AudioClock { shared })
+}
+
+/// The position and seek control, shareable with any thread.
+#[derive(Clone)]
+pub struct AudioClock {
+    shared: Arc<Shared>,
+}
+
+impl AudioClock {
+    /// The timeline sample the device consumes next, or the target of a seek it has not seen yet.
     pub fn position(&self) -> i64 {
-        self.position
+        self.shared.position()
     }
 
     /// The time of [`AudioClock::position`], derived from the samples the device consumed.
     pub fn time(&self) -> Time {
-        sample_time(self.position)
+        sample_time(self.position())
     }
 
-    /// Frames mixed and waiting for the device.
+    /// The sample count of the timeline.
+    pub fn end(&self) -> i64 {
+        self.shared.end.load(Ordering::Acquire)
+    }
+
+    /// Moves to the sample of `time`, limited to the timeline, and discards the prepared samples.
+    pub fn seek(&self, time: Time) {
+        self.shared.publish_seek(sample_position(time));
+    }
+}
+
+/// The half that decodes and mixes. Owns the project it mixes.
+pub struct AudioProducer {
+    shared: Arc<Shared>,
+    project: Project,
+    end: i64,
+    generation: u32,
+    /// The timeline sample the next block starts at.
+    next: i64,
+    tail: usize,
+    scratch: Vec<f32>,
+}
+
+impl AudioProducer {
+    fn sync(&mut self) {
+        let (generation, position) = unpack(self.shared.seek.load(Ordering::Acquire));
+        if generation != self.generation {
+            self.generation = generation;
+            self.next = position;
+        }
+    }
+
+    /// Frames mixed for the current position and waiting for the device.
     pub fn prepared_frames(&self) -> usize {
-        self.prepared.len() / MIX_CHANNELS
+        let (seek_generation, seek_position) = unpack(self.shared.seek.load(Ordering::Acquire));
+        if self.generation != seek_generation {
+            return 0;
+        }
+        let (generation, position) = unpack(self.shared.consumed.load(Ordering::Acquire));
+        let base = if generation == seek_generation { position } else { seek_position };
+        (self.next - base).max(0) as usize
     }
 
-    /// Mixes up to `frames` more frames after what is prepared, stopping at the end of the
-    /// timeline. Ask again until enough is prepared; a real device layer does this ahead of time.
+    /// Mixes up to `frames` more frames after what is prepared, stopping at the end of the timeline
+    /// or when the ring is full. Ask again until enough is prepared.
     pub fn prepare<S: AudioSource + ?Sized>(
         &mut self,
-        project: &Project,
         source: &mut S,
         frames: usize,
-    ) -> Result<MixReport, RenderError> {
-        let start = self.position + self.prepared_frames() as i64;
-        let count = (frames as i64).min(self.end - start).max(0) as usize;
-        let mut mixed = vec![0.0; count * MIX_CHANNELS];
-        let report = mix_audio(project, source, start, &mut mixed)?;
-        self.prepared.extend(mixed);
+    ) -> Result<PrepareReport, RenderError> {
+        let mut report = PrepareReport::default();
+        while report.frames < frames {
+            self.sync();
+            let shared = &self.shared;
+            let capacity = shared.blocks.len();
+            if self.tail.wrapping_sub(shared.head.load(Ordering::Acquire)) >= capacity {
+                break;
+            }
+            let count = (frames - report.frames)
+                .min(shared.block_frames)
+                .min((self.end - self.next).max(0) as usize);
+            if count == 0 {
+                break;
+            }
+            self.scratch.clear();
+            self.scratch.resize(count * MIX_CHANNELS, 0.0);
+            let mix = mix_audio(&self.project, source, self.next, &mut self.scratch)?;
+            report.mix.clamped_samples += mix.clamped_samples;
+
+            // A seek that arrives during the mix makes this block stale, and the consumer drops it.
+            let block = &shared.blocks[self.tail % capacity];
+            block.generation.store(self.generation, Ordering::Relaxed);
+            block.start.store(self.next, Ordering::Relaxed);
+            block.frames.store(count, Ordering::Relaxed);
+            for (slot, sample) in block.samples.iter().zip(&self.scratch) {
+                slot.store(sample.to_bits(), Ordering::Relaxed);
+            }
+            self.tail = self.tail.wrapping_add(1);
+            shared.tail.store(self.tail, Ordering::Release);
+            self.next += count as i64;
+            report.frames += count;
+        }
         Ok(report)
     }
 
+    /// Replaces the project. The clock takes the new end, what was prepared from the old project
+    /// is dropped, and playback resumes at the same position, limited to the new timeline.
+    pub fn set_project(&mut self, project: Project) {
+        let end = end_of(&project);
+        self.project = project;
+        self.end = end;
+        self.shared.end.store(end, Ordering::Release);
+        self.shared.publish_seek(self.shared.position());
+        self.sync();
+    }
+}
+
+/// The half for the device callback.
+pub struct AudioConsumer {
+    shared: Arc<Shared>,
+    generation: u32,
+    /// The position of the next frame, kept for the callback and published through `consumed`.
+    position: i64,
+    head: usize,
+    /// Frames already played from the block at `head`.
+    offset: usize,
+}
+
+impl AudioConsumer {
+    fn adopt(&mut self, state: u64) {
+        let (generation, position) = unpack(state);
+        self.generation = generation;
+        self.position = position;
+        self.offset = 0;
+        self.shared.consumed.store(state, Ordering::Release);
+    }
+
     /// Fills `out` as the device consumes it, interleaved stereo; a trailing odd element is zeroed.
+    /// Never locks, never allocates, and takes a bounded number of steps.
     pub fn pull(&mut self, out: &mut [f32]) -> PullReport {
         out.fill(0.0);
         let frames = out.len() / MIX_CHANNELS;
-        let remaining = (self.end - self.position).max(0) as usize;
-        let played = frames.min(self.prepared_frames()).min(remaining);
-        for (target, sample) in out.iter_mut().zip(self.prepared.drain(..played * MIX_CHANNELS)) {
-            *target = sample;
+        let state = self.shared.seek.load(Ordering::Acquire);
+        if unpack(state).0 != self.generation {
+            self.adopt(state);
         }
-        self.position += played as i64;
-        let past_end = (frames - played).saturating_sub(remaining - played);
+        let end = self.shared.end.load(Ordering::Acquire);
+        let mut remaining = (end - self.position).max(0) as usize;
+        let mut played = 0;
+        // Every step plays at least one frame, drops one block or adopts one seek.
+        let capacity = self.shared.blocks.len();
+        let mut steps = frames.saturating_add(capacity.saturating_mul(2));
+        while played < frames && steps > 0 {
+            steps -= 1;
+            if self.head == self.shared.tail.load(Ordering::Acquire) {
+                break;
+            }
+            let index = self.head % capacity;
+            let generation = self.shared.blocks[index].generation.load(Ordering::Relaxed);
+            if generation != self.generation {
+                let state = self.shared.seek.load(Ordering::Acquire);
+                if unpack(state).0 != self.generation {
+                    self.adopt(state);
+                    remaining = ((end - self.position).max(0) as usize).saturating_add(played);
+                } else {
+                    self.offset = 0;
+                    self.head = self.head.wrapping_add(1);
+                    self.shared.head.store(self.head, Ordering::Release);
+                }
+                continue;
+            }
+            let block = &self.shared.blocks[index];
+            let start = block.start.load(Ordering::Relaxed);
+            let block_frames = block.frames.load(Ordering::Relaxed);
+            let take = (frames - played).min(block_frames - self.offset);
+            let from = self.offset * MIX_CHANNELS;
+            for (target, slot) in out[played * MIX_CHANNELS..(played + take) * MIX_CHANNELS]
+                .iter_mut()
+                .zip(&block.samples[from..from + take * MIX_CHANNELS])
+            {
+                *target = f32::from_bits(slot.load(Ordering::Relaxed));
+            }
+            played += take;
+            self.offset += take;
+            self.position = start + self.offset as i64;
+            self.shared
+                .consumed
+                .store(pack(self.generation, self.position), Ordering::Release);
+            if self.offset == block_frames {
+                self.offset = 0;
+                self.head = self.head.wrapping_add(1);
+                self.shared.head.store(self.head, Ordering::Release);
+            }
+        }
+        let past_end = (frames - played).saturating_sub(remaining.saturating_sub(played));
         PullReport {
             played,
             underrun: frames - played - past_end,
             past_end,
         }
-    }
-
-    /// Moves to the sample of `time`, limited to the timeline, and discards the prepared samples.
-    pub fn seek(&mut self, time: Time) {
-        self.position = sample_position(time).clamp(0, self.end);
-        self.prepared.clear();
     }
 }

@@ -72,10 +72,6 @@ Trong cửa sổ transition, mỗi clip được kéo dài qua đầu hoặc đu
 
 Clip liên tục bị cắt tại tick không chia hết cho 15 thì lặp hoặc rớt tối đa 1 mẫu ở chỗ nối, có thể gây tiếng tách. Crossfade công suất đều của tiếng tương quan (hai nửa của một clip bị cắt) đạt đỉnh khoảng +3 dB và có thể bị chặn ở mức tối đa. Ghi ngày 2026-11-09.
 
-### [Vừa] AudioClock dồn chuẩn bị và lấy mẫu vào một &mut self, và giữ `end` lệch với project
-
-`AudioClock::prepare` (giải mã và mix) và `AudioClock::pull` (phía thiết bị) cùng nằm sau một `&mut self` (`crates/engine/src/audio_clock.rs:83` và `:98`), nên callback của thiết bị thật phải chờ khi đang seek và sẽ underrun. Cần tách bằng ring buffer một producer một consumer trước khi nối loa ở giai đoạn UI. Ngoài ra `end` được lưu lúc `new` (`crates/engine/src/audio_clock.rs:61`) còn `project` lại truyền vào `prepare` (`:83-85`), nên sửa timeline làm đồng hồ lệch với project. Ghi ngày 2026-11-09.
-
 ### [Thấp] Downmix 5.1 không chuẩn hoá, và hai nhánh decoder chưa có test
 
 Resampler ở `crates/d3d12-backend/src/audio.rs:430` xuất float và không chuẩn hoá, nên downmix 5.1 có thể vượt 1.0 và bị tính là clamp khi mix. Chưa đo trên nguồn 5.1 thật. Nhánh lấp khoảng trống timestamp (`crates/d3d12-backend/src/audio.rs:406`, mới có unit test cho giới hạn) và nhánh đổi định dạng giữa dòng (`crates/d3d12-backend/src/audio.rs:393-397`) chưa có test trên file thật. Nên làm vì âm có thể méo mà không có gì báo, và hai nhánh này khó tái hiện khi có lỗi. Ghi ngày 2026-11-09.
