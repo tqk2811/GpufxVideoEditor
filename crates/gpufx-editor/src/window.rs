@@ -201,7 +201,7 @@ impl Session {
             self.playback = None;
             return;
         }
-        self.state.set_silence_ms(frames_to_ms(playback.thread().shared().stats().underrun));
+        self.state.set_silence_ms(frames_to_ms(playback.thread().shared().stats().gaps));
         if !self.state.is_playing() {
             return;
         }

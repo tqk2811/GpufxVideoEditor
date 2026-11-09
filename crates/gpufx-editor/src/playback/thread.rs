@@ -26,6 +26,10 @@ pub struct PlaybackShared {
     gate: AtomicBool,
     played: AtomicU64,
     underrun: AtomicU64,
+    /// The underrun that was not the expected wait after a play, seek or edit.
+    gaps: AtomicU64,
+    /// Set by a seek or edit until real audio comes again.
+    settling: AtomicBool,
     past_end: AtomicU64,
     delay: AtomicU64,
     anchor: AtomicI64,
@@ -37,6 +41,9 @@ pub struct PlaybackStats {
     pub played: u64,
     /// Frames of silence because the audio was not prepared in time.
     pub underrun: u64,
+    /// Frames of [`Self::underrun`] that were not the expected wait after a seek or edit, since the
+    /// last play.
+    pub gaps: u64,
     pub delay: u64,
 }
 
@@ -45,12 +52,18 @@ impl PlaybackShared {
         PlaybackStats {
             played: self.played.load(Ordering::Relaxed),
             underrun: self.underrun.load(Ordering::Relaxed),
+            gaps: self.gaps.load(Ordering::Relaxed),
             delay: self.delay.load(Ordering::Relaxed),
         }
     }
 
     fn set_gate(&self, open: bool) {
         self.gate.store(open, Ordering::Release);
+    }
+
+    /// Call after the seek is published: an underrun before the next real audio is expected.
+    fn expect_silence(&self) {
+        self.settling.store(true, Ordering::Relaxed);
     }
 
     fn begin(&self, anchor: i64) {
@@ -78,6 +91,10 @@ fn pull_stereo(consumer: &mut AudioConsumer, shared: &PlaybackShared, out: &mut 
     let report = consumer.pull(out);
     shared.played.fetch_add(report.played as u64, Ordering::Relaxed);
     shared.underrun.fetch_add(report.underrun as u64, Ordering::Relaxed);
+    let expected = if report.played > 0 { shared.settling.swap(false, Ordering::Relaxed) } else { shared.settling.load(Ordering::Relaxed) };
+    if !expected {
+        shared.gaps.fetch_add(report.underrun as u64, Ordering::Relaxed);
+    }
     if report.past_end > 0 {
         shared.past_end.fetch_add(report.past_end as u64, Ordering::Relaxed);
     } else {
@@ -157,6 +174,8 @@ struct Commands {
     quit: bool,
     project: Option<Arc<Project>>,
     error: Option<String>,
+    /// Set when the source could not be made, so the thread is gone; every play reports it again.
+    startup_failure: Option<String>,
 }
 
 #[derive(Default)]
@@ -218,7 +237,12 @@ fn run<S: AudioSource + ?Sized>(mut producer: AudioProducer, source: &mut S, clo
         }
         if let Some(project) = commands.project.take() {
             silent = sound_is_off(&project);
+            // The clone can be long; the UI must not wait for it to seek or stop.
+            drop(commands);
             producer.set_project((*project).clone());
+            shared.expect_silence();
+            commands = control.lock();
+            continue;
         }
         if !commands.playing {
             commands = control.wake.wait(commands).unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -270,7 +294,13 @@ impl PreparingThread {
         let handle = thread::Builder::new()
             .name("audio-prepare".to_owned())
             .spawn(move || {
-                let mut source = make();
+                let Ok(mut source) = catch_unwind(AssertUnwindSafe(make)) else {
+                    let message = "the audio source could not be created".to_owned();
+                    let mut commands = thread_control.lock();
+                    commands.error = Some(message.clone());
+                    commands.startup_failure = Some(message);
+                    return;
+                };
                 run(producer, &mut source, &thread_clock, &thread_shared, &thread_control, silent);
             })
             .map_err(|e| format!("the audio thread could not start: {e}"))?;
@@ -284,8 +314,14 @@ impl PreparingThread {
     /// Prepares from `from`; the gate opens when the lead is ready.
     pub fn play(&self, from: Time) {
         let mut commands = self.control.lock();
+        if let Some(message) = commands.startup_failure.clone() {
+            commands.error = Some(message);
+            return;
+        }
         self.shared.begin(sample_position(from));
+        self.shared.gaps.store(0, Ordering::Relaxed);
         self.clock.seek(from);
+        self.shared.expect_silence();
         commands.error = None;
         commands.playing = true;
         self.control.wake.notify_all();
@@ -303,6 +339,7 @@ impl PreparingThread {
         let _commands = self.control.lock();
         self.shared.begin(sample_position(time));
         self.clock.seek(time);
+        self.shared.expect_silence();
         self.control.wake.notify_all();
     }
 
@@ -471,6 +508,54 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn the_silence_after_a_seek_is_not_a_gap_but_a_later_one_is() {
+        let permits = Permits::default();
+        let source = permits.clone();
+        let (thread, mut consumer) = PreparingThread::spawn(&project(8, true, TrackKind::Video), move || source).unwrap();
+        thread.play(Time::ZERO);
+        permits.grant(10);
+        open_gate(&thread);
+        pull(&mut consumer, thread.shared(), 480);
+        thread.seek(Time::from_seconds(1).unwrap());
+        pull(&mut consumer, thread.shared(), 480);
+        let stats = thread.shared().stats();
+        assert!(stats.underrun > 0, "nothing is prepared at the target yet");
+        assert_eq!(stats.gaps, 0, "the wait after a seek is expected");
+
+        let used = permits.used();
+        permits.grant(5);
+        permits.wait_for(used + 5);
+        wait_until(
+            || {
+                pull(&mut consumer, thread.shared(), 480);
+                thread.shared().stats().played > 480
+            },
+            "the audio at the target",
+        );
+        wait_until(
+            || {
+                pull(&mut consumer, thread.shared(), 480);
+                thread.shared().stats().gaps > 0
+            },
+            "a gap when the audio runs out",
+        );
+
+        thread.play(Time::ZERO);
+        assert_eq!(thread.shared().stats().gaps, 0, "reset on each play");
+        permits.unlimited();
+    }
+
+    #[test]
+    fn a_panicking_source_constructor_is_reported_on_every_play() {
+        let (thread, _consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), || -> Counting { panic!("deliberate test panic") }).unwrap();
+        thread.play(Time::ZERO);
+        wait_until(|| thread.control.lock().error.is_some(), "the error");
+        assert!(thread.take_error().expect("an error").contains("could not be created"));
+        thread.play(Time::ZERO);
+        assert!(thread.take_error().expect("a second report").contains("could not be created"));
     }
 
     #[test]

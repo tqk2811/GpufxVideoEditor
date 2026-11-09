@@ -9,7 +9,7 @@ use cpal::{BufferSize, OutputCallbackInfo, SampleFormat, Stream};
 use d3d12_backend::{AudioFiles, ProjectPaths};
 use engine::{Project, MIX_CHANNELS, MIX_SAMPLE_RATE};
 
-use super::plan::{choose_format, FormatRange};
+use super::plan::{choose_format, usable_latency, FormatRange};
 use super::thread::{fill_device_channels, PreparingThread, SilentDriver};
 
 /// Frames of stereo a surround callback pulls at a time; larger callbacks are pulled in pieces.
@@ -26,7 +26,7 @@ pub struct Playback {
 
 fn latency_of(info: &OutputCallbackInfo) -> Option<Duration> {
     let timestamp = info.timestamp();
-    Some(timestamp.playback.duration_since(timestamp.callback)).filter(|latency| !latency.is_zero())
+    usable_latency(timestamp.playback.duration_since(timestamp.callback))
 }
 
 impl Playback {

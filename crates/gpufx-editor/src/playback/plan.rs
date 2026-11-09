@@ -11,6 +11,8 @@ pub const LEAD_FRAMES: usize = 9_600;
 pub const RING_BLOCKS: usize = ring_blocks(LEAD_FRAMES, BLOCK_FRAMES);
 /// Used when the device gives no usable timestamps.
 pub const FALLBACK_LATENCY: Duration = Duration::from_millis(30);
+/// The most a device timestamp is believed: the end of the timeline waits for this delay.
+pub const MAX_LATENCY: Duration = Duration::from_secs(2);
 
 /// Twice the lead plus one: after a seek or edit, the stale blocks of a whole lead wait for the next
 /// pull and a whole fresh lead still fits beside them, so stale audio never limits the new audio.
@@ -32,6 +34,11 @@ pub fn prefill_done(prepared: usize, remaining: i64, lead_frames: usize) -> bool
 /// the prefill of the current generation is done. Ask with the command lock held.
 pub fn gate_may_open(playing: bool, edit_pending: bool, prepared: usize, remaining: i64, lead_frames: usize) -> bool {
     playing && !edit_pending && prefill_done(prepared, remaining, lead_frames)
+}
+
+/// A latency from device timestamps: none when it is zero, and at most [`MAX_LATENCY`].
+pub fn usable_latency(latency: Duration) -> Option<Duration> {
+    (!latency.is_zero()).then(|| latency.min(MAX_LATENCY))
 }
 
 /// Frames between the position the clock reports after a pull and what is heard at that moment: the
@@ -190,6 +197,13 @@ mod tests {
     fn the_delay_is_the_buffer_plus_the_latency() {
         assert_eq!(output_delay_frames(480, Some(Duration::from_millis(10))), 960);
         assert_eq!(output_delay_frames(480, None), 480 + 1_440);
+    }
+
+    #[test]
+    fn a_device_latency_is_limited_and_zero_means_unknown() {
+        assert_eq!(usable_latency(Duration::ZERO), None);
+        assert_eq!(usable_latency(Duration::from_millis(40)), Some(Duration::from_millis(40)));
+        assert_eq!(usable_latency(Duration::from_secs(3_600)), Some(MAX_LATENCY));
     }
 
     #[test]
