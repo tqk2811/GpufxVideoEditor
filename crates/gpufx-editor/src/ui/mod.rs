@@ -15,7 +15,7 @@ use crate::editor::{EditorState, Status};
 use crate::i18n::{Language, Message};
 use crate::layout::{panels, Panels};
 use crate::presenter::PreviewTexture;
-use egui::{CornerRadius, Event, Key, Modifiers, PointerButton, Rect, Stroke, StrokeKind, UiBuilder};
+use egui::{CornerRadius, Event, Key, Modifiers, Rect, Stroke, StrokeKind, UiBuilder};
 
 /// Work the window does after the frame, outside the UI pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,17 +58,16 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     }
 }
 
-/// The releases of every pointer button still down, for a window that lost the focus: no release
-/// reaches it then, and a hold would otherwise stay on until the next click.
-pub(crate) fn pointer_release_events(ctx: &egui::Context) -> Vec<Event> {
-    ctx.input(|input| {
-        let pos = input.pointer.latest_pos().or_else(|| input.pointer.interact_pos()).unwrap_or(egui::Pos2::ZERO);
-        [PointerButton::Primary, PointerButton::Secondary, PointerButton::Middle, PointerButton::Extra1, PointerButton::Extra2]
-            .into_iter()
-            .filter(|button| input.pointer.button_down(*button))
-            .map(|button| Event::PointerButton { pos, button, pressed: false, modifiers: Modifiers::NONE })
-            .collect()
-    })
+/// The window lost the focus: a hold is cancelled, as Escape cancels it, because switching windows
+/// is not a drop. The release may never reach this window, so egui is told to forget the buttons
+/// that are down. Without a release event nothing can turn into a click, and the next real press
+/// starts from a clean state; a release that does arrive later finds no button to end.
+pub(crate) fn focus_lost(ctx: &egui::Context, state: &mut EditorState) {
+    state.cancel_drag();
+    if ctx.input(|input| input.pointer.any_down()) {
+        ctx.input_mut(|input| input.pointer = egui::PointerState::default());
+        ctx.stop_dragging();
+    }
 }
 
 fn in_rect(root: &mut egui::Ui, id: &str, rect: Rect, add_contents: impl FnOnce(&mut egui::Ui)) {
@@ -564,27 +563,109 @@ mod tests {
         vec![Event::PointerMoved(at), Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]
     }
 
-    #[test]
-    fn losing_the_window_focus_counts_as_a_release() {
-        let mut state = state();
-        let ctx = egui::Context::default();
+    /// One whole-UI frame with `events`.
+    fn input_frame(ctx: &egui::Context, state: &mut EditorState, events: Vec<Event>) {
         let mut requests = Vec::new();
-        let at = egui::pos2(5.0, 5.0);
-        run_frame(&ctx, egui::RawInput { events: pointer_press(at), ..window_input(1280.0, 720.0) }, |ui| show(ui, &mut state, &mut requests, None));
-        state.live_gain(-6.0);
-        run_frame(&ctx, window_input(1280.0, 720.0), |ui| show(ui, &mut state, &mut requests, None));
-        assert!(state.is_live(), "the button is still down");
+        run_frame(ctx, egui::RawInput { events, ..window_input(1280.0, 720.0) }, |ui| show(ui, state, &mut requests, None));
+    }
 
-        let events = pointer_release_events(&ctx);
-        assert_eq!(events.len(), 1, "only the button that is down");
-        run_frame(&ctx, egui::RawInput { events, ..window_input(1280.0, 720.0) }, |ui| show(ui, &mut state, &mut requests, None));
-        assert!(!state.is_live(), "the hold ended with the focus");
-        assert_eq!(state.project().tracks[0].clips[0].gain_db, -6.0, "as a release, it keeps the edit");
+    fn pointer_release(at: egui::Pos2) -> Vec<Event> {
+        vec![Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]
+    }
+
+    /// The screen position of `time` inside the only track.
+    fn on_track(state: &EditorState, time: Time) -> egui::Pos2 {
+        let origin = timeline_panel::tracks_origin(panels(egui::vec2(1280.0, 720.0)).timeline);
+        origin + egui::vec2(state.view.time_to_x(time) as f32, state.view.track_top(0, 1) as f32 + 30.0)
+    }
+
+    /// Presses on the clip at 2 s and moves away, leaving a timeline drag in progress.
+    fn start_clip_drag(ctx: &egui::Context, state: &mut EditorState) {
+        let from = on_track(state, seconds(2));
+        input_frame(ctx, state, vec![]);
+        input_frame(ctx, state, vec![Event::PointerMoved(from)]);
+        input_frame(ctx, state, pointer_press(from));
+        input_frame(ctx, state, vec![Event::PointerMoved(from + egui::vec2(120.0, 0.0))]);
+        input_frame(ctx, state, vec![Event::PointerMoved(from + egui::vec2(240.0, 0.0))]);
+        assert!(state.drag.is_some(), "the test must really start a drag");
     }
 
     #[test]
-    fn with_no_button_down_losing_the_focus_releases_nothing() {
-        assert!(pointer_release_events(&egui::Context::default()).is_empty());
+    fn losing_the_focus_during_a_drag_moves_nothing_and_adds_no_undo_step() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let before = state.project().clone();
+        start_clip_drag(&ctx, &mut state);
+        focus_lost(&ctx, &mut state);
+        input_frame(&ctx, &mut state, vec![]);
+        assert_eq!(state.drag, None);
+        assert_eq!(state.project(), &before, "the clip stays where it was");
+        // The release can still arrive after the window lost the focus.
+        let late = on_track(&state, seconds(4));
+        input_frame(&ctx, &mut state, pointer_release(late));
+        assert_eq!(state.project(), &before, "a late release drops nothing");
+        state.undo();
+        assert!(state.project().tracks[0].clips.is_empty(), "the next undo step is still adding the clip");
+    }
+
+    #[test]
+    fn losing_the_focus_during_a_live_edit_restores_the_value() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        input_frame(&ctx, &mut state, pointer_press(egui::pos2(5.0, 5.0)));
+        state.live_gain(-6.0);
+        input_frame(&ctx, &mut state, vec![]);
+        assert!(state.is_live(), "the button is still down");
+        focus_lost(&ctx, &mut state);
+        input_frame(&ctx, &mut state, vec![]);
+        assert!(!state.is_live());
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, 0.0);
+        assert!(!state.hold_cancelled(), "egui no longer has a button down, so nothing stays cancelled");
+    }
+
+    #[test]
+    fn a_press_without_a_move_and_a_lost_focus_fires_no_click() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let center = panels(egui::vec2(1280.0, 720.0)).center;
+        let at = egui::pos2(center.center().x, center.bottom() - 21.0);
+        input_frame(&ctx, &mut state, vec![]);
+        input_frame(&ctx, &mut state, vec![Event::PointerMoved(at)]);
+        input_frame(&ctx, &mut state, pointer_press(at));
+        focus_lost(&ctx, &mut state);
+        input_frame(&ctx, &mut state, vec![]);
+        assert!(!state.is_playing(), "the play button was not clicked");
+        input_frame(&ctx, &mut state, pointer_release(at));
+        assert!(!state.is_playing(), "a release after the focus came back is no click either");
+    }
+
+    #[test]
+    fn after_the_focus_returns_the_next_drag_works_and_edits_are_not_blocked() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        start_clip_drag(&ctx, &mut state);
+        focus_lost(&ctx, &mut state);
+        input_frame(&ctx, &mut state, vec![]);
+        assert!(!state.is_holding());
+        press(&mut state, Key::S, Modifiers::NONE);
+        assert_ne!(state.status(), &Status::Info(Message::FinishDragFirst), "edits are not blocked by the lost drag");
+        state.undo();
+        input_frame(&ctx, &mut state, vec![]);
+
+        start_clip_drag(&ctx, &mut state);
+        let to = on_track(&state, seconds(2)) + egui::vec2(240.0, 0.0);
+        input_frame(&ctx, &mut state, pointer_release(to));
+        assert_eq!(state.drag, None);
+        assert!(state.project().tracks[0].clips[0].start > Time::ZERO, "the next drag moved the clip");
+    }
+
+    #[test]
+    fn losing_the_focus_with_no_button_down_keeps_the_pointer_position() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        input_frame(&ctx, &mut state, vec![Event::PointerMoved(egui::pos2(5.0, 5.0))]);
+        focus_lost(&ctx, &mut state);
+        assert_eq!(ctx.input(|input| input.pointer.latest_pos()), Some(egui::pos2(5.0, 5.0)));
     }
 
     #[test]

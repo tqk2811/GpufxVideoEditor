@@ -66,8 +66,8 @@ pub struct EditorState {
     export: Option<ExportProgress>,
     /// A control being dragged; see [`LiveEdit`].
     live: Option<LiveEdit>,
-    /// Escape dropped a held control: it keeps reporting the pointer, so its changes are ignored
-    /// until the button is released.
+    /// Escape or a lost window focus dropped a held control: it keeps reporting the pointer, so
+    /// its changes are ignored until the button is released.
     hold_cancelled: bool,
     /// What this session imported and what the open project uses.
     pub library: MediaLibrary,

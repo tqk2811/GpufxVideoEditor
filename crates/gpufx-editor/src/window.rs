@@ -678,7 +678,7 @@ impl ApplicationHandler for EditorApp {
                 }
             }
             WindowEvent::Focused(false) => {
-                session.presenter.release_pointer();
+                session.presenter.focus_lost(&mut session.state);
                 session.presenter.window().request_redraw();
             }
             WindowEvent::Resized(size) => {

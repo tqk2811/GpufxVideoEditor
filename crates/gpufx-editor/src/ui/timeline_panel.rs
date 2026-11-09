@@ -369,6 +369,12 @@ fn headers(ui: &mut egui::Ui, state: &EditorState, header_rect: Rect, requests: 
     });
 }
 
+/// Where the track rows start in a timeline panel at `panel`, for tests that point at a clip.
+#[cfg(test)]
+pub(super) fn tracks_origin(panel: Rect) -> Pos2 {
+    Pos2::new(panel.left() + 1.0 + HEADER_WIDTH, panel.top() + 1.0 + TOOLBAR_HEIGHT + RULER_HEIGHT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

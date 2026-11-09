@@ -94,10 +94,11 @@ impl Presenter {
         self.state.on_window_event(&self.window, event).repaint
     }
 
-    /// The window lost the focus: every button still down counts as released from the next frame.
-    pub fn release_pointer(&mut self) {
-        let releases = crate::ui::pointer_release_events(&self.context);
-        self.state.egui_input_mut().events.extend(releases);
+    /// The window lost the focus: cancels what is held. A press still waiting for the next frame
+    /// goes too, or it would put a button down again after the pointer was reset.
+    pub fn focus_lost(&mut self, editor: &mut crate::editor::EditorState) {
+        self.state.egui_input_mut().events.retain(|event| !matches!(event, egui::Event::PointerButton { .. }));
+        crate::ui::focus_lost(&self.context, editor);
     }
 
     /// Reconfigures the surface for a new window size. On failure the old size stays configured but
