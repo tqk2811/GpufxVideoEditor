@@ -196,8 +196,7 @@ fn a_relative_source_follows_the_paths_of_the_request() {
     let found = PreviewRequest { revision: 0, project: project.clone(), paths: beside, frame: 3 };
     producer.produce(&found).expect("found next to the project").expect("a picture");
 
-    let elsewhere = Arc::new(project_paths(Some(Path::new(r"C:
-o-such-folder\project.json")), &roots));
+    let elsewhere = Arc::new(project_paths(Some(Path::new(r"C:\no-such-folder\project.json")), &roots));
     let missing = PreviewRequest { revision: 1, project, paths: elsewhere, frame: 3 };
     assert!(matches!(producer.produce(&missing), Err(ProduceError::Failed(_))), "the old decoder must not serve the moved project");
 }
