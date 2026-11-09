@@ -4,6 +4,7 @@
 mod icons;
 mod inspector;
 mod left_panel;
+mod numeric;
 mod param_widgets;
 mod player;
 mod theme;
@@ -361,6 +362,23 @@ mod tests {
         press(&mut state, Key::Escape, Modifiers::NONE);
         assert_eq!(state.drag, None);
         assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn selecting_a_clip_with_an_out_of_range_gain_makes_no_edit() {
+        let mut project = EditorState::default().project().clone();
+        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![crate::editor::new_clip("a.mp4", Time::ZERO, seconds(5))], transitions: Vec::new() });
+        project.tracks[0].clips[0].gain_db = -80.0;
+        let mut state = EditorState::new(project);
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        let ctx = egui::Context::default();
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            run_frame(&ctx, window_input(1280.0, 720.0), |ui| show(ui, &mut state, &mut requests, None));
+        }
+        assert!(!state.is_dirty());
+        assert!(!state.can_undo());
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, -80.0);
     }
 
     #[test]

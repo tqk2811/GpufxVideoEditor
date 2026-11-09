@@ -1,5 +1,6 @@
 //! The panel on the right: the project figures, or everything about the selected clip.
 
+use super::numeric::drag_field;
 use super::param_widgets;
 use super::theme;
 use crate::editor::{applied_to, clip_label, transition_duration_limits, ClipField, EditorState};
@@ -11,7 +12,8 @@ use engine::{ClipKey, Time, Transition, TrackKind};
 use serde_json::{Map, Value};
 
 const HEADER_HEIGHT: f32 = 34.0;
-const GAIN_RANGE: std::ops::RangeInclusive<f64> = -60.0..=24.0;
+/// As far up as a project may go; validation sets no floor.
+const GAIN_RANGE: std::ops::RangeInclusive<f64> = -60.0..=60.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let rect = ui.max_rect();
@@ -30,6 +32,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
             None => project_summary(ui, state),
         });
     });
+}
+
+/// A slider that leaves an existing value outside its range alone until the user moves it.
+fn slider<'a>(value: &'a mut f64, range: std::ops::RangeInclusive<f64>) -> egui::Slider<'a> {
+    egui::Slider::new(value, range).show_value(false).clamping(egui::SliderClamping::Edits)
+}
+
+/// What tells clips apart in the id of a widget. The clip index alone would hand the state of the
+/// widget, such as text being typed, to whichever clip gets that index or selection next.
+fn clip_identity(key: ClipKey, clip: &engine::Clip) -> (ClipKey, String, i64) {
+    (key, clip.source.clone(), clip.start.ticks())
 }
 
 fn clip_of(state: &EditorState, key: ClipKey) -> Option<&engine::Clip> {
@@ -66,8 +79,8 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     ui.colored_label(theme::TEXT_DIM, "Âm lượng");
     let changed = ui.horizontal(|ui| {
         ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-        let mut changed = ui.add(egui::Slider::new(&mut gain, GAIN_RANGE).show_value(false)).changed();
-        changed |= ui.add(egui::DragValue::new(&mut gain).range(GAIN_RANGE).speed(0.1).max_decimals(1).suffix(" dB").update_while_editing(false)).changed();
+        let mut changed = ui.add(slider(&mut gain, GAIN_RANGE)).changed();
+        changed |= drag_field(ui, &mut gain, GAIN_RANGE, 0.1, 1, " dB", None).1;
         changed
     });
     if changed.inner {
@@ -103,11 +116,11 @@ fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f
     ui.horizontal(|ui| {
         ui.colored_label(theme::TEXT_DIM, label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let response = ui.add(egui::DragValue::new(&mut value).range(0.0..=f64::MAX).speed(0.02).max_decimals(3).suffix(" s").update_while_editing(false));
-            if response.changed() && !state.hold_cancelled() {
+            let (response, changed) = drag_field(ui, &mut value, 0.0..=f64::MAX, 0.02, 3, " s", None);
+            if changed && !state.hold_cancelled() {
                 state.ui.clip_field = Some(make(value));
             }
-            if response.drag_stopped() || (response.changed() && !response.dragged()) {
+            if response.drag_stopped() || (changed && !response.dragged()) {
                 if let Some(field) = state.ui.clip_field.take() {
                     state.apply_clip_field(field);
                 }
@@ -123,8 +136,8 @@ fn fade_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, value: Time
     ui.add_enabled_ui(enabled, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-            let mut changed = ui.add(egui::Slider::new(&mut seconds, 0.0..=max).show_value(false)).changed();
-            changed |= ui.add(egui::DragValue::new(&mut seconds).range(0.0..=max).speed(0.02).max_decimals(2).suffix(" s").update_while_editing(false)).changed();
+            let mut changed = ui.add(slider(&mut seconds, 0.0..=max)).changed();
+            changed |= drag_field(ui, &mut seconds, 0.0..=max, 0.02, 2, " s", None).1;
             if changed {
                 apply(state, from_seconds(seconds));
             }
@@ -140,7 +153,7 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     }
     let mut remove = None;
     for (index, effect) in clip.effects.iter().enumerate() {
-        ui.push_id(("effect", index), |ui| {
+        ui.push_id(("effect", clip_identity(key, &clip), index, &effect.package), |ui| {
             egui::CollapsingHeader::new(short_name(&effect.package)).default_open(true).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     if ui.small_button("Xóa").clicked() {
@@ -179,7 +192,8 @@ fn transitions(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     let mut remove = None;
     for (after_clip, _) in applied {
         let Some(transition) = state.project().tracks[track].transitions.iter().find(|tr| tr.after_clip == after_clip).cloned() else { continue };
-        ui.push_id(("transition", after_clip), |ui| transition_section(ui, state, track, &transition, &mut remove));
+        let first = state.project().tracks[track].clips.get(after_clip).map(|clip| clip_identity(ClipKey { track, clip: after_clip }, clip));
+        ui.push_id(("transition", first, after_clip, &transition.package), |ui| transition_section(ui, state, track, &transition, &mut remove));
     }
     if let Some(after_clip) = remove {
         state.remove_transition_after(track, after_clip);
@@ -197,8 +211,8 @@ fn transition_section(ui: &mut egui::Ui, state: &mut EditorState, track: usize, 
             ui.colored_label(theme::TEXT_DIM, "Thời lượng");
             ui.horizontal(|ui| {
                 ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-                let mut changed = ui.add(egui::Slider::new(&mut seconds, low..=high).show_value(false)).changed();
-                changed |= ui.add(egui::DragValue::new(&mut seconds).range(low..=high).speed(0.02).max_decimals(2).suffix(" s").update_while_editing(false)).changed();
+                let mut changed = ui.add(slider(&mut seconds, low..=high)).changed();
+                changed |= drag_field(ui, &mut seconds, low..=high, 0.02, 2, " s", None).1;
                 if changed {
                     state.live_transition(track, transition.after_clip, transition.params.clone(), from_seconds(seconds));
                 }
@@ -212,4 +226,20 @@ fn transition_section(ui: &mut egui::Ui, state: &mut EditorState, track: usize, 
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editor::new_clip;
+
+    #[test]
+    fn another_clip_at_the_same_index_has_another_identity() {
+        let key = ClipKey { track: 0, clip: 1 };
+        let a = new_clip("a.mp4", Time::ZERO, Time::from_ticks(9_000));
+        let b = new_clip("b.mp4", Time::ZERO, Time::from_ticks(9_000));
+        assert_ne!(clip_identity(key, &a), clip_identity(key, &b));
+        let moved = new_clip("a.mp4", Time::from_ticks(3_000), Time::from_ticks(9_000));
+        assert_ne!(clip_identity(key, &a), clip_identity(key, &moved));
+    }
 }
