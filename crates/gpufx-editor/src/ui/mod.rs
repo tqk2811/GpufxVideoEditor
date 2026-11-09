@@ -1,0 +1,389 @@
+//! Draws the editor and forwards input. Decisions live in `editor`, `params`, `media`, `layout` and
+//! `timeline`.
+
+mod icons;
+mod inspector;
+mod left_panel;
+mod param_widgets;
+mod player;
+mod theme;
+mod timeline_panel;
+mod top_bar;
+
+use crate::editor::{EditorState, Status};
+use crate::layout::{panels, Panels};
+use crate::presenter::PreviewTexture;
+use egui::{CornerRadius, Event, Key, Modifiers, Rect, Stroke, StrokeKind, UiBuilder};
+
+/// Work the window does after the frame, outside the UI pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiRequest {
+    PickClipFile { track: usize },
+    ImportMedia { audio_only: bool },
+    NewProject,
+    OpenProject,
+    SaveProject,
+    SaveProjectAs,
+    Export,
+    CancelExport,
+    ToggleFullscreen,
+}
+
+pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
+    theme::apply(root.ctx());
+    handle_shortcuts(root.ctx(), state, requests);
+    let screen = root.max_rect();
+    let Panels { top_bar, left, center, right, timeline, status } = panels(screen.size());
+    root.painter().rect_filled(screen, CornerRadius::ZERO, theme::BACKGROUND);
+    let enabled = !state.is_exporting();
+    in_rect(root, "top-bar", top_bar, |ui| top_bar::show(ui, state, requests));
+    panel(root, "left-panel", left, |ui| {
+        ui.add_enabled_ui(enabled, |ui| left_panel::show(ui, state, requests));
+    });
+    panel(root, "player-panel", center, |ui| player::show(ui, state, requests, preview));
+    panel(root, "right-panel", right, |ui| {
+        ui.add_enabled_ui(enabled, |ui| inspector::show(ui, state));
+    });
+    panel(root, "timeline-panel", timeline, |ui| {
+        ui.add_enabled_ui(enabled, |ui| timeline_panel::show(ui, state, requests));
+    });
+    in_rect(root, "status-line", status, |ui| status_line(ui, state));
+    // A release ends a held control wherever the pointer went, and a click or key press is
+    // finished in the frame that made it.
+    if state.is_live() && !root.ctx().input(|input| input.pointer.any_down()) {
+        state.commit_live();
+    }
+}
+
+fn in_rect(root: &mut egui::Ui, id: &str, rect: Rect, add_contents: impl FnOnce(&mut egui::Ui)) {
+    root.scope_builder(UiBuilder::new().id_salt(id).max_rect(rect), |ui| {
+        ui.set_clip_rect(rect);
+        add_contents(ui);
+    });
+}
+
+/// A rounded card holding `add_contents`.
+fn panel(root: &mut egui::Ui, id: &str, rect: Rect, add_contents: impl FnOnce(&mut egui::Ui)) {
+    if rect.width() < 1.0 || rect.height() < 1.0 {
+        return;
+    }
+    let radius = CornerRadius::same(theme::PANEL_RADIUS);
+    root.painter().rect_filled(rect, radius, theme::PANEL);
+    root.painter().rect_stroke(rect, radius, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+    in_rect(root, id, rect.shrink(1.0), add_contents);
+}
+
+/// Consumes `key` only when exactly the `wanted` modifiers are down. egui's own matching ignores
+/// an extra Shift or Alt, which would make Shift+S or Alt+Delete fire the plain shortcut.
+fn consume_exact(input: &mut egui::InputState, wanted: Modifiers, key: Key) -> bool {
+    input.modifiers.matches_exact(wanted) && input.consume_key(wanted, key)
+}
+
+fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
+    // Only a text edit needs the keys. A focused button or slider must not turn them off.
+    if ctx.text_edit_focused() {
+        return;
+    }
+    ctx.input_mut(|input| {
+        if consume_exact(input, Modifiers::NONE, Key::Escape) {
+            state.cancel_drag();
+        }
+        if consume_exact(input, Modifiers::COMMAND, Key::Z) {
+            state.undo();
+        }
+        if consume_exact(input, Modifiers::COMMAND, Key::Y) || consume_exact(input, Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) {
+            state.redo();
+        }
+        if consume_exact(input, Modifiers::COMMAND, Key::S) {
+            requests.push(UiRequest::SaveProject);
+        }
+        if consume_exact(input, Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+            requests.push(UiRequest::SaveProjectAs);
+        }
+        if consume_exact(input, Modifiers::COMMAND, Key::O) {
+            requests.push(UiRequest::OpenProject);
+        }
+        if consume_exact(input, Modifiers::NONE, Key::S) {
+            state.split_selected();
+        }
+        if consume_exact(input, Modifiers::NONE, Key::Delete) {
+            state.delete_selected();
+        }
+        // Holding the key must not toggle again on each repeat.
+        let repeat = input.events.iter().any(|event| matches!(event, Event::Key { key: Key::Space, repeat: true, .. }));
+        if consume_exact(input, Modifiers::NONE, Key::Space) && !repeat {
+            state.toggle_playback();
+        }
+    });
+}
+
+fn status_line(ui: &mut egui::Ui, state: &EditorState) {
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        // The load is shown beside the status, which may say why a request meanwhile was not taken.
+        let loading = state.loading();
+        if let Some(name) = loading {
+            ui.label(format!("Đang nạp {name}\u{2026}"));
+            if !matches!(state.status(), Status::Idle) {
+                ui.separator();
+            }
+        }
+        match state.status() {
+            Status::Idle if loading.is_some() => {}
+            Status::Idle => {
+                ui.colored_label(theme::TEXT_DIM, "Sẵn sàng");
+            }
+            Status::Info(message) => {
+                ui.colored_label(theme::TEXT_DIM, message);
+            }
+            Status::Refused(message) => {
+                ui.colored_label(theme::REFUSED, format!("Từ chối: {message}"));
+            }
+            Status::Error(message) => {
+                ui.colored_label(theme::REFUSED, message);
+            }
+        }
+        if let Some(message) = state.preview_error() {
+            ui.separator();
+            ui.colored_label(theme::REFUSED, format!("Xem trước: {message}"));
+        }
+        if let Some(message) = state.playback_message() {
+            ui.separator();
+            ui.colored_label(theme::REFUSED, format!("Âm thanh: {message}"));
+        }
+        if let Some(reason) = state.no_sound() {
+            ui.separator();
+            ui.colored_label(theme::REFUSED, format!("Không có tiếng: {reason}"));
+        }
+        if state.silence_ms() > 0 {
+            ui.separator();
+            ui.colored_label(theme::TEXT_DIM, format!("Hụt âm thanh: {} ms", state.silence_ms()));
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::timeline::drag::{ClipDrag, DragKind};
+    use engine::{ClipKey, Time, TrackKind};
+    use std::path::Path;
+
+    fn seconds(value: i64) -> Time {
+        Time::from_seconds(value).unwrap()
+    }
+
+    /// Two clips on one video track with the first selected and the playhead inside it.
+    fn state() -> EditorState {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("a.mp4"));
+        state.set_playhead(seconds(5));
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        state
+    }
+
+    /// One headless frame. The texture changes are dropped, because egui panics on unapplied ones.
+    fn run_frame(ctx: &egui::Context, raw: egui::RawInput, add_contents: impl FnMut(&mut egui::Ui)) {
+        let mut output = ctx.run_ui(raw, add_contents);
+        output.textures_delta.clear();
+    }
+
+    fn press_in(ctx: &egui::Context, state: &mut EditorState, key: Key, modifiers: Modifiers, mut extra: impl FnMut(&egui::Context)) -> Vec<UiRequest> {
+        let mut requests = Vec::new();
+        let event = Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers };
+        let raw = egui::RawInput { events: vec![Event::ModifiersChanged(modifiers), event], ..Default::default() };
+        run_frame(ctx, raw, |ui| {
+            handle_shortcuts(ui.ctx(), state, &mut requests);
+            extra(ui.ctx());
+        });
+        requests
+    }
+
+    fn press(state: &mut EditorState, key: Key, modifiers: Modifiers) -> Vec<UiRequest> {
+        press_in(&egui::Context::default(), state, key, modifiers, |_| {})
+    }
+
+    fn window_input(width: f32, height: f32) -> egui::RawInput {
+        egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height))), ..Default::default() }
+    }
+
+    #[test]
+    fn the_whole_ui_draws_at_every_window_size_with_and_without_a_selection() {
+        let mut selected = state();
+        let mut empty = EditorState::default();
+        for (width, height) in [(1280.0, 720.0), (800.0, 500.0), (500.0, 300.0), (100.0, 60.0), (2560.0, 1440.0)] {
+            for current in [&mut selected, &mut empty] {
+                let ctx = egui::Context::default();
+                let mut requests = Vec::new();
+                run_frame(&ctx, window_input(width, height), |ui| show(ui, current, &mut requests, None));
+                run_frame(&ctx, window_input(width, height), |ui| show(ui, current, &mut requests, None));
+                assert!(requests.is_empty(), "drawing asks for nothing by itself");
+            }
+        }
+    }
+
+    /// Hovers, presses and releases at `at` in three frames, as a real click reaches egui.
+    fn click(ctx: &egui::Context, state: &mut EditorState, at: egui::Pos2) -> Vec<UiRequest> {
+        let mut requests = Vec::new();
+        let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        for events in [vec![], vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)]] {
+            let raw = egui::RawInput { events, ..window_input(1280.0, 720.0) };
+            run_frame(ctx, raw, |ui| show(ui, state, &mut requests, None));
+        }
+        requests
+    }
+
+    #[test]
+    fn clicking_a_tab_switches_the_left_panel() {
+        let mut state = state();
+        let left = panels(egui::vec2(1280.0, 720.0)).left;
+        let at = egui::pos2(left.left() + left.width() * 5.0 / 6.0, left.top() + 20.0);
+        click(&egui::Context::default(), &mut state, at);
+        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Effects);
+    }
+
+    #[test]
+    fn clicking_play_does_what_space_does() {
+        let mut state = state();
+        let center = panels(egui::vec2(1280.0, 720.0)).center;
+        let at = egui::pos2(center.center().x, center.bottom() - 21.0);
+        let ctx = egui::Context::default();
+        click(&ctx, &mut state, at);
+        assert!(state.is_playing());
+        click(&ctx, &mut state, at);
+        assert!(!state.is_playing());
+    }
+
+    #[test]
+    fn clicking_the_fullscreen_button_asks_the_window() {
+        let mut state = state();
+        let center = panels(egui::vec2(1280.0, 720.0)).center;
+        let requests = click(&egui::Context::default(), &mut state, egui::pos2(center.right() - 25.0, center.bottom() - 21.0));
+        assert_eq!(requests, vec![UiRequest::ToggleFullscreen]);
+    }
+
+    #[test]
+    fn a_release_commits_a_held_control() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        state.live_gain(-6.0);
+        let mut requests = Vec::new();
+        run_frame(&ctx, window_input(1280.0, 720.0), |ui| show(ui, &mut state, &mut requests, None));
+        assert!(!state.is_live(), "no button is down, so the edit is finished");
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, -6.0);
+        state.undo();
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, 0.0);
+    }
+
+    #[test]
+    fn file_shortcuts_become_requests_and_do_not_split() {
+        let mut state = state();
+        assert_eq!(press(&mut state, Key::S, Modifiers::COMMAND), vec![UiRequest::SaveProject]);
+        assert_eq!(press(&mut state, Key::S, Modifiers::COMMAND | Modifiers::SHIFT), vec![UiRequest::SaveProjectAs]);
+        assert_eq!(press(&mut state, Key::O, Modifiers::COMMAND), vec![UiRequest::OpenProject]);
+        assert_eq!(state.project().tracks[0].clips.len(), 1, "Ctrl+S does not split");
+    }
+
+    #[test]
+    fn the_plain_shortcuts_work() {
+        let mut state = state();
+        press(&mut state, Key::S, Modifiers::NONE);
+        assert_eq!(state.project().tracks[0].clips.len(), 2, "S splits");
+        press(&mut state, Key::Delete, Modifiers::NONE);
+        assert_eq!(state.project().tracks[0].clips.len(), 1, "Delete deletes the selected half");
+        press(&mut state, Key::Z, Modifiers::COMMAND);
+        assert_eq!(state.project().tracks[0].clips.len(), 2, "Ctrl+Z undoes");
+        press(&mut state, Key::Y, Modifiers::COMMAND);
+        assert_eq!(state.project().tracks[0].clips.len(), 1, "Ctrl+Y redoes");
+        press(&mut state, Key::Z, Modifiers::COMMAND);
+        press(&mut state, Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+        assert_eq!(state.project().tracks[0].clips.len(), 1, "Ctrl+Shift+Z redoes");
+    }
+
+    #[test]
+    fn a_shortcut_with_an_extra_modifier_does_nothing() {
+        for modifiers in [Modifiers::SHIFT, Modifiers::ALT, Modifiers::COMMAND] {
+            let mut state = state();
+            let before = state.project().clone();
+            press(&mut state, Key::S, modifiers);
+            assert_eq!(state.project(), &before, "S with {modifiers:?}");
+        }
+        for modifiers in [Modifiers::SHIFT, Modifiers::ALT, Modifiers::COMMAND] {
+            let mut state = state();
+            let before = state.project().clone();
+            press(&mut state, Key::Delete, modifiers);
+            assert_eq!(state.project(), &before, "Delete with {modifiers:?}");
+        }
+    }
+
+    #[test]
+    fn undo_and_redo_need_exactly_their_modifiers() {
+        let mut state = state();
+        let with_clip = state.project().clone();
+        press(&mut state, Key::Z, Modifiers::COMMAND | Modifiers::ALT);
+        press(&mut state, Key::Y, Modifiers::COMMAND | Modifiers::SHIFT);
+        press(&mut state, Key::Z, Modifiers::NONE);
+        assert_eq!(state.project(), &with_clip, "nothing fired");
+        press(&mut state, Key::Z, Modifiers::COMMAND);
+        assert!(state.project().tracks[0].clips.is_empty());
+        press(&mut state, Key::Y, Modifiers::COMMAND | Modifiers::ALT);
+        assert!(state.project().tracks[0].clips.is_empty(), "Ctrl+Alt+Y does not redo");
+    }
+
+    #[test]
+    fn space_toggles_and_a_held_key_does_not_toggle_again() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        press_in(&ctx, &mut state, Key::Space, Modifiers::NONE, |_| {});
+        assert!(state.is_playing());
+        // Still down, so egui marks the second press as a repeat.
+        press_in(&ctx, &mut state, Key::Space, Modifiers::NONE, |_| {});
+        assert!(state.is_playing(), "a repeat is not a press");
+        press(&mut state, Key::Space, Modifiers::NONE);
+        assert!(!state.is_playing());
+        press(&mut state, Key::Space, Modifiers::SHIFT);
+        assert!(!state.is_playing(), "Shift+Space does nothing");
+    }
+
+    #[test]
+    fn escape_cancels_a_drag_without_an_edit() {
+        let mut state = state();
+        let before = state.project().clone();
+        state.drag = Some(ClipDrag { key: ClipKey { track: 0, clip: 0 }, kind: DragKind::Move, grab_offset: Time::ZERO });
+        press(&mut state, Key::Escape, Modifiers::NONE);
+        assert_eq!(state.drag, None);
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn a_focused_button_does_not_block_shortcuts_but_a_text_edit_does() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        let edit_id = egui::Id::unique("edit");
+        let mut state = state();
+
+        // Frame 1 focuses a button, frame 2 presses S.
+        run_frame(&ctx, egui::RawInput::default(), |ui| {
+            ui.button("Focus me").request_focus();
+        });
+        run_frame(&ctx, egui::RawInput::default(), |ui| {
+            let _ = ui.button("Focus me");
+        });
+        assert!(ctx.egui_wants_keyboard_input() && !ctx.text_edit_focused(), "the test must really focus a button");
+        press_in(&ctx, &mut state, Key::S, Modifiers::NONE, |_| {});
+        assert_eq!(state.project().tracks[0].clips.len(), 2, "S still splits with a button focused");
+
+        let mut state = self::state();
+        run_frame(&ctx, egui::RawInput::default(), |ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut text).id(edit_id));
+            response.request_focus();
+        });
+        run_frame(&ctx, egui::RawInput::default(), |ui| {
+            ui.add(egui::TextEdit::singleline(&mut text).id(edit_id));
+        });
+        assert!(ctx.text_edit_focused(), "the test must really focus a text edit");
+        press_in(&ctx, &mut state, Key::S, Modifiers::NONE, |_| {});
+        assert_eq!(state.project().tracks[0].clips.len(), 1, "S types into the text edit instead of splitting");
+    }
+}

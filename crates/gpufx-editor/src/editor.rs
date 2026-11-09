@@ -72,6 +72,7 @@ pub struct EditorState {
     live: Option<LiveEdit>,
     /// What this session imported and what the open project uses.
     pub library: MediaLibrary,
+    pub ui: UiState,
 }
 
 /// One held control: the project shows `shown` while `history` stays where it was, and the release
@@ -80,6 +81,26 @@ struct LiveEdit {
     shown: Project,
     /// Whether the project was clean when the drag began.
     was_clean: bool,
+}
+
+/// The tab of the left panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LeftTab {
+    #[default]
+    Media,
+    Audio,
+    Effects,
+}
+
+/// What the panels remember between frames.
+#[derive(Debug, Clone, Default)]
+pub struct UiState {
+    pub left_tab: LeftTab,
+    pub media_search: String,
+    pub audio_search: String,
+    pub fullscreen: bool,
+    /// A time field being dragged; the clip changes on release.
+    pub clip_field: Option<ClipField>,
 }
 
 /// What may be chosen in the inspector's time fields. Waits for the release of a drag, as a clip
@@ -152,6 +173,7 @@ impl EditorState {
             export: None,
             live: None,
             library: MediaLibrary::default(),
+            ui: UiState::default(),
         }
     }
 

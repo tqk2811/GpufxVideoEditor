@@ -141,20 +141,6 @@ pub fn vector_json(info: &ParamInfo, values: &[f64]) -> Value {
     Value::Array(clamped.map(|value| json!(value)).collect())
 }
 
-/// The map with the manifest default of `info` written out, so an explicit value replaces it.
-pub fn reset_to_default(params: &Map<String, Value>, info: &ParamInfo) -> Map<String, Value> {
-    let mut next = params.clone();
-    match &info.default {
-        Some(default) => {
-            next.insert(info.name.clone(), default.clone());
-        }
-        None => {
-            next.remove(&info.name);
-        }
-    }
-    next
-}
-
 /// Short display name of a parameter: `radius_v` becomes `Radius v`.
 pub fn display_name(info: &ParamInfo) -> String {
     let spaced = info.name.replace('_', " ");
@@ -263,12 +249,9 @@ mod tests {
     }
 
     #[test]
-    fn setting_a_value_leaves_the_others_and_reset_goes_back_to_the_default() {
+    fn setting_a_value_leaves_the_others() {
         let base = map(json!({ "a": 1, "b": 2 }));
         assert_eq!(with_value(&base, "a", json!(7)), map(json!({ "a": 7, "b": 2 })));
-        let param = ParamInfo { default: Some(json!(0.5)), ..info(ParamKind::Float) };
-        assert_eq!(reset_to_default(&base, &param), map(json!({ "a": 0.5, "b": 2 })));
-        assert_eq!(reset_to_default(&base, &info(ParamKind::Float)), map(json!({ "b": 2 })));
     }
 
     #[test]

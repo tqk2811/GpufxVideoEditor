@@ -1,0 +1,355 @@
+//! The timeline panel: toolbar, ruler, track headers and clips.
+
+use super::icons::{self, Icon};
+use super::{theme, UiRequest};
+use crate::editor::{clip_label, EditorState};
+use crate::timeline::drag::{begin_drag, clamp_trim, drag_command};
+use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
+use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
+use crate::timeline::view::{content_end, ViewArea, Wheel, TRACK_HEIGHT};
+use egui::{Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Layout, MouseWheelUnit, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, UiBuilder, Vec2};
+use engine::{Clip, ClipKey, Time, TrackKind};
+
+const TOOLBAR_HEIGHT: f32 = 36.0;
+const RULER_HEIGHT: f32 = 26.0;
+const HEADER_WIDTH: f32 = 64.0;
+const LINE_SCROLL_POINTS: f32 = 50.0;
+const CLIP_HEADER_HEIGHT: f32 = 14.0;
+const CLIP_RADIUS: u8 = 4;
+const ZOOM_SLIDER_WIDTH: f32 = 130.0;
+const PLAYHEAD_MARKER: f32 = 6.0;
+
+pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
+    let rect = ui.max_rect();
+    let toolbar_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), TOOLBAR_HEIGHT.min(rect.height())));
+    let body = Rect::from_min_max(Pos2::new(rect.left(), toolbar_rect.bottom()), rect.max);
+    ui.painter_at(rect).hline(rect.x_range(), toolbar_rect.bottom(), Stroke::new(1.0, theme::BORDER));
+    ui.scope_builder(UiBuilder::new().max_rect(toolbar_rect.shrink2(Vec2::new(6.0, 0.0))), |ui| toolbar(ui, state, toolbar_rect));
+    if body.height() > RULER_HEIGHT {
+        ui.scope_builder(UiBuilder::new().max_rect(body), |ui| timeline(ui, state, requests, body));
+    }
+}
+
+fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
+    ui.allocate_ui_with_layout(ui.max_rect().size(), Layout::left_to_right(Align::Center), |ui| {
+        ui.add_enabled_ui(state.can_undo(), |ui| {
+            if icons::button(ui, Icon::Undo, "Hoàn tác (Ctrl+Z)", false).clicked() {
+                state.undo();
+            }
+        });
+        ui.add_enabled_ui(state.can_redo(), |ui| {
+            if icons::button(ui, Icon::Redo, "Làm lại (Ctrl+Y)", false).clicked() {
+                state.redo();
+            }
+        });
+        ui.separator();
+        let has_selection = state.selection().is_some();
+        ui.add_enabled_ui(has_selection, |ui| {
+            if icons::button(ui, Icon::Scissors, "Cắt tại đầu phát (S)", false).clicked() {
+                state.split_selected();
+            }
+            if icons::button(ui, Icon::TrimLeft, "Cắt phần trước đầu phát", false).clicked() {
+                state.trim_start_to_playhead();
+            }
+            if icons::button(ui, Icon::TrimRight, "Cắt phần sau đầu phát", false).clicked() {
+                state.trim_end_to_playhead();
+            }
+            if icons::button(ui, Icon::Trash, "Xóa clip (Delete)", false).clicked() {
+                state.delete_selected();
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| zoom_controls(ui, state, toolbar_rect));
+    });
+}
+
+/// The zoom slider moves around the middle of the track area, as the wheel moves around the pointer.
+fn zoom_controls(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
+    let width = f64::from((toolbar_rect.width() - HEADER_WIDTH).max(1.0));
+    let area = ViewArea { content_end: content_end(state.project()), width, track_count: state.project().tracks.len(), rows_height: 0.0 };
+    let center = width / 2.0;
+    if icons::button(ui, Icon::ZoomIn, "Phóng to", false).clicked() {
+        state.view.zoom_at(1.25, center, &area);
+    }
+    let mut fraction = state.view.zoom_fraction();
+    ui.spacing_mut().slider_width = ZOOM_SLIDER_WIDTH;
+    if ui.add(egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false)).changed() {
+        state.view.set_zoom_fraction(fraction, center, &area);
+    }
+    if icons::button(ui, Icon::ZoomOut, "Thu nhỏ", false).clicked() {
+        state.view.zoom_at(0.8, center, &area);
+    }
+}
+
+fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, rect: Rect) {
+    ui.allocate_rect(rect, Sense::hover());
+    let tracks_left = rect.left() + HEADER_WIDTH;
+    let ruler_rect = Rect::from_min_max(Pos2::new(tracks_left, rect.top()), Pos2::new(rect.right(), rect.top() + RULER_HEIGHT));
+    let tracks_rect = Rect::from_min_max(Pos2::new(tracks_left, ruler_rect.bottom()), rect.max);
+    let header_rect = Rect::from_min_max(Pos2::new(rect.left(), ruler_rect.bottom()), Pos2::new(tracks_left, rect.bottom()));
+
+    let area = view_area(state, tracks_rect);
+    state.view.clamp_scroll(&area);
+    handle_wheel(ui, state, rect, tracks_rect, &area);
+
+    let ruler_response = ui.interact(ruler_rect, ui.scope_id().with("ruler"), Sense::click_and_drag());
+    if ruler_response.is_pointer_button_down_on() {
+        if let Some(pointer) = ruler_response.interact_pointer_pos() {
+            state.scrub_to(state.view.x_to_time(f64::from(pointer.x - tracks_left)));
+        }
+    } else {
+        state.end_scrub();
+    }
+
+    let tracks_response = ui.interact(tracks_rect, ui.scope_id().with("tracks"), Sense::click_and_drag());
+    handle_tracks(ui, state, &tracks_response, tracks_rect);
+    // A drop can shrink the content, so the limits are measured again.
+    state.view.clamp_scroll(&view_area(state, tracks_rect));
+
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::ZERO, theme::PANEL);
+    draw_rows(ui, state, tracks_rect);
+    draw_ruler(&painter, state, ruler_rect);
+    add_track_menu(ui, state, Rect::from_min_max(rect.min, Pos2::new(tracks_left, ruler_rect.bottom())));
+    headers(ui, state, header_rect, requests);
+    painter.vline(tracks_left, rect.y_range(), Stroke::new(1.0, theme::BORDER));
+    draw_playhead(&painter, state, ruler_rect, tracks_rect);
+}
+
+fn add_track_menu(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
+    ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+        ui.menu_button("+ Track", |ui| {
+            if ui.button("Thêm track video").clicked() {
+                state.add_track(TrackKind::Video);
+                ui.close();
+            }
+            if ui.button("Thêm track âm thanh").clicked() {
+                state.add_track(TrackKind::Audio);
+                ui.close();
+            }
+        });
+    });
+}
+
+fn view_area(state: &EditorState, tracks_rect: Rect) -> ViewArea {
+    ViewArea { content_end: content_end(state.project()), width: f64::from(tracks_rect.width()), track_count: state.project().tracks.len(), rows_height: f64::from(tracks_rect.height()) }
+}
+
+fn handle_wheel(ui: &egui::Ui, state: &mut EditorState, rect: Rect, tracks_rect: Rect, area: &ViewArea) {
+    if !ui.rect_contains_pointer(rect) {
+        return;
+    }
+    let cursor_x = ui.ctx().pointer_latest_pos().map_or(0.0, |p| f64::from(p.x - tracks_rect.left()));
+    let view = &mut state.view;
+    ui.ctx().input_mut(|input| {
+        let mut consumed = false;
+        input.events.retain(|event| {
+            let Event::MouseWheel { unit, delta, modifiers, .. } = event else {
+                return true;
+            };
+            let points = match unit {
+                MouseWheelUnit::Point => *delta,
+                MouseWheelUnit::Line => *delta * LINE_SCROLL_POINTS,
+                MouseWheelUnit::Page => Vec2::new(delta.x * tracks_rect.width(), delta.y * tracks_rect.height()),
+            };
+            let wheel = Wheel { ctrl: modifiers.command, shift: modifiers.shift, delta_x: f64::from(points.x), delta_y: f64::from(points.y), cursor_x };
+            let used = view.apply_wheel(wheel, area);
+            consumed |= used;
+            !used
+        });
+        if consumed {
+            input.smooth_scroll_delta = Vec2::ZERO;
+        }
+    });
+}
+
+fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Response, tracks_rect: Rect) {
+    let track_count = state.project().tracks.len();
+    let height = f64::from(tracks_rect.height());
+    let local = |pos: Pos2| (f64::from(pos.x - tracks_rect.left()), f64::from(pos.y - tracks_rect.top()));
+
+    if response.clicked() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let (x, y) = local(pointer);
+            let hit = state.view.track_at_y(y, track_count, height).and_then(|track| hit_test(state.project(), &state.view, track, x));
+            state.select(hit.map(|hit| hit.key));
+        }
+    }
+
+    if response.drag_started_by(egui::PointerButton::Primary) {
+        let press = ui.ctx().input(|input| input.pointer.press_origin());
+        if let Some(press) = press {
+            let (x, y) = local(press);
+            let hit = state.view.track_at_y(y, track_count, height).and_then(|track| hit_test(state.project(), &state.view, track, x));
+            if let Some(hit) = hit {
+                state.select(Some(hit.key));
+                state.drag = begin_drag(state.project(), hit, state.view.x_to_time(x));
+            }
+        }
+    }
+
+    if response.drag_stopped_by(egui::PointerButton::Primary) {
+        if let (Some(drag), Some(pointer)) = (state.drag, response.interact_pointer_pos()) {
+            let (x, y) = local(pointer);
+            let command = clamp_trim(state.project(), drag_command(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height)));
+            state.finish_drag(command);
+        }
+        state.drag = None;
+    }
+
+    let cursor = if state.drag.is_some() {
+        Some(CursorIcon::Grabbing)
+    } else {
+        response.hover_pos().and_then(|pointer| {
+            let (x, y) = local(pointer);
+            let track = state.view.track_at_y(y, track_count, height)?;
+            let hit = hit_test(state.project(), &state.view, track, x)?;
+            Some(match hit.zone {
+                ClipZone::Body => CursorIcon::Grab,
+                ClipZone::StartEdge | ClipZone::EndEdge => CursorIcon::ResizeHorizontal,
+            })
+        })
+    };
+    if let Some(cursor) = cursor {
+        ui.ctx().set_cursor_icon(cursor);
+    }
+}
+
+fn row_rect(state: &EditorState, tracks_rect: Rect, track: usize, track_count: usize) -> Rect {
+    let top = tracks_rect.top() + state.view.track_top(track, track_count) as f32;
+    Rect::from_min_size(Pos2::new(tracks_rect.left(), top), Vec2::new(tracks_rect.width(), TRACK_HEIGHT as f32))
+}
+
+fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
+    let painter = ui.painter_at(tracks_rect);
+    let project = state.project();
+    let track_count = project.tracks.len();
+    for (t, track) in project.tracks.iter().enumerate() {
+        let row = row_rect(state, tracks_rect, t, track_count);
+        painter.rect_filled(row, CornerRadius::ZERO, if t % 2 == 0 { theme::ROW_EVEN } else { theme::ROW_ODD });
+        for (c, clip) in track.clips.iter().enumerate() {
+            let key = ClipKey { track: t, clip: c };
+            let rect = span_rect(state, tracks_rect, row, clip.start, clip.start.saturating_add(clip.duration));
+            if rect.intersects(tracks_rect) {
+                let dragged = state.drag.is_some_and(|drag| drag.key == key);
+                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged });
+            }
+        }
+        draw_transitions(&painter, state, tracks_rect, row, track);
+    }
+    draw_drag_preview(ui, state, tracks_rect);
+}
+
+/// One clip to draw. Thumbnails, a waveform and lock or hide marks belong in [`draw_clip`].
+pub struct ClipPaint<'a> {
+    pub clip: &'a Clip,
+    pub kind: TrackKind,
+    pub rect: Rect,
+    /// The part of the screen clips may draw in.
+    pub clip_area: Rect,
+    pub selected: bool,
+    pub dragged: bool,
+}
+
+/// Paints a clip's body, name strip and selection. The rest of `paint.rect` under the strip is free
+/// for the picture and the waveform.
+pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
+    let (body, header) = match paint.kind {
+        TrackKind::Video => (theme::VIDEO_CLIP, theme::VIDEO_CLIP_HEADER),
+        TrackKind::Audio => (theme::AUDIO_CLIP, theme::AUDIO_CLIP_HEADER),
+    };
+    let dim = |color: Color32| if paint.dragged { color.gamma_multiply(0.5) } else { color };
+    let radius = CornerRadius::same(CLIP_RADIUS);
+    painter.rect_filled(paint.rect, radius, dim(body));
+    let strip = paint.rect.with_max_y(paint.rect.top() + CLIP_HEADER_HEIGHT);
+    painter.rect_filled(strip, CornerRadius { nw: CLIP_RADIUS, ne: CLIP_RADIUS, sw: 0, se: 0 }, dim(header));
+    let text = painter.with_clip_rect(paint.rect.intersect(paint.clip_area));
+    text.text(strip.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_label(&paint.clip.source), FontId::proportional(11.0), theme::TEXT);
+    if paint.selected {
+        painter.rect_stroke(paint.rect, radius, Stroke::new(2.0, theme::SELECTED), StrokeKind::Inside);
+    }
+}
+
+fn draw_transitions(painter: &egui::Painter, state: &EditorState, tracks_rect: Rect, row: Rect, track: &engine::Track) {
+    for transition in &track.transitions {
+        let Some(next) = track.clips.get(transition.after_clip + 1) else { continue };
+        let start = next.start.saturating_sub(transition.duration.half_floor());
+        let rect = span_rect(state, tracks_rect, row, start, start.saturating_add(transition.duration));
+        if rect.intersects(tracks_rect) {
+            painter.rect_filled(rect, CornerRadius::same(CLIP_RADIUS), theme::TRANSITION);
+            painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.0, theme::ACCENT_TEXT), StrokeKind::Inside);
+        }
+    }
+}
+
+fn span_rect(state: &EditorState, tracks_rect: Rect, row: Rect, start: Time, end: Time) -> Rect {
+    let left = tracks_rect.left() + state.view.time_to_x(start) as f32;
+    let right = (tracks_rect.left() + state.view.time_to_x(end) as f32).max(left + MIN_CLIP_WIDTH as f32);
+    Rect::from_min_max(Pos2::new(left, row.top() + 3.0), Pos2::new(right, row.bottom() - 3.0))
+}
+
+fn draw_drag_preview(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
+    let Some(drag) = state.drag else { return };
+    let Some(pointer) = ui.ctx().pointer_latest_pos() else { return };
+    let track_count = state.project().tracks.len();
+    let height = f64::from(tracks_rect.height());
+    let x = f64::from(pointer.x - tracks_rect.left());
+    let y = f64::from(pointer.y - tracks_rect.top());
+    let command = clamp_trim(state.project(), drag_command(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height)));
+    let Some(span) = command.landing(state.project()) else { return };
+    let row = row_rect(state, tracks_rect, span.track, track_count);
+    let rect = span_rect(state, tracks_rect, row, span.start, span.end);
+    ui.painter_at(tracks_rect).rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
+}
+
+fn draw_ruler(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect) {
+    let ruler = painter.with_clip_rect(ruler_rect);
+    ruler.rect_filled(ruler_rect, CornerRadius::ZERO, theme::RULER);
+    let step = major_step(&state.view);
+    for tick in ruler_ticks(&state.view, f64::from(ruler_rect.width())) {
+        let x = ruler_rect.left() + tick.x as f32;
+        let height = if tick.major { 10.0 } else { 5.0 };
+        ruler.line_segment([Pos2::new(x, ruler_rect.bottom() - height), Pos2::new(x, ruler_rect.bottom())], Stroke::new(1.0, theme::TICK));
+        if tick.major {
+            ruler.text(Pos2::new(x + 3.0, ruler_rect.top() + 3.0), Align2::LEFT_TOP, format_time(tick.time, step), FontId::monospace(11.0), theme::TEXT_DIM);
+        }
+    }
+    ruler.hline(ruler_rect.x_range(), ruler_rect.bottom(), Stroke::new(1.0, theme::BORDER));
+}
+
+fn draw_playhead(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect, tracks_rect: Rect) {
+    let x = ruler_rect.left() + state.view.time_to_x(state.playhead()) as f32;
+    if x < ruler_rect.left() || x > ruler_rect.right() {
+        return;
+    }
+    let top = ruler_rect.top() + 1.0;
+    painter.line_segment([Pos2::new(x, top), Pos2::new(x, tracks_rect.bottom())], Stroke::new(1.5, theme::PLAYHEAD));
+    let marker = vec![Pos2::new(x - PLAYHEAD_MARKER, top), Pos2::new(x + PLAYHEAD_MARKER, top), Pos2::new(x + PLAYHEAD_MARKER, top + 7.0), Pos2::new(x, top + 13.0), Pos2::new(x - PLAYHEAD_MARKER, top + 7.0)];
+    painter.add(Shape::convex_polygon(marker, theme::PLAYHEAD, Stroke::NONE));
+}
+
+fn headers(ui: &mut egui::Ui, state: &EditorState, header_rect: Rect, requests: &mut Vec<UiRequest>) {
+    let track_count = state.project().tracks.len();
+    let kinds: Vec<TrackKind> = state.project().tracks.iter().map(|track| track.kind).collect();
+    ui.scope_builder(UiBuilder::new().max_rect(header_rect), |ui| {
+        ui.set_clip_rect(header_rect);
+        for (t, kind) in kinds.into_iter().enumerate() {
+            let top = header_rect.top() + state.view.track_top(t, track_count) as f32;
+            let row = Rect::from_min_size(Pos2::new(header_rect.left(), top), Vec2::new(header_rect.width(), TRACK_HEIGHT as f32));
+            if !row.intersects(header_rect) {
+                continue;
+            }
+            let icon = if kind == TrackKind::Video { Icon::Film } else { Icon::Music };
+            let tip = if kind == TrackKind::Video { "Track video" } else { "Track âm thanh" };
+            let icon_rect = Rect::from_center_size(Pos2::new(row.left() + 18.0, row.center().y), Vec2::splat(14.0));
+            icons::paint(ui.painter(), icon_rect, icon, theme::TEXT_DIM);
+            let id = ui.scope_id().with(("track-icon", t));
+            ui.interact(icon_rect, id, Sense::hover()).on_hover_text(tip);
+            let button = Rect::from_center_size(Pos2::new(row.right() - 18.0, row.center().y), Vec2::splat(22.0));
+            ui.scope_builder(UiBuilder::new().max_rect(button).id_salt(("track-add", t)), |ui| {
+                if icons::button(ui, Icon::Plus, "Thêm clip từ tệp", false).clicked() {
+                    requests.push(UiRequest::PickClipFile { track: t });
+                }
+            });
+        }
+    });
+}

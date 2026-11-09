@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 use d3d12_backend::{encoder_exists, probe_media, read_package_info, ExportJob, Gpu, ProjectPaths};
 use engine::Project;
@@ -42,6 +42,9 @@ const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "wav", "m4a", "flac", "aac", "ogg"];
 const SMOKE_VARIABLE: &str = "GPUFX_EDITOR_SMOKE";
 #[cfg(debug_assertions)]
 const SMOKE_LINGER: Duration = Duration::from_secs(4);
+/// Stays open this many seconds instead, for looking at the window. Debug builds only.
+#[cfg(debug_assertions)]
+const SMOKE_LINGER_VARIABLE: &str = "GPUFX_EDITOR_SMOKE_LINGER_SECONDS";
 /// With the smoke check, also play and seek once, and report the audio figures.
 #[cfg(debug_assertions)]
 const SMOKE_PLAY_VARIABLE: &str = "GPUFX_EDITOR_SMOKE_PLAY";
@@ -100,7 +103,7 @@ struct Session {
 impl Session {
     fn open(event_loop: &ActiveEventLoop) -> Result<Self, String> {
         let gpu = Arc::new(Gpu::create()?);
-        let attributes = Window::default_attributes().with_title("gpufx editor").with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+        let attributes = Window::default_attributes().with_title("gpufx editor").with_inner_size(winit::dpi::LogicalSize::new(1280, 720)).with_min_inner_size(winit::dpi::LogicalSize::new(800, 500));
         let window = Arc::new(event_loop.create_window(attributes).map_err(|e| format!("creating the window failed: {e}"))?);
         let presenter = Presenter::new(&gpu, window.clone())?;
         let producer_gpu = gpu.clone();
@@ -222,7 +225,8 @@ impl Session {
             }
             Err(message) => println!("smoke read-back failed: {message}"),
         }
-        self.smoke.exit_at = Instant::now().checked_add(SMOKE_LINGER);
+        let linger = std::env::var(SMOKE_LINGER_VARIABLE).ok().and_then(|text| text.parse().ok()).map_or(SMOKE_LINGER, Duration::from_secs);
+        self.smoke.exit_at = Instant::now().checked_add(linger);
         if self.smoke.play {
             self.state.toggle_playback();
             self.smoke.seek_due = Instant::now().checked_add(SMOKE_SEEK_AFTER);
@@ -407,6 +411,7 @@ impl Session {
         if let Some(retried) = self.presenter.retry_resize(&self.gpu) {
             self.set_surface_error(retried.err());
         }
+        self.state.ui.fullscreen = self.presenter.window().fullscreen().is_some();
         let mut requests = Vec::new();
         let state = &mut self.state;
         let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
@@ -570,7 +575,7 @@ impl Session {
 
     /// Runs outside the frame, so what it starts cannot disturb the UI pass.
     fn handle(&mut self, request: UiRequest) {
-        if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport) {
+        if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport | UiRequest::ToggleFullscreen) {
             return;
         }
         match request {
@@ -594,6 +599,12 @@ impl Session {
             },
             UiRequest::SaveProjectAs => self.begin_task(Request::SaveProjectAs),
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
+            UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
+            UiRequest::ToggleFullscreen => {
+                let window = self.presenter.window();
+                let next = if window.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) };
+                window.set_fullscreen(next);
+            }
         }
     }
 }
