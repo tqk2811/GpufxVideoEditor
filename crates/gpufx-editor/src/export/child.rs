@@ -12,7 +12,7 @@ use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use d3d12_backend::{reserve_temporary, EncoderChoice, ExportJob, ProjectPaths, CANCEL_LINE};
+use d3d12_backend::{reserve_temporary, EncoderChoice, ExportJob, ProjectPaths, CANCEL_LINE, MAX_EVENT_LINE};
 use engine::Project;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
@@ -33,7 +33,7 @@ const PIPE_GRACE: Duration = Duration::from_secs(2);
 /// How often the cancel flag is looked at while the child is quiet.
 const POLL: Duration = Duration::from_millis(20);
 /// Longer lines of stdout are not events. Their bytes are dropped, not kept.
-const MAX_LINE: usize = 64 * 1024;
+const MAX_LINE: usize = MAX_EVENT_LINE;
 /// How much of stderr is kept for the error message.
 const STDERR_TAIL: usize = 1024;
 

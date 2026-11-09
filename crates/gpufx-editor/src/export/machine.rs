@@ -24,6 +24,9 @@ pub struct ChildMachine {
     started: bool,
     /// The child speaks another protocol version.
     mismatched: bool,
+    /// The last line of stdout was not an event.
+    last_line_malformed: bool,
+    total: i64,
     frames: i64,
 }
 
@@ -33,9 +36,17 @@ const OLD_RENDERER_USAGE: &str = "unknown argument --progress";
 impl ChildMachine {
     /// Takes one line of stdout. Anything that is not an event is ignored.
     pub fn take_line(&mut self, line: &[u8]) {
-        if let Some(event) = std::str::from_utf8(line).ok().and_then(ProgressEvent::parse) {
+        let event = std::str::from_utf8(line).ok().and_then(ProgressEvent::parse);
+        self.last_line_malformed = event.is_none();
+        if let Some(event) = event {
             self.take_event(event);
         }
+    }
+
+    /// Every frame was written and the last line was unreadable: it may have been the end, and a
+    /// file the child kept may be the only copy of the render.
+    fn result_unreadable(&self) -> bool {
+        self.last_line_malformed && self.total > 0 && self.frames >= self.total
     }
 
     fn take_event(&mut self, event: ProgressEvent) {
@@ -43,8 +54,9 @@ impl ChildMachine {
             return;
         }
         match event {
-            ProgressEvent::Started { protocol, .. } => {
+            ProgressEvent::Started { protocol, total, .. } => {
                 self.started = true;
+                self.total = total;
                 self.mismatched = protocol != PROGRESS_PROTOCOL;
             }
             ProgressEvent::OutputReserved { path } => self.reserved.push(PathBuf::from(path)),
@@ -73,6 +85,10 @@ impl ChildMachine {
     pub fn finish(self, cancel_requested: bool, exit_code: Option<i32>, stderr_tail: &str) -> (ExportOutcome, Vec<PathBuf>) {
         if self.mismatched || (self.end.is_none() && !self.started && stderr_tail.contains(OLD_RENDERER_USAGE)) {
             return (ExportOutcome::Failed(Message::ExportRendererMismatch), self.reserved);
+        }
+        if self.end.is_none() && self.result_unreadable() {
+            let files: Vec<String> = self.reserved.iter().map(|path| path.display().to_string()).collect();
+            return (ExportOutcome::Failed(Message::ExportResultUnknown(files.join(", "))), Vec::new());
         }
         match self.end {
             Some(ProgressEvent::Finished { report }) => (ExportOutcome::Finished(report), Vec::new()),
@@ -199,6 +215,41 @@ mod tests {
     fn a_renderer_without_the_flag_is_asked_to_match() {
         let tail = "unknown argument --progress\nusage: gpufx-render ...\n";
         assert_eq!(ChildMachine::default().finish(false, Some(1), tail).0, ExportOutcome::Failed(Message::ExportRendererMismatch));
+    }
+
+    fn after_every_frame(machine: &mut ChildMachine) {
+        feed(machine, &[ProgressEvent::Started { protocol: PROGRESS_PROTOCOL, adapter: "a".into(), total: 3, out: "o".into() }, reserved("a.tmp.mp4"), ProgressEvent::Progress { frame: 3, total: 3, elapsed_ms: 1 }]);
+    }
+
+    #[test]
+    fn an_unreadable_last_line_after_every_frame_keeps_the_file() {
+        for cancel_requested in [false, true] {
+            let mut machine = ChildMachine::default();
+            after_every_frame(&mut machine);
+            machine.take_line(b"{\"event\":\"err");
+            let (outcome, remove) = machine.finish(cancel_requested, Some(1), "");
+            assert_eq!(outcome, ExportOutcome::Failed(Message::ExportResultUnknown("a.tmp.mp4".into())));
+            assert!(remove.is_empty(), "it may be the only copy of the render");
+        }
+    }
+
+    #[test]
+    fn noise_before_the_last_frame_still_means_a_partial_file() {
+        let mut machine = ChildMachine::default();
+        feed(&mut machine, &[ProgressEvent::Started { protocol: PROGRESS_PROTOCOL, adapter: "a".into(), total: 3, out: "o".into() }, reserved("a.tmp.mp4"), ProgressEvent::Progress { frame: 2, total: 3, elapsed_ms: 1 }]);
+        machine.take_line(b"library noise");
+        let (outcome, remove) = machine.finish(false, Some(1), "");
+        assert!(matches!(outcome, ExportOutcome::Failed(Message::ExportChildCrashed { .. })));
+        assert_eq!(remove, [PathBuf::from("a.tmp.mp4")]);
+    }
+
+    #[test]
+    fn a_readable_line_after_the_noise_clears_the_doubt() {
+        let mut machine = ChildMachine::default();
+        after_every_frame(&mut machine);
+        machine.take_line(b"noise");
+        feed(&mut machine, &[ProgressEvent::Encoder { name: "x".into() }]);
+        assert_eq!(machine.finish(false, Some(1), "").1, [PathBuf::from("a.tmp.mp4")]);
     }
 
     #[test]

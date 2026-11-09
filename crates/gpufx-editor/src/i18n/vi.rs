@@ -109,6 +109,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::ExportToolMissing(path) => format!("Xuất video thất bại: thiếu trình render {path}. Hãy build gpufx-render hoặc cài lại ứng dụng."),
         Message::ExportChildCrashed { code, stderr } if stderr.is_empty() => format!("Xuất video thất bại: trình render dừng đột ngột (mã thoát {code})."),
         Message::ExportChildCrashed { code, stderr } => format!("Xuất video thất bại: trình render dừng đột ngột (mã thoát {code}): {stderr}"),
+        Message::ExportResultUnknown(files) => format!("Không đọc được kết quả của trình render. Hãy kiểm tra file xuất; các file tạm sau được giữ lại: {files}"),
         Message::ExportRendererMismatch => "Xuất video thất bại: gpufx-render không khớp với phiên bản editor này. Hãy cài gpufx-render cùng phiên bản.".to_owned(),
         Message::EncoderAuto => "Tự động".to_owned(),
         Message::EncoderNeedsGpl(name) => format!("{name} (cần bản GPL)"),

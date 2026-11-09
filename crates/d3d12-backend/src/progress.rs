@@ -11,6 +11,12 @@ pub const PROGRESS_PROTOCOL: u32 = 1;
 /// The stdin line that asks a `--progress json` run to stop cleanly.
 pub const CANCEL_LINE: &str = "cancel";
 
+/// The longest line of the protocol, without its line end. A reader treats a longer one as noise.
+pub const MAX_EVENT_LINE: usize = 64 * 1024;
+
+/// What replaces the end of an `error` message that would not fit on a line.
+const TRUNCATED: &str = "...";
+
 /// One line of the protocol. Exactly one of `Finished`, `Cancelled` and `Error` ends a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -28,9 +34,29 @@ pub enum ProgressEvent {
 }
 
 impl ProgressEvent {
-    /// The event as one line, without the line end.
+    /// The event as one line, without the line end. An `error` message is cut to keep the line
+    /// within [`MAX_EVENT_LINE`], so the reader always gets it.
     pub fn to_line(&self) -> String {
-        serde_json::to_string(self).expect("an event has only strings and numbers")
+        let line = serde_json::to_string(self).expect("an event has only strings and numbers");
+        match self {
+            Self::Error { message } if line.len() > MAX_EVENT_LINE => {
+                let quoted_length = |text: &str| serde_json::to_string(text).expect("a string").len() - 2;
+                let mut room = MAX_EVENT_LINE - (line.len() - quoted_length(message)) - TRUNCATED.len();
+                let mut keep = 0;
+                for (at, character) in message.char_indices() {
+                    // A control character or a quote takes several bytes of JSON.
+                    let cost = quoted_length(character.encode_utf8(&mut [0; 4]));
+                    if cost > room {
+                        break;
+                    }
+                    room -= cost;
+                    keep = at + character.len_utf8();
+                }
+                let shorter = Self::Error { message: format!("{}{TRUNCATED}", &message[..keep]) };
+                serde_json::to_string(&shorter).expect("an event has only strings and numbers")
+            }
+            _ => line,
+        }
     }
 
     /// The event on `line`, or `None` for anything else: other programs may write to stdout too.
@@ -65,6 +91,23 @@ mod tests {
         }
         assert_eq!(ProgressEvent::Cancelled.to_line(), r#"{"event":"cancelled"}"#);
         assert_eq!(ProgressEvent::Progress { frame: 1, total: 2, elapsed_ms: 3 }.to_line(), r#"{"event":"progress","frame":1,"total":2,"elapsed_ms":3}"#);
+    }
+
+    #[test]
+    fn an_error_too_long_for_a_line_stays_a_valid_event() {
+        for piece in ["a", "ế", "\"", "\n", "\u{1}"] {
+            let event = ProgressEvent::Error { message: piece.repeat(MAX_EVENT_LINE) };
+            let line = event.to_line();
+            assert!(line.len() <= MAX_EVENT_LINE, "{piece:?}: {} bytes", line.len());
+            let Some(ProgressEvent::Error { message }) = ProgressEvent::parse(&line) else { panic!("{piece:?}: not an event") };
+            assert!(message.ends_with("...") && message.starts_with(piece), "{piece:?}");
+        }
+    }
+
+    #[test]
+    fn a_message_that_fits_is_not_cut() {
+        let event = ProgressEvent::Error { message: "x".repeat(1000) };
+        assert_eq!(ProgressEvent::parse(&event.to_line()).as_ref(), Some(&event));
     }
 
     #[test]

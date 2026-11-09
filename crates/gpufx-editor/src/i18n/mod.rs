@@ -170,6 +170,8 @@ pub enum Message {
     ExportChildCrashed { code: String, stderr: String },
     /// The renderer beside the editor speaks another version of the progress protocol.
     ExportRendererMismatch,
+    /// The renderer's last line was unreadable after every frame; holds the temporary files kept.
+    ExportResultUnknown(String),
     EncoderAuto,
     EncoderNeedsGpl(String),
     EncoderMissing(String),

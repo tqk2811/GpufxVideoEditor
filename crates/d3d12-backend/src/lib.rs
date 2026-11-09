@@ -32,5 +32,5 @@ pub use gpu::Gpu;
 pub use packages::{expression_error, read_package_info, PackageInfo, ParamInfo, ParamKind};
 pub use paths::ProjectPaths;
 pub use probe::{probe_media, MediaProbe};
-pub use progress::{ProgressEvent, CANCEL_LINE, PROGRESS_PROTOCOL};
+pub use progress::{ProgressEvent, CANCEL_LINE, MAX_EVENT_LINE, PROGRESS_PROTOCOL};
 pub use thumbnail::{FrameSampler, ThumbnailError, ThumbnailImage};

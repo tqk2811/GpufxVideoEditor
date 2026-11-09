@@ -126,6 +126,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::ExportToolMissing(path) => format!("Export failed: the renderer {path} is missing. Build gpufx-render or reinstall the app."),
         Message::ExportChildCrashed { code, stderr } if stderr.is_empty() => format!("Export failed: the renderer stopped unexpectedly (exit code {code})."),
         Message::ExportChildCrashed { code, stderr } => format!("Export failed: the renderer stopped unexpectedly (exit code {code}): {stderr}"),
+        Message::ExportResultUnknown(files) => format!("The renderer's result could not be read. Check the output file; these temporary files were kept: {files}"),
         Message::ExportRendererMismatch => "Export failed: gpufx-render does not match this version of the editor. Install the matching gpufx-render.".to_owned(),
         Message::EncoderAuto => "Auto".to_owned(),
         Message::EncoderNeedsGpl(name) => format!("{name} (needs the GPL build)"),
