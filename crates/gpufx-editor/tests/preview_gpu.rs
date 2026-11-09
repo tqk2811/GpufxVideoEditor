@@ -26,7 +26,7 @@ fn project(clips: Vec<Clip>) -> Arc<Project> {
 }
 
 fn request(project: &Arc<Project>, frame: i64) -> PreviewRequest {
-    PreviewRequest { project: project.clone(), frame }
+    PreviewRequest { revision: 0, project: project.clone(), frame }
 }
 
 #[test]

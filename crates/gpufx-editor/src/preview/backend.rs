@@ -10,6 +10,7 @@ use d3d12_backend::{is_cancelled, D3d12Compositor, Gpu, ProjectPaths, SharedImag
 use engine::render::{FrameRenderer, RenderError};
 use engine::{layers_at_frame, Project};
 
+use super::plan::RequestId;
 use super::worker::{FrameProducer, ProduceError};
 
 /// The checkout's effect packages, as `gpufx-render` uses by default.
@@ -23,6 +24,7 @@ const RECYCLE_WAIT: Duration = Duration::from_secs(1);
 const ABORT_GRACE: Duration = Duration::from_millis(150);
 
 pub struct PreviewRequest {
+    pub revision: u64,
     pub project: Arc<Project>,
     pub frame: i64,
 }
@@ -81,6 +83,10 @@ impl D3d12Producer {
 impl FrameProducer for D3d12Producer {
     type Request = PreviewRequest;
     type Frame = PreviewImage;
+
+    fn request_id(request: &PreviewRequest) -> RequestId {
+        RequestId { revision: request.revision, frame: request.frame }
+    }
 
     fn produce(&mut self, request: &PreviewRequest) -> Result<Option<PreviewImage>, ProduceError> {
         if let Some(message) = self.gpu.device_lost() {

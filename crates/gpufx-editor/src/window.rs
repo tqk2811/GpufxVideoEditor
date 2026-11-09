@@ -13,9 +13,9 @@ use engine::{Project, Time, TrackKind};
 
 use crate::editor::EditorState;
 use crate::presenter::Presenter;
-use crate::preview::backend::{D3d12Producer, PreviewRequest};
-use crate::preview::plan::{frame_index, RequestTracker};
-use crate::preview::worker::PreviewWorker;
+use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
+use crate::preview::plan::{frame_index, is_current, RequestId, RequestTracker};
+use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::ui::{self, UiRequest};
 
 const MEDIA_EXTENSIONS: [&str; 10] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac"];
@@ -40,6 +40,8 @@ struct Session {
     state: EditorState,
     next_repaint: Option<Instant>,
     tracker: RequestTracker,
+    /// The request behind the frame on screen.
+    shown: Option<RequestId>,
     snapshot: Option<(u64, Arc<Project>)>,
     smoke: Smoke,
 }
@@ -60,26 +62,38 @@ impl Session {
             state.add_clip_from_file(0, std::path::Path::new(&path));
             state.set_playhead(Time::from_ticks(engine::TICKS_PER_SECOND));
         }
-        Ok(Self { preview, gpu, presenter, state, next_repaint: None, tracker: RequestTracker::default(), snapshot: None, smoke })
+        Ok(Self { preview, gpu, presenter, state, next_repaint: None, tracker: RequestTracker::default(), shown: None, snapshot: None, smoke })
+    }
+
+    fn apply_outcome(&mut self, Outcome { id, result }: Outcome<PreviewImage>) {
+        if !is_current(self.tracker.wanted(), self.shown, id) {
+            // Not shown, and it says nothing about what is wanted now.
+            if let Ok(Some(frame)) = result {
+                self.preview.give_back(frame);
+            }
+            return;
+        }
+        match result {
+            Ok(frame) => {
+                self.shown = Some(id);
+                self.state.set_preview_error(None);
+                if let Some(old) = self.presenter.set_frame(&self.gpu, frame) {
+                    self.preview.give_back(old);
+                }
+                self.report_smoke_frame();
+            }
+            Err(message) => {
+                if self.smoke.enabled {
+                    println!("smoke error: {message}");
+                }
+                self.state.set_preview_error(Some(message));
+            }
+        }
     }
 
     fn collect_preview(&mut self) {
         if let Some(outcome) = self.preview.poll() {
-            match outcome {
-                Ok(frame) => {
-                    self.state.set_preview_error(None);
-                    if let Some(old) = self.presenter.set_frame(&self.gpu, frame) {
-                        self.preview.give_back(old);
-                    }
-                    self.report_smoke_frame();
-                }
-                Err(message) => {
-                    if self.smoke.enabled {
-                        println!("smoke error: {message}");
-                    }
-                    self.state.set_preview_error(Some(message));
-                }
-            }
+            self.apply_outcome(outcome);
         }
         if let Some(message) = self.gpu.device_lost() {
             self.state.set_preview_error(Some(format!("the GPU device was lost: {message}")));
@@ -115,7 +129,7 @@ impl Session {
             self.snapshot = Some((revision, Arc::new(self.state.project().clone())));
         }
         if let Some((_, project)) = &self.snapshot {
-            self.preview.request(PreviewRequest { project: project.clone(), frame });
+            self.preview.request(PreviewRequest { revision, project: project.clone(), frame });
         }
     }
 

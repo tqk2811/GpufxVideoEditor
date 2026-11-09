@@ -6,12 +6,16 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+use super::plan::RequestId;
 use super::slot::LatestSlot;
 
 /// What the thread runs. Created on the thread, so it need not be `Send`.
 pub trait FrameProducer {
     type Request: Send + 'static;
     type Frame: Send + 'static;
+
+    /// Which frame `request` asks for.
+    fn request_id(request: &Self::Request) -> RequestId;
 
     /// The frame for `request`; `None` shows black.
     fn produce(&mut self, request: &Self::Request) -> Result<Option<Self::Frame>, ProduceError>;
@@ -35,7 +39,12 @@ pub enum ProduceError {
     Cancelled,
 }
 
-pub type Outcome<F> = Result<Option<F>, String>;
+/// A finished request: which one it was and what it produced.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Outcome<F> {
+    pub id: RequestId,
+    pub result: Result<Option<F>, String>,
+}
 
 pub struct PreviewWorker<P: FrameProducer> {
     requests: Arc<LatestSlot<P::Request>>,
@@ -59,7 +68,7 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
                 for frame in returned_frames.try_iter() {
                     producer.recycle(frame);
                 }
-                let outcome = match catch_unwind(AssertUnwindSafe(|| producer.produce(&request))) {
+                let result = match catch_unwind(AssertUnwindSafe(|| producer.produce(&request))) {
                     Ok(Ok(frame)) => Ok(frame),
                     Ok(Err(ProduceError::Failed(message))) => Err(message),
                     Ok(Err(ProduceError::Cancelled)) => continue,
@@ -68,7 +77,8 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
                         Err("the preview thread hit an internal error on this frame".to_owned())
                     }
                 };
-                if let Some(Ok(Some(unread))) = thread_results.put(outcome) {
+                let outcome = Outcome { id: P::request_id(&request), result };
+                if let Some(Outcome { result: Ok(Some(unread)), .. }) = thread_results.put(outcome) {
                     producer.recycle(unread);
                 }
                 wake();
@@ -143,6 +153,10 @@ mod tests {
         type Request = i32;
         type Frame = i32;
 
+        fn request_id(request: &i32) -> RequestId {
+            RequestId { revision: 7, frame: i64::from(*request) }
+        }
+
         fn produce(&mut self, request: &i32) -> Result<Option<i32>, ProduceError> {
             if *request == LONG {
                 set(&self.0.long_started);
@@ -187,9 +201,9 @@ mod tests {
         (worker, wake_rx)
     }
 
-    fn next(worker: &PreviewWorker<Fake>, wake: &std::sync::mpsc::Receiver<()>) -> Outcome<i32> {
+    fn next(worker: &PreviewWorker<Fake>, wake: &std::sync::mpsc::Receiver<()>) -> Result<Option<i32>, String> {
         wake.recv_timeout(TIMEOUT).expect("the worker finished a request");
-        worker.poll().expect("a result waits after a wake")
+        worker.poll().expect("a result waits after a wake").result
     }
 
     #[test]
@@ -205,7 +219,7 @@ mod tests {
         // Result 3 may replace an unread result 1, so wait for the newest rather than for each.
         loop {
             wake.recv_timeout(TIMEOUT).expect("the worker finished a request");
-            if worker.poll() == Some(Ok(Some(3))) {
+            if worker.poll().map(|outcome| outcome.result) == Some(Ok(Some(3))) {
                 break;
             }
         }
@@ -223,6 +237,27 @@ mod tests {
         worker.request(2);
         assert_eq!(worker.poll(), None);
         set(&log.release_first);
+    }
+
+    #[test]
+    fn a_result_names_its_request() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.request(4);
+        wake.recv_timeout(TIMEOUT).expect("the worker finished a request");
+        let outcome = worker.poll().expect("a result waits after a wake");
+        assert_eq!(outcome.id, RequestId { revision: 7, frame: 4 });
+    }
+
+    #[test]
+    fn a_failure_names_its_request() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.request(-1);
+        wake.recv_timeout(TIMEOUT).expect("the worker finished a request");
+        let outcome = worker.poll().expect("a result waits after a wake");
+        assert_eq!(outcome.id, RequestId { revision: 7, frame: -1 });
+        assert!(outcome.result.is_err());
     }
 
     #[test]

@@ -11,19 +11,47 @@ pub fn frame_index(project: &Project, time: Time) -> i64 {
     time.ticks().div_euclid(duration)
 }
 
-/// Remembers the last (revision, frame) asked for, so an unchanged wish sends nothing.
+/// Which frame of which project state a request or result is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestId {
+    pub revision: u64,
+    pub frame: i64,
+}
+
+/// Whether the result `got` should reach the screen, given the newest request `wanted` and what is
+/// `shown`. A result of another project state is stale. Of the same state, the exact frame always
+/// counts; another frame counts only while it brings the picture closer to the wanted frame, so a
+/// scrub keeps moving the picture and a frame arriving late does not move it back.
+pub fn is_current(wanted: Option<RequestId>, shown: Option<RequestId>, got: RequestId) -> bool {
+    let Some(wanted) = wanted else { return true };
+    if got.revision != wanted.revision {
+        return false;
+    }
+    if got == wanted {
+        return true;
+    }
+    let distance = |id: RequestId| id.frame.abs_diff(wanted.frame);
+    shown.filter(|shown| shown.revision == wanted.revision).is_none_or(|shown| distance(got) < distance(shown))
+}
+
+/// Remembers the last request asked for, so an unchanged wish sends nothing.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RequestTracker {
-    sent: Option<(u64, i64)>,
+    sent: Option<RequestId>,
 }
 
 impl RequestTracker {
     /// True when this wish differs from the last one, which it then becomes.
     pub fn should_send(&mut self, revision: u64, frame: i64) -> bool {
-        let wish = Some((revision, frame));
+        let wish = Some(RequestId { revision, frame });
         let changed = self.sent != wish;
         self.sent = wish;
         changed
+    }
+
+    /// The newest request, if any was made.
+    pub fn wanted(&self) -> Option<RequestId> {
+        self.sent
     }
 }
 
@@ -73,6 +101,49 @@ mod tests {
         assert!(tracker.should_send(0, 1));
         assert!(tracker.should_send(1, 1), "a new revision needs a new frame");
         assert!(tracker.should_send(0, 1), "going back to an older wish is a change too");
+    }
+
+    fn id(revision: u64, frame: i64) -> RequestId {
+        RequestId { revision, frame }
+    }
+
+    #[test]
+    fn the_exact_frame_is_always_current() {
+        assert!(is_current(Some(id(3, 10)), Some(id(3, 9)), id(3, 10)));
+        assert!(is_current(Some(id(3, 10)), None, id(3, 10)));
+    }
+
+    #[test]
+    fn a_result_of_another_revision_is_stale() {
+        assert!(!is_current(Some(id(3, 10)), Some(id(3, 9)), id(2, 10)), "an edit made it stale");
+        assert!(!is_current(Some(id(3, 10)), None, id(2, 10)));
+    }
+
+    #[test]
+    fn a_scrub_keeps_showing_frames_that_get_closer() {
+        assert!(is_current(Some(id(3, 20)), Some(id(3, 10)), id(3, 15)));
+        assert!(is_current(Some(id(3, 5)), Some(id(3, 10)), id(3, 7)), "scrubbing backward too");
+    }
+
+    #[test]
+    fn a_late_frame_does_not_move_the_picture_back() {
+        assert!(!is_current(Some(id(3, 20)), Some(id(3, 18)), id(3, 15)));
+        assert!(!is_current(Some(id(3, 20)), Some(id(3, 20)), id(3, 15)));
+    }
+
+    #[test]
+    fn nothing_shown_or_requested_accepts_a_frame() {
+        assert!(is_current(Some(id(3, 20)), None, id(3, 15)), "better than a stale picture");
+        assert!(is_current(None, None, id(3, 15)));
+        assert!(is_current(Some(id(3, 20)), Some(id(2, 19)), id(3, 15)), "shown is of an older state");
+    }
+
+    #[test]
+    fn the_tracker_remembers_the_newest_wish() {
+        let mut tracker = RequestTracker::default();
+        assert_eq!(tracker.wanted(), None);
+        tracker.should_send(1, 2);
+        assert_eq!(tracker.wanted(), Some(id(1, 2)));
     }
 
     #[test]
