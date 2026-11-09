@@ -627,7 +627,7 @@ impl EditorState {
 
     /// Takes the lock of `file`, keeping one already held for it. False when another process has it.
     pub fn claim_project_lock(&mut self, file: &Path) -> bool {
-        if self.project_lock.as_ref().is_some_and(|lock| lock.file() == file) {
+        if self.project_lock.as_ref().is_some_and(|lock| d3d12_backend::same_file(lock.file(), file)) {
             return true;
         }
         match ProjectLock::acquire(file) {
@@ -1125,6 +1125,17 @@ mod tests {
 
     fn seconds(value: i64) -> Time {
         Time::from_seconds(value).unwrap()
+    }
+
+    #[test]
+    fn the_own_lock_counts_whatever_the_case_of_the_path() {
+        let dir = std::env::temp_dir().join(format!("gpufx-editor-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = EditorState::default();
+        assert!(state.claim_project_lock(&dir.join("p.json")));
+        assert!(state.claim_project_lock(&dir.join("P.JSON")), "the file it already holds");
+        state.release_project_lock();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn state_with_clip() -> EditorState {
