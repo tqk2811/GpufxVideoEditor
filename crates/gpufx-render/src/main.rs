@@ -58,12 +58,11 @@ fn run() -> Result<(), String> {
     let paths = Arc::new(ProjectPaths::new(&arguments.project, arguments.package_roots.clone()));
     let has_audio = project.output.audio.is_some();
     let job = ExportJob { project, project_file: Some(arguments.project.clone()), paths, out: arguments.out.clone(), encoder: arguments.encoder, hashes: arguments.hashes };
-    job.check()?;
+    job.check_named("--out", "--hashes")?;
 
     let gpu = Arc::new(Gpu::create()?);
     println!("gpu: {}", gpu.adapter_name);
-    let report = job.run(gpu, ExportControl::default()).map_err(|e| e.to_string())?;
-    println!("encoder: {}", report.encoder);
+    let report = job.run(gpu, ExportControl { encoder_opened: Some(&|name| println!("encoder: {name}")), ..ExportControl::default() }).map_err(|e| e.to_string())?;
     if has_audio {
         println!("audio: {} samples, {} clamped", report.audio_samples, report.clamped_samples);
         println!("pcm sha256: {}", report.pcm_sha256.as_deref().unwrap_or_default());

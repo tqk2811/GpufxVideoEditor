@@ -58,6 +58,8 @@ pub struct ExportControl<'a> {
     pub cancel: Option<Arc<AtomicBool>>,
     /// Called after each frame with the frames done and the total.
     pub progress: Option<&'a dyn Fn(i64, i64)>,
+    /// Called with the encoder's name once it is open, before the first frame.
+    pub encoder_opened: Option<&'a dyn Fn(&str)>,
 }
 
 /// What a finished export produced.
@@ -179,6 +181,11 @@ impl FrameSink for ExportSink<'_> {
 impl ExportJob {
     /// Checks the project and refuses an output that would overwrite one of its inputs. Needs no GPU.
     pub fn check(&self) -> Result<(), String> {
+        self.check_named("the output", "the hash file")
+    }
+
+    /// [`ExportJob::check`], calling the two outputs `out` and `hashes` in its messages.
+    pub fn check_named(&self, out: &str, hashes: &str) -> Result<(), String> {
         let errors = validate(&self.project, self.paths.as_ref());
         if !errors.is_empty() {
             let lines: Vec<String> = errors.iter().map(ToString::to_string).collect();
@@ -194,18 +201,18 @@ impl ExportJob {
                 inputs.push((path, "a package of the project"));
             }
         }
-        let mut outputs = vec![&self.out];
-        outputs.extend(self.hashes.as_ref());
-        for output in &outputs {
+        let mut outputs = vec![(out, &self.out)];
+        outputs.extend(self.hashes.as_ref().map(|path| (hashes, path)));
+        for (name, output) in &outputs {
             let output_id = identity(output);
             for (input, what) in &inputs {
                 if identity(input) == output_id {
-                    return Err(format!("{} is {what}; it would be overwritten", output.display()));
+                    return Err(format!("{name} {} is {what}; it would be overwritten", output.display()));
                 }
             }
         }
-        if outputs.len() == 2 && identity(outputs[0]) == identity(outputs[1]) {
-            return Err("the output and the hash file name the same file".to_owned());
+        if outputs.len() == 2 && identity(outputs[0].1) == identity(outputs[1].1) {
+            return Err(format!("{out} and {hashes} name the same file"));
         }
         Ok(())
     }
@@ -239,6 +246,9 @@ impl ExportJob {
         }
         let encoder = Mp4Encoder::create(&out_file.temporary, &self.project.output, &self.encoder)?;
         let encoder_name = encoder.encoder_name().to_owned();
+        if let Some(opened) = control.encoder_opened {
+            opened(&encoder_name);
+        }
         let hashes = hashes_file.as_ref().map(|file| std::fs::File::create(&file.temporary).map(std::io::BufWriter::new).map_err(|e| format!("creating {}: {e}", file.temporary.display()))).transpose()?;
         let total = frame_count(&self.project);
         let mut sink = ExportSink { encoder, hashes, pcm: Sha256::new(), cancel: control.cancel.as_deref(), progress: control.progress, total };

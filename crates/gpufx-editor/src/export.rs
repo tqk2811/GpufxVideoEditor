@@ -136,7 +136,7 @@ fn run_job(job: &ExportJob, gpu: Arc<Gpu>, cancel: Arc<AtomicBool>, done: &Atomi
         return ExportOutcome::Cancelled;
     }
     let progress = |frames: i64, _total: i64| done.store(frames, Ordering::SeqCst);
-    match job.run(gpu, ExportControl { cancel: Some(cancel), progress: Some(&progress) }) {
+    match job.run(gpu, ExportControl { cancel: Some(cancel), progress: Some(&progress), ..Default::default() }) {
         Ok(report) => ExportOutcome::Finished(report),
         Err(ExportError::Cancelled) => ExportOutcome::Cancelled,
         Err(ExportError::Failed(message)) => ExportOutcome::Failed(message),

@@ -348,6 +348,8 @@ fn expect_refused_and_intact(test: &str, out_of: impl Fn(&PathBuf) -> PathBuf, h
     assert!(!result.status.success(), "writing over a source must be refused");
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("would be overwritten"), "{stderr}");
+    let flag = if hashes.is_some() { "--hashes " } else { "--out " };
+    assert!(stderr.contains(flag), "the message names the flag {flag}: {stderr}");
     assert_eq!(std::fs::read(&source).expect("read the source"), before, "the source was modified");
     assert!(!other.exists(), "nothing may be written when the arguments are refused");
 }
@@ -365,6 +367,32 @@ fn an_output_spelled_differently_is_still_the_source() {
 #[test]
 fn a_hash_file_that_is_a_source_is_refused() {
     expect_refused_and_intact("refuse-hashes-source", |s| s.clone(), |s| Some(s.clone()));
+}
+
+#[test]
+fn the_same_file_for_out_and_hashes_names_both_flags() {
+    let dir = scratch_dir("refuse-same-output");
+    let (clip, _) = test_clips();
+    let project = write_project(&dir, &one_clip_project(&json_path(&clip)));
+    let out = dir.join("out.mp4");
+    let result = render_with(&project, &out, &[&out]);
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("--out and --hashes name the same file"), "{stderr}");
+}
+
+#[test]
+fn the_encoder_is_printed_before_the_render_starts() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("failed-render-encoder-line");
+    std::fs::write(dir.join("broken.mp4"), b"this is not a video").expect("write the broken source");
+    let project = write_project(&dir, &one_clip_project("broken.mp4"));
+    let result = render_with(&project, &dir.join("out.mp4"), &[]);
+    assert!(!result.status.success(), "the render must fail after the encoder opened");
+    assert!(String::from_utf8_lossy(&result.stdout).lines().any(|l| l.starts_with("encoder: ")), "{}", String::from_utf8_lossy(&result.stdout));
 }
 
 #[test]
