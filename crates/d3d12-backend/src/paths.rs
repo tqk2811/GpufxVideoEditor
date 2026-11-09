@@ -39,6 +39,9 @@ impl ProjectPaths {
     fn inside_roots(&self, package: &str) -> bool {
         let path = Path::new(package);
         if path.is_absolute() {
+            if path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+                return false;
+            }
             return self.package_roots.iter().any(|root| std::path::absolute(root).is_ok_and(|root| path.starts_with(root)));
         }
         !path.has_root() && path.components().all(|part| matches!(part, std::path::Component::Normal(_) | std::path::Component::CurDir))
@@ -120,6 +123,7 @@ mod tests {
         assert_eq!(agent.package_path("fx"), None);
         assert_eq!(agent.package_path(project.join("fx").to_str().unwrap()), None, "an absolute path out of the roots");
         assert_eq!(agent.package_path("../project/fx"), None, "a climb out of the root");
+        assert_eq!(agent.package_path(root.join("../project/fx").to_str().unwrap()), None, "an absolute name climbing out with ..");
         assert_eq!(agent.package_path("mix"), Some(root.join("packages/gpufx/group/mix")));
         assert_eq!(agent.package_path("packages/gpufx/group/mix"), Some(root.join("packages/gpufx/group/mix")));
         let absolute = root.join("packages/gpufx/group/mix");
