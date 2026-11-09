@@ -18,8 +18,53 @@ pub fn settings_file() -> Option<PathBuf> {
     Some(PathBuf::from(folder).join(FOLDER).join(FILE))
 }
 
+/// What is on disk for the settings.
+enum Stored {
+    Missing,
+    Usable(Map<String, Value>),
+    /// The file could be read but holds no settings.
+    Corrupt,
+    Unreadable(std::io::Error),
+}
+
+fn stored_settings(file: &Path) -> Stored {
+    match std::fs::read(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Stored::Missing,
+        Err(e) => Stored::Unreadable(e),
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(settings)) => Stored::Usable(settings),
+            _ => Stored::Corrupt,
+        },
+    }
+}
+
+/// The settings to go by. Whatever cannot be read counts as nothing chosen.
 fn read_settings(file: &Path) -> Map<String, Value> {
-    std::fs::read_to_string(file).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).and_then(|value| value.as_object().cloned()).unwrap_or_default()
+    match stored_settings(file) {
+        Stored::Usable(settings) => settings,
+        Stored::Missing | Stored::Corrupt | Stored::Unreadable(_) => Map::new(),
+    }
+}
+
+/// Where a corrupt settings file is kept once a save replaces it.
+fn set_aside_file(file: &Path) -> PathBuf {
+    file.with_extension("json.bad")
+}
+
+/// The settings a save starts from. A corrupt file is kept aside, and one that cannot be read
+/// stops the save, so nothing the user chose is overwritten by a partial file.
+fn settings_to_update(file: &Path) -> Result<Map<String, Value>, String> {
+    match stored_settings(file) {
+        Stored::Missing => Ok(Map::new()),
+        Stored::Usable(settings) => Ok(settings),
+        Stored::Unreadable(e) => Err(format!("reading {} failed: {e}", file.display())),
+        Stored::Corrupt => {
+            let aside = set_aside_file(file);
+            std::fs::rename(file, &aside).map_err(|e| format!("keeping the corrupt {} failed: {e}", file.display()))?;
+            eprintln!("gpufx-editor: {} was corrupt and is kept as {}", file.display(), aside.display());
+            Ok(Map::new())
+        }
+    }
 }
 
 /// The language saved in `file`, if it names one the editor has.
@@ -43,11 +88,15 @@ fn temporary_file(file: &Path) -> PathBuf {
     file.with_extension(format!("json.{}.tmp", std::process::id()))
 }
 
-/// Records `value` under `key` in `file`, through a temporary file and keeping any other setting.
+/// Records `value` under `key` in `file`, keeping any other setting.
 fn write_setting(file: &Path, key: &str, value: Value) -> Result<(), String> {
-    let mut settings = read_settings(file);
+    let mut settings = settings_to_update(file)?;
     settings.insert(key.to_owned(), value);
-    let text = serde_json::to_string_pretty(&Value::Object(settings)).map_err(|e| e.to_string())?;
+    replace_file(file, &serde_json::to_string_pretty(&Value::Object(settings)).map_err(|e| e.to_string())?)
+}
+
+/// Writes `text` to `file` through a temporary file.
+fn replace_file(file: &Path, text: &str) -> Result<(), String> {
     if let Some(folder) = file.parent() {
         std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
     }
@@ -170,9 +219,49 @@ mod tests {
         std::fs::create_dir_all(&file).unwrap();
         let foreign = file.with_extension("json.tmp");
         std::fs::write(&foreign, "another editor").unwrap();
-        assert!(write_language(&file, Language::English).is_err());
+        assert!(replace_file(&file, "{}").is_err());
         assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "another editor");
         assert!(!temporary_file(&file).exists());
+    }
+
+    #[test]
+    fn a_save_keeps_a_corrupt_file_aside_and_writes_a_new_one() {
+        let file = temp_file("corrupt");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "{ not json").unwrap();
+        write_language(&file, Language::Vietnamese).unwrap();
+        assert_eq!(std::fs::read_to_string(set_aside_file(&file)).unwrap(), "{ not json");
+        assert_eq!(saved_language(&file), Some(Language::Vietnamese));
+    }
+
+    #[test]
+    fn json_that_holds_no_settings_is_corrupt_too() {
+        let file = temp_file("not-an-object");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "[1,2]").unwrap();
+        write_language(&file, Language::English).unwrap();
+        assert_eq!(std::fs::read_to_string(set_aside_file(&file)).unwrap(), "[1,2]");
+    }
+
+    #[test]
+    fn a_save_stops_when_the_file_cannot_be_read_and_leaves_it_alone() {
+        let file = temp_file("locked");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, r#"{"other":1}"#).unwrap();
+        // Shared for deletion only: reading fails, but a rename over it would succeed.
+        let lock = std::os::windows::fs::OpenOptionsExt::share_mode(&mut std::fs::OpenOptions::new(), 4).read(true).open(&file).unwrap();
+        assert!(write_language(&file, Language::Vietnamese).is_err());
+        drop(lock);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"other":1}"#);
+        assert!(!set_aside_file(&file).exists());
+    }
+
+    #[test]
+    fn a_missing_file_is_simply_created() {
+        let file = temp_file("missing");
+        write_language(&file, Language::Vietnamese).unwrap();
+        assert_eq!(saved_language(&file), Some(Language::Vietnamese));
+        assert!(!set_aside_file(&file).exists());
     }
 
     #[test]
