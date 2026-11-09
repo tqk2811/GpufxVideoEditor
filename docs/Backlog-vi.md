@@ -262,3 +262,27 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Vừa] MCP chưa được thử với client MCP thật và cửa sổ thật
 
 `crates/gpufx-editor/src/window.rs:241` (`serve_agent`): test đã đi qua pipe thật, `EditorState` và luồng preview thật, nhưng không có cửa sổ winit. Bật tuỳ chọn trong menu, dấu báo agent, lệnh tới khi cửa sổ thu nhỏ và preview cập nhật sau lệnh agent mới chỉ thử được bằng tay. Tiêu chí "Dùng thật" của đặc tả vẫn còn mở. Ghi ngày 2026-11-09.
+
+### [Vừa] Lưu hoặc xuất có thể ghi đè file bên trong package dạng thư mục
+
+`crates/d3d12-backend/src/export.rs:117` (`overwritten_input`): chỉ so đường dẫn đích với chính thư mục package, nên `project_save` với `overwrite: true` vào `<package>/manifest.json` làm hỏng package đang dùng, `export_start` hở tương tự. Nên từ chối mọi đích nằm dưới một package thư mục của project. Ghi ngày 2026-11-09.
+
+### [Thấp] So file cùng một đích qua admin share không nhận ra
+
+`crates/d3d12-backend/src/export.rs:87` (`same_file`): `\\localhost\c$\m\a.mp4` không trùng `C:\m\a.mp4` sau `canonicalize`, nên kiểm tra ghi đè file nguồn bị vượt. Cần quyền vào admin share nên khó gặp; chặn triệt để thì so volume serial và file ID. Ghi ngày 2026-11-09.
+
+### [Thấp] Capture xếp hàng trước khi luồng preview chết vẫn treo
+
+`crates/gpufx-editor/src/preview/worker.rs:167`: task vào queue trong lúc `make()` đang chạy rồi `make()` panic thì không được trả lời, `PendingFrame::finish` (`crates/gpufx-editor/src/agent/run.rs:57`) chặn luồng pipe tới khi worker bị drop. Nên xả queue khi luồng thoát, ví dụ bằng guard trong closure spawn. Ghi ngày 2026-11-09.
+
+### [Thấp] Hạn 30 giây khi ghi pipe tính trên cả câu trả lời
+
+`crates/gpufx-editor/src/agent/gateway.rs:231`: client vẫn đọc đều mà ảnh rất lớn (PNG base64 khoảng trên 120 MB, ước tính từ đọc code) thì bị cắt và client báo nhầm `no_app`. Nên tính hạn từ lần ghi có tiến triển cuối. Ghi ngày 2026-11-09.
+
+### [Thấp] Editor chạy quyền admin có thể bị MCP thường từ chối
+
+`crates/gpufx-editor/src/agent/gateway.rs:49`, phía client ở `crates/gpufx-mcp/src/session.rs`: kiểm chủ server cần mở token của tiến trình editor, từ medium integrity lên high integrity nhiều khả năng bị từ chối. Đây là fail-closed có thông báo, chưa chạy thử; ghi lại để biết khi gặp. Ghi ngày 2026-11-09.
+
+### [Thấp] Comment đặt sai chỗ ở test preview
+
+`crates/gpufx-editor/tests/preview_gpu.rs:292`: comment về `try_lock_submits` nằm trên test capture mới thay vì trên test nó mô tả ở dòng 311. Ghi ngày 2026-11-09.
