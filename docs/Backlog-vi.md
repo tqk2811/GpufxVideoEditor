@@ -286,3 +286,15 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Comment đặt sai chỗ ở test preview
 
 `crates/gpufx-editor/tests/preview_gpu.rs:292`: comment về `try_lock_submits` nằm trên test capture mới thay vì trên test nó mô tả ở dòng 311. Ghi ngày 2026-11-09.
+
+### [Vừa] Preview ở tốc độ cao có thể không kịp giải mã
+
+Ở 10x mỗi khung xuất cần `crates/d3d12-backend/src/decoder.rs:525` giải mã xuyên qua khoảng 10 khung nguồn, trừ khi nhảy quá 2 giây tới keyframe. Nguồn 4K dễ không kịp thời gian thực và preview sẽ rớt khung (xuất file vẫn đúng). Cần đo trên máy thật và cân nhắc giải mã chỉ khung intra khi tua nhanh. Ghi ngày 2026-11-10.
+
+### [Thấp] Đoạn ghép không căn pha mỗi 1,4 giây trong bộ giãn tiếng
+
+`crates/engine/src/stretch.rs:39` đặt mỗi 64 grain một grain không căn với grain trước, để tua chỉ phải dựng lại tối đa 1,4 giây. Tại đó có một đoạn 21 ms có thể lệch pha, nghe như một chỗ nhấp nhẹ ở âm liên tục. Chưa nghe thử trên nhạc thật; nếu lộ rõ thì tăng khoảng hoặc giữ vị trí grain xuyên suốt clip. Ghi ngày 2026-11-10.
+
+### [Thấp] Tách hoặc cắt clip đang tua có một mẫu lệch vị trí nguồn tiếng
+
+Ở tốc độ khác 1, sau khi tách, vị trí âm danh nghĩa của nửa sau khác tối đa 1 mẫu (dưới 21 µs) so với trước khi tách, và chuỗi grain bắt đầu lại ở chỗ cắt (`crates/engine/src/edit.rs` `cut_keeps_samples`). Vị trí khung hình vẫn chính xác. Không ảnh hưởng thời lượng hay đồng bộ. Ghi ngày 2026-11-10.

@@ -84,6 +84,15 @@ Giai đoạn 0 là cửa quyết định, không đạt thì dừng hoặc đổ
 
 Ước lượng thô: bản dựng được video ngắn cần vài tháng; cạnh tranh với Kdenlive cần nhiều năm.
 
+## Tua nhanh, tua chậm theo clip
+
+Đã làm (2026-11-10). User chốt: giữ cao độ khi đổi tốc độ, mỗi clip một tốc độ cố định, không có đường cong. Khoảng 0,1x đến 10x; tua chậm lặp khung, tua nhanh bỏ khung, không nội suy khung.
+
+- `Clip.speed` lưu trong project, mặc định 1 và không ghi ra file khi bằng 1. `duration` vẫn là độ dài trên timeline, nguồn tiêu thụ là `duration * speed`.
+- Ánh xạ thời gian dùng số nguyên: tốc độ được làm tròn tới phần nghìn, `source_in + floor(offset * speed)` tính bằng `i128`, nên hình và tiếng không lệch dần theo độ dài clip. Cắt đầu và tách clip rơi vào bội của lưới tốc độ (lệch tối đa 11 ms) để mọi vị trí nguồn giữ nguyên chính xác.
+- Tiếng: WSOLA tự viết trong `crates/engine/src/stretch.rs`, không dùng `atempo` (không phải phụ thuộc thêm vào libavfilter ở bản LGPL, không phải dựng lại filter graph sau mỗi lần tua). Kết quả chỉ phụ thuộc nguồn và clip, không phụ thuộc cách chia khối hay tua, nên preview và file xuất giống hệt nhau. Tốc độ 1 không đi qua bộ này.
+- Đổi tốc độ trong app giữ nguyên đoạn nguồn; clip sẽ đè clip sau thì bị từ chối thay vì đẩy clip khác. Dùng được từ ô Tốc độ ở inspector và tool `clip_set_speed`.
+
 ## Rủi ro giấy phép và pháp lý
 
 Đây là hiểu biết chung, không phải tư vấn pháp lý.

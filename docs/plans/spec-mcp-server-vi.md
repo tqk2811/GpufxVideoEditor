@@ -54,6 +54,7 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `clip_add`, `clip_move`, `clip_trim_start`, `clip_trim_end`, `clip_split`, `clip_delete` | Sửa clip |
 | `effect_add`, `effect_remove`, `transition_add`, `transition_remove` | Hiệu ứng và transition |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
+| `clip_set_speed` | Tốc độ phát một clip, xem mục dưới |
 | `undo`, `redo` | Hoàn tác, mỗi tool sửa là một bước; `track_set_locked` không phải một bước, giống nút khoá |
 | `frame_capture` | Chụp khung đã ghép |
 | `export_start`, `export_status`, `export_cancel` | Xuất nền |
@@ -65,6 +66,10 @@ Nhận đúng một trong hai tham số `time` (tick) hoặc `frame` (index), v�
 Trả về ảnh PNG dạng nội dung image của MCP, cùng frame index, thời điểm thực của khung và revision. Khung đã gồm hiệu ứng và transition. `time` được đổi sang frame index bằng đúng công thức preview dùng. Ảnh được thu nhỏ khi quá `max_width`, mặc định 1280 để không làm phình ngữ cảnh agent.
 
 Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế độ live chạy việc chụp trên luồng preview, xen giữa các khung (`PreviewWorker::run_on_thread`), không thay yêu cầu preview đang chờ, không báo khung đang dựng là hết cần. Chụp dùng decoder riêng và cờ abort tắt, nên không di chuyển đầu phát, không thay khung đang hiển thị và không bị yêu cầu preview mới làm hỏng. Trong lúc xuất, chụp trả `busy` ở cả hai chế độ.
+
+### `clip_set_speed` và `speed` của `clip_add`
+
+`clip_set_speed` nhận `clip`, `speed` (từ 0,1 đến 10, ví dụ 2 là nhanh gấp đôi) và `expected_revision`. Nó giữ nguyên đoạn nguồn đang phát nên thời lượng trên timeline thành `đoạn nguồn / speed`, tính từ điểm đầu cũ. Lỗi: `speed_overlap` khi clip sẽ chồng lên clip kế tiếp (không tự đẩy clip khác), `transition_on_edge` khi đuôi clip đang có transition, `invalid_project` khi tốc độ ngoài khoảng hoặc fade, transition đầu clip không còn vừa, `track_locked` trên track khoá. `clip_add` nhận thêm `speed` tuỳ chọn; thời lượng mặc định là phần nguồn còn lại chia cho `speed`. `project_get` trả `speed` khi khác 1.
 
 ### Xuất file
 
