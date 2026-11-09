@@ -67,6 +67,11 @@ impl<T> TileCache<T> {
         [below, above].into_iter().flatten().min_by_key(|(candidate, _)| (candidate.1 - time).abs()).map(|(candidate, _)| *candidate)
     }
 
+    /// Forgets the tiles of `source` that `doomed` picks.
+    pub fn remove_where(&mut self, source: u32, doomed: impl Fn(&T) -> bool) {
+        self.entries.retain(|(entry, _), (_, value)| *entry != source || !doomed(value));
+    }
+
     /// Forgets every tile of `source`.
     pub fn remove_source(&mut self, source: u32) {
         self.entries.retain(|(entry, _), _| *entry != source);

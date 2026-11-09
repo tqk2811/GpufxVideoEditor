@@ -64,6 +64,8 @@ struct Slot {
     identity: Option<u32>,
     view: SourceView,
     checked: Option<Instant>,
+    /// The last check could not read the file: a failure made since may have been the drive.
+    stamp_lost: bool,
 }
 
 struct PeakEntry {
@@ -257,7 +259,7 @@ impl ClipVisuals {
             Some(slot) => *slot,
             None => {
                 let slot = self.slots.len();
-                self.slots.push(Slot { path: path.into(), stamp: None, identity: None, view: SourceView::Pending, checked: None });
+                self.slots.push(Slot { path: path.into(), stamp: None, identity: None, view: SourceView::Pending, checked: None, stamp_lost: false });
                 self.by_path.insert(normalized, slot);
                 slot
             }
@@ -338,9 +340,14 @@ impl ClipVisuals {
             Done::Stamp { slot, stamp } => {
                 let index = slot as usize;
                 self.slots[index].checked = Some(Instant::now());
-                // No stamp means the file could not be read just now, not that it changed.
-                if stamp.is_some() && self.slots[index].stamp != stamp {
+                // No stamp means the file could not be read just now, not that it changed. When it
+                // reads again unchanged, what failed meanwhile is tried once more.
+                if stamp.is_none() {
+                    self.slots[index].stamp_lost = true;
+                } else if self.slots[index].stamp != stamp {
                     self.reset_slot(index);
+                } else if std::mem::take(&mut self.slots[index].stamp_lost) {
+                    self.clear_failures(index);
                 }
             }
             Done::Inspected { slot, stamp, result } => {
@@ -384,12 +391,22 @@ impl ClipVisuals {
         }
     }
 
+    /// Forgets what could not be read of a source, keeping every picture and level that was.
+    fn clear_failures(&mut self, index: usize) {
+        let Some(identity) = self.slots[index].identity else { return };
+        self.tiles.remove_where(identity, |tile| matches!(tile, Tile::Failed));
+        if self.peaks.get(&identity).is_some_and(|entry| entry.finished && entry.data.is_empty()) {
+            self.peaks.remove(&identity);
+        }
+    }
+
     /// Forgets a source whose file changed: its identity ends, so nothing old can come back.
     fn reset_slot(&mut self, index: usize) {
         let slot = &mut self.slots[index];
         slot.stamp = None;
         slot.view = SourceView::Pending;
         slot.checked = None;
+        slot.stamp_lost = false;
         if let Some(identity) = slot.identity.take() {
             self.live_identities.remove(&identity);
             self.tiles.remove_source(identity);

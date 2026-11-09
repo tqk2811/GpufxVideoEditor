@@ -199,7 +199,7 @@ fn eviction_frees_the_egui_texture() {
 fn a_tile_borrows_a_neighbour_until_its_own_picture_arrives() {
     let ctx = egui::Context::default();
     let mut visuals = ClipVisuals::default();
-    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(3), view: SourceView::Pending, checked: None });
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(3), view: SourceView::Pending, checked: None, stamp_lost: false });
     visuals.live_identities.insert(3);
     let image = ThumbnailImage { width: 2, height: 2, rgba: vec![9; 16] };
     visuals.apply(Done::Frame { identity: 3, bucket: 0, result: Ok(image) });
@@ -214,7 +214,7 @@ fn a_tile_borrows_a_neighbour_until_its_own_picture_arrives() {
 fn a_failed_tile_is_not_requested_again() {
     let ctx = egui::Context::default();
     let mut visuals = ClipVisuals::default();
-    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(3), view: SourceView::Pending, checked: None });
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(3), view: SourceView::Pending, checked: None, stamp_lost: false });
     visuals.live_identities.insert(3);
     visuals.apply(Done::Frame { identity: 3, bucket: 0, result: Err("bad".to_owned()) });
     visuals.begin_frame(&ctx);
@@ -236,7 +236,7 @@ fn a_late_result_for_a_replaced_file_is_ignored() {
 fn a_cancelled_run_of_levels_leaves_nothing_and_the_next_starts_over() {
     let facts = SourceFacts { has_video: false, has_audio: true, aspect: 1.0, length: None };
     let mut visuals = ClipVisuals::default();
-    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(1), view: SourceView::Known(facts), checked: None });
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(1), view: SourceView::Known(facts), checked: None, stamp_lost: false });
     visuals.live_identities.insert(1);
     visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: vec![0.1], finished: false });
     let project = crate::editor::EditorState::default().project().clone();
@@ -254,7 +254,7 @@ fn a_cancelled_run_of_levels_leaves_nothing_and_the_next_starts_over() {
 
 fn known_slot(visuals: &mut ClipVisuals, stamp: Option<FileStamp>, identity: u32) {
     let facts = SourceFacts { has_video: true, has_audio: true, aspect: 1.0, length: None };
-    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp, identity: Some(identity), view: SourceView::Known(facts), checked: None });
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp, identity: Some(identity), view: SourceView::Known(facts), checked: None, stamp_lost: false });
     visuals.live_identities.insert(identity);
     visuals.interned.insert("a.mp4".to_owned(), visuals.slots.len() - 1);
 }
@@ -273,6 +273,49 @@ fn a_moment_without_a_stamp_keeps_what_was_made_of_the_source() {
     visuals.apply(Done::Stamp { slot: 0, stamp: Some(FileStamp { size: 11, modified: None }) });
     assert_eq!(visuals.slots[0].identity, None, "a real change still forgets it");
     assert!(visuals.peaks.is_empty());
+}
+
+#[test]
+fn a_drive_that_comes_back_retries_only_what_failed() {
+    let ctx = egui::Context::default();
+    let stamp = FileStamp { size: 10, modified: None };
+    let mut visuals = ClipVisuals::default();
+    known_slot(&mut visuals, Some(stamp), 1);
+    visuals.apply(Done::Frame { identity: 1, bucket: 0, result: Ok(ThumbnailImage { width: 1, height: 1, rgba: vec![0; 4] }) });
+    visuals.begin_frame(&ctx);
+    visuals.apply(Done::Frame { identity: 1, bucket: 7, result: Err("gone".to_owned().into()) });
+    visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: Vec::new(), finished: true });
+    visuals.apply(Done::Stamp { slot: 0, stamp: None });
+    assert!(matches!(visuals.tiles.peek_mut((1, 7)), Some(Tile::Failed)), "nothing changes while the drive is away");
+    visuals.apply(Done::Stamp { slot: 0, stamp: Some(stamp) });
+    assert_eq!(visuals.slots[0].identity, Some(1), "the same file, so the same identity");
+    assert!(visuals.tiles.peek_mut((1, 7)).is_none(), "the failure is forgotten");
+    assert!(matches!(visuals.tiles.peek_mut((1, 0)), Some(Tile::Ready(_))), "a good picture stays");
+    assert!(visuals.peaks.is_empty(), "levels that read nothing are read again");
+    visuals.tile(0, 7, TICKS_PER_SECOND);
+    assert!(visuals.wanted_frames.iter().any(|job| job.key == JobKey::Frame(1, 7)), "and the picture is asked for again");
+    visuals.wanted_frames.clear();
+}
+
+#[test]
+fn levels_with_content_survive_a_drive_that_comes_back() {
+    let stamp = FileStamp { size: 10, modified: None };
+    let mut visuals = ClipVisuals::default();
+    known_slot(&mut visuals, Some(stamp), 1);
+    visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: vec![0.3], finished: true });
+    visuals.apply(Done::Stamp { slot: 0, stamp: None });
+    visuals.apply(Done::Stamp { slot: 0, stamp: Some(stamp) });
+    assert!(!visuals.peaks.is_empty());
+}
+
+#[test]
+fn a_stamp_that_was_never_lost_clears_nothing() {
+    let stamp = FileStamp { size: 10, modified: None };
+    let mut visuals = ClipVisuals::default();
+    known_slot(&mut visuals, Some(stamp), 1);
+    visuals.apply(Done::Frame { identity: 1, bucket: 7, result: Err("damaged".to_owned().into()) });
+    visuals.apply(Done::Stamp { slot: 0, stamp: Some(stamp) });
+    assert!(matches!(visuals.tiles.peek_mut((1, 7)), Some(Tile::Failed)), "a damaged file is not read again every five seconds");
 }
 
 #[test]
@@ -344,7 +387,7 @@ fn levels_read_before_an_error_are_handed_over() {
 #[test]
 fn levels_of_a_clip_removed_from_the_project_are_dropped() {
     let mut visuals = ClipVisuals::default();
-    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(1), view: SourceView::Pending, checked: None });
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(1), view: SourceView::Pending, checked: None, stamp_lost: false });
     visuals.live_identities.insert(1);
     visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: vec![0.1], finished: false });
     let project = crate::editor::EditorState::default().project().clone();
