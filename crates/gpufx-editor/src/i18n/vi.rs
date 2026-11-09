@@ -82,6 +82,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditSplitOutsideClip { track, at } => format!("{}: không thể tách tại {at} giây", track_label(*track)),
         Message::EditSplitInsideFade { track, at } => format!("{}: {at} giây nằm trong đoạn tăng hoặc giảm dần âm lượng", track_label(*track)),
         Message::EditSplitInsideTransition { track, at } => format!("{}: {at} giây nằm trong chuyển cảnh", track_label(*track)),
+        Message::EditTrackLocked(track) => format!("{}: track đang khoá", track_label(*track)),
         Message::EditInvalid(detail) => format!("Kết quả không hợp lệ: {detail}"),
 
         Message::DialogOpen => "Hãy đóng hộp thoại đang mở trước".to_owned(),
@@ -177,5 +178,10 @@ pub(super) fn text(message: &Message) -> String {
         Message::VideoTrackNumber(number) => format!("Track video {number}"),
         Message::AudioTrackNumber(number) => format!("Track âm thanh {number}"),
         Message::AddClipFromFile => "Thêm clip từ tệp".to_owned(),
+        Message::LockTrack => "Khoá track".to_owned(),
+        Message::UnlockTrack => "Mở khoá track".to_owned(),
+        Message::HideTrack => "Ẩn track khỏi hình, tiếng và file xuất".to_owned(),
+        Message::ShowTrack => "Hiện track".to_owned(),
+        Message::TrackLockedNote => "Track này đang khoá: chỉ xem được, không sửa được".to_owned(),
     }
 }

@@ -9,6 +9,8 @@
 //!   the 30000/1001 cadence (`frame_duration = 3003`) never drifts.
 //! * **Audio tracks.** Everything in this module ignores tracks of kind `audio`; they still
 //!   count in the [`Layer::track`] numbering.
+//! * **Hidden tracks.** A hidden track gives no layer, transitions included, but still counts in the
+//!   frame count, so hiding a track does not change the length of the project.
 //! * **Frame count.** The timeline end is the largest clip end over all video tracks. The count is
 //!   `ceil(end / frame_duration)`, so a final partial frame is kept. An empty project has 0 frames.
 //! * **Clip coverage.** A clip covers the half-open range `[start, start + duration)`. A frame is
@@ -125,7 +127,7 @@ pub fn layers_at_frame(project: &Project, frame: i64) -> Vec<Layer<'_>> {
         .tracks
         .iter()
         .enumerate()
-        .filter(|(_, track)| !track.is_audio())
+        .filter(|(_, track)| !track.is_audio() && !track.hidden)
         .filter_map(|(i, track)| content_at(track, t).map(|content| Layer { track: i, content }))
         .collect()
 }

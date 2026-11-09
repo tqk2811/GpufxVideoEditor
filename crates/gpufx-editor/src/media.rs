@@ -93,9 +93,10 @@ pub enum TrackChoice {
 }
 
 /// The first track of `kind` where the clip fits exactly at `playhead`, so the clip plays where the
-/// user is looking. A clip is never moved to some other time just to reuse a track.
+/// user is looking. A clip is never moved to some other time just to reuse a track. A locked track
+/// takes no new clip, and a hidden one would not show it, so both are passed over.
 pub fn choose_track(project: &Project, kind: TrackKind, duration: Time, playhead: Time) -> TrackChoice {
-    let found = project.tracks.iter().position(|track| track.kind == kind && nearest_free_start(track, None, duration, playhead) == Some(playhead));
+    let found = project.tracks.iter().position(|track| track.kind == kind && !track.locked && !track.hidden && nearest_free_start(track, None, duration, playhead) == Some(playhead));
     found.map_or(TrackChoice::New, TrackChoice::Existing)
 }
 
@@ -110,7 +111,7 @@ mod tests {
     }
 
     fn track(kind: TrackKind, spans: &[(i64, i64)]) -> Track {
-        Track { kind, clips: spans.iter().map(|&(start, length)| new_clip("x.mp4", seconds(start), seconds(length))).collect(), transitions: Vec::new() }
+        Track { kind, clips: spans.iter().map(|&(start, length)| new_clip("x.mp4", seconds(start), seconds(length))).collect(), transitions: Vec::new(), locked: false, hidden: false }
     }
 
     fn project(tracks: Vec<Track>) -> Project {
@@ -145,6 +146,15 @@ mod tests {
     fn with_no_track_of_the_kind_a_new_one_is_needed() {
         assert_eq!(choose_track(&project(vec![track(TrackKind::Audio, &[])]), TrackKind::Video, seconds(1), Time::ZERO), TrackChoice::New);
         assert_eq!(choose_track(&project(Vec::new()), TrackKind::Audio, seconds(1), Time::ZERO), TrackChoice::New);
+    }
+
+    #[test]
+    fn a_locked_or_hidden_track_is_passed_over() {
+        let mut timeline = project(vec![track(TrackKind::Video, &[]), track(TrackKind::Video, &[])]);
+        timeline.tracks[0].locked = true;
+        assert_eq!(choose_track(&timeline, TrackKind::Video, seconds(1), Time::ZERO), TrackChoice::Existing(1));
+        timeline.tracks[1].hidden = true;
+        assert_eq!(choose_track(&timeline, TrackKind::Video, seconds(1), Time::ZERO), TrackChoice::New);
     }
 
     #[test]

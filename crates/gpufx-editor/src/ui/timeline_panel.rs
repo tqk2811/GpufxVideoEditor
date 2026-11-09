@@ -4,7 +4,7 @@ use super::icons::{self, Icon};
 use super::{theme, UiRequest};
 use crate::editor::{clip_label, EditorState};
 use crate::i18n::{Language, Message};
-use crate::timeline::drag::{begin_drag, clamp_trim, drag_command};
+use crate::timeline::drag::{clamp_trim, drag_command};
 use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
 use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
 use crate::timeline::view::{content_end, ViewArea, Wheel, TRACK_HEIGHT};
@@ -17,7 +17,10 @@ use engine::{Clip, ClipKey, Time, TrackKind};
 
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const RULER_HEIGHT: f32 = 26.0;
-const HEADER_WIDTH: f32 = 64.0;
+/// Room for the kind icon, a label such as "V12", and the three buttons of the row.
+const HEADER_WIDTH: f32 = 132.0;
+/// A button of a track header.
+const HEADER_BUTTON: f32 = 24.0;
 const LINE_SCROLL_POINTS: f32 = 50.0;
 const CLIP_HEADER_HEIGHT: f32 = 14.0;
 const CLIP_RADIUS: u8 = 4;
@@ -27,6 +30,8 @@ const PLAYHEAD_MARKER: f32 = 6.0;
 const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
 const BARS_COLOR: Color32 = Color32::from_rgb(96, 208, 158);
 const BARS_MUTED: Color32 = Color32::from_rgb(120, 120, 130);
+const DRAGGED_OPACITY: f32 = 0.5;
+const HIDDEN_OPACITY: f32 = 0.35;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let rect = ui.max_rect();
@@ -53,8 +58,8 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
             }
         });
         ui.separator();
-        let has_selection = state.selection().is_some();
-        ui.add_enabled_ui(has_selection, |ui| {
+        let can_edit_selection = state.selection().is_some() && !state.selection_locked();
+        ui.add_enabled_ui(can_edit_selection, |ui| {
             if icons::button(ui, Icon::Scissors, &language.t(Message::SplitShortcut), false).clicked() {
                 state.split_selected();
             }
@@ -194,7 +199,7 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
             let hit = state.view.track_at_y(y, track_count, height).and_then(|track| hit_test(state.project(), &state.view, track, x));
             if let Some(hit) = hit {
                 state.select(Some(hit.key));
-                state.drag = begin_drag(state.project(), hit, state.view.x_to_time(x));
+                state.begin_clip_drag(hit, state.view.x_to_time(x));
             }
         }
     }
@@ -215,6 +220,9 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
             let (x, y) = local(pointer);
             let track = state.view.track_at_y(y, track_count, height)?;
             let hit = hit_test(state.project(), &state.view, track, x)?;
+            if state.is_track_locked(hit.key.track) {
+                return None;
+            }
             Some(match hit.zone {
                 ClipZone::Body => CursorIcon::Grab,
                 ClipZone::StartEdge | ClipZone::EndEdge => CursorIcon::ResizeHorizontal,
@@ -243,7 +251,7 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
             let rect = span_rect(state, tracks_rect, row, clip.start, clip.start.saturating_add(clip.duration));
             if rect.intersects(tracks_rect) {
                 let dragged = state.drag.is_some_and(|drag| drag.key == key);
-                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second() });
+                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, hidden: track.hidden, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second() });
             }
         }
         draw_transitions(&painter, state, tracks_rect, row, track);
@@ -260,9 +268,24 @@ pub struct ClipPaint<'a> {
     pub clip_area: Rect,
     pub selected: bool,
     pub dragged: bool,
+    /// The track is left out of the picture and the sound.
+    pub hidden: bool,
     /// The thumbnails and levels to draw, when there are any to draw from.
     pub visuals: Option<&'a RefCell<ClipVisuals>>,
     pub pixels_per_second: f64,
+}
+
+impl ClipPaint<'_> {
+    /// How strongly the clip shows: a held clip and a hidden track are drawn fainter.
+    fn opacity(&self) -> f32 {
+        if self.hidden {
+            HIDDEN_OPACITY
+        } else if self.dragged {
+            DRAGGED_OPACITY
+        } else {
+            1.0
+        }
+    }
 }
 
 /// Paints a clip's body, name strip, pictures, level bars and selection.
@@ -271,7 +294,7 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
         TrackKind::Video => (theme::VIDEO_CLIP, theme::VIDEO_CLIP_HEADER),
         TrackKind::Audio => (theme::AUDIO_CLIP, theme::AUDIO_CLIP_HEADER),
     };
-    let dim = |color: Color32| if paint.dragged { color.gamma_multiply(0.5) } else { color };
+    let dim = |color: Color32| color.gamma_multiply(paint.opacity());
     let radius = CornerRadius::same(CLIP_RADIUS);
     painter.rect_filled(paint.rect, radius, dim(body));
     let strip = paint.rect.with_max_y(paint.rect.top() + CLIP_HEADER_HEIGHT);
@@ -317,7 +340,7 @@ fn draw_clip_media(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut
 fn draw_film_strip(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut ClipVisuals, slot: usize, strip: Rect, aspect: f32, length: Option<Time>, show_pictures: bool) {
     let tile_width = (strip.height() * aspect).max(8.0);
     let visible = paint.clip_area.x_range();
-    let tint = if paint.dragged { Color32::from_white_alpha(128) } else { Color32::WHITE };
+    let tint = Color32::WHITE.gamma_multiply(paint.opacity());
     let cells = visible_cells(f64::from(strip.left()), f64::from(tile_width), f64::from(strip.width()), f64::from(visible.min)..f64::from(visible.max));
     let step = bucket_step(tile_ticks(f64::from(tile_width), paint.pixels_per_second));
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
@@ -343,7 +366,7 @@ fn draw_level_bars(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut
         return;
     };
     let color = if paint.clip.muted { BARS_MUTED } else { BARS_COLOR };
-    let color = if paint.dragged { color.gamma_multiply(0.5) } else { color };
+    let color = color.gamma_multiply(paint.opacity());
     let mut mesh = Mesh::default();
     for index in cells {
         let span = bar_span(paint.clip, paint.pixels_per_second, index);
@@ -365,8 +388,9 @@ fn draw_transitions(painter: &egui::Painter, state: &EditorState, tracks_rect: R
         let start = next.start.saturating_sub(transition.duration.half_floor());
         let rect = span_rect(state, tracks_rect, row, start, start.saturating_add(transition.duration));
         if rect.intersects(tracks_rect) {
-            painter.rect_filled(rect, CornerRadius::same(CLIP_RADIUS), theme::TRANSITION);
-            painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.0, theme::ACCENT_TEXT), StrokeKind::Inside);
+            let opacity = if track.hidden { HIDDEN_OPACITY } else { 1.0 };
+            painter.rect_filled(rect, CornerRadius::same(CLIP_RADIUS), theme::TRANSITION.gamma_multiply(opacity));
+            painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.0, theme::ACCENT_TEXT.gamma_multiply(opacity)), StrokeKind::Inside);
         }
     }
 }
@@ -426,9 +450,18 @@ fn track_label(language: Language, kinds: &[TrackKind], t: usize) -> (String, St
     }
 }
 
-fn headers(ui: &mut egui::Ui, state: &EditorState, header_rect: Rect, requests: &mut Vec<UiRequest>) {
+/// The square of the header button `from_right` places from the right edge of `row`.
+fn header_button_rect(row: Rect, from_right: usize) -> Rect {
+    let right = row.right() - 4.0 - from_right as f32 * (HEADER_BUTTON + 1.0);
+    Rect::from_center_size(Pos2::new(right - HEADER_BUTTON / 2.0, row.center().y), Vec2::splat(HEADER_BUTTON))
+}
+
+fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, requests: &mut Vec<UiRequest>) {
     let track_count = state.project().tracks.len();
     let kinds: Vec<TrackKind> = state.project().tracks.iter().map(|track| track.kind).collect();
+    let language = state.language();
+    let mut toggle_lock = None;
+    let mut toggle_hide = None;
     ui.scope_builder(UiBuilder::new().max_rect(header_rect), |ui| {
         ui.set_clip_rect(header_rect);
         for (t, &kind) in kinds.iter().enumerate() {
@@ -437,22 +470,43 @@ fn headers(ui: &mut egui::Ui, state: &EditorState, header_rect: Rect, requests: 
             if !row.intersects(header_rect) {
                 continue;
             }
+            let (locked, hidden) = state.project().tracks.get(t).map_or((false, false), |track| (track.locked, track.hidden));
+            let tint = if hidden { theme::TICK } else { theme::TEXT_DIM };
             let icon = if kind == TrackKind::Video { Icon::Film } else { Icon::Music };
-            let (label, tip) = track_label(state.language(), &kinds, t);
-            let icon_rect = Rect::from_center_size(Pos2::new(row.left() + 18.0, row.center().y), Vec2::splat(14.0));
-            icons::paint(ui.painter(), icon_rect, icon, theme::TEXT_DIM);
+            let (label, tip) = track_label(language, &kinds, t);
+            let icon_rect = Rect::from_center_size(Pos2::new(row.left() + 14.0, row.center().y), Vec2::splat(14.0));
+            icons::paint(ui.painter(), icon_rect, icon, tint);
             let label_pos = Pos2::new(icon_rect.right() + 6.0, row.center().y);
-            let label_rect = ui.painter().text(label_pos, Align2::LEFT_CENTER, label, FontId::proportional(12.0), theme::TEXT_DIM);
+            let label_rect = ui.painter().text(label_pos, Align2::LEFT_CENTER, label, FontId::proportional(12.0), tint);
             let id = ui.scope_id().with(("track-icon", t));
             ui.interact(icon_rect.union(label_rect), id, Sense::hover()).on_hover_text(tip);
-            let button = Rect::from_center_size(Pos2::new(row.right() - 18.0, row.center().y), Vec2::splat(22.0));
-            ui.scope_builder(UiBuilder::new().max_rect(button).id_salt(("track-add", t)), |ui| {
-                if icons::button(ui, Icon::Plus, &state.language().t(Message::AddClipFromFile), false).clicked() {
-                    requests.push(UiRequest::PickClipFile { track: t });
+            ui.scope_builder(UiBuilder::new().max_rect(header_button_rect(row, 2)).id_salt(("track-lock", t)), |ui| {
+                let (icon, tip) = if locked { (Icon::Lock, Message::UnlockTrack) } else { (Icon::Unlock, Message::LockTrack) };
+                if icons::button_of_size(ui, icon, &language.t(tip), locked, HEADER_BUTTON).clicked() {
+                    toggle_lock = Some(t);
                 }
+            });
+            ui.scope_builder(UiBuilder::new().max_rect(header_button_rect(row, 1)).id_salt(("track-hide", t)), |ui| {
+                let (icon, tip) = if hidden { (Icon::EyeOff, Message::ShowTrack) } else { (Icon::Eye, Message::HideTrack) };
+                if icons::button_of_size(ui, icon, &language.t(tip), hidden, HEADER_BUTTON).clicked() {
+                    toggle_hide = Some(t);
+                }
+            });
+            ui.scope_builder(UiBuilder::new().max_rect(header_button_rect(row, 0)).id_salt(("track-add", t)), |ui| {
+                ui.add_enabled_ui(!locked, |ui| {
+                    if icons::button_of_size(ui, Icon::Plus, &language.t(Message::AddClipFromFile), false, HEADER_BUTTON).clicked() {
+                        requests.push(UiRequest::PickClipFile { track: t });
+                    }
+                });
             });
         }
     });
+    if let Some(track) = toggle_lock {
+        state.toggle_track_locked(track);
+    }
+    if let Some(track) = toggle_hide {
+        state.toggle_track_hidden(track);
+    }
 }
 
 /// Where the track rows start in a timeline panel at `panel`, for tests that point at a clip.
@@ -461,9 +515,40 @@ pub(super) fn tracks_origin(panel: Rect) -> Pos2 {
     Pos2::new(panel.left() + 1.0 + HEADER_WIDTH, panel.top() + 1.0 + TOOLBAR_HEIGHT + RULER_HEIGHT)
 }
 
+/// The centre of the header button `from_right` places from the right of the row of track `t`.
+#[cfg(test)]
+pub(super) fn header_button_center(panel: Rect, state: &EditorState, t: usize, from_right: usize) -> Pos2 {
+    let origin = tracks_origin(panel);
+    let top = origin.y + state.view.track_top(t, state.project().tracks.len()) as f32;
+    let row = Rect::from_min_size(Pos2::new(panel.left() + 1.0, top), Vec2::new(HEADER_WIDTH, TRACK_HEIGHT as f32));
+    header_button_rect(row, from_right).center()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_track_label_stays_clear_of_the_header_buttons() {
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(HEADER_WIDTH, TRACK_HEIGHT as f32));
+        let ctx = egui::Context::default();
+        let mut right_of_label = 0.0;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = ui.painter().layout_no_wrap("V12".to_owned(), FontId::proportional(12.0), Color32::WHITE);
+            right_of_label = row.left() + 14.0 + 7.0 + 6.0 + galley.size().x;
+        });
+        output.textures_delta.clear();
+        assert!(right_of_label <= header_button_rect(row, 2).left(), "{right_of_label}");
+    }
+
+    #[test]
+    fn the_header_buttons_do_not_overlap_and_stay_in_the_row() {
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(HEADER_WIDTH, TRACK_HEIGHT as f32));
+        for place in 0..3 {
+            assert!(row.contains_rect(header_button_rect(row, place)), "{place}");
+            assert!(!header_button_rect(row, place).intersects(header_button_rect(row, place + 1)), "{place}");
+        }
+    }
 
     #[test]
     fn tracks_are_numbered_within_their_kind() {

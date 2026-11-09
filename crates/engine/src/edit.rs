@@ -19,6 +19,10 @@
 //!   not (at most 14 ticks away, under 0.2 ms; the picture does not depend on the cut). A fade
 //!   cannot be divided between two clips, so a cut inside a fade is refused, as is a cut inside a
 //!   transition window.
+//! * **Locked tracks.** Every command that changes the clips, effects or transitions of a locked
+//!   track is refused with [`EditError::TrackLocked`], so that every caller gets the same rule.
+//!   A move is refused when either its source track or its target track is locked. Locking and
+//!   hiding themselves stay possible, as does adding a track.
 
 use crate::audio_schedule::sample_position;
 use crate::project::{Clip, Effect, Project, Track, TrackKind, Transition};
@@ -58,6 +62,8 @@ pub enum EditError {
     SplitInsideFade { key: ClipKey, at: Time },
     /// The cut falls inside the window of a transition of the clip.
     SplitInsideTransition { key: ClipKey, at: Time },
+    /// The track is locked: nothing on it can be changed.
+    TrackLocked { track: usize },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -105,6 +111,7 @@ impl fmt::Display for EditError {
                 "track {}, clip {}: {at} is inside a transition window",
                 key.track, key.clip
             ),
+            TrackLocked { track } => write!(f, "track {track} is locked"),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
                 for error in errors {
@@ -133,6 +140,15 @@ fn track_of(project: &Project, track: usize) -> Result<&Track, EditError> {
 
 fn track_mut(project: &mut Project, track: usize) -> Result<&mut Track, EditError> {
     project.tracks.get_mut(track).ok_or(EditError::TrackNotFound { track })
+}
+
+/// Refuses a command that would change `track` while it is locked.
+fn unlocked(project: &Project, track: usize) -> Result<(), EditError> {
+    if track_of(project, track)?.locked {
+        Err(EditError::TrackLocked { track })
+    } else {
+        Ok(())
+    }
 }
 
 fn clip_of(project: &Project, key: ClipKey) -> Result<&Clip, EditError> {
@@ -244,13 +260,30 @@ pub fn add_track(project: &Project, kind: TrackKind) -> Result<Project, EditErro
         kind,
         clips: Vec::new(),
         transitions: Vec::new(),
+        locked: false,
+        hidden: false,
     });
+    finish(next)
+}
+
+/// Sets whether every edit of `track` is refused.
+pub fn set_track_locked(project: &Project, track: usize, locked: bool) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    track_mut(&mut next, track)?.locked = locked;
+    finish(next)
+}
+
+/// Sets whether `track` is left out of the picture and the sound.
+pub fn set_track_hidden(project: &Project, track: usize, hidden: bool) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    track_mut(&mut next, track)?.hidden = hidden;
     finish(next)
 }
 
 /// Adds a clip to `track` at its own `start`. Refuses a position taken by another clip; use
 /// [`nearest_free_start`] to pick a free one.
 pub fn add_clip(project: &Project, track: usize, clip: Clip) -> Result<Project, EditError> {
+    unlocked(project, track)?;
     let mut next = project.clone();
     let target = track_mut(&mut next, track)?;
     if let Some(end) = clip.end() {
@@ -275,6 +308,8 @@ pub fn move_clip(
     target_track: usize,
     desired_start: Time,
 ) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    unlocked(project, target_track)?;
     let clip = clip_of(project, key)?;
     let from = project.tracks[key.track].kind;
     let target = track_of(project, target_track)?;
@@ -308,6 +343,7 @@ fn has_transition_before(track: &Track, clip: usize) -> bool {
 
 /// Moves the start edge of a clip to `new_start`, keeping the source frames under the end edge.
 pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
     if new_start == clip.start {
         return finish(project.clone());
@@ -344,6 +380,7 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
 /// Moves the end edge of a clip to `new_end`. Whether the source has that much media is for the
 /// caller to know; the project does not record source lengths.
 pub fn trim_end(project: &Project, key: ClipKey, new_end: Time) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
     if clip.end() == Some(new_end) {
         return finish(project.clone());
@@ -392,6 +429,7 @@ fn aligned_cut(clip: &Clip, wanted: i64, earliest: i64, latest: i64) -> Option<i
 /// Splits a clip into two at `at`, or at the nearest tick that keeps the audio aligned (see the
 /// module rules). A transition stays with the half that touches it.
 pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
     let outside = EditError::SplitOutsideClip { key, at };
     let wanted = at.checked_sub(clip.start).ok_or(outside.clone())?;
@@ -448,6 +486,7 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
 
 /// Deletes a clip and the transitions touching it.
 pub fn delete_clip(project: &Project, key: ClipKey) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     clip_of(project, key)?;
     let mut next = project.clone();
     remove_clip_at(&mut next.tracks[key.track], key.clip);
@@ -456,6 +495,7 @@ pub fn delete_clip(project: &Project, key: ClipKey) -> Result<Project, EditError
 
 /// Appends an effect to a clip.
 pub fn add_effect(project: &Project, key: ClipKey, effect: Effect) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.effects.push(effect);
     finish(next)
@@ -463,6 +503,7 @@ pub fn add_effect(project: &Project, key: ClipKey, effect: Effect) -> Result<Pro
 
 /// Removes effect `effect` of a clip.
 pub fn remove_effect(project: &Project, key: ClipKey, effect: usize) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let mut next = project.clone();
     let clip = clip_mut(&mut next, key)?;
     if effect >= clip.effects.len() {
@@ -479,6 +520,7 @@ pub fn add_transition(
     track: usize,
     transition: Transition,
 ) -> Result<Project, EditError> {
+    unlocked(project, track)?;
     let mut next = project.clone();
     let target = track_mut(&mut next, track)?;
     target.transitions.push(transition);
@@ -492,6 +534,7 @@ pub fn remove_transition(
     track: usize,
     after_clip: usize,
 ) -> Result<Project, EditError> {
+    unlocked(project, track)?;
     let mut next = project.clone();
     let target = track_mut(&mut next, track)?;
     let index = target
@@ -505,6 +548,7 @@ pub fn remove_transition(
 
 /// Sets the audio gain of a clip, in decibels.
 pub fn set_gain(project: &Project, key: ClipKey, gain_db: f64) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.gain_db = gain_db;
     finish(next)
@@ -512,6 +556,7 @@ pub fn set_gain(project: &Project, key: ClipKey, gain_db: f64) -> Result<Project
 
 /// Sets whether a clip is left out of the mix.
 pub fn set_muted(project: &Project, key: ClipKey, muted: bool) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.muted = muted;
     finish(next)
@@ -524,6 +569,7 @@ pub fn set_fades(
     fade_in: Time,
     fade_out: Time,
 ) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let mut next = project.clone();
     let clip = clip_mut(&mut next, key)?;
     clip.fade_in = fade_in;
@@ -538,6 +584,7 @@ pub fn set_effect_params(
     effect: usize,
     params: Map<String, Value>,
 ) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
     let mut next = project.clone();
     let clip = clip_mut(&mut next, key)?;
     clip.effects
@@ -556,6 +603,7 @@ pub fn set_transition_params(
     params: Map<String, Value>,
     duration: Time,
 ) -> Result<Project, EditError> {
+    unlocked(project, track)?;
     let mut next = project.clone();
     let transition = track_mut(&mut next, track)?
         .transitions

@@ -326,7 +326,10 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 errors.push(ClipTimeOverflow { track: t, clip: c });
                 ok = false;
             }
-            if !resolver.source_exists(&clip.source) {
+            // A hidden track reads no file and no package, so one that is missing does not matter.
+            if track.hidden {
+                // Its structure is still checked below.
+            } else if !resolver.source_exists(&clip.source) {
                 errors.push(SourceNotFound {
                     track: t,
                     clip: c,
@@ -384,7 +387,7 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                         effect: e,
                     });
                 }
-                if !resolver.package_exists(&effect.package) {
+                if !track.hidden && !resolver.package_exists(&effect.package) {
                     errors.push(EffectPackageNotFound {
                         track: t,
                         clip: c,
@@ -432,7 +435,7 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 });
                 ok = false;
             }
-            if !resolver.package_exists(&tr.package) {
+            if !track.hidden && !resolver.package_exists(&tr.package) {
                 errors.push(TransitionPackageNotFound {
                     track: t,
                     transition: i,

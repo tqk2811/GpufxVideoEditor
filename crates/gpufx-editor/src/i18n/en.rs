@@ -99,6 +99,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditSplitOutsideClip { track, at } => format!("{}: cannot split at {at} s", track_label(*track)),
         Message::EditSplitInsideFade { track, at } => format!("{}: {at} s is inside a fade", track_label(*track)),
         Message::EditSplitInsideTransition { track, at } => format!("{}: {at} s is inside a transition", track_label(*track)),
+        Message::EditTrackLocked(track) => format!("{}: the track is locked", track_label(*track)),
         Message::EditInvalid(detail) => format!("The result is not valid: {detail}"),
 
         Message::DialogOpen => "Close the open dialog first".to_owned(),
@@ -194,5 +195,10 @@ pub(super) fn text(message: &Message) -> String {
         Message::VideoTrackNumber(number) => format!("Video track {number}"),
         Message::AudioTrackNumber(number) => format!("Audio track {number}"),
         Message::AddClipFromFile => "Add a clip from a file".to_owned(),
+        Message::LockTrack => "Lock the track".to_owned(),
+        Message::UnlockTrack => "Unlock the track".to_owned(),
+        Message::HideTrack => "Hide the track from the picture, the sound and the export".to_owned(),
+        Message::ShowTrack => "Show the track".to_owned(),
+        Message::TrackLockedNote => "This track is locked: its clips can be looked at, not changed".to_owned(),
     }
 }

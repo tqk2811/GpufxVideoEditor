@@ -128,12 +128,12 @@ pub struct AudioSegment<'a> {
     pub gain: GainEnvelope,
 }
 
-/// The segments sounding in the `len` samples from `start`, in track then clip order. Muted clips
-/// and samples no clip covers produce nothing.
+/// The segments sounding in the `len` samples from `start`, in track then clip order. Muted clips,
+/// hidden tracks and samples no clip covers produce nothing.
 pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegment<'_>> {
     let end = start.saturating_add(len.max(0));
     let mut segments = Vec::new();
-    for (t, track) in project.tracks.iter().enumerate() {
+    for (t, track) in project.tracks.iter().enumerate().filter(|(_, track)| !track.hidden) {
         for (c, clip) in track.clips.iter().enumerate() {
             if clip.muted {
                 continue;

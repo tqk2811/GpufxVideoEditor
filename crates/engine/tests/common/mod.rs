@@ -55,6 +55,8 @@ pub fn track(clips: Vec<Clip>, transitions: Vec<Transition>) -> Track {
         kind: TrackKind::Video,
         clips,
         transitions,
+        locked: false,
+        hidden: false,
     }
 }
 
@@ -63,6 +65,8 @@ pub fn audio_track(clips: Vec<Clip>) -> Track {
         kind: TrackKind::Audio,
         clips,
         transitions: Vec::new(),
+        locked: false,
+        hidden: false,
     }
 }
 

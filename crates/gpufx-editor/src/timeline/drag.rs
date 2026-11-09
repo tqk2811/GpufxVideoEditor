@@ -106,15 +106,19 @@ impl EditCommand {
     }
 
     /// Where the clip lands if the engine accepts the command. A move onto a track of another kind
-    /// lands nowhere, because the engine refuses it.
+    /// or a locked one lands nowhere, because the engine refuses it.
     pub fn landing(&self, project: &Project) -> Option<ClipSpan> {
         let key = self.key();
-        let clip = project.tracks.get(key.track)?.clips.get(key.clip)?;
+        let source = project.tracks.get(key.track)?;
+        if source.locked {
+            return None;
+        }
+        let clip = source.clips.get(key.clip)?;
         let end = clip.start.saturating_add(clip.duration);
         match *self {
             EditCommand::Move { track, desired_start, .. } => {
                 let target = project.tracks.get(track)?;
-                if target.kind != project.tracks[key.track].kind {
+                if target.kind != source.kind || target.locked {
                     return None;
                 }
                 let ignore = (track == key.track).then_some(key.clip);
@@ -206,6 +210,18 @@ mod tests {
         let command = EditCommand::Move { key: key(0), track: 2, desired_start: seconds(1) };
         assert_eq!(command.landing(&project), None);
         assert!(matches!(command.apply(&project), Err(EditError::TrackKindMismatch { .. })));
+    }
+
+    #[test]
+    fn nothing_lands_on_or_from_a_locked_track() {
+        let mut project = project();
+        project.tracks[1].locked = true;
+        let onto = EditCommand::Move { key: key(0), track: 1, desired_start: seconds(1) };
+        assert_eq!(onto.landing(&project), None);
+        assert!(matches!(onto.apply(&project), Err(EditError::TrackLocked { track: 1 })));
+        project.tracks[1].locked = false;
+        project.tracks[0].locked = true;
+        assert_eq!(EditCommand::TrimEnd { key: key(0), new_end: seconds(3) }.landing(&project), None);
     }
 
     fn limits_project() -> Project {

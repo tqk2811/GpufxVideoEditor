@@ -6,12 +6,13 @@ use crate::i18n::{ClipAction, ClipEdge, Language, Message, StreamKind, TrackLabe
 use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, TrackChoice};
 use crate::packages::{Catalog, PickerState};
 use crate::playback::plan::{start_time, TransportCommand};
-use crate::timeline::drag::{clamp_trim, ClipDrag, EditCommand};
+use crate::timeline::drag::{begin_drag, clamp_trim, ClipDrag, EditCommand};
+use crate::timeline::hit::ClipHit;
 use crate::timeline::view::TimelineView;
 use crate::visuals::ClipVisuals;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted,
-    set_transition_params, split_clip, trim_end, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
+    set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
 use serde_json::{Map, Value};
@@ -125,6 +126,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::SplitOutsideClip { key, at } => Message::EditSplitOutsideClip { track: label(key.track), at: seconds_text(*at) },
         EditError::SplitInsideFade { key, at } => Message::EditSplitInsideFade { track: label(key.track), at: seconds_text(*at) },
         EditError::SplitInsideTransition { key, at } => Message::EditSplitInsideTransition { track: label(key.track), at: seconds_text(*at) },
+        EditError::TrackLocked { track } => Message::EditTrackLocked(label(*track)),
         EditError::Invalid(errors) => Message::EditInvalid(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
     }
 }
@@ -524,6 +526,34 @@ impl EditorState {
 
     pub fn add_track(&mut self, kind: TrackKind) {
         self.run(|project| add_track(project, kind));
+    }
+
+    pub fn is_track_locked(&self, track: usize) -> bool {
+        self.project().tracks.get(track).is_some_and(|target| target.locked)
+    }
+
+    /// Whether the selected clip sits on a locked track.
+    pub fn selection_locked(&self) -> bool {
+        self.selection.is_some_and(|key| self.is_track_locked(key.track))
+    }
+
+    pub fn toggle_track_locked(&mut self, track: usize) {
+        let locked = self.is_track_locked(track);
+        self.run(|project| set_track_locked(project, track, !locked));
+    }
+
+    pub fn toggle_track_hidden(&mut self, track: usize) {
+        let hidden = self.project().tracks.get(track).is_some_and(|target| target.hidden);
+        self.run(|project| set_track_hidden(project, track, !hidden));
+    }
+
+    /// Starts dragging the clip at `hit`, unless its track is locked, which the status then says.
+    pub fn begin_clip_drag(&mut self, hit: ClipHit, press_time: Time) {
+        if self.is_track_locked(hit.key.track) {
+            self.refuse(&EditError::TrackLocked { track: hit.key.track });
+            return;
+        }
+        self.drag = begin_drag(self.project(), hit, press_time);
     }
 
     /// Adds a clip of `duration` for `path` to `track`, at the free position nearest the playhead
@@ -959,6 +989,90 @@ mod tests {
         project.tracks[track].clips.iter().map(|clip| (clip.start, clip.duration)).collect()
     }
 
+    fn locked_clip_state() -> EditorState {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        state.toggle_track_locked(0);
+        state
+    }
+
+    #[test]
+    fn locking_refuses_edits_of_the_track_with_a_translated_reason() {
+        let mut state = locked_clip_state();
+        assert!(state.is_track_locked(0));
+        let before = state.project().clone();
+        state.set_playhead(seconds(5));
+        state.split_selected();
+        assert_eq!(state.project(), &before);
+        assert_eq!(state.status(), &Status::Refused(Message::EditTrackLocked(TrackLabel::Video(1))));
+        state.delete_selected();
+        assert_eq!(state.project(), &before, "Delete is refused too");
+        state.set_muted(true);
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn a_locked_clip_can_still_be_selected_and_its_refused_edit_leaves_the_selection() {
+        let mut state = locked_clip_state();
+        state.select(None);
+        state.select(Some(key(0)));
+        assert_eq!(state.selection(), Some(key(0)));
+        state.delete_selected();
+        assert_eq!(state.selection(), Some(key(0)));
+    }
+
+    #[test]
+    fn locking_and_hiding_are_undoable_steps() {
+        let mut state = state_with_clip();
+        state.toggle_track_locked(0);
+        state.toggle_track_hidden(0);
+        let revision = state.revision();
+        assert!(state.project().tracks[0].locked && state.project().tracks[0].hidden);
+        state.undo();
+        assert!(state.revision() > revision);
+        assert!(state.project().tracks[0].locked && !state.project().tracks[0].hidden);
+        state.undo();
+        assert!(!state.project().tracks[0].locked);
+    }
+
+    #[test]
+    fn hiding_a_track_makes_preview_and_audio_follow() {
+        let mut state = state_with_clip();
+        let (revision, audio) = (state.revision(), state.audio_revision());
+        state.toggle_track_hidden(0);
+        assert!(state.revision() > revision, "the preview is asked for again");
+        assert!(state.audio_revision() > audio, "playback gets the new project");
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn a_locked_track_can_still_be_hidden_and_unlocked() {
+        let mut state = locked_clip_state();
+        state.toggle_track_hidden(0);
+        assert!(state.project().tracks[0].hidden);
+        state.toggle_track_locked(0);
+        assert!(!state.project().tracks[0].locked);
+    }
+
+    #[test]
+    fn a_drag_on_a_locked_track_does_not_start_and_says_why() {
+        let mut state = locked_clip_state();
+        state.begin_clip_drag(crate::timeline::hit::ClipHit { key: key(0), zone: crate::timeline::hit::ClipZone::Body }, seconds(1));
+        assert_eq!(state.drag, None);
+        assert_eq!(state.status(), &Status::Refused(Message::EditTrackLocked(TrackLabel::Video(1))));
+    }
+
+    #[test]
+    fn dropping_a_clip_on_a_locked_track_is_refused_and_the_clip_stays() {
+        let mut state = state_with_clip();
+        state.add_track(TrackKind::Video);
+        state.toggle_track_locked(2);
+        let before = state.project().clone();
+        state.finish_drag(EditCommand::Move { key: key(0), track: 2, desired_start: seconds(1) });
+        assert_eq!(state.project(), &before);
+        assert_eq!(state.status(), &Status::Refused(Message::EditTrackLocked(TrackLabel::Video(2))));
+    }
+
     #[test]
     fn a_new_clip_is_selected_and_uses_the_default_length() {
         let state = state_with_clip();
@@ -1051,7 +1165,7 @@ mod tests {
     fn every_edit_refusal_has_text_and_names_its_track_as_the_timeline_does() {
         let mut project = EditorState::default().project().clone();
         for kind in [TrackKind::Video, TrackKind::Audio, TrackKind::Video] {
-            project.tracks.push(engine::Track { kind, clips: Vec::new(), transitions: Vec::new() });
+            project.tracks.push(engine::Track { kind, clips: Vec::new(), transitions: Vec::new(), locked: false, hidden: false });
         }
         let key = ClipKey { track: 2, clip: 0 };
         let at = Time::from_seconds(3).unwrap();
@@ -1100,7 +1214,7 @@ mod tests {
         for offset in 1000..1040 {
             let project = {
                 let mut base = default_project();
-                base.tracks.push(engine::Track { kind: TrackKind::Video, clips: Vec::new(), transitions: Vec::new() });
+                base.tracks.push(engine::Track { kind: TrackKind::Video, clips: Vec::new(), transitions: Vec::new(), locked: false, hidden: false });
                 let mut clip = new_clip("a.mp4", Time::ZERO, DEFAULT_CLIP_DURATION);
                 clip.source_in = Time::from_ticks(1);
                 base.tracks[0].clips.push(clip);
@@ -1895,7 +2009,7 @@ mod tests {
     fn opening_a_project_lists_its_media() {
         let mut state = EditorState::default();
         let mut project = default_project();
-        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![new_clip("C:/v/x.mp4", Time::ZERO, seconds(4))], transitions: Vec::new() });
+        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![new_clip("C:/v/x.mp4", Time::ZERO, seconds(4))], transitions: Vec::new(), locked: false, hidden: false });
         state.replace_project(project, Some(PathBuf::from("p.json")));
         let listed = state.library.visible(crate::media::MediaKind::Video, "");
         assert_eq!(listed.len(), 1);

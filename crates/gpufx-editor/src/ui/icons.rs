@@ -24,6 +24,10 @@ pub enum Icon {
     ZoomIn,
     ZoomOut,
     Export,
+    Lock,
+    Unlock,
+    Eye,
+    EyeOff,
 }
 
 const ICON_STROKE: f32 = 1.5;
@@ -140,6 +144,30 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
             painter.add(Shape::convex_polygon(vec![p(-0.25, -0.2), p(0.45, 0.1), p(-0.25, 0.4)], color, Stroke::NONE));
         }
+        Icon::Lock | Icon::Unlock => {
+            let body = Rect::from_min_max(p(-0.7, -0.1), p(0.7, 0.85));
+            painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
+            // Closed, the shackle comes down into the body on both sides; open, its right leg stops short.
+            let (left, right) = if icon == Icon::Lock { (-0.1, -0.1) } else { (-0.1, -0.4) };
+            let mut shackle = vec![p(-0.42, left)];
+            shackle.extend(arc(p(0.0, -0.45), s * 0.42, std::f32::consts::PI, std::f32::consts::TAU));
+            shackle.push(p(0.42, right));
+            line(painter, shackle, stroke);
+        }
+        Icon::Eye | Icon::EyeOff => {
+            let lid = |flip: f32| -> Vec<Pos2> {
+                (0..=14).map(|i| {
+                    let x = -0.9 + 1.8 * i as f32 / 14.0;
+                    p(x, flip * 0.62 * (1.0 - (x / 0.9) * (x / 0.9)))
+                }).collect()
+            };
+            line(painter, lid(-1.0), stroke);
+            line(painter, lid(1.0), stroke);
+            painter.circle_stroke(c, s * 0.26, stroke);
+            if icon == Icon::EyeOff {
+                painter.line_segment([p(-0.75, -0.75), p(0.75, 0.75)], stroke);
+            }
+        }
     }
 }
 
@@ -160,7 +188,12 @@ pub fn label_button(ui: &mut egui::Ui, icon: Icon, text: &str, fill: Color32, te
 
 /// A square icon button; `selected` keeps the accent background.
 pub fn button(ui: &mut egui::Ui, icon: Icon, tooltip: &str, selected: bool) -> Response {
-    let size = Vec2::splat(28.0);
+    button_of_size(ui, icon, tooltip, selected, 28.0)
+}
+
+/// [`button`] of a side of `side` points, for tight rows.
+pub fn button_of_size(ui: &mut egui::Ui, icon: Icon, tooltip: &str, selected: bool, side: f32) -> Response {
+    let size = Vec2::splat(side);
     let enabled = ui.is_enabled();
     let (rect, response) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     let fill = if selected {
@@ -180,6 +213,6 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, tooltip: &str, selected: bool) -> R
     } else {
         theme::TEXT
     };
-    paint(ui.painter(), rect.shrink(6.0), icon, color);
+    paint(ui.painter(), rect.shrink(side * 0.21), icon, color);
     response.on_hover_text(tooltip)
 }

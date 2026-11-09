@@ -69,6 +69,13 @@ pub struct Track {
     /// Transitions between clip `after_clip` and clip `after_clip + 1`.
     #[serde(default)]
     pub transitions: Vec<Transition>,
+    /// Whether every edit of this track is refused. See [`crate::EditError::TrackLocked`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+    /// Whether the track is left out of the picture and the sound. It still counts for the length
+    /// of the project, so hiding a track does not change where anything ends.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
 }
 
 /// A piece of a source file placed on the timeline.
@@ -234,6 +241,8 @@ impl From<ProjectV1> for Project {
                         })
                         .collect(),
                     transitions: track.transitions,
+                    locked: false,
+                    hidden: false,
                 })
                 .collect(),
         }

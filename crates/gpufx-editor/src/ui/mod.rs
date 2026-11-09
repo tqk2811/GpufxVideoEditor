@@ -329,6 +329,60 @@ mod tests {
         assert!(!state.visuals.borrow().is_paused(), "no later frame may be needed to let them go");
     }
 
+    fn timeline_panel_rect() -> egui::Rect {
+        panels(egui::vec2(1280.0, 720.0)).timeline
+    }
+
+    #[test]
+    fn the_header_buttons_toggle_the_lock_and_the_visibility_of_their_track() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        input_frame(&ctx, &mut state, vec![]);
+        let lock = timeline_panel::header_button_center(timeline_panel_rect(), &state, 0, 2);
+        click(&ctx, &mut state, lock);
+        assert!(state.project().tracks[0].locked, "{:?}", state.status());
+        let eye = timeline_panel::header_button_center(timeline_panel_rect(), &state, 0, 1);
+        click(&ctx, &mut state, eye);
+        assert!(state.project().tracks[0].hidden, "{:?}", state.status());
+        click(&ctx, &mut state, lock);
+        assert!(!state.project().tracks[0].locked);
+    }
+
+    #[test]
+    fn the_add_button_of_a_locked_track_does_nothing() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        input_frame(&ctx, &mut state, vec![]);
+        state.toggle_track_locked(0);
+        let plus = timeline_panel::header_button_center(timeline_panel_rect(), &state, 0, 0);
+        assert!(click(&ctx, &mut state, plus).is_empty());
+    }
+
+    #[test]
+    fn a_drag_on_a_locked_track_moves_nothing() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        state.toggle_track_locked(0);
+        let before = state.project().clone();
+        let from = on_track(&state, seconds(2));
+        input_frame(&ctx, &mut state, vec![]);
+        input_frame(&ctx, &mut state, vec![Event::PointerMoved(from)]);
+        input_frame(&ctx, &mut state, pointer_press(from));
+        input_frame(&ctx, &mut state, vec![Event::PointerMoved(from + egui::vec2(120.0, 0.0))]);
+        assert_eq!(state.drag, None, "no drag starts");
+        assert_eq!(state.status(), &Status::Refused(Message::EditTrackLocked(crate::i18n::TrackLabel::Video(1))));
+        input_frame(&ctx, &mut state, pointer_release(from + egui::vec2(120.0, 0.0)));
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn the_toolbar_does_not_offer_edits_of_a_locked_selection() {
+        let mut state = state();
+        assert!(!state.selection_locked());
+        state.toggle_track_locked(0);
+        assert!(state.selection_locked());
+    }
+
     #[test]
     fn clicking_the_fullscreen_button_asks_the_window() {
         let mut state = state();
@@ -433,7 +487,7 @@ mod tests {
     #[test]
     fn selecting_a_clip_with_an_out_of_range_gain_makes_no_edit() {
         let mut project = EditorState::default().project().clone();
-        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![crate::editor::new_clip("a.mp4", Time::ZERO, seconds(5))], transitions: Vec::new() });
+        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![crate::editor::new_clip("a.mp4", Time::ZERO, seconds(5))], transitions: Vec::new(), locked: false, hidden: false });
         project.tracks[0].clips[0].gain_db = -80.0;
         let mut state = EditorState::new(project);
         state.select(Some(ClipKey { track: 0, clip: 0 }));

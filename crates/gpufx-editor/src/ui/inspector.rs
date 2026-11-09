@@ -87,35 +87,41 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     let language = state.language();
     let Some(clip) = clip_of(state, key).cloned() else { return };
     let track_kind = state.project().tracks[key.track].kind;
+    let editable = !state.is_track_locked(key.track);
     ui.add(egui::Label::new(egui::RichText::new(clip_label(&clip.source)).strong()).truncate());
-    time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start);
-    time_field(ui, state, &language.t(Message::FieldDuration), to_seconds(clip.duration), ClipField::Duration);
-    ui.separator();
+    if !editable {
+        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::TEXT_DIM)).wrap());
+    }
+    ui.add_enabled_ui(editable, |ui| {
+        time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start);
+        time_field(ui, state, &language.t(Message::FieldDuration), to_seconds(clip.duration), ClipField::Duration);
+        ui.separator();
 
-    let mut gain = clip.gain_db;
-    ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldVolume));
-    let changed = ui.horizontal(|ui| {
-        ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-        let mut changed = ui.add(slider(&mut gain, GAIN_RANGE)).changed();
-        changed |= drag_field(ui, &mut gain, GAIN_RANGE, 0.1, 1, " dB", None).1;
-        changed
+        let mut gain = clip.gain_db;
+        ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldVolume));
+        let changed = ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+            let mut changed = ui.add(slider(&mut gain, GAIN_RANGE)).changed();
+            changed |= drag_field(ui, &mut gain, GAIN_RANGE, 0.1, 1, " dB", None).1;
+            changed
+        });
+        if changed.inner {
+            state.live_gain(gain);
+        }
+        let mut muted = clip.muted;
+        if ui.checkbox(&mut muted, language.t(Message::Mute)).changed() {
+            state.set_muted(muted);
+        }
+
+        let (has_before, has_after) = transitions_beside(state, key);
+        fade_row(ui, state, &language.t(Message::FadeIn), clip.fade_in, clip.duration.saturating_sub(clip.fade_out), !has_before, |state, value| state.live_fades(value, clip.fade_out));
+        fade_row(ui, state, &language.t(Message::FadeOut), clip.fade_out, clip.duration.saturating_sub(clip.fade_in), !has_after, |state, value| state.live_fades(clip.fade_in, value));
     });
-    if changed.inner {
-        state.live_gain(gain);
-    }
-    let mut muted = clip.muted;
-    if ui.checkbox(&mut muted, language.t(Message::Mute)).changed() {
-        state.set_muted(muted);
-    }
-
-    let (has_before, has_after) = transitions_beside(state, key);
-    fade_row(ui, state, &language.t(Message::FadeIn), clip.fade_in, clip.duration.saturating_sub(clip.fade_out), !has_before, |state, value| state.live_fades(value, clip.fade_out));
-    fade_row(ui, state, &language.t(Message::FadeOut), clip.fade_out, clip.duration.saturating_sub(clip.fade_in), !has_after, |state, value| state.live_fades(clip.fade_in, value));
 
     if track_kind == TrackKind::Video {
         ui.separator();
-        effects(ui, state, key);
-        transitions(ui, state, key);
+        effects(ui, state, key, editable);
+        transitions(ui, state, key, editable);
     }
 }
 
@@ -162,7 +168,7 @@ fn fade_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, value: Time
     });
 }
 
-fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
+fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: bool) {
     let Some(clip) = clip_of(state, key).cloned() else { return };
     let language = state.language();
     ui.strong(language.t(Message::TabEffects));
@@ -172,25 +178,28 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     let mut remove = None;
     for (index, effect) in clip.effects.iter().enumerate() {
         ui.push_id(("effect", clip_identity(key, &clip), index, &effect.package), |ui| {
+            // The header stays live: a locked clip can still be looked through.
             egui::CollapsingHeader::new(short_name(&effect.package)).default_open(true).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.small_button(language.t(Message::Remove)).clicked() {
-                        remove = Some(index);
-                    }
-                    if ui.small_button(language.t(Message::Reset)).clicked() {
-                        state.live_effect_params(index, Map::new());
-                    }
-                });
-                match state.catalog.params_of(&effect.package).map(<[d3d12_backend::ParamInfo]>::to_vec) {
-                    Some(infos) => {
-                        if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &effect.params) {
-                            state.live_effect_params(index, next);
+                ui.add_enabled_ui(editable, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.small_button(language.t(Message::Remove)).clicked() {
+                            remove = Some(index);
+                        }
+                        if ui.small_button(language.t(Message::Reset)).clicked() {
+                            state.live_effect_params(index, Map::new());
+                        }
+                    });
+                    match state.catalog.params_of(&effect.package).map(<[d3d12_backend::ParamInfo]>::to_vec) {
+                        Some(infos) => {
+                            if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &effect.params) {
+                                state.live_effect_params(index, next);
+                            }
+                        }
+                        None => {
+                            ui.colored_label(theme::TEXT_DIM, language.t(Message::PackageParamsUnreadable));
                         }
                     }
-                    None => {
-                        ui.colored_label(theme::TEXT_DIM, language.t(Message::PackageParamsUnreadable));
-                    }
-                }
+                });
             });
         });
     }
@@ -199,7 +208,7 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     }
 }
 
-fn transitions(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
+fn transitions(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: bool) {
     let (_, applied) = applied_to(state.project(), key);
     if applied.is_empty() {
         return;
@@ -211,40 +220,44 @@ fn transitions(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     for (after_clip, _) in applied {
         let Some(transition) = state.project().tracks[track].transitions.iter().find(|tr| tr.after_clip == after_clip).cloned() else { continue };
         let first = state.project().tracks[track].clips.get(after_clip).map(|clip| clip_identity(ClipKey { track, clip: after_clip }, clip));
-        ui.push_id(("transition", first, after_clip, &transition.package), |ui| transition_section(ui, state, track, &transition, &mut remove));
+        ui.push_id(("transition", first, after_clip, &transition.package), |ui| transition_section(ui, state, track, &transition, &mut remove, editable));
     }
     if let Some(after_clip) = remove {
         state.remove_transition_after(track, after_clip);
     }
 }
 
-fn transition_section(ui: &mut egui::Ui, state: &mut EditorState, track: usize, transition: &Transition, remove: &mut Option<usize>) {
+fn transition_section(ui: &mut egui::Ui, state: &mut EditorState, track: usize, transition: &Transition, remove: &mut Option<usize>, editable: bool) {
     let language = state.language();
     egui::CollapsingHeader::new(short_name(&transition.package)).default_open(true).show(ui, |ui| {
-        if ui.small_button(language.t(Message::Remove)).clicked() {
-            *remove = Some(transition.after_clip);
-        }
-        if let Some((shortest, longest)) = transition_duration_limits(state.project(), track, transition.after_clip) {
-            let mut seconds = to_seconds(transition.duration);
-            let (low, high) = (to_seconds(shortest), to_seconds(longest));
-            ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldDuration));
-            ui.horizontal(|ui| {
-                ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-                let mut changed = ui.add(slider(&mut seconds, low..=high)).changed();
-                changed |= drag_field(ui, &mut seconds, low..=high, 0.02, 2, " s", None).1;
-                if changed {
-                    state.live_transition(track, transition.after_clip, transition.params.clone(), from_seconds(seconds));
-                }
-            });
-        }
-        let infos: Option<Vec<d3d12_backend::ParamInfo>> = state.catalog.params_of(&transition.package).map(<[_]>::to_vec);
-        let params: Map<String, Value> = transition.params.clone();
-        if let Some(infos) = infos {
-            if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &params) {
-                state.live_transition(track, transition.after_clip, next, transition.duration);
-            }
-        }
+        ui.add_enabled_ui(editable, |ui| transition_controls(ui, state, track, transition, remove, language));
     });
+}
+
+fn transition_controls(ui: &mut egui::Ui, state: &mut EditorState, track: usize, transition: &Transition, remove: &mut Option<usize>, language: crate::i18n::Language) {
+    if ui.small_button(language.t(Message::Remove)).clicked() {
+        *remove = Some(transition.after_clip);
+    }
+    if let Some((shortest, longest)) = transition_duration_limits(state.project(), track, transition.after_clip) {
+        let mut seconds = to_seconds(transition.duration);
+        let (low, high) = (to_seconds(shortest), to_seconds(longest));
+        ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldDuration));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+            let mut changed = ui.add(slider(&mut seconds, low..=high)).changed();
+            changed |= drag_field(ui, &mut seconds, low..=high, 0.02, 2, " s", None).1;
+            if changed {
+                state.live_transition(track, transition.after_clip, transition.params.clone(), from_seconds(seconds));
+            }
+        });
+    }
+    let infos: Option<Vec<d3d12_backend::ParamInfo>> = state.catalog.params_of(&transition.package).map(<[_]>::to_vec);
+    let params: Map<String, Value> = transition.params.clone();
+    if let Some(infos) = infos {
+        if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &params) {
+            state.live_transition(track, transition.after_clip, next, transition.duration);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -285,6 +298,32 @@ mod tests {
         frame(&ctx, &mut state);
         assert!(!param_widgets::has_test_draft(&ctx), "no stale draft stays in memory");
         assert_eq!(state.status(), &Status::Info(Message::ExpressionDropped));
+    }
+
+    #[test]
+    fn a_clip_on_a_locked_track_can_be_inspected_but_a_click_changes_nothing() {
+        let ctx = egui::Context::default();
+        let mut state = selected_clip();
+        state.toggle_track_locked(0);
+        let before = state.project().clone();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 500.0));
+        let mut pass = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let mut output = ctx.run_ui(raw, |ui| show(ui, &mut state));
+            output.textures_delta.clear();
+        };
+        let button = |at, pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        pass(vec![]);
+        // Down the left of the panel, over the time fields, the sliders and the mute box.
+        for y in (40..440).step_by(6) {
+            let at = egui::pos2(24.0, y as f32);
+            pass(vec![egui::Event::PointerMoved(at)]);
+            pass(vec![button(at, true)]);
+            pass(vec![button(at, false)]);
+        }
+        assert_eq!(state.selection(), Some(ClipKey { track: 0, clip: 0 }), "it stays selected");
+        assert!(!matches!(state.status(), Status::Refused(_)), "the controls are off, not refused: {:?}", state.status());
+        assert_eq!(state.project(), &before);
     }
 
     #[test]

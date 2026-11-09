@@ -132,6 +132,7 @@ pub enum Message {
     EditTimeOverflow { track: TrackLabel, clip: usize },
     EditTransitionOnEdge { track: TrackLabel, edge: ClipEdge },
     EditBeforeSourceStart(TrackLabel),
+    EditTrackLocked(TrackLabel),
     EditSplitOutsideClip { track: TrackLabel, at: String },
     EditSplitInsideFade { track: TrackLabel, at: String },
     EditSplitInsideTransition { track: TrackLabel, at: String },
@@ -214,6 +215,7 @@ pub enum Message {
     FadeIn,
     FadeOut,
     NoEffectsYet,
+    TrackLockedNote,
     Remove,
     Reset,
     PackageParamsUnreadable,
@@ -241,6 +243,10 @@ pub enum Message {
     VideoTrackNumber(usize),
     AudioTrackNumber(usize),
     AddClipFromFile,
+    LockTrack,
+    UnlockTrack,
+    HideTrack,
+    ShowTrack,
 }
 
 #[cfg(test)]
@@ -273,6 +279,12 @@ mod tests {
             Message::TabMedia,
             Message::FieldDuration,
             Message::AddTrack,
+            Message::EditTrackLocked(TrackLabel::Video(1)),
+            Message::TrackLockedNote,
+            Message::LockTrack,
+            Message::UnlockTrack,
+            Message::HideTrack,
+            Message::ShowTrack,
         ];
         for language in Language::ALL {
             for message in &all {
