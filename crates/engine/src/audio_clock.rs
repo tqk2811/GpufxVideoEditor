@@ -36,7 +36,8 @@
 //! older. A block that still differs after that re-read is stale and is dropped.
 //!
 //! The ring holds whole blocks, so stale blocks occupy it until the consumer drops them on its
-//! next pull; [`AudioProducer::prepare`] writes less while the ring is full. Generations wrap at
+//! next pull or [`AudioConsumer::discard_stale`]; [`AudioProducer::prepare`] writes less while the
+//! ring is full, so a device that is not playing must keep calling the latter. Generations wrap at
 //! 2^20: a stale block could only be taken for current if it survived that many seeks unconsumed.
 
 use crate::audio_mix::{mix_audio, AudioSource, MixReport};
@@ -334,6 +335,37 @@ impl AudioConsumer {
         self.position = position;
         self.offset = 0;
         self.shared.consumed.store(state, Ordering::Release);
+    }
+
+    /// Adopts the newest seek and drops the blocks of older generations without playing anything,
+    /// so a callback that is not playing still frees the ring. A block of the current generation
+    /// stays, and so does what was already played of it. Never locks, never allocates, and takes a
+    /// bounded number of steps.
+    pub fn discard_stale(&mut self) {
+        let state = self.shared.seek.load(Ordering::Acquire);
+        if unpack(state).0 != self.generation {
+            self.adopt(state);
+        }
+        let capacity = self.shared.blocks.len();
+        // Every step drops one block or adopts one seek.
+        for _ in 0..capacity.saturating_mul(2) {
+            if self.head == self.shared.tail.load(Ordering::Acquire) {
+                return;
+            }
+            let generation = self.shared.blocks[self.head % capacity].generation.load(Ordering::Relaxed);
+            if generation == self.generation {
+                return;
+            }
+            // The block may be newer than the seek read above; see the module documentation.
+            let state = self.shared.seek.load(Ordering::Acquire);
+            if unpack(state).0 != self.generation {
+                self.adopt(state);
+            } else {
+                self.offset = 0;
+                self.head = self.head.wrapping_add(1);
+                self.shared.head.store(self.head, Ordering::Release);
+            }
+        }
     }
 
     /// Fills `out` as the device consumes it, interleaved stereo; a trailing odd element is zeroed.

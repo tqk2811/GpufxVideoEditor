@@ -57,3 +57,21 @@ fn pull_does_not_allocate() {
     let after = ALLOCATIONS.with(Cell::get);
     assert_eq!(after, before, "pull allocated");
 }
+
+#[test]
+fn discard_stale_does_not_allocate() {
+    let project = Project::from_json(
+        r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
+        {"clips":[{"source":"a","start":0,"source_in":0,"duration":90000}]}]}"#,
+    )
+    .expect("valid project");
+    let (mut producer, mut consumer, clock) = audio_channel(project, 256, 8);
+    producer.prepare(&mut Silence, 1_024).expect("prepare");
+
+    let before = ALLOCATIONS.with(Cell::get);
+    consumer.discard_stale(); // nothing stale
+    clock.seek(Time::from_ticks(45_000));
+    consumer.discard_stale(); // adopted, and the blocks dropped
+    let after = ALLOCATIONS.with(Cell::get);
+    assert_eq!(after, before, "discard_stale allocated");
+}

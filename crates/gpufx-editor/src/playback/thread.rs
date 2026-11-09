@@ -56,10 +56,12 @@ impl PlaybackShared {
 }
 
 /// The whole device callback: no lock, no allocation. Silence while the gate is closed, and the
-/// consumer does not see those frames.
+/// consumer does not see those frames; it only drops stale blocks, or the ring could fill up with
+/// them before the lead is ready and the gate would never open.
 pub fn fill_device_buffer(consumer: &mut AudioConsumer, shared: &PlaybackShared, out: &mut [f32], latency: Option<Duration>) {
     if !shared.gate.load(Ordering::Acquire) {
         out.fill(0.0);
+        consumer.discard_stale();
         return;
     }
     let report = consumer.pull(out);
@@ -337,6 +339,74 @@ mod tests {
 
     fn sample_of(value: f32) -> i64 {
         (value * 1e7).round() as i64
+    }
+
+    /// Reads only with a permit, so a test decides how far the thread gets. The wait ends by itself
+    /// so a failed test can still join the thread.
+    #[derive(Clone, Default)]
+    struct Permits {
+        granted: Arc<AtomicI64>,
+        used: Arc<AtomicUsize>,
+    }
+
+    impl Permits {
+        fn grant(&self, count: i64) {
+            self.granted.fetch_add(count, Ordering::SeqCst);
+        }
+
+        fn unlimited(&self) {
+            self.grant(i64::MAX / 2);
+        }
+
+        fn used(&self) -> usize {
+            self.used.load(Ordering::SeqCst)
+        }
+
+        fn wait_for(&self, used: usize) {
+            wait_until(|| self.used() >= used, "the permitted reads");
+        }
+    }
+
+    impl AudioSource for Permits {
+        fn read(&mut self, _key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+            let start = Instant::now();
+            while self.granted.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| (left > 0).then_some(left - 1)).is_err() && start.elapsed() < TIMEOUT {
+                thread::sleep(Duration::from_millis(1));
+            }
+            self.used.fetch_add(1, Ordering::SeqCst);
+            for (i, frame) in out.chunks_exact_mut(2).enumerate() {
+                frame.fill((position + i as i64) as f32 / 1e7);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stale_blocks_of_several_seeks_do_not_keep_the_gate_closed() {
+        let permits = Permits::default();
+        let source = permits.clone();
+        let (thread, mut consumer) = PreparingThread::spawn(&project(8, true, TrackKind::Video), move || source).unwrap();
+        thread.play(Time::ZERO);
+        // Four blocks per seek never make a lead, and together they are more than the ring holds.
+        let mut target = Time::ZERO;
+        for round in 0..RING_BLOCKS as i64 {
+            let used = permits.used();
+            permits.grant(4);
+            permits.wait_for(used + 4);
+            target = Time::from_seconds(1 + round % 5).unwrap();
+            thread.seek(target);
+            assert!(pull(&mut consumer, thread.shared(), 480).iter().all(|sample| *sample == 0.0));
+        }
+        permits.unlimited();
+        let mut first = None;
+        wait_until(
+            || {
+                first = pull(&mut consumer, thread.shared(), 480).first().copied().filter(|sample| *sample != 0.0);
+                first.is_some()
+            },
+            "the gate after the seeks",
+        );
+        assert_eq!(sample_of(first.unwrap()), sample_position(target));
     }
 
     #[test]

@@ -431,3 +431,57 @@ fn seeks_never_replay_or_resurrect_old_samples() {
     assert!(last >= target(SEEKS), "last sample {last} is before the last seek");
     assert!(jumps > 0 && frames > 0, "jumps {jumps}, frames {frames}");
 }
+
+#[test]
+fn discard_stale_frees_the_ring_of_older_generations() {
+    let (mut producer, mut consumer, clock) = audio_channel(project(), 64, 4);
+    assert_eq!(producer.prepare(&mut PositionSource, 4 * 64).expect("prepare").frames, 4 * 64);
+    clock.seek(sample_time(1_000));
+    assert_eq!(producer.prepare(&mut PositionSource, 64).expect("prepare").frames, 0, "the ring is full of stale blocks");
+
+    consumer.discard_stale();
+
+    assert_eq!(producer.prepare(&mut PositionSource, 4 * 64).expect("prepare").frames, 4 * 64);
+    let mut buffer = [0.0; 64 * 2];
+    assert_eq!(consumer.pull(&mut buffer).played, 64);
+    assert_eq!(buffer[0], value_of(1_000));
+}
+
+#[test]
+fn discard_stale_follows_several_seeks_at_once() {
+    let (mut producer, mut consumer, clock) = audio_channel(project(), 64, 8);
+    producer.prepare(&mut PositionSource, 2 * 64).expect("prepare");
+    clock.seek(sample_time(1_000));
+    producer.prepare(&mut PositionSource, 2 * 64).expect("prepare");
+    clock.seek(sample_time(2_000));
+    producer.prepare(&mut PositionSource, 2 * 64).expect("prepare");
+
+    consumer.discard_stale();
+
+    assert_eq!(clock.position(), 2_000);
+    let mut buffer = [0.0; 64 * 2];
+    assert_eq!(consumer.pull(&mut buffer).played, 64);
+    assert_eq!(buffer[0], value_of(2_000), "only the blocks of the newest seek are left");
+}
+
+#[test]
+fn discard_stale_keeps_the_blocks_of_the_current_generation() {
+    let (mut producer, mut consumer, clock) = audio_channel(project(), 64, 8);
+    producer.prepare(&mut PositionSource, 2 * 64).expect("prepare");
+    let mut buffer = [0.0; 20 * 2];
+    assert_eq!(consumer.pull(&mut buffer).played, 20);
+
+    consumer.discard_stale();
+
+    assert_eq!(clock.position(), 20, "nothing was played");
+    assert_eq!(producer.prepared_frames(), 2 * 64 - 20);
+    assert_eq!(consumer.pull(&mut buffer).played, 20);
+    assert_eq!(buffer[0], value_of(20), "continues inside the partly played block");
+}
+
+#[test]
+fn discard_stale_on_an_empty_ring_does_nothing() {
+    let (_producer, mut consumer, clock) = channel();
+    consumer.discard_stale();
+    assert_eq!(clock.position(), 0);
+}
