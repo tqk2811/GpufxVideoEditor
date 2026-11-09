@@ -85,12 +85,14 @@ impl Presenter {
         self.state.on_window_event(&self.window, event).repaint
     }
 
-    pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&gpu.device, &self.config);
+    /// Reconfigures the surface for a new window size. On failure the old size stays recorded, so
+    /// the next resize or Outdated status tries again.
+    pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) -> Result<(), String> {
+        if width == 0 || height == 0 {
+            return Ok(());
         }
+        let surface = &self.surface;
+        apply_resize(&mut self.config, width, height, |config| gpu.configure_surface(surface, config))
     }
 
     /// Runs the UI and presents. Returns how long egui can wait before the next frame.
@@ -99,7 +101,8 @@ impl Presenter {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(SURFACE_RETRY),
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&gpu.device, &self.config);
+                // On failure the status repeats and this runs again on the retry.
+                let _ = gpu.configure_surface(&self.surface, &self.config);
                 return Ok(SURFACE_RETRY);
             }
             wgpu::CurrentSurfaceTexture::Validation => return Err("acquiring the surface texture failed validation".to_owned()),
@@ -153,13 +156,7 @@ impl Presenter {
             frame.image.record_end_sampling(&mut after);
             buffers.push(after.finish());
         }
-        // The one submit of the UI thread. The gate keeps it away from gpufx's staged fences.
-        let submission = {
-            let _gate = gpu.lock_submits();
-            let submission = gpu.queue.submit(buffers);
-            gpu.queue.present(surface_texture);
-            submission
-        };
+        let submission = gpu.submit_and_present(buffers, surface_texture);
         if let Some(frame) = &mut self.frame {
             frame.last_use = Some(submission);
         }
@@ -168,5 +165,52 @@ impl Presenter {
             self.renderer.free_texture(&id);
         }
         Ok(repaint_delay)
+    }
+}
+
+/// Runs `configure` with `config` at the new size and records that size only when it succeeded.
+fn apply_resize(config: &mut wgpu::SurfaceConfiguration, width: u32, height: u32, configure: impl FnOnce(&wgpu::SurfaceConfiguration) -> Result<(), String>) -> Result<(), String> {
+    let wanted = wgpu::SurfaceConfiguration { width, height, ..config.clone() };
+    configure(&wanted)?;
+    *config = wanted;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(width: u32, height: u32) -> wgpu::SurfaceConfiguration {
+        wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 1,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: Vec::new(),
+            color_space: wgpu::SurfaceColorSpace::Auto,
+        }
+    }
+
+    #[test]
+    fn a_failed_configure_keeps_the_old_size() {
+        let mut current = config(100, 50);
+        let mut asked = (0, 0);
+        let result = apply_resize(&mut current, 200, 80, |c| {
+            asked = (c.width, c.height);
+            Err("timed out".to_owned())
+        });
+        assert!(result.is_err());
+        assert_eq!(asked, (200, 80), "the new size was tried");
+        assert_eq!((current.width, current.height), (100, 50), "the surface still has the old size");
+    }
+
+    #[test]
+    fn a_successful_configure_records_the_new_size() {
+        let mut current = config(100, 50);
+        assert_eq!(apply_resize(&mut current, 200, 80, |_| Ok(())), Ok(()));
+        assert_eq!((current.width, current.height), (200, 80));
     }
 }

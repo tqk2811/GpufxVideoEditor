@@ -192,7 +192,11 @@ impl ApplicationHandler for EditorApp {
         }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => session.presenter.resize(&session.gpu, size.width, size.height),
+            WindowEvent::Resized(size) => {
+                if let Err(message) = session.presenter.resize(&session.gpu, size.width, size.height) {
+                    session.state.set_preview_error(Some(message));
+                }
+            }
             WindowEvent::RedrawRequested => {
                 if let Err(message) = session.redraw() {
                     self.fail(event_loop, message);

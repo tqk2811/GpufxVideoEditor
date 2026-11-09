@@ -105,6 +105,31 @@ impl Gpu {
         self.submit_gate.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Configures `surface` under the submit gate, because wgpu waits for the queue to be idle here
+    /// and fails if another thread submits meanwhile. The error comes back to the caller instead of
+    /// going to the error shared with the worker's frames.
+    pub fn configure_surface(&self, surface: &wgpu::Surface<'_>, config: &wgpu::SurfaceConfiguration) -> Result<(), String> {
+        let _gate = self.lock_submits();
+        let scopes = [wgpu::ErrorFilter::Validation, wgpu::ErrorFilter::OutOfMemory, wgpu::ErrorFilter::Internal].map(|filter| self.device.push_error_scope(filter));
+        surface.configure(&self.device, config);
+        let mut failure = None;
+        // Error scopes pop in the opposite order of their pushes.
+        for scope in scopes.into_iter().rev() {
+            if let Some(error) = pollster::block_on(scope.pop()) {
+                failure.get_or_insert_with(|| error.to_string());
+            }
+        }
+        failure.map_or(Ok(()), |message| Err(format!("configuring the surface failed: {message}")))
+    }
+
+    /// Submits `buffers` and presents `frame` as one step under the submit gate.
+    pub fn submit_and_present(&self, buffers: Vec<wgpu::CommandBuffer>, frame: wgpu::SurfaceTexture) -> wgpu::SubmissionIndex {
+        let _gate = self.lock_submits();
+        let submission = self.queue.submit(buffers);
+        self.queue.present(frame);
+        submission
+    }
+
     /// The `ID3D12Device` behind the wgpu device.
     pub fn raw_device(&self) -> &ID3D12Device {
         &self.raw
