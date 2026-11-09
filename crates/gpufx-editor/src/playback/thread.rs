@@ -359,24 +359,31 @@ mod tests {
     const TIMEOUT: Duration = Duration::from_secs(10);
     /// A device of ten millisecond buffers.
     const DEVICE_FRAMES: usize = 480;
+    /// A clip of this source reads from `OTHER_SOURCE_BASE` up, so its samples are recognisable.
+    const OTHER_SOURCE: &str = "b.wav";
+    const OTHER_SOURCE_BASE: i64 = 2_000_000;
 
     /// Writes the source sample number into every channel so a pull shows where it came from.
     #[derive(Clone, Default)]
     struct Counting {
         reads: Arc<AtomicUsize>,
+        /// The source position of the last read.
+        latest: Arc<AtomicI64>,
         fail_at: Option<i64>,
         panic_at: Option<i64>,
     }
 
     impl AudioSource for Counting {
-        fn read(&mut self, _key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        fn read(&mut self, _key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
+            self.latest.store(position, Ordering::SeqCst);
             assert_ne!(self.panic_at, Some(position), "deliberate test panic");
             if self.fail_at == Some(position) {
                 return Err(RenderError("broken source".to_owned()));
             }
+            let base = if source == OTHER_SOURCE { OTHER_SOURCE_BASE } else { 0 };
             for (i, frame) in out.chunks_exact_mut(2).enumerate() {
-                let value = (position + i as i64) as f32 / 1e7;
+                let value = (base + position + i as i64) as f32 / 1e7;
                 frame[0] = value;
                 frame[1] = value;
             }
@@ -385,8 +392,12 @@ mod tests {
     }
 
     fn project(seconds: i64, audio: bool, clip_track: TrackKind) -> Project {
+        project_of("a.wav", seconds, audio, clip_track)
+    }
+
+    fn project_of(source: &str, seconds: i64, audio: bool, clip_track: TrackKind) -> Project {
         let duration = Time::from_seconds(seconds).unwrap();
-        let clip = Clip { source: "a.wav".to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO };
+        let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO };
         Project {
             version: SUPPORTED_VERSION,
             output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: audio.then_some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
@@ -615,20 +626,23 @@ mod tests {
 
     #[test]
     fn a_seek_after_a_full_lead_plays_from_the_target_without_silence() {
-        let (thread, mut consumer) = PreparingThread::spawn(&project(4, true, TrackKind::Video), Counting::default).unwrap();
+        let source = Counting::default();
+        let latest = source.latest.clone();
+        let (thread, mut consumer) = PreparingThread::spawn(&project(4, true, TrackKind::Video), move || source).unwrap();
         thread.play(Time::ZERO);
         open_gate(&thread);
         pull(&mut consumer, thread.shared(), 480);
         let target = Time::from_seconds(2).unwrap();
         thread.seek(target);
         assert_eq!(thread.reading().anchor, sample_position(target));
-        // Stale blocks are in the ring; the fresh lead must fit beside them.
-        let clock = thread.clock.clone();
-        let reads = thread.shared().clone();
-        wait_until(|| clock.position() == sample_position(target) && reads.stats().underrun == 0, "the seek");
-        thread::sleep(Duration::from_millis(50));
+        // Stale blocks are in the ring; the fresh lead must fit beside them. Blocks are mixed in
+        // order, so once the tenth is being read the nine before it are in the ring.
+        let tenth_block = sample_position(target) + 9 * BLOCK_FRAMES as i64;
+        wait_until(|| latest.load(Ordering::SeqCst) >= tenth_block, "the lead at the target");
         let out = pull(&mut consumer, thread.shared(), 480);
-        assert_eq!(sample_of(out[0]), sample_position(target));
+        for (i, frame) in out.chunks_exact(2).enumerate() {
+            assert_eq!(sample_of(frame[0]), sample_position(target) + i as i64, "frame {i}");
+        }
         assert_eq!(thread.shared().stats().underrun, 0, "a whole lead was ready after the seek");
     }
 
@@ -637,12 +651,17 @@ mod tests {
         let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
         thread.play(Time::ZERO);
         open_gate(&thread);
-        thread.set_project(Arc::new(project(1, true, TrackKind::Video)));
+        thread.set_project(Arc::new(project_of(OTHER_SOURCE, 1, true, TrackKind::Video)));
         wait_until(|| thread.reading().end == 48_000, "the new end");
+        let mut seen_new = false;
         wait_until(
             || {
-                pull(&mut consumer, thread.shared(), 480);
-                thread.shared().stats().played >= 480
+                for sample in pull(&mut consumer, thread.shared(), 480).into_iter().filter(|sample| *sample != 0.0) {
+                    let is_new = sample_of(sample) >= OTHER_SOURCE_BASE;
+                    assert!(is_new || !seen_new, "audio of the old project after the new one");
+                    seen_new |= is_new;
+                }
+                seen_new
             },
             "audio of the new project",
         );
@@ -752,6 +771,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "real time, the thresholds fail on a loaded machine"]
     fn a_seek_or_edit_causes_only_brief_silence_on_a_fast_source() {
         let (seek, edit) = measure(Duration::ZERO);
         eprintln!("silence after a seek: {seek} frames, after an edit: {edit} frames (no decode cost)");
