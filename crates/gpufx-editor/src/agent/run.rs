@@ -188,11 +188,26 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
     };
     // What the source still holds lasts longer or shorter on the timeline at another speed.
     let speed = speed.unwrap_or(1.0);
+    check_speed(speed)?;
     let mut clip = new_clip(&absolute.to_string_lossy(), start, Time::ZERO);
     clip.source_in = source_in;
-    clip.speed = if engine::speed_in_range(speed) { engine::speed_milli(speed) as f64 / engine::SPEED_SCALE as f64 } else { speed };
+    clip.speed = engine::speed_milli(speed) as f64 / engine::SPEED_SCALE as f64;
     clip.duration = duration.or(remaining.map(|length| clip.timeline_ticks(length))).unwrap_or(DEFAULT_CLIP_DURATION);
+    if let (Some(length), Some(duration)) = (known, duration) {
+        if clip.source_end() > length {
+            return Err(AgentError::new("out_of_range", format!("source_in {source_in} plus duration {duration} at speed {speed} reads past the {length} of the {stream} stream")));
+        }
+    }
     Ok(clip)
+}
+
+/// A speed the agent may not ask for is its mistake, told apart from a project that does not fit.
+fn check_speed(speed: f64) -> Result<(), AgentError> {
+    if engine::speed_in_range(speed) {
+        Ok(())
+    } else {
+        Err(AgentError::new("out_of_range", format!("speed {speed} is outside {} to {}", engine::MIN_SPEED, engine::MAX_SPEED)))
+    }
 }
 
 fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<MediaProbe, AgentError>>) -> Result<Value, AgentError> {
@@ -236,7 +251,10 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             state.apply_agent_command(|project| engine::add_transition(project, track, transition)).map_err(refused)?;
         }
         AgentEdit::TransitionRemove { track, after_clip } => state.apply_agent_command(|project| engine::remove_transition(project, track, after_clip)).map_err(refused)?,
-        AgentEdit::ClipSetSpeed { clip, speed } => state.apply_agent_command(|project| engine::set_speed(project, clip.into(), speed)).map_err(refused)?,
+        AgentEdit::ClipSetSpeed { clip, speed } => {
+            check_speed(speed)?;
+            state.apply_agent_command(|project| engine::set_speed(project, clip.into(), speed)).map_err(refused)?;
+        }
         AgentEdit::ClipSetGain { clip, gain_db } => state.apply_agent_command(|project| engine::set_gain(project, clip.into(), gain_db)).map_err(refused)?,
         AgentEdit::ClipSetMuted { clip, muted } => state.apply_agent_command(|project| engine::set_muted(project, clip.into(), muted)).map_err(refused)?,
         AgentEdit::ClipSetFades { clip, fade_in, fade_out } => state.apply_agent_command(|project| engine::set_fades(project, clip.into(), fade_in, fade_out)).map_err(refused)?,
@@ -513,6 +531,43 @@ mod tests {
 
     fn code(result: AgentResult) -> String {
         result.expect_err("must be refused").code
+    }
+
+    fn probed(length: Time) -> MediaProbe {
+        MediaProbe { has_video: true, has_audio: false, video_duration: Some(length), audio_duration: None, video_problem: None, audio_problem: None }
+    }
+
+    fn added(source_in: Option<Time>, duration: Option<Time>, speed: Option<f64>) -> Result<Clip, AgentError> {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        added_clip(&state, 0, Path::new("a.mp4"), Time::ZERO, source_in, duration, speed, Some(Ok(probed(Time::from_ticks(9000)))))
+    }
+
+    #[test]
+    fn the_default_length_of_a_clip_add_follows_its_speed_and_source_in() {
+        assert_eq!(added(None, None, None).unwrap().duration, Time::from_ticks(9000));
+        assert_eq!(added(None, None, Some(2.0)).unwrap().duration, Time::from_ticks(4500));
+        let clip = added(Some(Time::from_ticks(3000)), None, Some(2.0)).unwrap();
+        assert_eq!((clip.source_in, clip.duration), (Time::from_ticks(3000), Time::from_ticks(3000)));
+    }
+
+    #[test]
+    fn an_explicit_duration_may_not_read_past_the_source() {
+        // Exactly to the end is fine, at any speed.
+        assert_eq!(added(Some(Time::from_ticks(3000)), Some(Time::from_ticks(3000)), Some(2.0)).unwrap().duration, Time::from_ticks(3000));
+        assert_eq!(code(added(Some(Time::from_ticks(3000)), Some(Time::from_ticks(3002)), Some(2.0)).map(|_| json!({}))), "out_of_range");
+        assert_eq!(code(added(None, Some(Time::from_ticks(9001)), None).map(|_| json!({}))), "out_of_range", "at 1x as well");
+    }
+
+    #[test]
+    fn a_speed_out_of_range_is_out_of_range() {
+        assert_eq!(code(added(None, None, Some(20.0)).map(|_| json!({}))), "out_of_range");
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Video);
+        host.state.add_clip_from_file(0, Path::new("a.mp4"));
+        let revision = host.state.revision();
+        let edit = AgentEdit::ClipSetSpeed { clip: ClipRef { track: 0, clip: 0 }, speed: 0.01 };
+        assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: revision, edit })), "out_of_range");
     }
 
     #[test]

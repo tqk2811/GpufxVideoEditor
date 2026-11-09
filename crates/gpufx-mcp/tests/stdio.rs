@@ -173,14 +173,29 @@ fn clip_set_speed_changes_what_a_capture_shows() {
     let (content, error) = client.tool("clip_set_speed", json!({"expected_revision": 0, "clip": {"track": 0, "clip": 0}, "speed": 0.5}));
     assert!(error && content[0]["text"].as_str().unwrap().contains("stale_revision"));
     let (content, error) = client.tool("clip_set_speed", json!({"expected_revision": set["revision"], "clip": {"track": 0, "clip": 0}, "speed": 20.0}));
-    assert!(error && content[0]["text"].as_str().unwrap().contains("invalid_project"), "{content:?}");
+    assert!(error && content[0]["text"].as_str().unwrap().contains("out_of_range"), "{content:?}");
+    let length = d3d12_backend::probe_media(std::path::Path::new(&a)).unwrap().video_duration.unwrap().ticks();
     // clip_add takes a speed, and the default length follows it.
     let (added, _) = client.ok("clip_add", json!({"expected_revision": set["revision"], "track": 0, "source": a, "start": 90 * FRAME, "speed": 2.0}));
     let (read, _) = client.ok("project_get", json!({}));
     let clips = read["project"]["tracks"][0]["clips"].as_array().unwrap();
     assert_eq!(clips.len(), 2);
     assert_eq!(clips[1]["speed"], json!(2.0));
+    assert_eq!(clips[1]["duration"], json!(length / 2), "the default length follows the speed");
     assert_eq!(added["clip"], json!({"track": 0, "clip": 1}));
+    // With a source_in, what is left of the source lasts half as long.
+    let from = 10 * FRAME;
+    let (later, _) = client.ok("clip_add", json!({"expected_revision": added["revision"], "track": 0, "source": a, "start": 900 * FRAME, "source_in": from, "speed": 2.0}));
+    // An explicit duration is the timeline length, and may not read past the source.
+    let fits = (length - from) / 2;
+    let (content, error) = client.tool("clip_add", json!({"expected_revision": later["revision"], "track": 0, "source": a, "start": 1800 * FRAME, "source_in": from, "duration": fits + FRAME, "speed": 2.0}));
+    assert!(error && content[0]["text"].as_str().unwrap().contains("out_of_range"), "{content:?}");
+    let (exact, _) = client.ok("clip_add", json!({"expected_revision": later["revision"], "track": 0, "source": a, "start": 1800 * FRAME, "source_in": from, "duration": fits, "speed": 2.0}));
+    let (read, _) = client.ok("project_get", json!({}));
+    let clips = read["project"]["tracks"][0]["clips"].as_array().unwrap();
+    assert_eq!(clips[2]["duration"], json!((length - from) / 2), "source_in and speed");
+    assert_eq!((clips[3]["source_in"].clone(), clips[3]["duration"].clone()), (json!(from), json!(fits)), "duration and speed");
+    assert_eq!(exact["clip"], json!({"track": 0, "clip": 3}));
 }
 
 fn render_tool() -> std::path::PathBuf {
