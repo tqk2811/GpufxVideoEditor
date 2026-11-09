@@ -1,6 +1,6 @@
 # Đặc tả MCP server cho agent
 
-Ngày lập: 2026-11-09. Trạng thái: **đề xuất, chưa code**. Kế hoạch tổng ở [plan-video-editor-vi.md](plan-video-editor-vi.md), giao diện ở [spec-ui-phase3-vi.md](spec-ui-phase3-vi.md).
+Ngày lập: 2026-11-09. Trạng thái: **đã code trên nhánh `feat/mcp-server`**; các mục "Đề xuất" trong bảng dưới vẫn chờ user chốt. Kế hoạch tổng ở [plan-video-editor-vi.md](plan-video-editor-vi.md), giao diện ở [spec-ui-phase3-vi.md](spec-ui-phase3-vi.md).
 
 Mục tiêu: agent dựng video qua MCP với cùng các lệnh mà giao diện dùng, tự xem kết quả bằng ảnh chụp, và xuất file.
 
@@ -13,7 +13,7 @@ Mục tiêu: agent dựng video qua MCP với cùng các lệnh mà giao diện 
 | Crate | `gpufx-mcp` mới, một binary, giao tiếp MCP qua stdio | Đề xuất |
 | Thư viện MCP | `rmcp` (SDK Rust chính thức), kiểm phiên bản khi làm | Đề xuất |
 | Nối vào app đang mở | Named pipe cục bộ của user hiện tại, app bật bằng một tuỳ chọn, mặc định tắt | Đề xuất |
-| Chụp khung gốc của file chưa đưa vào timeline | Chưa làm, thêm sau nếu user cần | Đề xuất |
+| Chụp khung gốc của file chưa đưa vào timeline | Chưa làm (cần thêm đường dựng project tạm theo kích thước file, ở cả hai chế độ), thêm sau nếu user cần | Đề xuất |
 
 ## Kiến trúc
 
@@ -23,11 +23,11 @@ Một bộ tool dùng chung cho cả hai chế độ. Tool chỉ gọi một tra
 |---|---|
 | Lớp tool | Khai báo tool, kiểm tham số, đổi lỗi thành kết quả có cấu trúc |
 | `EditorSession` | Đọc project, chạy lệnh sửa, undo, chụp hình, xuất file |
-| `FileSession` | Giữ `Project` và `EditHistory` trong tiến trình MCP, tự mở `Gpu` khi cần chụp hoặc xuất |
+| `FileSession` | Giữ một `EditorState` không cửa sổ trong tiến trình MCP (chính state mà cửa sổ dùng), tự mở `Gpu` khi cần chụp |
 | `LiveSession` | Gửi lệnh qua named pipe tới app đang mở |
-| Cổng lệnh trong `gpufx-editor` | Nhận lệnh từ pipe, chạy trên luồng UI qua event loop, trả kết quả |
+| `gpufx_editor::agent` | Kiểu yêu cầu chung, `execute` chạy một yêu cầu trên `EditorState`, `gateway` là named pipe. Yêu cầu đi tới luồng UI bằng user event của winit, nên cửa sổ thu nhỏ vẫn nhận |
 
-Lệnh sửa là các hàm thuần đã có trong `engine::edit`, xuất file dùng `ExportJob`. Chế độ file không dựng cửa sổ và không mở GPU cho tới tool đầu tiên cần tới nó.
+Lệnh sửa là các hàm thuần đã có trong `engine::edit`, xuất file chạy `gpufx-render` thành tiến trình con (`ExportWorker`). Hai chế độ cùng đi qua `execute`, nên trait `EditorSession` chỉ có một hàm `call`. Việc đọc đĩa (mở project, probe file nguồn, quét package) nằm ở `prepare`, chạy ngoài luồng UI. Chế độ file không dựng cửa sổ và không mở GPU cho tới tool đầu tiên cần tới nó.
 
 Ở chế độ live, lệnh đi cùng đường với thao tác tay qua `EditorState`, nên preview, audio và undo tự cập nhật, và user thấy thay đổi ngay.
 
@@ -54,7 +54,7 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `clip_add`, `clip_move`, `clip_trim_start`, `clip_trim_end`, `clip_split`, `clip_delete` | Sửa clip |
 | `effect_add`, `effect_remove`, `transition_add`, `transition_remove` | Hiệu ứng và transition |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
-| `undo`, `redo` | Hoàn tác, mỗi tool sửa là một bước |
+| `undo`, `redo` | Hoàn tác, mỗi tool sửa là một bước; `track_set_locked` không phải một bước, giống nút khoá |
 | `frame_capture` | Chụp khung đã ghép |
 | `export_start`, `export_status`, `export_cancel` | Xuất nền |
 
@@ -64,11 +64,11 @@ Nhận đúng một trong hai tham số `time` (tick) hoặc `frame` (index), v�
 
 Trả về ảnh PNG dạng nội dung image của MCP, cùng frame index, thời điểm thực của khung và revision. Khung đã gồm hiệu ứng và transition. `time` được đổi sang frame index bằng đúng công thức preview dùng. Ảnh được thu nhỏ khi quá `max_width`, mặc định 1280 để không làm phình ngữ cảnh agent.
 
-Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế độ live gửi yêu cầu cho luồng preview với một kênh trả kết quả riêng, không di chuyển đầu phát và không thay khung đang hiển thị.
+Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế độ live chạy việc chụp trên luồng preview, xen giữa các khung (`PreviewWorker::run_on_thread`), không thay yêu cầu preview đang chờ, không báo khung đang dựng là hết cần. Chụp dùng decoder riêng và cờ abort tắt, nên không di chuyển đầu phát, không thay khung đang hiển thị và không bị yêu cầu preview mới làm hỏng. Trong lúc xuất, chụp trả `busy` ở cả hai chế độ.
 
 ### Xuất file
 
-`export_start` trả ngay một mã công việc, `export_status` trả tiến độ, `export_cancel` huỷ. Ghi đè file có sẵn phải có `overwrite: true`. Mỗi lúc chỉ một lần xuất. Ở chế độ live, preview tạm dừng và không sửa được trong lúc xuất, giống thao tác từ giao diện.
+`export_start` trả ngay một mã công việc, `export_status` trả tiến độ, `export_cancel` huỷ. Ghi đè file có sẵn phải có `overwrite: true`. Mỗi lúc chỉ một lần xuất. Không sửa được trong lúc xuất, ở cả hai chế độ; ở chế độ live preview cũng tạm dừng, giống thao tác từ giao diện.
 
 `export_start`, `export_status` và `export_cancel` chạy `gpufx-render --progress json` thành tiến trình con, giống hệt cách editor đang làm, và dùng lại giao thức dưới đây.
 
@@ -96,14 +96,18 @@ Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế đ�
 
 ## Lỗi
 
-Kết quả lỗi có `code`, `message` và dữ liệu kèm theo. `EditError` đổi sang code ổn định, ví dụ `overlap`, `clip_not_found`, `no_room`, `invalid_project`. Thêm `stale_revision`, `busy` (đang kéo hoặc đang xuất), `no_app` (chế độ live không tìm thấy app), `gpu_unavailable`. Lỗi không làm chết server. GPU hỏng thì báo lỗi rõ và phải khởi động lại phiên.
+Kết quả lỗi có `code`, `message` và dữ liệu kèm theo. `EditError` đổi sang code ổn định, ví dụ `overlap`, `clip_not_found`, `no_room`, `invalid_project`. Thêm `stale_revision`, `busy` (đang kéo hoặc đang xuất), `no_app` (chế độ live không tìm thấy app), `gpu_unavailable`, `invalid_params`, `out_of_range`, `unsaved_changes` (`project_new`, `project_open` trên project chưa lưu mà thiếu `discard_changes`), `project_locked`, `source_not_found`, `invalid_source`, `package_not_found`, `file_exists`, `job_not_found`, `capture_failed`. Lỗi không làm chết server. GPU hỏng thì báo lỗi rõ và phải khởi động lại phiên.
 
 ## An toàn
 
 - Pipe chỉ cho user hiện tại truy cập, không mở cổng mạng.
 - App chỉ nhận lệnh khi user bật tuỳ chọn, và hiện dấu báo đang có agent nối vào.
 - Đường dẫn trong tham số được chuẩn hoá. Lưu, xuất và ghi đè không bao giờ ghi vào file nguồn đang dùng, theo kiểm tra sẵn có của `ExportJob`.
-- Package là code shader nạp từ đĩa. Chế độ agent chỉ nạp từ package root, không nạp theo đường dẫn nằm trong thư mục project.
+- Package là code shader nạp từ đĩa. Agent chỉ thêm và mở được package từ package root (`ProjectPaths::roots_only`). Ở chế độ live, project do chính user mở bằng tay vẫn dùng được package cạnh project như trước.
+
+## Cách chạy
+
+`gpufx-mcp.exe` nằm cạnh `gpufx-render.exe`. Mặc định làm việc trên project file (`--project <file>` để mở sẵn). `--live` nối vào cửa sổ đang mở; user bật tại File > cho phép agent điều khiển, tên pipe gắn với SID của user. Server khi chế độ file: tiến trình xuất không nằm trong job object kill-on-close, để stdin đóng thì nó tự dừng sạch.
 
 ## Thứ tự làm
 
@@ -130,6 +134,6 @@ Mỗi bước một commit, build và test xong mới sang bước sau.
 ## Phụ thuộc và rủi ro
 
 - `ClipKey` theo chỉ số là điểm yếu cho agent. Nếu `expected_revision` gây thử lại quá nhiều, cần chuyển sang id clip ổn định trong `engine`.
-- Chế độ file và app đang mở cùng sửa một project file sẽ ghi đè lẫn nhau. Bản đầu dùng file khoá để từ chối mở lần hai.
+- Chế độ file và app đang mở cùng sửa một project file sẽ ghi đè lẫn nhau. File khoá `<project>.lock` giữ không chia sẻ và tự xoá khi đóng, kể cả khi tiến trình chết; lần mở thứ hai bị từ chối (`project_locked`, hoặc thông báo trong app).
 - Chế độ file mở GPU riêng, nên chạy cùng app tốn thêm bộ nhớ video.
 - Độ dài clip đọc từ file nguồn bằng `d3d12_backend::probe_media`, tách theo luồng video và audio; giao diện đã dùng nó thay cho độ dài cố định 10 giây. Agent dùng lại API này.

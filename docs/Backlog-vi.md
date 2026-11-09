@@ -234,3 +234,15 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Chưa kiểm chứng việc cô lập khi GPU reset bằng TDR cưỡng bức
 
 `crates/gpufx-editor/src/export.rs:1`: việc tách export sang tiến trình con mới chứng minh được là crash trong tiến trình con không kéo editor chết. Một lần reset adapter có thể ảnh hưởng nhiều tiến trình cùng lúc, và `crates/gpufx-editor/src/window.rs:711-714` thoát app khi redraw lỗi (gọi ở `window.rs:758`), nên một TDR trong lúc xuất vẫn có thể đóng editor. Nên thử bằng TDR cưỡng bức trên máy thật rồi quyết định có giữ app sống khi mất device hay không. Ghi ngày 2026-11-09.
+
+### [Thấp] Server MCP bị kill giữa lúc xuất để lại project tạm
+
+`crates/gpufx-editor/src/export/child.rs:72` (`TemporaryProject`): tiến trình con tự dừng sạch khi stdin đóng và không để lại file video tạm, nhưng project tạm `gpufx-export.*.tmp.json` trong thư mục temp thì không ai xoá khi `gpufx-mcp` chết. Nên dọn chung với việc dọn file tạm của editor. Ghi ngày 2026-11-09.
+
+### [Thấp] Hai chương trình tranh nhau file khoá thì cửa sổ vẫn cho sửa
+
+`crates/gpufx-editor/src/window.rs:575` (`sync_project_paths`): nếu không lấy được khoá sau khi project đã đổi (ca hiếm, vì lúc mở đã kiểm trước) thì chỉ hiện thông báo, cửa sổ vẫn sửa và lưu được. Nên chuyển sang chỉ đọc hoặc bỏ project nếu ca này gặp thật. Ghi ngày 2026-11-09.
+
+### [Vừa] MCP chưa được thử với client MCP thật và cửa sổ thật
+
+`crates/gpufx-editor/src/window.rs:241` (`serve_agent`): test đã đi qua pipe thật, `EditorState` và luồng preview thật, nhưng không có cửa sổ winit. Bật tuỳ chọn trong menu, dấu báo agent, lệnh tới khi cửa sổ thu nhỏ và preview cập nhật sau lệnh agent mới chỉ thử được bằng tay. Tiêu chí "Dùng thật" của đặc tả vẫn còn mở. Ghi ngày 2026-11-09.
