@@ -6,6 +6,7 @@
 
 use std::any::Any;
 use std::collections::HashSet;
+use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -85,6 +86,8 @@ struct Queues {
     done: Vec<Done>,
     /// Runs of peaks that are running and should stop: (identity, run).
     cancelled_peaks: HashSet<(u32, u32)>,
+    /// No job starts while this is set, so playback and export have the machine.
+    paused: bool,
 }
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
@@ -150,12 +153,19 @@ impl WorkerPool {
                 shared.alive.fetch_add(1, Ordering::AcqRel);
                 // A thread that does not start only means fewer pictures at once.
                 let _ = std::thread::Builder::new().name(format!("clip-visuals-{index}")).spawn(move || {
+                    lower_thread_priority();
                     run_worker(&worker_shared, &*generator, lane);
                     worker_shared.alive.fetch_sub(1, Ordering::AcqRel);
                 });
             }
         }
         Self { shared }
+    }
+
+    /// Holds back jobs that have not started, or lets them go again.
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.lock().paused = paused;
+        self.shared.work.notify_all();
     }
 
     /// Replaces the waiting jobs with `frames` and `audio`, minus what is running or finished
@@ -212,6 +222,21 @@ impl Drop for WorkerPool {
     }
 }
 
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentThread() -> *mut c_void;
+    fn SetThreadPriority(thread: *mut c_void, priority: i32) -> i32;
+}
+
+/// `THREAD_PRIORITY_BELOW_NORMAL`.
+const BELOW_NORMAL: i32 = -1;
+
+/// Background work yields to the UI and playback. A failure only means no lowering.
+fn lower_thread_priority() {
+    // SAFETY: the pseudo handle always names the calling thread, and the value is a valid priority.
+    unsafe { SetThreadPriority(GetCurrentThread(), BELOW_NORMAL) };
+}
+
 /// Runs jobs until the pool is dropped.
 fn run_worker<G: Generator>(shared: &Shared, generator: &G, lane: Lane) {
     let mut local = G::Local::default();
@@ -225,6 +250,7 @@ fn run_worker<G: Generator>(shared: &Shared, generator: &G, lane: Lane) {
                     return;
                 }
                 let picked = match lane {
+                    _ if queues.paused => None,
                     Lane::Frames => pick_job(&mut queues.frames, &cursor),
                     Lane::Audio => (!queues.audio.is_empty()).then(|| queues.audio.remove(0)),
                 };
@@ -551,6 +577,58 @@ mod tests {
         fn peaks(&self, _: &Path, _: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String> {
             Ok(())
         }
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetThreadPriority(thread: *mut c_void) -> i32;
+    }
+
+    struct PriorityProbe(std::sync::atomic::AtomicI32);
+
+    impl Generator for PriorityProbe {
+        type Local = ();
+
+        fn stamp(&self, _: &Path) -> Option<FileStamp> {
+            None
+        }
+
+        fn inspect(&self, _: &Path) -> Result<SourceFacts, String> {
+            Err("unused".to_owned())
+        }
+
+        fn frame(&self, _: &mut (), _: u32, _: &Path, _: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+            // SAFETY: the pseudo handle always names the calling thread.
+            self.0.store(unsafe { GetThreadPriority(GetCurrentThread()) }, Ordering::SeqCst);
+            Ok(ThumbnailImage { width: 1, height: 1, rgba: vec![0; 4] })
+        }
+
+        fn peaks(&self, _: &Path, _: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn workers_run_below_normal_priority() {
+        let probe = Arc::new(PriorityProbe(std::sync::atomic::AtomicI32::new(99)));
+        let pool = WorkerPool::start(probe.clone(), 1, 0, None);
+        pool.publish(vec![frame(1, 0)], Vec::new());
+        wait_for(|| pool.outstanding() == 0);
+        assert_eq!(probe.0.load(Ordering::SeqCst), BELOW_NORMAL);
+    }
+
+    #[test]
+    fn no_job_starts_while_paused() {
+        let generator = Arc::new(Fake::default());
+        let pool = WorkerPool::start(generator.clone(), 1, 1, None);
+        pool.set_paused(true);
+        pool.publish(vec![frame(1, 0)], vec![Job { key: JobKey::Peaks(3, 0), path: Path::new("a.mp4").into() }]);
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(pool.outstanding(), 2, "they wait");
+        pool.set_paused(false);
+        wait_for(|| generator.calls.load(Ordering::SeqCst) == 1);
+        pool.cancel_peaks(3, 0);
     }
 
     #[test]

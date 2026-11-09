@@ -309,6 +309,20 @@ fn level_data_drawn_last_frame_is_not_evicted() {
 }
 
 #[test]
+fn nothing_new_is_generated_while_paused_even_from_a_pool_started_then() {
+    let ctx = egui::Context::default();
+    let mut visuals = ClipVisuals::default();
+    visuals.set_paused(true);
+    let slot = visuals.slot("a-file-that-does-not-exist.mp4");
+    visuals.view(slot);
+    visuals.end_frame();
+    std::thread::sleep(Duration::from_millis(40));
+    assert_eq!(visuals.pool.as_ref().expect("started").outstanding(), 1, "the inspection waits");
+    visuals.set_paused(false);
+    run_frames(&mut visuals, &ctx, |v| { v.view(slot); }, |v| v.slots[slot].view == SourceView::Failed);
+}
+
+#[test]
 fn levels_read_before_an_error_are_handed_over() {
     let mut calls = 0;
     let mut got = Vec::new();

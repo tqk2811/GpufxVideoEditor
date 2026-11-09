@@ -37,6 +37,7 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     state.visuals.borrow_mut().begin_frame(root.ctx());
     {
         let mut visuals = state.visuals.borrow_mut();
+        visuals.set_paused(state.is_playing() || state.is_exporting());
         visuals.sync_project(state.revision(), state.project());
     }
     handle_shortcuts(root.ctx(), state, requests);

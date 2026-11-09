@@ -78,6 +78,7 @@ type PoolFactory = Box<dyn Fn(Option<Waker>) -> WorkerPool>;
 pub struct ClipVisuals {
     factory: PoolFactory,
     pool: Option<WorkerPool>,
+    paused: bool,
     waker: Option<Waker>,
     paths: Option<Arc<ProjectPaths>>,
     /// Source text as the clip stores it, to its slot, without normalizing on every frame.
@@ -112,6 +113,7 @@ impl ClipVisuals {
         Self {
             factory: Box::new(move |waker| WorkerPool::start(generator.clone(), FRAME_WORKERS, AUDIO_WORKERS, waker)),
             pool: None,
+            paused: false,
             waker: None,
             paths: None,
             interned: HashMap::new(),
@@ -136,6 +138,16 @@ impl ClipVisuals {
     /// `waker` is called from worker threads when results wait to be drawn.
     pub fn set_waker(&mut self, waker: Waker) {
         self.waker = Some(waker);
+    }
+
+    /// Starts no new work while playback or an export needs the machine.
+    pub fn set_paused(&mut self, paused: bool) {
+        if self.paused != paused {
+            self.paused = paused;
+            if let Some(pool) = &self.pool {
+                pool.set_paused(paused);
+            }
+        }
     }
 
     /// How sources resolve from now on.
@@ -173,12 +185,12 @@ impl ClipVisuals {
         if keys == self.published {
             return;
         }
-        if self.pool.is_none() {
-            self.pool = Some((self.factory)(self.waker.clone()));
-        }
-        if let Some(pool) = &self.pool {
-            pool.publish(frames, audio);
-        }
+        let pool = self.pool.get_or_insert_with(|| {
+            let pool = (self.factory)(self.waker.clone());
+            pool.set_paused(self.paused);
+            pool
+        });
+        pool.publish(frames, audio);
         self.published = keys;
     }
 
