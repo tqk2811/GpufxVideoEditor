@@ -127,3 +127,11 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Seek không có prefill, decoder nguội có thể gây giật
 
 `crates/gpufx-editor/src/playback/thread.rs`, `PreparingThread::seek`: gate vẫn mở khi seek, nên decoder nguội phải đuổi kịp trong lúc đang phát. Bài `measure_silence_with_a_slow_source` chỉ đo bằng nguồn giả; cần nghe thử trên media thật để quyết định có cần đóng gate tới khi đủ lead không. Ghi ngày 2026-11-09.
+
+### [Thấp] Project thiếu file nguồn hoặc thiếu package không mở được
+
+`crates/gpufx-editor/src/project_file.rs`, `parse_project`: mở project chạy `validate` đầy đủ nên một file nguồn bị di chuyển làm cả project bị từ chối, người dùng không có cách trỏ lại đường dẫn. Nên làm vì media hay bị đổi thư mục; cần hộp thoại định vị lại file khi mở. Ghi ngày 2026-11-09.
+
+### [Thấp] Quay undo về đúng trạng thái đã lưu vẫn tính là chưa lưu
+
+`crates/gpufx-editor/src/editor.rs`, `is_dirty` so số revision, mà undo cũng tăng revision, nên undo về đúng bản đã lưu vẫn hỏi lưu khi đóng. Nên làm nếu cảnh báo thừa gây khó chịu. Ghi ngày 2026-11-09.
