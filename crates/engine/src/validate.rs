@@ -326,7 +326,7 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 errors.push(ClipTimeOverflow { track: t, clip: c });
                 ok = false;
             }
-            // A hidden track reads no file and no package, so one that is missing does not matter.
+            // A hidden track's file and package are not needed for the output, so one that is missing does not matter.
             if track.hidden {
                 // Its structure is still checked below.
             } else if !resolver.source_exists(&clip.source) {

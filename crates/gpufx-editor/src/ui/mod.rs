@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn the_toolbar_does_not_offer_edits_of_a_locked_selection() {
+    fn locking_the_selected_clips_track_makes_selection_locked_true() {
         let mut state = state();
         assert!(!state.selection_locked());
         state.toggle_track_locked(0);
