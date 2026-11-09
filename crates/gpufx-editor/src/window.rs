@@ -1,7 +1,7 @@
 //! The window and its event loop.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,7 +10,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use d3d12_backend::{encoder_exists, read_package_info, ExportJob, Gpu, ProjectPaths};
+use d3d12_backend::{encoder_exists, probe_media, read_package_info, ExportJob, Gpu, ProjectPaths};
 use engine::Project;
 #[cfg(debug_assertions)]
 use engine::{Time, TrackKind};
@@ -25,6 +25,7 @@ use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::project_file::{load_project_file, package_roots, project_paths, save_project_file};
+use crate::tasks::{Action, Arrival, FileDialog, Prompt, Request, Tasks};
 use crate::ui::{self, UiRequest};
 
 /// How often the playhead moves while playing.
@@ -86,6 +87,11 @@ struct Session {
     /// The title now on the window.
     title: String,
     catalog: Option<Receiver<Catalog>>,
+    tasks: Tasks,
+    arrivals: Receiver<Arrival>,
+    arrival_sender: Sender<Arrival>,
+    /// Set when a finished prompt decided the app should close.
+    exit_accepted: bool,
     #[cfg(debug_assertions)]
     smoke: Smoke,
 }
@@ -117,6 +123,7 @@ impl Session {
         let paths = Arc::new(project_paths(None, &package_roots));
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
+        let (arrival_sender, arrivals) = channel();
         Ok(Self {
             export: None,
             export_out: None,
@@ -137,6 +144,10 @@ impl Session {
             paths_file: None,
             title: String::new(),
             catalog: Some(catalog),
+            tasks: Tasks::default(),
+            arrivals,
+            arrival_sender,
+            exit_accepted: false,
             #[cfg(debug_assertions)]
             smoke,
         })
@@ -303,15 +314,13 @@ impl Session {
         }
     }
 
-    /// Starts an export of the current project to a chosen file. Playback and the preview stop
-    /// first, so the export has the GPU and decoders to itself; the thread waits for the preview to
-    /// let go.
-    fn start_export(&mut self) {
+    /// Starts an export of the current project to `out`. Playback and the preview stop first, so
+    /// the export has the GPU and decoders to itself; the thread waits for the preview to let go.
+    fn start_export(&mut self, out: PathBuf) {
         if let Some(reason) = export_blocker(self.state.project()) {
             self.state.report_error(reason.to_owned());
             return;
         }
-        let Some(out) = rfd::FileDialog::new().add_filter("MP4", &["mp4"]).set_file_name("export.mp4").set_parent(self.presenter.window()).save_file() else { return };
         let Some(option) = self.state.encoders.get(self.state.encoder).cloned() else { return };
         let total = engine::frame_count(self.state.project());
         self.state.begin_export(total);
@@ -388,6 +397,7 @@ impl Session {
 
     fn redraw(&mut self) -> Result<(), String> {
         self.collect_catalog();
+        self.collect_arrivals();
         self.poll_export();
         self.collect_preview();
         self.poll_playback();
@@ -401,12 +411,16 @@ impl Session {
         let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
         let delay = if self.state.is_exporting() {
             delay.min(EXPORT_REPAINT)
-        } else if self.state.is_playing() {
+        } else if self.state.is_playing() || self.tasks.has_waiting_load() {
             delay.min(PLAYING_REPAINT)
         } else {
             delay
         };
         self.next_repaint = self.smoke_exit_at().filter(|_| !self.state.is_playing()).or_else(|| Instant::now().checked_add(delay));
+        // A request can change the status line, which only the next frame shows.
+        if !requests.is_empty() {
+            self.window.request_redraw();
+        }
         for request in requests {
             self.handle(request);
         }
@@ -441,7 +455,7 @@ impl Session {
         }
         self.paths_file = self.state.project_file().map(Path::to_path_buf);
         self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
-        // The file dialog blocked this thread while the audio played on, so catch up first.
+        // The audio played on since this frame polled it, so catch up first.
         self.poll_playback();
         self.playback = None;
         self.state.reopen_playback();
@@ -456,78 +470,123 @@ impl Session {
         }
     }
 
-    /// A close stops a running export and removes its partial file, so that is asked first.
-    fn close_accepted(&self) -> bool {
-        if self.state.is_exporting() && !confirm(self.presenter.window(), "An export is running. Cancel it and close?") {
-            return false;
-        }
-        self.discard_accepted("Close")
-    }
-
-    /// Whether the user accepts losing `action`'s unsaved changes; asked only when there are some.
-    fn discard_accepted(&self, action: &str) -> bool {
-        !self.state.is_dirty() || confirm(self.presenter.window(), &format!("The project has unsaved changes. {action} anyway and lose them?"))
-    }
-
-    fn project_dialog(&self) -> rfd::FileDialog {
-        rfd::FileDialog::new().add_filter("Project", &["json"]).set_parent(self.presenter.window())
-    }
-
-    fn open_project(&mut self) {
-        if !self.discard_accepted("Open another project") {
-            return;
-        }
-        let Some(file) = self.project_dialog().pick_file() else { return };
-        match load_project_file(&file, &self.package_roots) {
-            Ok(project) => {
-                self.state.replace_project(project, Some(file));
-                self.playback = None;
-            }
-            Err(message) => self.state.report_error(message),
-        }
-    }
-
-    fn save_project(&mut self, file: Option<PathBuf>) {
-        let picked = file.or_else(|| self.project_dialog().set_file_name("project.json").save_file());
-        let Some(file) = picked else { return };
+    fn save_project(&mut self, file: PathBuf) {
         match save_project_file(self.state.project(), &file) {
             Ok(()) => self.state.mark_saved(file),
             Err(message) => self.state.report_error(message),
         }
     }
 
-    /// Runs outside the frame, because the file dialog blocks this thread.
+    /// Runs `work` on its own thread and wakes the loop when its result is in. The threads are
+    /// never joined, so a dialog still up or a file still being read cannot hold up the exit.
+    fn spawn_task(&mut self, name: &str, work: impl FnOnce() -> Arrival + Send + 'static) {
+        let sender = self.arrival_sender.clone();
+        let window = self.window.clone();
+        let spawned = std::thread::Builder::new().name(name.to_owned()).spawn(move || {
+            let _ = sender.send(work());
+            window.request_redraw();
+        });
+        if let Err(e) = spawned {
+            self.tasks.start_failed(&mut self.state, format!("starting the {name} thread failed: {e}"));
+        }
+    }
+
+    fn show_file_dialog(&mut self, dialog: FileDialog) {
+        let parent = self.window.clone();
+        let base = || rfd::FileDialog::new().set_parent(parent.as_ref());
+        let picker = match dialog {
+            FileDialog::PickClip { .. } => base().add_filter("Media", &MEDIA_EXTENSIONS).add_filter("All files", &["*"]),
+            FileDialog::OpenProject => base().add_filter("Project", &["json"]),
+            FileDialog::SaveProject => base().add_filter("Project", &["json"]).set_file_name("project.json"),
+            FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
+        };
+        self.spawn_task("file-dialog", move || {
+            let path = match dialog {
+                FileDialog::PickClip { .. } | FileDialog::OpenProject => picker.pick_file(),
+                FileDialog::SaveProject | FileDialog::Export => picker.save_file(),
+            };
+            Arrival::FilePicked { dialog, path }
+        });
+    }
+
+    fn show_prompt(&mut self, prompt: Prompt) {
+        let dialog = rfd::MessageDialog::new()
+            .set_parent(self.window.as_ref())
+            .set_title("gpufx editor")
+            .set_description(prompt.question())
+            .set_buttons(rfd::MessageButtons::YesNo);
+        self.spawn_task("prompt", move || Arrival::PromptAnswered { prompt, accepted: dialog.show() == rfd::MessageDialogResult::Yes });
+    }
+
+    fn perform(&mut self, action: Action) {
+        match action {
+            Action::Nothing => {}
+            Action::ShowFileDialog(dialog) => self.show_file_dialog(dialog),
+            Action::ShowPrompt(prompt) => self.show_prompt(prompt),
+            Action::ProbeClip { track, path } => self.spawn_task("clip-probe", move || {
+                let result = probe_media(&path);
+                Arrival::ClipProbed { track, path, result }
+            }),
+            Action::ReadProject { file } => {
+                let roots = self.package_roots.clone();
+                self.spawn_task("project-read", move || {
+                    let result = load_project_file(&file, &roots);
+                    Arrival::ProjectRead { file, result }
+                });
+            }
+            Action::SaveTo(path) => self.save_project(path),
+            Action::StartExport(path) => self.start_export(path),
+            Action::ProjectReplaced => self.playback = None,
+            Action::Exit => self.exit_accepted = true,
+        }
+    }
+
+    /// Takes the results of finished dialogs and loads, and applies a load that had to wait.
+    fn collect_arrivals(&mut self) {
+        while let Ok(arrival) = self.arrivals.try_recv() {
+            let action = self.tasks.on_arrival(&mut self.state, arrival);
+            self.perform(action);
+        }
+        let action = self.tasks.poll(&mut self.state);
+        self.perform(action);
+    }
+
+    fn begin_task(&mut self, request: Request) {
+        let action = self.tasks.begin(&mut self.state, request);
+        self.perform(action);
+    }
+
+    fn close_requested(&mut self) {
+        let action = self.tasks.close_requested(&mut self.state);
+        self.perform(action);
+    }
+
+    /// Runs outside the frame, so what it starts cannot disturb the UI pass.
     fn handle(&mut self, request: UiRequest) {
         if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport) {
             return;
         }
         match request {
-            UiRequest::Export => self.start_export(),
+            UiRequest::Export => {
+                if let Some(reason) = export_blocker(self.state.project()) {
+                    self.state.report_error(reason.to_owned());
+                    return;
+                }
+                self.begin_task(Request::Export);
+            }
             UiRequest::CancelExport => {
                 if let Some(export) = &self.export {
                     export.cancel();
                 }
             }
-            UiRequest::NewProject => {
-                if self.discard_accepted("Start a new project") {
-                    self.state.new_project();
-                    self.playback = None;
-                }
-            }
-            UiRequest::OpenProject => self.open_project(),
-            UiRequest::SaveProject => self.save_project(self.state.project_file().map(Path::to_path_buf)),
-            UiRequest::SaveProjectAs => self.save_project(None),
-            UiRequest::PickClipFile { track } => {
-                let picked = rfd::FileDialog::new()
-                    .add_filter("Media", &MEDIA_EXTENSIONS)
-                    .add_filter("All files", &["*"])
-                    .set_parent(self.presenter.window())
-                    .pick_file();
-                if let Some(path) = picked {
-                    self.state.add_picked_file(track, &path, self.paths.as_ref());
-                }
-                self.presenter.window().request_redraw();
-            }
+            UiRequest::NewProject => self.begin_task(Request::NewProject),
+            UiRequest::OpenProject => self.begin_task(Request::OpenProject),
+            UiRequest::SaveProject => match self.state.project_file().map(Path::to_path_buf) {
+                Some(file) => self.save_project(file),
+                None => self.begin_task(Request::SaveProjectAs),
+            },
+            UiRequest::SaveProjectAs => self.begin_task(Request::SaveProjectAs),
+            UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
         }
     }
 }
@@ -543,11 +602,6 @@ fn spawn_catalog_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<Cata
         eprintln!("gpufx-editor: the package scan could not start: {e}");
     }
     receiver
-}
-
-/// Asks a yes or no question over `window`.
-fn confirm(window: &Window, question: &str) -> bool {
-    rfd::MessageDialog::new().set_parent(window).set_title("gpufx editor").set_description(question).set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes
 }
 
 #[derive(Default)]
@@ -585,7 +639,9 @@ impl ApplicationHandler for EditorApp {
         }
         match event {
             WindowEvent::CloseRequested => {
-                if session.close_accepted() {
+                session.close_requested();
+                session.presenter.window().request_redraw();
+                if session.exit_accepted {
                     event_loop.exit();
                 }
             }
@@ -599,6 +655,8 @@ impl ApplicationHandler for EditorApp {
             WindowEvent::RedrawRequested => {
                 if let Err(message) = session.redraw() {
                     self.fail(event_loop, message);
+                } else if session.exit_accepted {
+                    event_loop.exit();
                 } else if session.smoke_finished() {
                     #[cfg(debug_assertions)]
                     session.report_smoke_audio();

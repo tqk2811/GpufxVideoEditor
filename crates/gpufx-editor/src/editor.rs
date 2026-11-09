@@ -8,8 +8,9 @@ use crate::timeline::drag::{ClipDrag, EditCommand};
 use crate::timeline::view::TimelineView;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, split_clip, AudioOutput, Clip, ClipKey,
-    EditError, EditHistory, Effect, Output, Project, Resolver, Time, TrackKind, Transition, SUPPORTED_VERSION,
+    EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
+use d3d12_backend::MediaProbe;
 use serde_json::Map;
 use std::path::{Path, PathBuf};
 
@@ -19,8 +20,7 @@ const EXPORT_RUNNING: &str = "Editing is off while an export runs";
 const NO_NEIGHBOUR: &str = "A transition needs a selected clip that touches another clip on its track";
 const NOTHING_TO_PLAY: &str = "Nothing to play: playback length follows the video frames, and audio alone has none yet";
 
-/// Length given to a new clip. The project does not record source lengths and no backend call
-/// reports one without opening a decoder.
+/// Length given to a clip whose file states none, and to a clip added without a probe.
 pub const DEFAULT_CLIP_DURATION: Time = Time::from_ticks(900_000);
 /// Length given to a new transition; parameters and lengths are edited in a later phase.
 pub const DEFAULT_TRANSITION_DURATION: Time = Time::from_ticks(90_000);
@@ -56,6 +56,8 @@ pub struct EditorState {
     no_sound: Option<String>,
     pub view: TimelineView,
     pub drag: Option<ClipDrag>,
+    /// The name of the file a background load is reading.
+    loading: Option<String>,
     pub catalog: Catalog,
     pub picker: PickerState,
     pub encoders: Vec<EncoderOption>,
@@ -117,6 +119,7 @@ impl EditorState {
             no_sound: None,
             view: TimelineView::default(),
             drag: None,
+            loading: None,
             catalog: Catalog::default(),
             picker: PickerState::default(),
             encoders: Vec::new(),
@@ -167,6 +170,22 @@ impl EditorState {
 
     pub fn report_error(&mut self, message: String) {
         self.status = Status::Error(message);
+    }
+
+    pub fn report_info(&mut self, message: String) {
+        self.status = Status::Info(message);
+    }
+
+    pub fn report_refused(&mut self, message: String) {
+        self.status = Status::Refused(message);
+    }
+
+    pub fn loading(&self) -> Option<&str> {
+        self.loading.as_deref()
+    }
+
+    pub fn set_loading(&mut self, name: Option<String>) {
+        self.loading = name;
     }
 
     /// Replaces the project with a new or opened one: a fresh history, and a new revision so preview
@@ -391,36 +410,59 @@ impl EditorState {
         self.run(|project| add_track(project, kind));
     }
 
-    /// Adds a clip of [`DEFAULT_CLIP_DURATION`] for `path` to `track`, at the free position nearest
-    /// the playhead.
-    pub fn add_clip_from_file(&mut self, track: usize, path: &Path) {
+    /// Adds a clip of `duration` for `path` to `track`, at the free position nearest the playhead
+    /// and selected. False, with a status, when it could not be added.
+    fn place_clip(&mut self, track: usize, path: &Path, duration: Time) -> bool {
         if self.edits_blocked() {
-            return;
+            return false;
         }
         let Some(target) = self.project().tracks.get(track) else {
             self.refuse(&EditError::TrackNotFound { track });
-            return;
+            return false;
         };
-        let Some(start) = nearest_free_start(target, None, DEFAULT_CLIP_DURATION, self.playhead) else {
+        let Some(start) = nearest_free_start(target, None, duration, self.playhead) else {
             self.refuse(&EditError::NoRoom { track });
-            return;
+            return false;
         };
-        let clip = new_clip(&path.to_string_lossy(), start, DEFAULT_CLIP_DURATION);
-        if self.run(|project| add_clip(project, track, clip)) {
-            self.selection = clip_at(self.project(), track, start);
-            self.status = Status::Info("Clip added with the default length of 10 s".to_owned());
+        let clip = new_clip(&path.to_string_lossy(), start, duration);
+        if !self.run(|project| add_clip(project, track, clip)) {
+            return false;
+        }
+        self.selection = clip_at(self.project(), track, start);
+        true
+    }
+
+    /// Adds a clip of [`DEFAULT_CLIP_DURATION`] for `path` to `track`.
+    pub fn add_clip_from_file(&mut self, track: usize, path: &Path) {
+        if self.place_clip(track, path, DEFAULT_CLIP_DURATION) {
+            self.status = Status::Info(format!("Added {}", clip_label(&path.to_string_lossy())));
         }
     }
 
-    /// Adds a file the user picked for `track`. A file with no audio stream on an audio track is
-    /// refused here, because a project holding one would not open again.
-    pub fn add_picked_file(&mut self, track: usize, path: &Path, resolver: &dyn Resolver) {
-        let source = path.to_string_lossy();
-        if self.project().tracks.get(track).is_some_and(|target| target.kind == TrackKind::Audio) && !resolver.source_has_audio(&source) {
-            self.status = Status::Refused(format!("{source} has no audio stream or could not be read"));
+    /// Adds a file a background probe has read to `track`, as long as the stream it runs on. A file
+    /// lacking the stream the track plays is refused, because a project holding one would not open
+    /// again.
+    pub fn add_probed_file(&mut self, track: usize, path: &Path, probe: &MediaProbe) {
+        let name = clip_label(&path.to_string_lossy()).to_owned();
+        let Some(kind) = self.project().tracks.get(track).map(|target| target.kind) else {
+            self.refuse(&EditError::TrackNotFound { track });
+            return;
+        };
+        let (present, stated, needed) = match kind {
+            TrackKind::Video => (probe.has_video, probe.video_duration, "video"),
+            TrackKind::Audio => (probe.has_audio, probe.audio_duration, "audio"),
+        };
+        if !present {
+            self.status = Status::Refused(format!("{name} has no {needed} stream"));
             return;
         }
-        self.add_clip_from_file(track, path);
+        let length = stated.filter(|length| *length > Time::ZERO);
+        if self.place_clip(track, path, length.unwrap_or(DEFAULT_CLIP_DURATION)) {
+            self.status = Status::Info(match length {
+                Some(length) => format!("Added {name}, {:.2} s", length.ticks() as f64 / engine::TICKS_PER_SECOND as f64),
+                None => format!("Added {name}: it states no length, so it got {} s", DEFAULT_CLIP_DURATION.ticks() / engine::TICKS_PER_SECOND),
+            });
+        }
     }
 
     /// Issues the command of a finished drag and selects the clip where it landed.
@@ -581,7 +623,7 @@ mod tests {
         let state = state_with_clip();
         assert_eq!(state.selection(), Some(key(0)));
         assert_eq!(clips(state.project(), 0), vec![(Time::ZERO, DEFAULT_CLIP_DURATION)]);
-        assert_eq!(state.status(), &Status::Info("Clip added with the default length of 10 s".to_owned()));
+        assert_eq!(state.status(), &Status::Info("Added a.mp4".to_owned()));
     }
 
     #[test]
@@ -592,18 +634,12 @@ mod tests {
         assert_eq!(state.selection(), Some(key(1)));
     }
 
-    /// Only `sound.wav` has an audio stream.
-    struct SoundOnlyInWav;
-
-    impl Resolver for SoundOnlyInWav {
-        fn source_exists(&self, _source: &str) -> bool {
-            true
-        }
-        fn package_exists(&self, _package: &str) -> bool {
-            true
-        }
-        fn source_has_audio(&self, source: &str) -> bool {
-            source.ends_with("sound.wav")
+    fn video_probe(video: Option<i64>, audio: Option<i64>) -> MediaProbe {
+        MediaProbe {
+            has_video: video.is_some(),
+            has_audio: audio.is_some(),
+            video_duration: video.map(seconds),
+            audio_duration: audio.map(seconds),
         }
     }
 
@@ -611,13 +647,44 @@ mod tests {
     fn a_file_without_sound_is_refused_on_an_audio_track_only() {
         let mut state = state_with_clip();
         let before = state.project().clone();
-        state.add_picked_file(1, Path::new("silent.mp4"), &SoundOnlyInWav);
+        state.add_probed_file(1, Path::new("silent.mp4"), &video_probe(Some(3), None));
         assert_eq!(state.project(), &before);
-        assert!(matches!(state.status(), Status::Refused(message) if message.contains("silent.mp4")), "{:?}", state.status());
-        state.add_picked_file(1, Path::new("sound.wav"), &SoundOnlyInWav);
+        assert!(matches!(state.status(), Status::Refused(message) if message.contains("silent.mp4") && message.contains("audio")), "{:?}", state.status());
+        state.add_probed_file(1, Path::new("sound.wav"), &video_probe(None, Some(3)));
         assert_eq!(state.project().tracks[1].clips.len(), 1);
-        state.add_picked_file(0, Path::new("silent.mp4"), &SoundOnlyInWav);
+        state.add_probed_file(0, Path::new("silent.mp4"), &video_probe(Some(3), None));
         assert_eq!(state.project().tracks[0].clips.len(), 2, "a video track does not need sound");
+    }
+
+    #[test]
+    fn an_audio_only_file_is_refused_on_a_video_track() {
+        let mut state = state_with_clip();
+        let before = state.project().clone();
+        state.add_probed_file(0, Path::new("music.mp3"), &video_probe(None, Some(4)));
+        assert_eq!(state.project(), &before);
+        assert!(matches!(state.status(), Status::Refused(message) if message.contains("video")), "{:?}", state.status());
+    }
+
+    #[test]
+    fn a_probed_clip_takes_the_length_of_the_stream_its_track_plays() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_track(TrackKind::Audio);
+        state.add_probed_file(0, Path::new("a.mp4"), &video_probe(Some(5), Some(8)));
+        assert_eq!(state.project().tracks[0].clips[0].duration, seconds(5));
+        assert_eq!(state.status(), &Status::Info("Added a.mp4, 5.00 s".to_owned()));
+        state.add_probed_file(1, Path::new("a.mp4"), &video_probe(Some(5), Some(8)));
+        assert_eq!(state.project().tracks[1].clips[0].duration, seconds(8));
+    }
+
+    #[test]
+    fn a_probed_clip_with_no_stated_length_gets_the_default_and_says_so() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        let unknown = MediaProbe { has_video: true, has_audio: false, video_duration: None, audio_duration: None };
+        state.add_probed_file(0, Path::new("raw.h264"), &unknown);
+        assert_eq!(state.project().tracks[0].clips[0].duration, DEFAULT_CLIP_DURATION);
+        assert!(matches!(state.status(), Status::Info(message) if message.contains("states no length")), "{:?}", state.status());
     }
 
     #[test]
