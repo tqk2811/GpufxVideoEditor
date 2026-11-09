@@ -126,6 +126,17 @@ impl TimelineView {
         true
     }
 
+    /// The zoom as a position from 0 to 1 on a logarithmic scale, for the zoom slider.
+    pub fn zoom_fraction(&self) -> f64 {
+        (self.pixels_per_second / MIN_PIXELS_PER_SECOND).ln() / (MAX_PIXELS_PER_SECOND / MIN_PIXELS_PER_SECOND).ln()
+    }
+
+    /// Sets the zoom from a slider position, keeping the time under `cursor_x` in place.
+    pub fn set_zoom_fraction(&mut self, fraction: f64, cursor_x: f64, area: &ViewArea) {
+        let target = MIN_PIXELS_PER_SECOND * (MAX_PIXELS_PER_SECOND / MIN_PIXELS_PER_SECOND).powf(fraction.clamp(0.0, 1.0));
+        self.zoom_at(target / self.pixels_per_second, cursor_x, area);
+    }
+
     /// Applies a wheel event; true when it did something, so the caller may consume it. An event
     /// that can do nothing here returns false and must be left for others.
     pub fn apply_wheel(&mut self, wheel: Wheel, area: &ViewArea) -> bool {
@@ -240,6 +251,20 @@ mod tests {
         let mut view = view(1000.0, 9000.0);
         view.zoom_at(0.01, 500.0, &area);
         assert!(view.scroll_x() >= 0.0 && view.scroll_x() <= view.max_scroll_x(&area));
+    }
+
+    #[test]
+    fn the_zoom_slider_position_round_trips() {
+        let area = area();
+        let mut view = view(80.0, 0.0);
+        view.set_zoom_fraction(0.0, 0.0, &area);
+        assert_eq!(view.pixels_per_second(), MIN_PIXELS_PER_SECOND);
+        view.set_zoom_fraction(1.0, 0.0, &area);
+        assert!((view.pixels_per_second() - MAX_PIXELS_PER_SECOND).abs() < 1e-6);
+        view.set_zoom_fraction(0.5, 0.0, &area);
+        assert!((view.zoom_fraction() - 0.5).abs() < 1e-9);
+        view.set_zoom_fraction(4.0, 0.0, &area);
+        assert!(view.zoom_fraction() <= 1.0 + 1e-9, "out-of-range positions are clamped");
     }
 
     #[test]

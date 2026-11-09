@@ -2,27 +2,29 @@
 //! calls these methods and draws the result; every timeline change goes through an engine command.
 
 use crate::export::{EncoderOption, ExportProgress};
+use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, TrackChoice};
 use crate::packages::{Catalog, PickerState};
 use crate::playback::plan::{start_time, TransportCommand};
-use crate::timeline::drag::{ClipDrag, EditCommand};
+use crate::timeline::drag::{clamp_trim, ClipDrag, EditCommand};
 use crate::timeline::view::TimelineView;
 use engine::{
-    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, split_clip, AudioOutput, Clip, ClipKey,
-    EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
+    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted,
+    set_transition_params, split_clip, trim_end, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
-use serde_json::Map;
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 const UNDO_DEPTH: usize = 200;
 const DRAG_FIRST: &str = "Finish the drag first";
 const EXPORT_RUNNING: &str = "Editing is off while an export runs";
 const NO_NEIGHBOUR: &str = "A transition needs a selected clip that touches another clip on its track";
+const NOTHING_AT_PLAYHEAD: &str = "Move the playhead inside the selected clip first";
 const NOTHING_TO_PLAY: &str = "Nothing to play: playback length follows the video frames, and audio alone has none yet";
 
 /// Length given to a clip whose file states none, and to a clip added without a probe.
 pub const DEFAULT_CLIP_DURATION: Time = Time::from_ticks(900_000);
-/// Length given to a new transition; parameters and lengths are edited in a later phase.
+/// Length given to a new transition, until the inspector changes it.
 pub const DEFAULT_TRANSITION_DURATION: Time = Time::from_ticks(90_000);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -41,6 +43,8 @@ pub struct EditorState {
     status: Status,
     /// Counts the changes of the project; equal values mean an equal project.
     revision: u64,
+    /// The revision of the last change audio must hear.
+    audio_revision: u64,
     /// The file the project was last saved to or opened from.
     project_file: Option<PathBuf>,
     /// The revision that is on disk.
@@ -64,6 +68,26 @@ pub struct EditorState {
     pub encoder: usize,
     /// The running export, which turns editing, playback and scrubbing off.
     export: Option<ExportProgress>,
+    /// A control being dragged; see [`LiveEdit`].
+    live: Option<LiveEdit>,
+    /// What this session imported and what the open project uses.
+    pub library: MediaLibrary,
+}
+
+/// One held control: the project shows `shown` while `history` stays where it was, and the release
+/// makes it one undo step.
+struct LiveEdit {
+    shown: Project,
+    /// Whether the project was clean when the drag began.
+    was_clean: bool,
+}
+
+/// What may be chosen in the inspector's time fields. Waits for the release of a drag, as a clip
+/// edit renumbers clips.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClipField {
+    Start(f64),
+    Duration(f64),
 }
 
 /// A clip of the whole default length at `start`, with no effects.
@@ -108,6 +132,7 @@ impl EditorState {
             playhead: Time::ZERO,
             status: Status::Idle,
             revision: 0,
+            audio_revision: 0,
             project_file: None,
             saved_revision: 0,
             preview_error: None,
@@ -125,11 +150,14 @@ impl EditorState {
             encoders: Vec::new(),
             encoder: 0,
             export: None,
+            live: None,
+            library: MediaLibrary::default(),
         }
     }
 
+    /// The project as shown: during a live edit, its preview.
     pub fn project(&self) -> &Project {
-        self.history.current()
+        self.live.as_ref().map_or_else(|| self.history.current(), |live| &live.shown)
     }
 
     pub fn selection(&self) -> Option<ClipKey> {
@@ -194,8 +222,11 @@ impl EditorState {
         if self.playing {
             self.transport.push(TransportCommand::Stop);
         }
+        self.live = None;
+        self.library.adopt_project_media(&project);
         self.history = EditHistory::new(project, UNDO_DEPTH);
         self.revision += 1;
+        self.audio_revision = self.revision;
         self.saved_revision = self.revision;
         self.status = match &file {
             Some(file) => Status::Info(format!("Opened {}", file.display())),
@@ -235,6 +266,7 @@ impl EditorState {
         self.playing = false;
         self.scrub_target = None;
         self.drag = None;
+        self.cancel_live();
         self.export = Some(ExportProgress { done: 0, total });
         self.status = Status::Info("Exporting".to_owned());
     }
@@ -368,14 +400,14 @@ impl EditorState {
     }
 
     /// An export renders the project it started with, so edits wait for it. A drag holds a clip key,
-    /// and any edit could make that key name another clip, so edits wait for the drop. True, with a
-    /// status, while either is in progress.
+    /// and any edit could make that key name another clip, so edits wait for the drop; the same
+    /// goes for a held inspector control. True, with a status, while any is in progress.
     fn edits_blocked(&mut self) -> bool {
         if self.export.is_some() {
             self.status = Status::Info(EXPORT_RUNNING.to_owned());
             return true;
         }
-        if self.drag.is_none() {
+        if self.drag.is_none() && self.live.is_none() {
             return false;
         }
         self.status = Status::Info(DRAG_FIRST.to_owned());
@@ -395,6 +427,7 @@ impl EditorState {
             Ok(after) => {
                 if *after != before {
                     self.revision += 1;
+                    self.audio_revision = self.revision;
                 }
                 self.status = Status::Idle;
                 true
@@ -428,6 +461,7 @@ impl EditorState {
         if !self.run(|project| add_clip(project, track, clip)) {
             return false;
         }
+        self.library.adopt_project_media(self.history.current());
         self.selection = clip_at(self.project(), track, start);
         true
     }
@@ -460,6 +494,9 @@ impl EditorState {
             });
             return;
         }
+        if let Some(item) = item_from_probe(&path.to_string_lossy(), probe) {
+            self.library.add(item);
+        }
         let length = stated.filter(|length| *length > Time::ZERO);
         if self.place_clip(track, path, length.unwrap_or(DEFAULT_CLIP_DURATION)) {
             self.status = Status::Info(match length {
@@ -469,12 +506,169 @@ impl EditorState {
         }
     }
 
+    /// Whether a drag of an inspector control is previewing.
+    pub fn is_live(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// The revision audio has to follow: live previews do not count, the release does.
+    pub fn audio_revision(&self) -> u64 {
+        self.audio_revision
+    }
+
+    /// Shows the result of `command` on the project before the drag, without touching the history.
+    /// A refused step goes to the status line and the last good one stays shown.
+    pub fn live_edit<F>(&mut self, command: F)
+    where
+        F: FnOnce(&Project) -> Result<Project, EditError>,
+    {
+        if self.live.is_none() && (self.export.is_some() || self.drag.is_some()) {
+            self.edits_blocked();
+            return;
+        }
+        match command(self.history.current()) {
+            Ok(shown) => {
+                let changed = shown != *self.project();
+                let was_clean = self.live.as_ref().map_or(!self.is_dirty(), |live| live.was_clean);
+                self.live = Some(LiveEdit { shown, was_clean });
+                if changed {
+                    self.revision += 1;
+                }
+                self.status = Status::Idle;
+            }
+            Err(error) => self.refuse(&error),
+        }
+    }
+
+    /// Ends the live edit, leaving at most one undo step.
+    pub fn commit_live(&mut self) {
+        let Some(live) = self.live.take() else { return };
+        let unchanged = live.shown == *self.history.current();
+        let shown = live.shown;
+        let applied = self.history.apply(move |_| Ok(shown)).is_ok();
+        debug_assert!(applied, "a live edit is already validated");
+        self.revision += 1;
+        self.audio_revision = self.revision;
+        if unchanged && live.was_clean {
+            self.saved_revision = self.revision;
+        }
+    }
+
+    /// Ends the live edit and shows the project as it was before the drag.
+    pub fn cancel_live(&mut self) {
+        let Some(live) = self.live.take() else { return };
+        self.revision += 1;
+        if live.was_clean {
+            self.saved_revision = self.revision;
+        }
+    }
+
     /// Issues the command of a finished drag and selects the clip where it landed.
     pub fn finish_drag(&mut self, command: EditCommand) {
         self.drag = None;
         let landing = command.landing(self.project());
         if self.run(|project| command.apply(project)) {
             self.selection = landing.and_then(|span| clip_at(self.project(), span.track, span.start));
+        }
+    }
+
+    /// The Start or Duration field of the selected clip, once its value is final.
+    pub fn apply_clip_field(&mut self, field: ClipField) {
+        let Some(key) = self.selected_for("change") else { return };
+        let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
+        let command = match field {
+            ClipField::Start(seconds) => EditCommand::Move { key, track: key.track, desired_start: crate::timecode::from_seconds(seconds) },
+            ClipField::Duration(seconds) => EditCommand::TrimEnd { key, new_end: clip.start.saturating_add(crate::timecode::from_seconds(seconds)) },
+        };
+        let command = clamp_trim(self.project(), command);
+        self.finish_drag(command);
+    }
+
+    pub fn set_muted(&mut self, muted: bool) {
+        let Some(key) = self.selected_for("mute") else { return };
+        self.run(|project| set_muted(project, key, muted));
+    }
+
+    pub fn live_gain(&mut self, gain_db: f64) {
+        let Some(key) = self.selection else { return };
+        self.live_edit(|project| set_gain(project, key, gain_db));
+    }
+
+    pub fn live_fades(&mut self, fade_in: Time, fade_out: Time) {
+        let Some(key) = self.selection else { return };
+        self.live_edit(|project| set_fades(project, key, fade_in, fade_out));
+    }
+
+    pub fn live_effect_params(&mut self, effect: usize, params: Map<String, Value>) {
+        let Some(key) = self.selection else { return };
+        self.live_edit(|project| set_effect_params(project, key, effect, params));
+    }
+
+    pub fn live_transition(&mut self, track: usize, after_clip: usize, params: Map<String, Value>, duration: Time) {
+        self.live_edit(|project| set_transition_params(project, track, after_clip, params, duration));
+    }
+
+    /// Trims the selected clip so it starts at the playhead.
+    pub fn trim_start_to_playhead(&mut self) {
+        let Some(key) = self.selected_for("trim") else { return };
+        let at = self.playhead;
+        if !self.playhead_inside(key) {
+            self.status = Status::Info(NOTHING_AT_PLAYHEAD.to_owned());
+            return;
+        }
+        if self.run(|project| trim_start(project, key, at)) {
+            self.selection = clip_at(self.project(), key.track, at);
+        }
+    }
+
+    /// Trims the selected clip so it ends at the playhead.
+    pub fn trim_end_to_playhead(&mut self) {
+        let Some(key) = self.selected_for("trim") else { return };
+        let at = self.playhead;
+        if !self.playhead_inside(key) {
+            self.status = Status::Info(NOTHING_AT_PLAYHEAD.to_owned());
+            return;
+        }
+        self.run(|project| trim_end(project, key, at));
+    }
+
+    fn playhead_inside(&self, key: ClipKey) -> bool {
+        let at = self.playhead;
+        self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_some_and(|clip| at > clip.start && clip.end().is_some_and(|end| at < end))
+    }
+
+    /// Adds `item` at the playhead, on a track with room or a new one, as one undo step.
+    pub fn add_media_at_playhead(&mut self, item: &MediaItem) {
+        if self.edits_blocked() {
+            return;
+        }
+        let duration = item.duration.unwrap_or(DEFAULT_CLIP_DURATION);
+        let start = self.playhead;
+        let track_kind = item.kind.track_kind();
+        let choice = choose_track(self.project(), track_kind, duration, start);
+        let track = match choice {
+            TrackChoice::Existing(index) => index,
+            TrackChoice::New => self.project().tracks.len(),
+        };
+        let clip = new_clip(&item.source, start, duration);
+        let added = self.run(|project| {
+            let with_track = if choice == TrackChoice::New { add_track(project, track_kind)? } else { project.clone() };
+            add_clip(&with_track, track, clip)
+        });
+        if added {
+            self.selection = clip_at(self.project(), track, start);
+            self.status = Status::Info(format!("Added {}", item.name));
+        }
+    }
+
+    /// Records a probed file, whether or not a clip is made from it.
+    pub fn import_probed(&mut self, path: &Path, probe: &MediaProbe) {
+        match item_from_probe(&path.to_string_lossy(), probe) {
+            Some(item) => {
+                self.status = Status::Info(format!("Imported {}", item.name));
+                self.library.add(item);
+            }
+            None => self.status = Status::Refused(format!("{} has no usable video or audio", clip_label(&path.to_string_lossy()))),
         }
     }
 
@@ -537,6 +731,7 @@ impl EditorState {
 
     /// Drops the drag in progress without any edit.
     pub fn cancel_drag(&mut self) {
+        self.cancel_live();
         if self.drag.take().is_some() {
             self.status = Status::Idle;
         }
@@ -568,6 +763,7 @@ impl EditorState {
     /// forward. There is no drag to drop here, because both steps wait for it.
     fn after_history_step(&mut self) {
         self.revision += 1;
+        self.audio_revision = self.revision;
         self.selection = None;
         self.status = Status::Idle;
     }
@@ -580,6 +776,20 @@ pub fn touching_pair(project: &Project, key: ClipKey) -> Option<usize> {
     let pairs: Vec<usize> = [Some(key.clip), key.clip.checked_sub(1)].into_iter().flatten().filter(|&first| touches(first)).collect();
     let free = |first: &&usize| !track.transitions.iter().any(|transition| transition.after_clip == **first);
     pairs.iter().find(free).or(pairs.first()).copied()
+}
+
+/// How long the transition after clip `after_clip` of `track` may be: at least a frame, at most
+/// twice the shorter usable side. `None` when there is no such transition or room.
+pub fn transition_duration_limits(project: &Project, track: usize, after_clip: usize) -> Option<(Time, Time)> {
+    let target = project.tracks.get(track)?;
+    let (first, second) = (target.clips.get(after_clip)?, target.clips.get(after_clip + 1)?);
+    let tail_used = |clip_index: usize| target.transitions.iter().find(|tr| tr.after_clip + 1 == clip_index).map_or(Time::ZERO, |tr| tr.duration.saturating_sub(tr.duration.half_floor()));
+    let head_used = |clip_index: usize| target.transitions.iter().find(|tr| tr.after_clip == clip_index).map_or(Time::ZERO, |tr| tr.duration.half_floor());
+    let usable_first = first.duration.saturating_sub(tail_used(after_clip));
+    let usable_second = second.duration.saturating_sub(head_used(after_clip + 1));
+    let longest = Time::from_ticks(usable_first.min(usable_second).ticks().saturating_mul(2));
+    let shortest = project.output.frame_duration;
+    (longest >= shortest).then_some((shortest, longest))
 }
 
 /// What sits on a clip: its effects by position and the transitions on either side, by the index of
@@ -1233,6 +1443,245 @@ mod tests {
         state.end_export(Status::Error("disk full".to_owned()));
         assert_eq!(state.export_progress(), None);
         assert_eq!(state.status(), &Status::Error("disk full".to_owned()));
+    }
+
+    fn with_effect() -> EditorState {
+        let mut state = two_touching_clips();
+        state.add_effect_package("blur");
+        state.select(Some(key(0)));
+        state
+    }
+
+    fn radius(value: f64) -> Map<String, Value> {
+        serde_json::json!({ "radius": value }).as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn a_slider_drag_previews_without_history_and_commits_one_undo_step() {
+        let mut state = with_effect();
+        let before = state.project().clone();
+        let base_revision = state.revision();
+        for value in [1.0, 2.0, 3.0] {
+            state.live_effect_params(0, radius(value));
+            assert_eq!(state.project().tracks[0].clips[0].effects[0].params, radius(value));
+        }
+        assert!(state.is_live());
+        assert_eq!(state.revision(), base_revision + 3, "each step refreshes the preview");
+        assert_eq!(state.history.current(), &before, "the history has not moved");
+        state.commit_live();
+        assert!(!state.is_live());
+        assert_eq!(state.project().tracks[0].clips[0].effects[0].params, radius(3.0));
+        state.undo();
+        assert_eq!(state.project(), &before, "one drag is one undo step");
+        state.redo();
+        assert_eq!(state.project().tracks[0].clips[0].effects[0].params, radius(3.0));
+    }
+
+    #[test]
+    fn a_held_control_blocks_edits_like_a_timeline_drag() {
+        let mut state = with_effect();
+        state.live_effect_params(0, radius(5.0));
+        let shown = state.project().clone();
+        state.delete_selected();
+        state.undo();
+        state.split_selected();
+        state.add_track(TrackKind::Video);
+        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+        assert_eq!(state.project(), &shown);
+        assert!(state.is_live());
+    }
+
+    #[test]
+    fn a_timeline_drag_blocks_a_live_edit() {
+        let mut state = state_with_two_clips_and_a_drag_on_the_first();
+        let before = state.project().clone();
+        state.live_gain(-6.0);
+        assert!(!state.is_live());
+        assert_eq!(state.project(), &before);
+        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+    }
+
+    #[test]
+    fn cancelling_a_live_edit_restores_the_project_and_stays_clean() {
+        let mut state = with_effect();
+        state.mark_saved(PathBuf::from("a.json"));
+        let before = state.project().clone();
+        let revision = state.revision();
+        state.live_effect_params(0, radius(5.0));
+        assert!(state.is_dirty());
+        state.cancel_live();
+        assert_eq!(state.project(), &before);
+        assert!(state.revision() > revision, "the preview must come back");
+        assert!(!state.is_dirty());
+    }
+
+    #[test]
+    fn a_commit_that_changed_nothing_leaves_a_clean_project_clean_and_adds_no_step() {
+        let mut state = with_effect();
+        state.undo();
+        state.redo();
+        state.mark_saved(PathBuf::from("a.json"));
+        assert!(state.can_undo());
+        state.select(Some(key(0)));
+        let params = state.project().tracks[0].clips[0].effects[0].params.clone();
+        state.live_effect_params(0, params);
+        state.commit_live();
+        assert!(!state.is_dirty());
+        state.undo();
+        assert_eq!(state.project().tracks[0].clips[0].effects.len(), 0, "the earlier step is still next");
+    }
+
+    #[test]
+    fn audio_hears_a_live_edit_only_at_the_release() {
+        let mut state = state_with_clip();
+        let audio = state.audio_revision();
+        state.live_gain(-6.0);
+        assert_eq!(state.audio_revision(), audio);
+        state.commit_live();
+        assert!(state.audio_revision() > audio);
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, -6.0);
+    }
+
+    #[test]
+    fn a_refused_live_step_keeps_the_last_good_one() {
+        let mut state = state_with_clip();
+        state.live_gain(-6.0);
+        state.live_gain(99.0);
+        assert!(matches!(state.status(), Status::Refused(_)));
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, -6.0);
+        state.commit_live();
+        assert_eq!(state.project().tracks[0].clips[0].gain_db, -6.0);
+    }
+
+    #[test]
+    fn escape_ends_a_live_edit_without_a_change() {
+        let mut state = state_with_clip();
+        let before = state.project().clone();
+        state.live_gain(-6.0);
+        state.cancel_drag();
+        assert_eq!(state.project(), &before);
+        assert!(!state.is_live());
+    }
+
+    #[test]
+    fn a_new_project_drops_a_live_edit() {
+        let mut state = state_with_clip();
+        state.live_gain(-6.0);
+        state.new_project();
+        assert!(!state.is_live());
+        assert!(state.project().tracks.is_empty());
+    }
+
+    #[test]
+    fn a_transition_duration_edit_is_one_step_and_stays_within_its_limits() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        let (shortest, longest) = transition_duration_limits(state.project(), 0, 0).unwrap();
+        assert_eq!(shortest, state.project().output.frame_duration);
+        assert_eq!(longest, Time::from_ticks(DEFAULT_CLIP_DURATION.ticks() * 2));
+        state.live_transition(0, 0, Map::new(), seconds(4));
+        state.commit_live();
+        assert_eq!(state.project().tracks[0].transitions[0].duration, seconds(4));
+        state.undo();
+        assert_eq!(state.project().tracks[0].transitions[0].duration, DEFAULT_TRANSITION_DURATION);
+        assert_eq!(transition_duration_limits(state.project(), 0, 5), None);
+    }
+
+    #[test]
+    fn a_neighbouring_transition_takes_its_share_of_a_clip() {
+        let mut state = two_touching_clips();
+        state.add_clip_from_file(0, Path::new("c.mp4"));
+        state.select(Some(key(0)));
+        state.add_transition_package("mix");
+        state.select(Some(key(1)));
+        state.add_transition_package("mix");
+        let (_, longest) = transition_duration_limits(state.project(), 0, 1).unwrap();
+        let taken = DEFAULT_TRANSITION_DURATION.saturating_sub(DEFAULT_TRANSITION_DURATION.half_floor());
+        assert_eq!(longest.ticks(), 2 * (DEFAULT_CLIP_DURATION.ticks() - taken.ticks()));
+    }
+
+    #[test]
+    fn the_start_and_duration_fields_edit_and_keep_the_selection() {
+        let mut state = state_with_clip();
+        state.apply_clip_field(ClipField::Start(4.0));
+        assert_eq!(clips(state.project(), 0), vec![(seconds(4), DEFAULT_CLIP_DURATION)]);
+        assert_eq!(state.selection(), Some(key(0)));
+        state.apply_clip_field(ClipField::Duration(2.0));
+        assert_eq!(clips(state.project(), 0), vec![(seconds(4), seconds(2))]);
+    }
+
+    #[test]
+    fn trimming_to_the_playhead_cuts_each_side() {
+        let mut state = state_with_clip();
+        state.set_playhead(seconds(2));
+        state.trim_start_to_playhead();
+        assert_eq!(clips(state.project(), 0), vec![(seconds(2), seconds(8))]);
+        assert_eq!(state.selection(), Some(key(0)));
+        state.set_playhead(seconds(7));
+        state.trim_end_to_playhead();
+        assert_eq!(clips(state.project(), 0), vec![(seconds(2), seconds(5))]);
+    }
+
+    #[test]
+    fn trimming_with_the_playhead_outside_the_clip_explains_itself() {
+        let mut state = state_with_clip();
+        state.set_playhead(seconds(50));
+        let before = state.project().clone();
+        state.trim_start_to_playhead();
+        state.trim_end_to_playhead();
+        assert_eq!(state.project(), &before);
+        assert_eq!(state.status(), &Status::Info(NOTHING_AT_PLAYHEAD.to_owned()));
+    }
+
+    fn media(source: &str, kind: crate::media::MediaKind, length: Option<i64>) -> MediaItem {
+        MediaItem { source: source.to_owned(), name: source.to_owned(), kind, duration: length.map(seconds), estimated: false }
+    }
+
+    #[test]
+    fn media_is_added_at_the_playhead_making_a_track_in_one_undo_step() {
+        let mut state = EditorState::default();
+        state.set_playhead(seconds(2));
+        let before = state.project().clone();
+        state.add_media_at_playhead(&media("a.mp4", crate::media::MediaKind::Video, Some(3)));
+        assert_eq!(state.project().tracks.len(), 1);
+        assert_eq!(clips(state.project(), 0), vec![(seconds(2), seconds(3))]);
+        assert_eq!(state.selection(), Some(key(0)));
+        state.undo();
+        assert_eq!(state.project(), &before, "the track and the clip are one step");
+    }
+
+    #[test]
+    fn media_with_no_room_at_the_playhead_goes_on_a_new_track() {
+        let mut state = state_with_clip();
+        state.set_playhead(seconds(1));
+        state.add_media_at_playhead(&media("b.mp4", crate::media::MediaKind::Video, Some(3)));
+        assert_eq!(state.project().tracks.len(), 3);
+        assert_eq!(state.project().tracks[2].clips[0].source, "b.mp4");
+        state.add_media_at_playhead(&media("m.wav", crate::media::MediaKind::Audio, None));
+        assert_eq!(state.project().tracks[1].clips.len(), 1, "the free audio track takes it");
+        assert_eq!(state.project().tracks[1].clips[0].duration, DEFAULT_CLIP_DURATION);
+    }
+
+    #[test]
+    fn opening_a_project_lists_its_media() {
+        let mut state = EditorState::default();
+        let mut project = default_project();
+        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![new_clip("C:/v/x.mp4", Time::ZERO, seconds(4))], transitions: Vec::new() });
+        state.replace_project(project, Some(PathBuf::from("p.json")));
+        let listed = state.library.visible(crate::media::MediaKind::Video, "");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "x.mp4");
+    }
+
+    #[test]
+    fn a_probed_import_is_listed_without_touching_the_project() {
+        let mut state = EditorState::default();
+        let before = state.project().clone();
+        state.import_probed(Path::new("C:/a.mp4"), &video_probe(Some(5), Some(5)));
+        assert_eq!(state.project(), &before);
+        assert_eq!(state.library.visible(crate::media::MediaKind::Video, "").len(), 1);
+        state.import_probed(Path::new("C:/none.bin"), &video_probe(None, None));
+        assert!(matches!(state.status(), Status::Refused(_)));
     }
 
     #[test]

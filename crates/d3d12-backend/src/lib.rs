@@ -25,6 +25,6 @@ pub use decoder::{is_cancelled, DecodedFrame, PublishClock, SequentialDecoder};
 pub use encoder::{encoder_exists, EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
 pub use export::{reserve_temporary, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;
-pub use packages::{read_package_info, PackageInfo};
+pub use packages::{expression_error, read_package_info, PackageInfo, ParamInfo, ParamKind};
 pub use paths::ProjectPaths;
 pub use probe::{probe_media, MediaProbe};

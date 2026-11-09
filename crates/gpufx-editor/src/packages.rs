@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use d3d12_backend::PackageInfo;
+use d3d12_backend::{PackageInfo, ParamInfo};
 
 /// How deep the groups of `packages/gpufx` may nest.
 const MAX_DEPTH: usize = 8;
@@ -26,13 +26,14 @@ pub fn classify(info: &PackageInfo) -> Option<PackageKind> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackageEntry {
     /// The name stored in a project: the path relative to the package root.
     pub package: String,
     pub name: String,
     pub description: String,
     pub kind: PackageKind,
+    pub params: Vec<ParamInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub struct PackageProblem {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Catalog {
     pub loaded: bool,
     pub effects: Vec<PackageEntry>,
@@ -55,6 +56,11 @@ impl Catalog {
             PackageKind::Effect => &self.effects,
             PackageKind::Transition => &self.transitions,
         }
+    }
+
+    /// The parameters of the package stored in a project as `package`.
+    pub fn params_of(&self, package: &str) -> Option<&[ParamInfo]> {
+        self.effects.iter().chain(&self.transitions).find(|entry| entry.package == package).map(|entry| entry.params.as_slice())
     }
 }
 
@@ -92,7 +98,7 @@ pub fn scan(roots: &[PathBuf], read: impl Fn(&Path) -> Result<PackageInfo, Strin
             match info {
                 Ok(info) => {
                     let Some(kind) = classify(&info) else { continue };
-                    let entry = PackageEntry { package, name: info.name, description: info.description, kind };
+                    let entry = PackageEntry { package, name: info.name, description: info.description, kind, params: info.params };
                     match kind {
                         PackageKind::Effect => catalog.effects.push(entry),
                         PackageKind::Transition => catalog.transitions.push(entry),
@@ -173,7 +179,7 @@ mod tests {
     use super::*;
 
     fn info(inputs: usize, has_progress: bool) -> PackageInfo {
-        PackageInfo { name: "n".to_owned(), description: String::new(), inputs, has_progress }
+        PackageInfo { name: "n".to_owned(), description: String::new(), inputs, has_progress, params: Vec::new() }
     }
 
     #[test]
@@ -201,8 +207,8 @@ mod tests {
 
     fn fake_read(path: &Path) -> Result<PackageInfo, String> {
         match path.file_name().unwrap().to_str().unwrap() {
-            "blur" => Ok(PackageInfo { name: "Blur".into(), description: String::new(), inputs: 1, has_progress: false }),
-            "wipe" => Ok(PackageInfo { name: "Wipe".into(), description: String::new(), inputs: 2, has_progress: true }),
+            "blur" => Ok(PackageInfo { name: "Blur".into(), description: String::new(), inputs: 1, has_progress: false, params: Vec::new() }),
+            "wipe" => Ok(PackageInfo { name: "Wipe".into(), description: String::new(), inputs: 2, has_progress: true, params: Vec::new() }),
             _ => Err("bad manifest".to_owned()),
         }
     }
@@ -232,8 +238,8 @@ mod tests {
     #[test]
     fn the_filter_matches_every_word_in_name_or_package() {
         let entries = vec![
-            PackageEntry { package: "packages/gpufx/capcut/snow".into(), name: "Snow Fall".into(), description: String::new(), kind: PackageKind::Effect },
-            PackageEntry { package: "packages/gpufx/ffmpeg/blur".into(), name: "Box Blur".into(), description: String::new(), kind: PackageKind::Effect },
+            PackageEntry { package: "packages/gpufx/capcut/snow".into(), name: "Snow Fall".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new() },
+            PackageEntry { package: "packages/gpufx/ffmpeg/blur".into(), name: "Box Blur".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new() },
         ];
         assert_eq!(filter_entries(&entries, "").len(), 2);
         assert_eq!(filter_entries(&entries, "BLUR")[0].name, "Box Blur");
@@ -250,8 +256,18 @@ mod tests {
         assert!(catalog.effects.iter().chain(&catalog.transitions).all(|entry| entry.package.starts_with("packages/gpufx/")));
     }
 
+    #[test]
+    fn the_parameters_of_a_shipped_package_come_from_its_manifest() {
+        let catalog = scan(&crate::project_file::package_roots(), d3d12_backend::read_package_info);
+        let params = catalog.params_of("packages/gpufx/ffmpeg/box-blur").expect("box-blur is shipped");
+        let radius = params.iter().find(|param| param.name == "radius").unwrap();
+        assert_eq!((radius.kind, radius.min, radius.max), (d3d12_backend::ParamKind::Int, Some(0.0), Some(64.0)));
+        assert_eq!(radius.default, Some(serde_json::json!(2)));
+        assert_eq!(catalog.params_of("packages/gpufx/none"), None);
+    }
+
     fn picker_catalog() -> Catalog {
-        let entry = |package: &str, name: &str, kind| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind };
+        let entry = |package: &str, name: &str, kind| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind, params: Vec::new() };
         Catalog {
             loaded: true,
             effects: vec![entry("packages/gpufx/a/blur", "Blur", PackageKind::Effect)],
@@ -283,7 +299,7 @@ mod tests {
 
     #[test]
     fn a_shared_name_shows_the_group_and_a_unique_one_does_not() {
-        let entry = |package: &str, name: &str| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind: PackageKind::Effect };
+        let entry = |package: &str, name: &str| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new() };
         let entries = vec![entry("packages/gpufx/capcut/blur", "Blur"), entry("packages/gpufx/ffmpeg/deep/blur", "blur"), entry("packages/gpufx/capcut/snow", "Snow")];
         let duplicates = duplicated_names(&entries);
         assert_eq!(list_label(&entries[0], &duplicates), "Blur (capcut)");

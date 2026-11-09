@@ -34,6 +34,7 @@ const PLAYING_REPAINT: Duration = Duration::from_millis(16);
 const EXPORT_REPAINT: Duration = Duration::from_millis(100);
 
 const MEDIA_EXTENSIONS: [&str; 10] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac"];
+const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "wav", "m4a", "flac", "aac", "ogg"];
 
 /// Hidden check of the frame path: names a media file to open at one second, and the app reports
 /// the first frame it shows on stdout and exits a few seconds later. Debug builds only.
@@ -269,7 +270,7 @@ impl Session {
     }
 
     fn sync_audio_project(&mut self) {
-        let revision = self.state.revision();
+        let revision = self.state.audio_revision();
         if revision == self.audio_revision {
             return;
         }
@@ -286,7 +287,7 @@ impl Session {
                     if self.playback.is_none() {
                         match Playback::open(self.state.project(), self.paths.clone()) {
                             Ok(playback) => {
-                                self.audio_revision = self.state.revision();
+                                self.audio_revision = self.state.audio_revision();
                                 self.state.set_no_sound(playback.no_sound().map(str::to_owned));
                                 self.playback = Some(playback);
                             }
@@ -496,14 +497,15 @@ impl Session {
         let parent = self.window.clone();
         let base = || rfd::FileDialog::new().set_parent(parent.as_ref());
         let picker = match dialog {
-            FileDialog::PickClip { .. } => base().add_filter("Media", &MEDIA_EXTENSIONS).add_filter("All files", &["*"]),
+            FileDialog::PickClip { .. } | FileDialog::ImportMedia { audio_only: false } => base().add_filter("Media", &MEDIA_EXTENSIONS).add_filter("All files", &["*"]),
+            FileDialog::ImportMedia { audio_only: true } => base().add_filter("Audio", &AUDIO_EXTENSIONS).add_filter("All files", &["*"]),
             FileDialog::OpenProject => base().add_filter("Project", &["json"]),
             FileDialog::SaveProject => base().add_filter("Project", &["json"]).set_file_name("project.json"),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
         };
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
-                FileDialog::PickClip { .. } | FileDialog::OpenProject => picker.pick_file(),
+                FileDialog::PickClip { .. } | FileDialog::ImportMedia { .. } | FileDialog::OpenProject => picker.pick_file(),
                 FileDialog::SaveProject | FileDialog::Export => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
@@ -527,6 +529,10 @@ impl Session {
             Action::ProbeClip { load, track, path } => self.spawn_task("clip-probe", TaskId::Load(load), move || {
                 let result = probe_media(&path);
                 Arrival::ClipProbed { load, track, path, result }
+            }),
+            Action::ProbeMedia { load, path } => self.spawn_task("media-probe", TaskId::Load(load), move || {
+                let result = probe_media(&path);
+                Arrival::MediaProbed { load, path, result }
             }),
             Action::ReadProject { load, file } => {
                 let roots = self.package_roots.clone();

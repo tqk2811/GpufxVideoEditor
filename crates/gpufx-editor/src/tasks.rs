@@ -19,6 +19,7 @@ const OPEN_CANCELLED: &str = "The project changed while it was being read, so Op
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileDialog {
     PickClip { track: usize },
+    ImportMedia { audio_only: bool },
     OpenProject,
     SaveProject,
     Export,
@@ -41,10 +42,10 @@ pub enum Prompt {
 impl Prompt {
     pub fn question(self) -> String {
         match self {
-            Self::DiscardFor(Discard::NewProject) => "The project has unsaved changes. Start a new project anyway and lose them?".to_owned(),
-            Self::DiscardFor(Discard::OpenProject) => "The project has unsaved changes. Open another project anyway and lose them?".to_owned(),
-            Self::DiscardFor(Discard::Close) => "The project has unsaved changes. Close anyway and lose them?".to_owned(),
-            Self::CancelExportForClose => "An export is running. Cancel it and close?".to_owned(),
+            Self::DiscardFor(Discard::NewProject) => "Dự án có thay đổi chưa lưu. Vẫn tạo dự án mới và bỏ các thay đổi đó?".to_owned(),
+            Self::DiscardFor(Discard::OpenProject) => "Dự án có thay đổi chưa lưu. Vẫn mở dự án khác và bỏ các thay đổi đó?".to_owned(),
+            Self::DiscardFor(Discard::Close) => "Dự án có thay đổi chưa lưu. Vẫn đóng và bỏ các thay đổi đó?".to_owned(),
+            Self::CancelExportForClose => "Đang xuất video. Hủy xuất và đóng?".to_owned(),
         }
     }
 }
@@ -56,6 +57,7 @@ pub enum Request {
     OpenProject,
     SaveProjectAs,
     PickClip { track: usize },
+    ImportMedia { audio_only: bool },
     Export,
 }
 
@@ -74,6 +76,7 @@ pub enum Arrival {
     FilePicked { dialog: FileDialog, path: Option<PathBuf> },
     PromptAnswered { prompt: Prompt, accepted: bool },
     ClipProbed { load: u64, track: usize, path: PathBuf, result: Result<MediaProbe, String> },
+    MediaProbed { load: u64, path: PathBuf, result: Result<MediaProbe, String> },
     ProjectRead { load: u64, file: PathBuf, result: Result<Project, String> },
     /// The thread of a task panicked, so it will never deliver a result.
     TaskFailed { task: TaskId, message: String },
@@ -97,6 +100,7 @@ pub enum Action {
     ShowFileDialog(FileDialog),
     ShowPrompt(Prompt),
     ProbeClip { load: u64, track: usize, path: PathBuf },
+    ProbeMedia { load: u64, path: PathBuf },
     ReadProject { load: u64, file: PathBuf },
     SaveTo(PathBuf),
     StartExport(PathBuf),
@@ -124,6 +128,7 @@ struct Load {
 #[derive(Debug)]
 enum Finished {
     Clip { track: usize, path: PathBuf, result: Result<MediaProbe, String> },
+    Media { path: PathBuf, result: Result<MediaProbe, String> },
     Project { file: PathBuf, result: Result<Project, String>, base_revision: Option<u64> },
 }
 
@@ -199,6 +204,7 @@ impl Tasks {
             }
             Request::SaveProjectAs => self.start_dialog(FileDialog::SaveProject),
             Request::PickClip { track } => self.start_dialog(FileDialog::PickClip { track }),
+            Request::ImportMedia { audio_only } => self.start_dialog(FileDialog::ImportMedia { audio_only }),
             Request::Export => self.start_dialog(FileDialog::Export),
         }
     }
@@ -251,6 +257,10 @@ impl Tasks {
                         let load = self.start_load(state, &path, None);
                         Action::ProbeClip { load, track, path }
                     }
+                    FileDialog::ImportMedia { .. } => {
+                        let load = self.start_load(state, &path, None);
+                        Action::ProbeMedia { load, path }
+                    }
                     FileDialog::OpenProject => {
                         let base = self.open_base.take();
                         let load = self.start_load(state, &path, base);
@@ -280,6 +290,7 @@ impl Tasks {
                 }
             }
             Arrival::ClipProbed { load, track, path, result } => self.load_finished(state, load, Finished::Clip { track, path, result }),
+            Arrival::MediaProbed { load, path, result } => self.load_finished(state, load, Finished::Media { path, result }),
             Arrival::ProjectRead { load, file, result } => {
                 let base_revision = self.load.filter(|running| running.id == load).and_then(|running| running.base_revision);
                 self.load_finished(state, load, Finished::Project { file, result, base_revision })
@@ -311,7 +322,7 @@ impl Tasks {
     /// Applies a finished load once nothing is in the way: an export, a drag, or a prompt whose
     /// answer decides whether the app goes on.
     pub fn poll(&mut self, state: &mut EditorState) -> Action {
-        if state.is_exporting() || state.drag.is_some() || self.modal.is_some() {
+        if state.is_exporting() || state.drag.is_some() || state.is_live() || self.modal.is_some() {
             return Action::Nothing;
         }
         let Some(finished) = self.finished.take() else { return Action::Nothing };
@@ -321,6 +332,13 @@ impl Tasks {
             Finished::Clip { track, path, result } => {
                 match result {
                     Ok(probe) => state.add_probed_file(track, &path, &probe),
+                    Err(message) => state.report_refused(message),
+                }
+                Action::Nothing
+            }
+            Finished::Media { path, result } => {
+                match result {
+                    Ok(probe) => state.import_probed(&path, &probe),
                     Err(message) => state.report_refused(message),
                 }
                 Action::Nothing
@@ -473,6 +491,45 @@ mod tests {
         state.drag = None;
         assert_eq!(tasks.poll(&mut state), Action::Nothing);
         assert_eq!(state.project().tracks[0].clips.len(), 2);
+        assert!(tasks.is_idle());
+    }
+
+    #[test]
+    fn a_result_during_a_held_inspector_control_waits_for_the_release() {
+        let (mut tasks, mut state) = (Tasks::default(), with_tracks());
+        state.add_clip_from_file(0, Path::new("old.mp4"));
+        let load = start_load(&mut tasks, &mut state, "new.mp4");
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        state.live_gain(-3.0);
+        tasks.on_arrival(&mut state, probed(load, "new.mp4", Ok(probe(Some(5), None))));
+        assert_eq!(state.project().tracks[0].clips.len(), 1, "queued, the control holds a clip key");
+        state.commit_live();
+        tasks.poll(&mut state);
+        assert_eq!(state.project().tracks[0].clips.len(), 2);
+    }
+
+    #[test]
+    fn an_import_lists_the_file_and_adds_no_clip() {
+        let (mut tasks, mut state) = (Tasks::default(), with_tracks());
+        let dialog = FileDialog::ImportMedia { audio_only: false };
+        assert_eq!(tasks.begin(&mut state, Request::ImportMedia { audio_only: false }), Action::ShowFileDialog(dialog));
+        let Action::ProbeMedia { load, path } = tasks.on_arrival(&mut state, picked(dialog, "C:/m/a.mp4")) else { panic!("expected a probe") };
+        assert_eq!(state.loading(), Some("a.mp4"));
+        let result = Arrival::MediaProbed { load, path, result: Ok(probe(Some(5), Some(5))) };
+        assert_eq!(tasks.on_arrival(&mut state, result), Action::Nothing);
+        assert_eq!(state.library.visible(crate::media::MediaKind::Video, "").len(), 1);
+        assert!(state.project().tracks[0].clips.is_empty());
+        assert!(tasks.is_idle());
+    }
+
+    #[test]
+    fn a_failed_import_says_why_and_frees_the_slot() {
+        let (mut tasks, mut state) = (Tasks::default(), with_tracks());
+        let dialog = FileDialog::ImportMedia { audio_only: true };
+        tasks.begin(&mut state, Request::ImportMedia { audio_only: true });
+        let Action::ProbeMedia { load, path } = tasks.on_arrival(&mut state, picked(dialog, "bad.wav")) else { panic!("expected a probe") };
+        tasks.on_arrival(&mut state, Arrival::MediaProbed { load, path, result: Err("unreadable".to_owned()) });
+        assert!(matches!(state.status(), Status::Refused(message) if message == "unreadable"), "{:?}", state.status());
         assert!(tasks.is_idle());
     }
 
