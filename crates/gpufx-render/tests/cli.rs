@@ -153,3 +153,73 @@ fn a_transition_longer_than_the_clips_is_rejected() {
     );
     expect_rejected("reject-long-transition", &tracks, "track 0, transition 0: needs");
 }
+
+fn one_clip_project(source: &str) -> String {
+    invalid_project(&format!(r#"{{"clips":[{{"source":"{source}","start":0,"source_in":0,"duration":9000}}]}}"#))
+}
+
+fn render_with(project: &PathBuf, out: &PathBuf, extra: &[&PathBuf]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gpufx-render"));
+    command.arg(project).arg("--out").arg(out);
+    for hashes in extra {
+        command.arg("--hashes").arg(hashes);
+    }
+    command.output().expect("run gpufx-render")
+}
+
+fn expect_refused_and_intact(test: &str, out_of: impl Fn(&PathBuf) -> PathBuf, hashes_of: impl Fn(&PathBuf) -> Option<PathBuf>) {
+    let dir = scratch_dir(test);
+    let (clip, _) = test_clips();
+    let source = dir.join("source.mp4");
+    std::fs::copy(&clip, &source).expect("copy the clip");
+    let before = std::fs::read(&source).expect("read the source");
+    let project = write_project(&dir, &one_clip_project("source.mp4"));
+    let other = dir.join("other.mp4");
+    let _ = std::fs::remove_file(&other);
+    let hashes = hashes_of(&source);
+    let result = match &hashes {
+        Some(h) => render_with(&project, &other, &[h]),
+        None => render_with(&project, &out_of(&source), &[]),
+    };
+    assert!(!result.status.success(), "writing over a source must be refused");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("would be overwritten"), "{stderr}");
+    assert_eq!(std::fs::read(&source).expect("read the source"), before, "the source was modified");
+    assert!(!other.exists(), "nothing may be written when the arguments are refused");
+}
+
+#[test]
+fn an_output_that_is_a_source_is_refused() {
+    expect_refused_and_intact("refuse-out-source", |s| s.clone(), |_| None);
+}
+
+#[test]
+fn an_output_spelled_differently_is_still_the_source() {
+    expect_refused_and_intact("refuse-out-spelling", |s| s.parent().unwrap().join(".").join("SOURCE.MP4"), |_| None);
+}
+
+#[test]
+fn a_hash_file_that_is_a_source_is_refused() {
+    expect_refused_and_intact("refuse-hashes-source", |s| s.clone(), |s| Some(s.clone()));
+}
+
+#[test]
+fn a_failed_render_leaves_existing_outputs_untouched() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("failed-render");
+    // Passes validation (the file exists) but cannot be decoded, so the render fails after the encoder opened.
+    std::fs::write(dir.join("broken.mp4"), b"this is not a video").expect("write the broken source");
+    let project = write_project(&dir, &one_clip_project("broken.mp4"));
+    let (out, hashes) = (dir.join("existing.mp4"), dir.join("existing.txt"));
+    std::fs::write(&out, b"previous output").expect("write the existing output");
+    std::fs::write(&hashes, b"previous hashes").expect("write the existing hashes");
+    let result = render_with(&project, &out, &[&hashes]);
+    assert!(!result.status.success(), "the render must fail");
+    assert_eq!(std::fs::read(&out).expect("read the output"), b"previous output");
+    assert_eq!(std::fs::read(&hashes).expect("read the hashes"), b"previous hashes");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).expect("list the directory").flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".tmp")).collect();
+    assert!(leftovers.is_empty(), "temporary files left behind: {leftovers:?}");
+}
