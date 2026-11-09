@@ -477,7 +477,10 @@ impl Session {
         }
         let Some(file) = self.project_dialog().pick_file() else { return };
         match load_project_file(&file, &self.package_roots) {
-            Ok(project) => self.state.replace_project(project, Some(file)),
+            Ok(project) => {
+                self.state.replace_project(project, Some(file));
+                self.playback = None;
+            }
             Err(message) => self.state.report_error(message),
         }
     }
@@ -506,6 +509,7 @@ impl Session {
             UiRequest::NewProject => {
                 if self.discard_accepted("Start a new project") {
                     self.state.new_project();
+                    self.playback = None;
                 }
             }
             UiRequest::OpenProject => self.open_project(),

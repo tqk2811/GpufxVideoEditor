@@ -189,6 +189,8 @@ impl EditorState {
         self.scrub_target = None;
         self.preview_error = None;
         self.playback_message = None;
+        self.silence_ms = 0;
+        self.no_sound = None;
         self.view = TimelineView::default();
         self.drag = None;
     }
@@ -1090,6 +1092,16 @@ mod tests {
         assert_eq!(state.selection(), None);
         assert_eq!(state.playhead(), Time::ZERO);
         assert_eq!(state.project(), &opened);
+    }
+
+    #[test]
+    fn opening_a_project_clears_the_audio_notes() {
+        let mut state = state_with_clip();
+        state.set_no_sound(Some("no device".to_owned()));
+        state.set_silence_ms(40);
+        state.replace_project(default_project(), None);
+        assert_eq!(state.no_sound(), None);
+        assert_eq!(state.silence_ms(), 0);
     }
 
     #[test]
