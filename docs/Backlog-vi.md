@@ -1,5 +1,13 @@
 # Backlog
 
+### [Vừa] Cần bản FFmpeg shared GPLv3 cho win64
+
+Editor đã chọn FFmpeg GPLv3 để xuất bằng x264. Release `ffmpeg-N-128691-gcc583787bb` của tqk2811/FFmpegGpuFilter chỉ có bản LGPL. Cần asset win64 biến thể `gpl` cùng commit cc583787bb, có header và thư viện. User đồng ý tạo release ngày 2026-11-09, phiên FFmpegGpuFilter đã đóng nên yêu cầu chưa gửi được. Chặn bước test xuất x264 của `docs/plans/spec-engine-phase1-vi.md`. Ghi ngày 2026-11-09.
+
+### [Thấp] Yêu cầu API gpufx đã gửi, chưa rõ đã xử lý chưa
+
+Hai yêu cầu cho `external/FFmpegGpuFilter`: công khai `GpuContext::from_device` (`crates/gpufx-core/src/runtime.rs:267`) để app và gpufx dùng một wgpu device; cho zero-copy đọc texture lớn hơn khung (`crates/gpufx-core/src/d3d12.rs:365`) vì D3D12VA cấp 1920x1088 cho khung 1080p. Đã gửi phiên FFmpegGpuFilter, chưa có phản hồi. Ghi ngày 2026-11-09.
+
 ### [Vừa] Tua clip GOP dài vượt ngưỡng đề xuất
 
 Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 200 ms (`docs/plans/result-poc-phase0-vi.md`). Footage thật thường có GOP dài, nên giai đoạn sau cần proxy, cache hoặc giải mã trước. Ghi ngày 2026-11-09.
