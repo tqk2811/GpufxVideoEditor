@@ -225,3 +225,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/engine/src/project.rs:74,78` (`locked`, `hidden`): phiên bản project vẫn là 2 và `Track` không có `deny_unknown_fields`, nên bản dựng cũ mở project mới sẽ bỏ qua hai trường này không báo gì, rồi xuất luôn track đã ẩn. Nên tăng phiên bản project hoặc cho bản cũ từ chối trường lạ. Ghi ngày 2026-11-09.
 
+### [Thấp] `window.fullscreen()` đọc cờ ý định của winit, không phải trạng thái của hệ điều hành
+
+`crates/gpufx-editor/src/window.rs:456`: `window.fullscreen()` trả về chế độ winit được yêu cầu chứ không phải trạng thái thật của cửa sổ, nên Win+mũi tên hoặc đổi màn hình có thể để editor tin là vẫn fullscreen và các panel vẫn ẩn. Cần thử tay trên máy thật rồi mới quyết định có theo dõi trạng thái hệ điều hành hay không. Ghi ngày 2026-11-09.
+
