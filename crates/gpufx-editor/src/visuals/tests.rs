@@ -228,8 +228,28 @@ fn a_late_result_for_a_replaced_file_is_ignored() {
     let mut visuals = ClipVisuals::default();
     visuals.apply(Done::Frame { identity: 9, bucket: 0, result: Ok(ThumbnailImage { width: 1, height: 1, rgba: vec![0; 4] }) });
     assert!(visuals.tiles.is_empty());
-    visuals.apply(Done::Peaks { identity: 9, peaks: vec![0.5], finished: true });
+    visuals.apply(Done::Peaks { identity: 9, run: 0, peaks: vec![0.5], finished: true });
     assert!(visuals.peaks.is_empty());
+}
+
+#[test]
+fn a_cancelled_run_of_levels_leaves_nothing_and_the_next_starts_over() {
+    let facts = SourceFacts { has_video: false, has_audio: true, aspect: 1.0, length: None };
+    let mut visuals = ClipVisuals::default();
+    visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(1), view: SourceView::Known(facts), checked: None });
+    visuals.live_identities.insert(1);
+    visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: vec![0.1], finished: false });
+    let project = crate::editor::EditorState::default().project().clone();
+    visuals.sync_project(1, &project);
+    // The worker's last words about the run it was told to stop.
+    visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: vec![0.2], finished: false });
+    visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: Vec::new(), finished: false });
+    assert!(visuals.peaks.is_empty(), "no entry may come back, or the clip would stay without bars");
+    assert!(visuals.peaks(0).is_none());
+    assert_eq!(visuals.wanted_audio[0].key, JobKey::Peaks(1, 1), "undo asks for a new run");
+    visuals.apply(Done::Peaks { identity: 1, run: 1, peaks: vec![0.7], finished: false });
+    assert_eq!(visuals.peaks[&1].data.max_between(0, 1), 0.7, "the first bar is the start of the file");
+    visuals.end_frame();
 }
 
 #[test]
@@ -237,7 +257,7 @@ fn levels_of_a_clip_removed_from_the_project_are_dropped() {
     let mut visuals = ClipVisuals::default();
     visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(1), view: SourceView::Pending, checked: None });
     visuals.live_identities.insert(1);
-    visuals.apply(Done::Peaks { identity: 1, peaks: vec![0.1], finished: false });
+    visuals.apply(Done::Peaks { identity: 1, run: 0, peaks: vec![0.1], finished: false });
     let project = crate::editor::EditorState::default().project().clone();
     visuals.sync_project(1, &project);
     assert!(visuals.peaks.is_empty(), "the project does not use it");

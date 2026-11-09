@@ -88,6 +88,8 @@ pub struct ClipVisuals {
     live_identities: HashSet<u32>,
     tiles: TileCache<Tile>,
     peaks: HashMap<u32, PeakEntry>,
+    /// The current run of the levels of an identity; results of any other run are ignored.
+    peak_runs: HashMap<u32, u32>,
     uploads: VecDeque<TileKey>,
     wanted_frames: Vec<Job>,
     wanted_audio: Vec<Job>,
@@ -118,6 +120,7 @@ impl ClipVisuals {
             live_identities: HashSet::new(),
             tiles: TileCache::new(TILE_CACHE_ENTRIES),
             peaks: HashMap::new(),
+            peak_runs: HashMap::new(),
             uploads: VecDeque::new(),
             wanted_frames: Vec::new(),
             wanted_audio: Vec::new(),
@@ -193,9 +196,17 @@ impl ClipVisuals {
         let abandoned: Vec<u32> = self.peaks.iter().filter(|(identity, entry)| !entry.finished && !used.contains(identity)).map(|(identity, _)| *identity).collect();
         for identity in abandoned {
             self.peaks.remove(&identity);
-            if let Some(pool) = &self.pool {
-                pool.cancel_peaks(identity);
-            }
+            self.cancel_peak_run(identity);
+        }
+    }
+
+    /// Ends the current run of the levels of `identity`; asking again reads from the start.
+    fn cancel_peak_run(&mut self, identity: u32) {
+        let run = self.peak_runs.entry(identity).or_insert(0);
+        let cancelled = *run;
+        *run += 1;
+        if let Some(pool) = &self.pool {
+            pool.cancel_peaks(identity, cancelled);
         }
     }
 
@@ -281,7 +292,8 @@ impl ClipVisuals {
             return None;
         }
         if !self.peaks.contains_key(&identity) {
-            self.want(Job { key: JobKey::Peaks(identity), path: self.slots[slot].path.clone() }, false);
+            let run = self.peak_runs.get(&identity).copied().unwrap_or(0);
+            self.want(Job { key: JobKey::Peaks(identity, run), path: self.slots[slot].path.clone() }, false);
             return None;
         }
         let clock = self.clock;
@@ -295,7 +307,7 @@ impl ClipVisuals {
             return;
         }
         match job.key {
-            JobKey::Peaks(_) => self.wanted_audio.push(job),
+            JobKey::Peaks(..) => self.wanted_audio.push(job),
             _ if front => self.wanted_frames.insert(0, job),
             _ => self.wanted_frames.push(job),
         }
@@ -337,8 +349,8 @@ impl ClipVisuals {
                     Err(_) => self.tiles.insert(key, Tile::Failed),
                 }
             }
-            Done::Peaks { identity, peaks, finished } => {
-                if !self.live_identities.contains(&identity) {
+            Done::Peaks { identity, run, peaks, finished } => {
+                if !self.live_identities.contains(&identity) || self.peak_runs.get(&identity).copied().unwrap_or(0) != run {
                     return;
                 }
                 let clock = self.clock;
@@ -360,9 +372,8 @@ impl ClipVisuals {
             self.live_identities.remove(&identity);
             self.tiles.remove_source(identity);
             self.peaks.remove(&identity);
-            if let Some(pool) = &self.pool {
-                pool.cancel_peaks(identity);
-            }
+            self.cancel_peak_run(identity);
+            self.peak_runs.remove(&identity);
         }
     }
 

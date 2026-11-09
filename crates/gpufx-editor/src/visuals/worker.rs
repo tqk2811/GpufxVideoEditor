@@ -50,13 +50,14 @@ pub trait Generator: Send + Sync + 'static {
 }
 
 /// Which job is meant, for de-duplicating them. Frames and peaks name the identity the UI gave a
-/// source, so a late result for a replaced file is told apart.
+/// source, so a late result for a replaced file is told apart. Peaks also name the run, because a
+/// read starts at the beginning of the file and a cancelled one must not be taken for a new one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum JobKey {
     Stamp(u32),
     Inspect(u32),
     Frame(u32, i64),
-    Peaks(u32),
+    Peaks(u32, u32),
 }
 
 #[derive(Debug, Clone)]
@@ -71,7 +72,7 @@ pub enum Done {
     Stamp { slot: u32, stamp: Option<FileStamp> },
     Inspected { slot: u32, stamp: Option<FileStamp>, result: Result<SourceFacts, String> },
     Frame { identity: u32, bucket: i64, result: Result<ThumbnailImage, String> },
-    Peaks { identity: u32, peaks: Vec<f32>, finished: bool },
+    Peaks { identity: u32, run: u32, peaks: Vec<f32>, finished: bool },
 }
 
 #[derive(Default)]
@@ -80,7 +81,8 @@ struct Queues {
     audio: Vec<Job>,
     running: HashSet<JobKey>,
     done: Vec<Done>,
-    cancelled_peaks: HashSet<u32>,
+    /// Runs of peaks that are running and should stop: (identity, run).
+    cancelled_peaks: HashSet<(u32, u32)>,
 }
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
@@ -157,11 +159,6 @@ impl WorkerPool {
     /// Replaces the waiting jobs with `frames` and `audio`, minus what is already running.
     pub fn publish(&self, frames: Vec<Job>, audio: Vec<Job>) {
         let mut queues = self.shared.lock();
-        for job in &audio {
-            if let JobKey::Peaks(identity) = job.key {
-                queues.cancelled_peaks.remove(&identity);
-            }
-        }
         let running = std::mem::take(&mut queues.running);
         queues.frames = frames.into_iter().filter(|job| !running.contains(&job.key)).collect();
         queues.audio = audio.into_iter().filter(|job| !running.contains(&job.key)).collect();
@@ -176,9 +173,14 @@ impl WorkerPool {
         std::mem::take(&mut self.shared.lock().done)
     }
 
-    /// Stops reading levels of `identity`: its clip is gone.
-    pub fn cancel_peaks(&self, identity: u32) {
-        self.shared.lock().cancelled_peaks.insert(identity);
+    /// Stops run `run` of the levels of `identity`, waiting or running: its clip is gone.
+    pub fn cancel_peaks(&self, identity: u32, run: u32) {
+        let key = JobKey::Peaks(identity, run);
+        let mut queues = self.shared.lock();
+        queues.audio.retain(|job| job.key != key);
+        if queues.running.contains(&key) {
+            queues.cancelled_peaks.insert((identity, run));
+        }
     }
 
     /// How many jobs wait or run, for tests and the frame report.
@@ -253,6 +255,9 @@ fn run_worker<G: Generator>(shared: &Shared, generator: &G, lane: Lane) {
         };
         let mut queues = shared.lock();
         queues.running.remove(&job.key);
+        if let JobKey::Peaks(identity, run) = job.key {
+            queues.cancelled_peaks.remove(&(identity, run));
+        }
         queues.done.push(done);
         drop(queues);
         shared.wake();
@@ -290,17 +295,17 @@ fn run_job<G: Generator>(shared: &Shared, generator: &G, local: &mut G::Local, j
             let result = generator.frame(local, identity, &job.path, Time::from_ticks(bucket), &cancelled);
             Done::Frame { identity, bucket, result }
         }
-        JobKey::Peaks(identity) => {
+        JobKey::Peaks(identity, run) => {
             // What was read before an error is kept and drawn; only a cancel leaves it unfinished.
             let _ = generator.peaks(&job.path, &mut |peaks| {
-                if shared.shutdown.load(Ordering::Acquire) || shared.lock().cancelled_peaks.contains(&identity) {
+                if shared.shutdown.load(Ordering::Acquire) || shared.lock().cancelled_peaks.contains(&(identity, run)) {
                     return false;
                 }
-                shared.deliver(Done::Peaks { identity, peaks: peaks.to_vec(), finished: false });
+                shared.deliver(Done::Peaks { identity, run, peaks: peaks.to_vec(), finished: false });
                 true
             });
-            let cancelled = shared.lock().cancelled_peaks.contains(&identity);
-            Done::Peaks { identity, peaks: Vec::new(), finished: !cancelled }
+            let cancelled = shared.lock().cancelled_peaks.contains(&(identity, run));
+            Done::Peaks { identity, run, peaks: Vec::new(), finished: !cancelled }
         }
     }
 }
@@ -310,7 +315,7 @@ fn failure(job: &Job, message: &str) -> Done {
         JobKey::Stamp(slot) => Done::Stamp { slot, stamp: None },
         JobKey::Inspect(slot) => Done::Inspected { slot, stamp: None, result: Err(message.to_owned()) },
         JobKey::Frame(identity, bucket) => Done::Frame { identity, bucket, result: Err(message.to_owned()) },
-        JobKey::Peaks(identity) => Done::Peaks { identity, peaks: Vec::new(), finished: true },
+        JobKey::Peaks(identity, run) => Done::Peaks { identity, run, peaks: Vec::new(), finished: true },
     }
 }
 
@@ -459,13 +464,38 @@ mod tests {
     fn levels_of_a_removed_clip_stop_being_read() {
         let generator = Arc::new(Fake::default());
         let pool = WorkerPool::start(generator, 0, 1, None);
-        pool.publish(Vec::new(), vec![Job { key: JobKey::Peaks(3), path: Path::new("a.mp4").into() }]);
+        pool.publish(Vec::new(), vec![Job { key: JobKey::Peaks(3, 0), path: Path::new("a.mp4").into() }]);
         wait_for(|| pool.lock_for_test().done.iter().any(|d| matches!(d, Done::Peaks { .. })));
-        pool.cancel_peaks(3);
+        pool.cancel_peaks(3, 0);
         wait_for(|| pool.outstanding() == 0);
         let done = pool.take_done();
         assert!(done.iter().any(|d| matches!(d, Done::Peaks { finished: false, peaks, .. } if peaks.is_empty())), "{done:?}");
         assert!(!done.iter().any(|d| matches!(d, Done::Peaks { finished: true, .. })), "{done:?}");
+    }
+
+    #[test]
+    fn a_new_run_of_levels_starts_over_after_a_cancelled_one() {
+        let generator = Arc::new(Fake::default());
+        let pool = WorkerPool::start(generator, 0, 1, None);
+        let peaks = |run| Job { key: JobKey::Peaks(3, run), path: Path::new("a.mp4").into() };
+        pool.publish(Vec::new(), vec![peaks(0)]);
+        wait_for(|| pool.lock_for_test().done.iter().any(|d| matches!(d, Done::Peaks { run: 0, .. })));
+        pool.cancel_peaks(3, 0);
+        pool.publish(Vec::new(), vec![peaks(1)]);
+        wait_for(|| pool.lock_for_test().done.iter().any(|d| matches!(d, Done::Peaks { run: 1, .. })));
+        pool.cancel_peaks(3, 1);
+        wait_for(|| pool.outstanding() == 0);
+        assert!(pool.lock_for_test().cancelled_peaks.is_empty(), "nothing is remembered of a run that ended");
+    }
+
+    #[test]
+    fn a_waiting_run_of_levels_can_be_cancelled() {
+        let generator = Arc::new(Fake::default());
+        let pool = WorkerPool::start(generator, 0, 0, None);
+        pool.publish(Vec::new(), vec![Job { key: JobKey::Peaks(3, 0), path: Path::new("a.mp4").into() }]);
+        pool.cancel_peaks(3, 0);
+        assert_eq!(pool.outstanding(), 0);
+        assert!(pool.lock_for_test().cancelled_peaks.is_empty());
     }
 
     static RELEASED_DECODERS: AtomicU32 = AtomicU32::new(0);
