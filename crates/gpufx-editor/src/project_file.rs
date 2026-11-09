@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use d3d12_backend::{temporary_path, ProjectPaths};
+use d3d12_backend::{reserve_temporary, ProjectPaths};
 use engine::{validate, Project, Resolver};
 
 /// Names a directory holding `packages/gpufx`, for an install that keeps them elsewhere.
@@ -86,9 +86,9 @@ pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
 /// Writes `project` to `file` through a temporary file, so a failure leaves any earlier save intact.
 pub fn save_project_file(project: &Project, file: &Path) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&with_relative_sources(project, file)).map_err(|e| format!("serialising the project failed: {e}"))?;
-    let temporary = temporary_path(file);
+    let temporary = reserve_temporary(file).map_err(|e| format!("saving {} failed: {e}", file.display()))?;
     let written = (|| {
-        let mut output = std::fs::File::create(&temporary)?;
+        let mut output = std::fs::OpenOptions::new().write(true).open(&temporary)?;
         output.write_all(text.as_bytes())?;
         output.sync_all()?;
         drop(output);
@@ -178,7 +178,8 @@ mod tests {
 
         assert!(std::fs::read_to_string(&file).unwrap().contains("clips/a.mp4"), "kept readable and relative");
         assert_eq!(load_project_file(&file, &package_roots()).unwrap(), original);
-        assert!(!temporary_path(&file).exists(), "the temporary file is gone");
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|entry| entry.file_name()).collect();
+        assert_eq!(names.len(), 2, "only the project and its clips folder remain: {names:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -187,10 +188,27 @@ mod tests {
         let dir = temp_folder("failed-save");
         let file = dir.join("p.json");
         std::fs::write(&file, b"earlier").unwrap();
-        // A directory named like the temporary file blocks writing it.
-        std::fs::create_dir_all(temporary_path(&file)).unwrap();
+        let bystander = dir.join("p.tmp.json");
+        std::fs::write(&bystander, b"user data").unwrap();
+        // Opened without sharing, so the rename over it fails.
+        let lock = std::os::windows::fs::OpenOptionsExt::share_mode(&mut std::fs::OpenOptions::new(), 0).read(true).open(&file).unwrap();
         assert!(save_project_file(&project(Vec::new()), &file).is_err());
+        drop(lock);
         assert_eq!(std::fs::read(&file).unwrap(), b"earlier");
+        assert_eq!(std::fs::read(&bystander).unwrap(), b"user data");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "the reserved file is removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_leaves_a_file_with_the_temporary_look_alone() {
+        let dir = temp_folder("keep-tmp");
+        let file = dir.join("p.json");
+        let bystander = dir.join("p.tmp.json");
+        std::fs::write(&bystander, b"user data").unwrap();
+        save_project_file(&project(Vec::new()), &file).unwrap();
+        assert_eq!(std::fs::read(&bystander).unwrap(), b"user data");
+        assert!(file.is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

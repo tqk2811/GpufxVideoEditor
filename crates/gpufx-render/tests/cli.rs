@@ -368,6 +368,25 @@ fn a_hash_file_that_is_a_source_is_refused() {
 }
 
 #[test]
+fn a_failed_render_leaves_files_with_the_temporary_look_alone() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("failed-render-bystander");
+    std::fs::write(dir.join("broken.mp4"), b"this is not a video").expect("write the broken source");
+    let project = write_project(&dir, &one_clip_project("broken.mp4"));
+    let (out, hashes) = (dir.join("existing.mp4"), dir.join("existing.txt"));
+    let (out_bystander, hashes_bystander) = (dir.join("existing.tmp.mp4"), dir.join("existing.tmp.txt"));
+    std::fs::write(&out_bystander, b"user video").expect("write the file");
+    std::fs::write(&hashes_bystander, b"user text").expect("write the file");
+    let result = render_with(&project, &out, &[&hashes]);
+    assert!(!result.status.success(), "the render must fail");
+    assert_eq!(std::fs::read(&out_bystander).expect("read the file"), b"user video");
+    assert_eq!(std::fs::read(&hashes_bystander).expect("read the file"), b"user text");
+}
+
+#[test]
 fn a_failed_render_leaves_existing_outputs_untouched() {
     let _lock = gpu_lock();
     if !hardware_available() {

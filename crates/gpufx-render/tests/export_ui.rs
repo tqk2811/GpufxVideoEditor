@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use d3d12_backend::{temporary_path, EncoderChoice, ExportJob, Gpu};
+use d3d12_backend::{EncoderChoice, ExportJob, Gpu};
 use engine::{AudioOutput, Clip, Output, Project, Time, Track, TrackKind, Transition, SUPPORTED_VERSION};
 use gpufx_editor::export::{ExportOutcome, ExportWorker};
 use gpufx_editor::project_file::{load_project_file, package_roots, project_paths, save_project_file};
@@ -118,6 +118,8 @@ fn a_cancelled_export_keeps_the_old_file_and_removes_the_partial_one() {
     save_project_file(&project_with_transition_and_sound(), &file).expect("save the project");
     let out = dir.join("out.mp4");
     std::fs::write(&out, b"earlier").expect("write the earlier file");
+    let bystander = dir.join("out.tmp.mp4");
+    std::fs::write(&bystander, b"user video").expect("write the file");
 
     let mut worker = start_export(&gpu, &file, &out, None);
     let started = Instant::now();
@@ -129,5 +131,7 @@ fn a_cancelled_export_keeps_the_old_file_and_removes_the_partial_one() {
 
     assert_eq!(wait(&mut worker), ExportOutcome::Cancelled);
     assert_eq!(std::fs::read(&out).expect("read the earlier file"), b"earlier");
-    assert!(!temporary_path(&out).exists(), "the partial file is gone");
+    assert_eq!(std::fs::read(&bystander).expect("read the file"), b"user video", "a file this run did not create stays");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).expect("list the directory").flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".tmp") && n != "out.tmp.mp4").collect();
+    assert!(leftovers.is_empty(), "the partial file is gone: {leftovers:?}");
 }

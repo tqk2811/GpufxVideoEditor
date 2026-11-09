@@ -83,19 +83,29 @@ fn identity(path: &Path) -> String {
     resolved.or_else(|| std::path::absolute(path).ok()).unwrap_or_else(|| path.to_path_buf()).to_string_lossy().to_lowercase()
 }
 
-/// The sibling file a result is written to first: `movie.mp4` becomes `movie.tmp.mp4`, so the
-/// extension that picks the container is kept.
-pub fn temporary_path(target: &Path) -> PathBuf {
+/// How many names [`reserve_temporary`] tries before giving up.
+const RESERVE_ATTEMPTS: u32 = 10_000;
+
+/// Creates an empty sibling of `target` under a name no file had, and returns its path:
+/// `movie.mp4` gives `movie.<pid>-<n>.tmp.mp4`, so the extension that picks the container stays
+/// last. The file is closed again, so a writer can open it; only its creator may delete it.
+pub fn reserve_temporary(target: &Path) -> std::io::Result<PathBuf> {
     let stem = target.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let name = match target.extension() {
-        Some(extension) => format!("{stem}.tmp.{}", extension.to_string_lossy()),
-        None => format!("{stem}.tmp"),
-    };
-    target.with_file_name(name)
+    let tail = target.extension().map_or_else(|| "tmp".to_owned(), |extension| format!("tmp.{}", extension.to_string_lossy()));
+    for attempt in 0..RESERVE_ATTEMPTS {
+        let candidate = target.with_file_name(format!("{stem}.{}-{attempt}.{tail}", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("no free temporary name next to {}", target.display())))
 }
 
-/// A file written under a temporary name that replaces `target` only on [`PendingFile::commit`].
-/// Dropped without a commit, it deletes the temporary file, so a failed run leaves `target` as it was.
+/// A file written under a reserved temporary name that replaces `target` only on
+/// [`PendingFile::commit`]. Dropped without a commit, it deletes the file it reserved, so a failed
+/// run leaves `target` as it was and touches nothing it did not create.
 struct PendingFile {
     temporary: PathBuf,
     target: PathBuf,
@@ -103,8 +113,9 @@ struct PendingFile {
 }
 
 impl PendingFile {
-    fn new(target: &Path) -> Self {
-        Self { temporary: temporary_path(target), target: target.to_path_buf(), committed: false }
+    fn new(target: &Path) -> Result<Self, String> {
+        let temporary = reserve_temporary(target).map_err(|e| format!("reserving a temporary file next to {}: {e}", target.display()))?;
+        Ok(Self { temporary, target: target.to_path_buf(), committed: false })
     }
 
     /// Renames the finished temporary file over the target. Close the file first.
@@ -209,10 +220,10 @@ impl ExportJob {
             compositor.set_closing(cancel.clone());
         }
         // Declared before the sink, so they drop after it has closed its files.
-        let mut out_file = PendingFile::new(&self.out);
-        let mut hashes_file = self.hashes.as_deref().map(PendingFile::new);
+        let mut out_file = PendingFile::new(&self.out)?;
+        let mut hashes_file = self.hashes.as_deref().map(PendingFile::new).transpose()?;
         if let Some(hashes) = &hashes_file {
-            if identity(&hashes.temporary) == identity(&out_file.temporary) {
+            if identity(&hashes.target) == identity(&out_file.target) {
                 return Err("the output and the hash file name the same file".to_owned().into());
             }
         }
@@ -253,24 +264,49 @@ impl ExportJob {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_temporary_name_keeps_the_extension() {
-        assert_eq!(temporary_path(Path::new("a/movie.mp4")), PathBuf::from("a/movie.tmp.mp4"));
-        assert_eq!(temporary_path(Path::new("a/movie")), PathBuf::from("a/movie.tmp"));
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gpufx-export-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
     }
 
     #[test]
-    fn a_pending_file_dropped_without_commit_leaves_the_target() {
-        let dir = std::env::temp_dir().join(format!("gpufx-export-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn a_reserved_name_keeps_the_extension_last_and_avoids_existing_files() {
+        let dir = scratch("reserve");
+        let target = dir.join("movie.mp4");
+        let first = reserve_temporary(&target).unwrap();
+        let second = reserve_temporary(&target).unwrap();
+        assert_ne!(first, second);
+        for path in [&first, &second] {
+            assert_eq!(path.extension().unwrap(), "mp4");
+            assert!(path.is_file());
+        }
+        let without_extension = reserve_temporary(&dir.join("movie")).unwrap();
+        assert_eq!(without_extension.extension().unwrap(), "tmp");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_pending_file_dropped_without_commit_leaves_the_target_and_other_files() {
+        let dir = scratch("drop");
         let target = dir.join("out.mp4");
         std::fs::write(&target, b"old").unwrap();
+        let bystander = dir.join("out.tmp.mp4");
+        std::fs::write(&bystander, b"user").unwrap();
         {
-            let pending = PendingFile::new(&target);
+            let pending = PendingFile::new(&target).unwrap();
             std::fs::write(&pending.temporary, b"partial").unwrap();
         }
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
-        assert!(!temporary_path(&target).exists());
+        assert_eq!(std::fs::read(&bystander).unwrap(), b"user");
+        assert_eq!(file_names(&dir), ["out.mp4", "out.tmp.mp4"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
