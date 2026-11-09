@@ -107,4 +107,4 @@ Mỗi bước một commit, build và test xong mới sang bước sau.
 - `ClipKey` theo chỉ số là điểm yếu cho agent. Nếu `expected_revision` gây thử lại quá nhiều, cần chuyển sang id clip ổn định trong `engine`.
 - Chế độ file và app đang mở cùng sửa một project file sẽ ghi đè lẫn nhau. Bản đầu dùng file khoá để từ chối mở lần hai.
 - Chế độ file mở GPU riêng, nên chạy cùng app tốn thêm bộ nhớ video.
-- Độ dài clip chưa đọc được từ file nguồn. Agent cần biết độ dài thật, nên bước 1 phải thêm API đọc thời lượng, cũng giúp bỏ độ dài cố định 10 giây của giao diện.
+- Độ dài clip đọc từ file nguồn bằng `d3d12_backend::probe_media`, tách theo luồng video và audio; giao diện đã dùng nó thay cho độ dài cố định 10 giây. Agent dùng lại API này.

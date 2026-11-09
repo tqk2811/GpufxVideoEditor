@@ -94,7 +94,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Vừa] `process_d3d12` của gpufx-core poll GPU trong lúc giữ cổng submit
 
-`external/FFmpegGpuFilter/crates/gpufx-core/src/d3d12.rs:491` gọi `device.poll(Wait)` bên trong đoạn app giữ `Gpu::lock_submits` (`crates/d3d12-backend/src/compositor.rs`, `run_graph`), nên effect nặng làm UI đứng đúng bằng thời gian GPU của nó, kể cả lần `configure_surface` khi đổi kích thước cửa sổ. Cần nhờ FFmpegGpuFilter cho phép poll chạy ngoài cổng; chưa có phiên FFmpegGpuFilter nào đang mở để nhận việc. Nên làm vì scrub và resize giật theo độ nặng của effect. Ghi ngày 2026-11-09.
+`external/FFmpegGpuFilter/crates/gpufx-core/src/d3d12.rs:491` gọi `device.poll(Wait)` bên trong đoạn app giữ `Gpu::lock_submits` (`crates/d3d12-backend/src/compositor.rs`, `run_graph`), nên trong lúc đó khung UI không present được. `Presenter::render` đã dùng `try_lock_submits` nên vòng lặp không còn đứng, nhưng hình vẫn dừng: lần `process_d3d12` đầu tiên của clip mới giữ cổng 0,9 đến 1,7 giây (đo 2026-11-09, debug và opt-level 3 như nhau). Cần nhờ FFmpegGpuFilter dựng pipeline và poll ngoài cổng, hoặc có API warm-up; chưa có phiên FFmpegGpuFilter nào đang mở để nhận việc. Nên làm vì mở clip đầu tiên và effect nặng vẫn làm hình đứng. Ghi ngày 2026-11-09.
 
 ### [Thấp] Lỗi wgpu của luồng UI chỉ hiện chớp qua ở dòng preview
 
@@ -114,7 +114,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Thấp] Mở thiết bị âm thanh trên luồng UI làm khựng lần bấm Space đầu tiên
 
-`crates/gpufx-editor/src/window.rs`, `apply_transport`: `Playback::open` chạy ngay trên luồng UI. Nên làm vì mở WASAPI có thể mất đáng kể, và UI đứng trong lúc đó. Ghi ngày 2026-11-09.
+`crates/gpufx-editor/src/window.rs`, `apply_transport`: `Playback::open` chạy ngay trên luồng UI, đo được 100 đến 330 ms (2026-11-09). `cpal::Stream` của WASAPI là `Send` nên mở được trên luồng nền như các dialog. Nên làm vì lần bấm Space đầu tiên làm UI đứng trong khoảng đó. Ghi ngày 2026-11-09.
 
 ### [Thấp] Đổi thiết bị mặc định làm dừng phát kèm lỗi, kể cả lúc đang rảnh
 
