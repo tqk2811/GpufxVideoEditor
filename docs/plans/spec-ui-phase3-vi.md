@@ -1,12 +1,12 @@
 # Đặc tả giai đoạn 3: UI tối thiểu
 
-Ngày lập: 2026-11-09. Trạng thái: **đã code, chờ thao tác tay; bảng quyết định vẫn là đề xuất tạm**. Kế hoạch tổng ở [plan-video-editor-vi.md](plan-video-editor-vi.md), audio ở [spec-audio-phase2-vi.md](spec-audio-phase2-vi.md).
+Ngày lập: 2026-11-09. Trạng thái: **đã code, chờ thao tác tay**. Kế hoạch tổng ở [plan-video-editor-vi.md](plan-video-editor-vi.md), audio ở [spec-audio-phase2-vi.md](spec-audio-phase2-vi.md).
 
 Mục tiêu: một ứng dụng desktop Windows để cắt, kéo clip trên nhiều track, chọn hiệu ứng, undo, xem preview có tiếng và xuất file.
 
-## Quyết định cần chốt
+## Quyết định
 
-Các mục dưới đây là đề xuất, chỉ user chốt được.
+User đã chốt các mục dưới đây theo đề xuất ngày 2026-11-09.
 
 | Vấn đề | Đề xuất | Lý do |
 |---|---|---|

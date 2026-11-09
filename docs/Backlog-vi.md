@@ -138,7 +138,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Vừa] Export chạy trong tiến trình editor
 
-`crates/gpufx-editor/src/export.rs` chạy render ngay trong tiến trình editor (luồng `export`) trên cùng device với preview, nên device bị mất lúc export kéo sập cả editor, và preview phải tạm dừng suốt thời gian export. Nên cân nhắc chạy `gpufx-render` thành tiến trình con và lấy tiến độ qua stdout, để hai bên tách biệt. Ghi ngày 2026-11-09.
+`crates/gpufx-editor/src/export.rs` chạy render ngay trong tiến trình editor (luồng `export`) trên cùng device với preview, nên device bị mất lúc export kéo sập cả editor, và preview phải tạm dừng suốt thời gian export. User đã chốt làm: chạy `gpufx-render` thành tiến trình con và lấy tiến độ qua stdout, vì sau này có bản chạy không giao diện cho agent MCP. Ghi ngày 2026-11-09.
 
 ### [Thấp] Seek trong lúc clone project bị kẹp về điểm cuối cũ khi timeline dài ra
 
