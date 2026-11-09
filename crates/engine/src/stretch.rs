@@ -16,6 +16,10 @@
 //! and sound therefore share one mapping and cannot drift. Within [`SEARCH`] samples of that
 //! position, the grain starts where it best continues the previous grain.
 //!
+//! A grain reaching outside the source adds nothing, and the samples it would have covered are
+//! scaled back up by the window weights of the grains that do reach them, so the level holds up
+//! to the very first and last sample of the file.
+//!
 //! Every [`KEY_INTERVAL`] grains the position is the nominal one, so the alignment of any grain
 //! depends on at most [`KEY_INTERVAL`] grains before it, and a seek replays only those. Grain
 //! positions are kept between blocks, which is only memoisation: rebuilding them gives the same
@@ -41,6 +45,11 @@ const KEY_INTERVAL: i64 = 64;
 const DECIMATE: i64 = 4;
 /// Grain positions kept between blocks: the last ones a following block may still need.
 const KEPT_POSITIONS: usize = 3;
+/// Below this sum of window weights a sample is not boosted further, only tapered: there the only
+/// valid grain is itself nearly silent.
+const MIN_WEIGHT: f32 = 0.01;
+/// From this sum of window weights the sample is complete.
+const FULL_WEIGHT: f32 = 0.999;
 
 /// Where a stretched segment reads from. Equal specs produce equal audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +79,12 @@ struct ClipStretch {
     window_start: i64,
     /// Positions of the latest grains, ascending: `(grain, centre in the source)`.
     positions: VecDeque<(i64, i64)>,
+    /// The first frame past the end of the source, once a read has reached it.
+    source_end: Option<i64>,
     reference: Vec<f32>,
     candidates: Vec<f32>,
+    /// The window weights that went into each output sample.
+    weights: Vec<f32>,
 }
 
 /// The stretchers of the clips being mixed. Keep one for a whole render or playback.
@@ -98,7 +111,7 @@ impl StretchStates {
 
 impl ClipStretch {
     fn new(spec: Stretch, source: &str) -> Self {
-        Self { spec, source: source.to_owned(), window: Vec::new(), window_start: 0, positions: VecDeque::new(), reference: Vec::new(), candidates: Vec::new() }
+        Self { spec, source: source.to_owned(), window: Vec::new(), window_start: 0, positions: VecDeque::new(), source_end: None, reference: Vec::new(), candidates: Vec::new(), weights: Vec::new() }
     }
 
     fn nominal(&self, grain: i64) -> i64 {
@@ -111,6 +124,9 @@ impl ClipStretch {
         // The first grain reaching past `begin`, and the last one starting before `end`.
         let first = (begin - GRAIN / 2).div_euclid(HOP) + 1;
         let last = (end + GRAIN / 2 - 1).div_euclid(HOP);
+        let mut weights = std::mem::take(&mut self.weights);
+        weights.clear();
+        weights.resize(frames as usize, 0.0);
         for grain in first..=last {
             let centre = self.position_of(source, key, grain)?;
             let from = centre - GRAIN / 2;
@@ -121,13 +137,25 @@ impl ClipStretch {
                 if timeline < begin || timeline >= end {
                     continue;
                 }
+                let Some((left, right)) = self.valid_frame(from + i) else { continue };
                 let weight = hann(i);
-                let at = (timeline - begin) as usize * MIX_CHANNELS;
-                let (left, right) = self.frame(from + i);
+                let index = (timeline - begin) as usize;
+                let at = index * MIX_CHANNELS;
                 out[at] += left * weight;
                 out[at + 1] += right * weight;
+                weights[index] += weight;
             }
         }
+        // A grain reaching outside the source adds nothing, so the windows of the others no longer
+        // add up to one. Silence stays silence: with no valid grain the sum is zero.
+        for (frame, &total) in out.chunks_exact_mut(MIX_CHANNELS).zip(&weights) {
+            if total < FULL_WEIGHT {
+                let scale = 1.0 / total.max(MIN_WEIGHT);
+                frame[0] *= scale;
+                frame[1] *= scale;
+            }
+        }
+        self.weights = weights;
         self.trim();
         Ok(())
     }
@@ -186,10 +214,14 @@ impl ClipStretch {
         let mut candidates = std::mem::take(&mut self.candidates);
         self.mono(reference_start, points, &mut reference);
         self.mono(search_start, points + 2 * SEARCH / DECIMATE, &mut candidates);
+        // Near an end of the source the search only moves the grain further into it, so that
+        // aligning never trades away audio the grain could have read.
+        let low = (GRAIN / 2 + SEARCH - nominal).clamp(0, SEARCH);
+        let high = self.source_end.map_or(2 * SEARCH, |end| (end - GRAIN / 2 + SEARCH - nominal).clamp(SEARCH, 2 * SEARCH));
         let energy: f32 = reference.iter().map(|sample| sample * sample).sum();
         let mut best = (f32::MIN, SEARCH);
         if energy > 1e-9 {
-            for lag in 0..=2 * SEARCH / DECIMATE {
+            for lag in (low + DECIMATE - 1) / DECIMATE..=high / DECIMATE {
                 let score = correlation(&reference, &candidates[lag as usize..(lag + points) as usize]);
                 if score > best.0 {
                     best = (score, lag * DECIMATE);
@@ -198,7 +230,7 @@ impl ClipStretch {
             // A sample of the search grid is four of the mix, so look a little around it.
             let (coarse, mut refined) = (best.1, best.1);
             let mut top = f32::MIN;
-            for fine in (coarse - DECIMATE + 1).max(0)..=(coarse + DECIMATE - 1).min(2 * SEARCH) {
+            for fine in (coarse - DECIMATE + 1).max(low)..=(coarse + DECIMATE - 1).min(high) {
                 let score = self.full_rate_correlation(reference_start, search_start + fine);
                 if score > top {
                     top = score;
@@ -238,14 +270,18 @@ impl ClipStretch {
         (left + right) * 0.5
     }
 
-    /// The stereo source frame at `at`. Outside the window, which holds what the source has, it is
-    /// silence.
+    /// The stereo source frame at `at`, or silence outside what the source has.
     fn frame(&self, at: i64) -> (f32, f32) {
+        self.valid_frame(at).unwrap_or((0.0, 0.0))
+    }
+
+    /// The stereo source frame at `at`, if the source has one there.
+    fn valid_frame(&self, at: i64) -> Option<(f32, f32)> {
         let index = at.saturating_sub(self.window_start).saturating_mul(MIX_CHANNELS as i64);
-        if index < 0 || index as usize + 1 >= self.window.len() {
-            return (0.0, 0.0);
+        if index < 0 || index as usize + 1 >= self.window.len() || self.source_end.is_some_and(|end| at >= end) {
+            return None;
         }
-        (self.window[index as usize], self.window[index as usize + 1])
+        Some((self.window[index as usize], self.window[index as usize + 1]))
     }
 
     /// Makes source frames `[from, to)` available, reading forward only.
@@ -266,7 +302,12 @@ impl ClipStretch {
         }
         let at = self.window.len();
         self.window.resize(at + (to - from) as usize * MIX_CHANNELS, 0.0);
-        source.read(key, &self.source, from, &mut self.window[at..])
+        let written = source.read_counted(key, &self.source, from, &mut self.window[at..])? as i64;
+        if written < to - from {
+            let end = from + written;
+            self.source_end = Some(self.source_end.map_or(end, |known| known.min(end)));
+        }
+        Ok(())
     }
 
     /// Drops source audio no retained grain needs.

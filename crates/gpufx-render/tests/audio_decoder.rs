@@ -159,6 +159,19 @@ fn audio_that_ends_early_leaves_silence() {
 }
 
 #[test]
+fn a_read_says_how_far_the_file_reaches() {
+    for (name, path) in sources() {
+        let end = 6 * RATE;
+        let mut decoder = AudioFileDecoder::open(&path).expect("open the clip");
+        let mut out = vec![0.0f32; 2 * 7200];
+        assert_eq!(decoder.read_counted(RATE, &mut out).unwrap(), 7200, "{name}: inside the file");
+        let covered = decoder.read_counted(end - 2400, &mut out).unwrap();
+        assert!((2400..7200).contains(&covered), "{name}: at the end, {covered} frames");
+        assert_eq!(decoder.read_counted(20 * RATE, &mut out).unwrap(), 0, "{name}: far past the end");
+    }
+}
+
+#[test]
 fn reads_past_the_end_stay_silent_and_can_come_back() {
     let path = stepped_tone_clip("tone-48k-stereo.m4a", 48_000, 2, "aac");
     let mut decoder = AudioFileDecoder::open(&path).expect("open the clip");

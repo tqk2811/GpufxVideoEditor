@@ -247,8 +247,14 @@ impl AudioFileDecoder {
     /// Fills `out` with stereo frames starting at source sample `position`. Whatever the file does
     /// not cover is left as it was, so a zeroed `out` gets silence.
     pub fn read(&mut self, position: i64, out: &mut [f32]) -> Result<(), String> {
+        self.read_counted(position, out).map(|_| ())
+    }
+
+    /// Like [`AudioFileDecoder::read`], and says how many frames from the start of `out` the file
+    /// covers.
+    pub fn read_counted(&mut self, position: i64, out: &mut [f32]) -> Result<usize, String> {
         if self.stream_index.is_none() {
-            return Ok(());
+            return Ok(0);
         }
         let frames = (out.len() / CHANNELS) as i64;
         let target = position.saturating_add(self.origin);
@@ -261,8 +267,7 @@ impl AudioFileDecoder {
                 self.decode_more()?;
             }
         }
-        self.deliver(target, frames, out);
-        Ok(())
+        Ok(self.deliver(target, frames, out))
     }
 
     /// Whether a read from here on would only be silence: the stream ended and everything decoded
@@ -280,8 +285,8 @@ impl AudioFileDecoder {
     }
 
     /// Copies what is decoded of `[target, target + frames)` to `out` and forgets everything before
-    /// the end of that range.
-    fn deliver(&mut self, target: i64, frames: i64, out: &mut [f32]) {
+    /// the end of that range. Returns the frames of `out` covered, a lead of silence included.
+    fn deliver(&mut self, target: i64, frames: i64, out: &mut [f32]) -> usize {
         let available = (self.pending.len() / CHANNELS) as i64;
         let skip = (target - self.pending_start).clamp(0, available);
         let lead = (self.pending_start - target).clamp(0, frames);
@@ -292,6 +297,7 @@ impl AudioFileDecoder {
         let consumed = skip + count;
         self.pending.drain(..(consumed as usize) * CHANNELS);
         self.pending_start += consumed;
+        (lead + count) as usize
     }
 
     /// Restarts decoding so that the decoded audio covers `target`, or starts at the first audio
@@ -504,6 +510,10 @@ impl AudioFiles {
 
 impl AudioSource for AudioFiles {
     fn read(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        self.read_counted(key, source, position, out).map(|_| ())
+    }
+
+    fn read_counted(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<usize, RenderError> {
         self.uses += 1;
         // Edits renumber clips, so a key can come back naming another file.
         if self.open.get(&key).is_some_and(|(_, _, opened)| opened != source) {
@@ -520,7 +530,7 @@ impl AudioSource for AudioFiles {
         }
         let (decoder, used, _) = self.open.get_mut(&key).expect("inserted above");
         *used = self.uses;
-        decoder.read(position, out).map_err(|e| RenderError(format!("{}: {e}", decoder.path)))
+        decoder.read_counted(position, out).map_err(|e| RenderError(format!("{}: {e}", decoder.path)))
     }
 }
 

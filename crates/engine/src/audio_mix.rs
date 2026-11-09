@@ -21,6 +21,21 @@ pub trait AudioSource {
         position: i64,
         out: &mut [f32],
     ) -> Result<(), RenderError>;
+
+    /// Like [`AudioSource::read`], and also says how many frames from the start of `out` the file
+    /// covers. Fewer than asked means the source ended there; the time stretcher uses it to tell
+    /// the end of a file from audio that is merely silent. A source without that knowledge claims
+    /// them all.
+    fn read_counted(
+        &mut self,
+        key: ClipKey,
+        source: &str,
+        position: i64,
+        out: &mut [f32],
+    ) -> Result<usize, RenderError> {
+        self.read(key, source, position, out)?;
+        Ok(out.len() / MIX_CHANNELS)
+    }
 }
 
 /// What happened during one mix.

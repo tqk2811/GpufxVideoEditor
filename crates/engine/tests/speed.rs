@@ -333,6 +333,72 @@ fn small_blocks_across_key_grains_never_read_backwards() {
     }
 }
 
+/// A tone of `length` samples that says where it ends, as a real file does.
+struct EndingTone {
+    hz: f64,
+    length: i64,
+    level: f32,
+}
+
+impl AudioSource for EndingTone {
+    fn read(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        self.read_counted(key, source, position, out).map(|_| ())
+    }
+
+    fn read_counted(&mut self, _key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<usize, RenderError> {
+        let written = (self.length - position).clamp(0, out.len() as i64 / 2) as usize;
+        for (i, frame) in out.chunks_exact_mut(2).take(written).enumerate() {
+            let sample = (2.0 * std::f64::consts::PI * self.hz * (position + i as i64) as f64 / 48_000.0).sin() as f32 * self.level;
+            frame[0] = sample;
+            frame[1] = sample;
+        }
+        Ok(written)
+    }
+}
+
+fn timeline_samples(ticks: i64) -> usize {
+    engine::sample_position(t(ticks)) as usize
+}
+
+/// The lowest RMS of the consecutive windows of `size` frames over `samples`.
+fn lowest_window(samples: &[f32], size: usize) -> f32 {
+    samples.chunks(size * 2).map(rms).fold(f32::MAX, f32::min)
+}
+
+/// A whole file slowed down is the default case: the level must reach the first and last sample,
+/// where grains read outside the file.
+#[test]
+fn the_level_holds_up_to_the_very_first_and_last_sample_of_the_file() {
+    for speed in [0.1f64, 0.5] {
+        for hz in [235.0, 440.0, 1000.0] {
+            let length = 2 * 48_000;
+            let duration = (2.0 * SECOND as f64 / speed).round() as i64;
+            let project = project_of(vec![sped_clip(0, 0, duration, speed)]);
+            let frames = timeline_samples(duration);
+            let mut out = vec![0.0f32; frames * 2];
+            mix_audio(&project, &mut EndingTone { hz, length, level: 0.5 }, 0, &mut out).unwrap();
+            let head = lowest_window(&out[..4096 * 2], 256);
+            let tail = lowest_window(&out[(frames - 4096) * 2..], 256);
+            assert!(head > 0.2, "{speed}x {hz} Hz: start of the file, rms {head}");
+            assert!(tail > 0.2, "{speed}x {hz} Hz: end of the file, rms {tail}");
+        }
+    }
+}
+
+#[test]
+fn past_the_end_of_the_file_is_silent_and_a_silent_file_stays_silent() {
+    let length = 48_000;
+    // One source second at half speed, but a clip twice as long: its second half has no audio.
+    let project = project_of(vec![sped_clip(0, 0, 4 * SECOND, 0.5)]);
+    let frames = 4 * 48_000;
+    let mut out = vec![0.0f32; frames * 2];
+    mix_audio(&project, &mut EndingTone { hz: 440.0, length, level: 0.5 }, 0, &mut out).unwrap();
+    assert!(rms(&out[(2 * 48_000 + 4096) * 2..]) == 0.0, "nothing is boosted out of the void");
+    let mut silent = vec![1.0f32; frames * 2];
+    mix_audio(&project, &mut EndingTone { hz: 440.0, length: 4 * 48_000, level: 0.0 }, 0, &mut silent).unwrap();
+    assert!(silent.iter().all(|sample| *sample == 0.0), "digital silence is not boosted");
+}
+
 fn long_mix(project: &Project, hz: f64, frames: usize, block: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; frames * 2];
     let mut states = StretchStates::default();
