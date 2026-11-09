@@ -130,6 +130,22 @@ pub struct PickerState {
     pub selected: Option<String>,
 }
 
+impl PickerState {
+    /// Shows `kind`'s list. A selection belongs to the list it was made in.
+    pub fn set_kind(&mut self, kind: PackageKind) {
+        if self.kind != kind {
+            self.kind = kind;
+            self.selected = None;
+        }
+    }
+
+    /// The selection, if it is one of the entries now listed.
+    pub fn addable(&self, catalog: &Catalog) -> Option<String> {
+        let selected = self.selected.as_ref()?;
+        filter_entries(catalog.entries(self.kind), &self.filter).into_iter().any(|entry| entry.package == *selected).then(|| selected.clone())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +226,37 @@ mod tests {
         assert!(catalog.transitions.iter().any(|entry| short_name(&entry.package) == "mix"), "{} transitions", catalog.transitions.len());
         assert!(catalog.effects.len() + catalog.transitions.len() > 150, "the list must need its scroll bar");
         assert!(catalog.effects.iter().chain(&catalog.transitions).all(|entry| entry.package.starts_with("packages/gpufx/")));
+    }
+
+    fn picker_catalog() -> Catalog {
+        let entry = |package: &str, name: &str, kind| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind };
+        Catalog {
+            loaded: true,
+            effects: vec![entry("packages/gpufx/a/blur", "Blur", PackageKind::Effect)],
+            transitions: vec![entry("packages/gpufx/a/mix", "Mix", PackageKind::Transition)],
+            problems: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn changing_the_tab_drops_the_selection() {
+        let mut picker = PickerState { selected: Some("packages/gpufx/a/blur".to_owned()), ..PickerState::default() };
+        picker.set_kind(PackageKind::Effect);
+        assert_eq!(picker.selected.as_deref(), Some("packages/gpufx/a/blur"), "the tab did not change");
+        picker.set_kind(PackageKind::Transition);
+        assert_eq!(picker.selected, None);
+    }
+
+    #[test]
+    fn only_a_listed_entry_of_the_current_kind_can_be_added() {
+        let catalog = picker_catalog();
+        let mut picker = PickerState { selected: Some("packages/gpufx/a/blur".to_owned()), ..PickerState::default() };
+        assert_eq!(picker.addable(&catalog).as_deref(), Some("packages/gpufx/a/blur"));
+        picker.kind = PackageKind::Transition;
+        assert_eq!(picker.addable(&catalog), None, "an effect cannot be added as a transition");
+        picker.kind = PackageKind::Effect;
+        picker.filter = "mix".to_owned();
+        assert_eq!(picker.addable(&catalog), None, "a package hidden by the filter cannot be added");
     }
 
     #[test]

@@ -176,8 +176,11 @@ fn encoder_combo(ui: &mut egui::Ui, state: &mut EditorState) {
 /// The effect and transition lists with their filter, then what the selected clip already has.
 fn picker(ui: &mut egui::Ui, state: &mut EditorState) {
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut state.picker.kind, PackageKind::Effect, "Effects");
-        ui.selectable_value(&mut state.picker.kind, PackageKind::Transition, "Transitions");
+        for (kind, label) in [(PackageKind::Effect, "Effects"), (PackageKind::Transition, "Transitions")] {
+            if ui.selectable_label(state.picker.kind == kind, label).clicked() {
+                state.picker.set_kind(kind);
+            }
+        }
     });
     ui.add(egui::TextEdit::singleline(&mut state.picker.filter).hint_text("Filter"));
     if !state.catalog.loaded {
@@ -186,7 +189,7 @@ fn picker(ui: &mut egui::Ui, state: &mut EditorState) {
         ui.colored_label(REFUSED, format!("No packages were found. Set {}.", crate::project_file::PACKAGE_ROOT_VARIABLE));
     }
     picker_list(ui, state);
-    let selected = state.picker.selected.clone();
+    let selected = state.picker.addable(&state.catalog);
     if ui.add_enabled(selected.is_some(), egui::Button::new("Add to the selected clip")).clicked() {
         if let Some(package) = &selected {
             add_package(state, package);
