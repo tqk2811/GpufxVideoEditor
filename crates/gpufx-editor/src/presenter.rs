@@ -101,6 +101,7 @@ impl Presenter {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(SURFACE_RETRY),
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                surface_loss_error(gpu.device_lost())?;
                 // On failure the status repeats and this runs again on the retry.
                 let _ = gpu.configure_surface(&self.surface, &self.config);
                 return Ok(SURFACE_RETRY);
@@ -168,6 +169,12 @@ impl Presenter {
     }
 }
 
+/// The error for a surface that cannot be acquired on a lost device. Reconfiguring cannot help then,
+/// and retrying forever would freeze the window without saying why.
+fn surface_loss_error(device_lost: Option<String>) -> Result<(), String> {
+    device_lost.map_or(Ok(()), |message| Err(format!("the GPU device was lost: {message}")))
+}
+
 /// Runs `configure` with `config` at the new size and records that size only when it succeeded.
 fn apply_resize(config: &mut wgpu::SurfaceConfiguration, width: u32, height: u32, configure: impl FnOnce(&wgpu::SurfaceConfiguration) -> Result<(), String>) -> Result<(), String> {
     let wanted = wgpu::SurfaceConfiguration { width, height, ..config.clone() };
@@ -192,6 +199,17 @@ mod tests {
             view_formats: Vec::new(),
             color_space: wgpu::SurfaceColorSpace::Auto,
         }
+    }
+
+    #[test]
+    fn a_surface_on_a_lost_device_is_an_error_naming_the_reason() {
+        let error = surface_loss_error(Some("Destroyed: removed".to_owned())).unwrap_err();
+        assert!(error.contains("device was lost") && error.contains("removed"), "{error}");
+    }
+
+    #[test]
+    fn a_surface_on_a_live_device_is_retried() {
+        assert_eq!(surface_loss_error(None), Ok(()));
     }
 
     #[test]
