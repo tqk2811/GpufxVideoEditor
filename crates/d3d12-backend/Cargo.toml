@@ -1,0 +1,26 @@
+[package]
+name = "d3d12-backend"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Windows only: D3D12VA decoding, gpufx on a shared D3D12 device and libav encoding.
+# Kept out of `engine` so the project model and the scheduler stay free of GPU and FFmpeg code.
+
+[dependencies]
+engine = { path = "../engine" }
+serde_json = "1"
+pollster = "0.4"
+gpufx-core = { path = "../../external/FFmpegGpuFilter/crates/gpufx-core" }
+# Must stay the wgpu major version gpufx-core uses (30).
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
+
+[target.'cfg(windows)'.dependencies]
+# Same major version as wgpu-hal's DX12 backend, so its ID3D12Device type is ours too.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_LibraryLoader",
+] }

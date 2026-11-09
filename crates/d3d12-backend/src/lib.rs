@@ -1,0 +1,22 @@
+//! The Windows render backend: D3D12VA decoding, gpufx compositing on one shared D3D12 device, and
+//! libav encoding. It implements the traits in `engine::render`; nothing here touches the project
+//! model or the scheduler.
+//!
+//! Rendering is single threaded. `process_d3d12` and every `queue.submit` run on the calling
+//! thread, so no submit can overlap `process_d3d12`, which is the contract of
+//! `GpuContext::from_device` for one queue.
+
+#![cfg(windows)]
+
+mod compositor;
+mod decoder;
+mod encoder;
+mod ffi;
+mod gpu;
+mod paths;
+
+pub use compositor::D3d12Compositor;
+pub use decoder::{DecodedFrame, SequentialDecoder};
+pub use encoder::{EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
+pub use gpu::Gpu;
+pub use paths::ProjectPaths;

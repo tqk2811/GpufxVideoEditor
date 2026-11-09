@@ -456,6 +456,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "d3d12-backend"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "gpufx-core",
+ "pollster",
+ "serde_json",
+ "wgpu",
+ "windows",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -900,6 +912,15 @@ dependencies = [
  "wgpu",
  "windows",
  "zip",
+]
+
+[[package]]
+name = "gpufx-render"
+version = "0.1.0"
+dependencies = [
+ "d3d12-backend",
+ "engine",
+ "sha2",
 ]
 
 [[package]]

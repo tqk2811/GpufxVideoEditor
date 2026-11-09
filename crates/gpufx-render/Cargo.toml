@@ -1,0 +1,10 @@
+[package]
+name = "gpufx-render"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+engine = { path = "../engine" }
+d3d12-backend = { path = "../d3d12-backend" }
+sha2 = "0.10"

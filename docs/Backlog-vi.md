@@ -20,6 +20,26 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 
 Debug layer báo #1334 (CopyTextureRegion trên COPY list) 24 lần. Số lần khớp bước đọc ngược pixel `av_hwframe_transfer_data` trong kiểm tra, nhưng chưa cô lập (`POC_D3D12_DEBUG=1`). Ghi ngày 2026-11-09.
 
-### [Thấp] Benchmark chưa kiểm hết tính đúng của ảnh và chưa có test tự động
+### [Thấp] Benchmark POC chưa kiểm hết tính đúng của ảnh
 
-Blend chỉ kiểm ở 3 vị trí tua, ma trận màu lấy cùng nguồn với gpufx, khung lúc phát chưa kiểm, player chưa thao tác bằng tay. Workspace chưa có bộ test nên bản sửa đồng bộ chưa có test hồi quy; nên dựng ở giai đoạn 1 (`crates/poc/src/mix_bench.rs`). Ghi ngày 2026-11-09.
+Blend của `crates/poc/src/mix_bench.rs` chỉ kiểm ở 3 vị trí tua, ma trận màu lấy cùng nguồn với gpufx, khung lúc phát chưa kiểm, player chưa thao tác bằng tay. Bộ test tự động của engine đã có (`crates/gpufx-render/tests/`), nhưng không có test nào chứng minh được việc chờ decoder (`wait_idle`) thật sự chặn đúng lỗi tham chiếu đồng thời: bỏ nó đi thì test có thể vẫn xanh, vì lỗi loại này không lộ thành sai ảnh ổn định. Ghi ngày 2026-11-09.
+
+### [Vừa] Encoder phần cứng h264_d3d12va chưa dùng được
+
+`crates/d3d12-backend/src/encoder.rs` chỉ gửi khung NV12 CPU. `h264_d3d12va` đòi `AV_PIX_FMT_D3D12`, nên hiện báo lỗi `Invalid argument`; `libopenh264` đòi `yuv420p` nên cũng không mở được. Hai encoder này có trong FFmpeg LGPL; muốn dùng cần upload khung lên hw frames context và thêm nhánh `yuv420p`. Ghi ngày 2026-11-09.
+
+### [Vừa] Bộ giải mã chưa xử lý nguồn đổi kích thước giữa chừng và nguồn 10-bit
+
+`crates/d3d12-backend/src/decoder.rs` từ chối mọi nguồn không phải NV12 8-bit (P010/10-bit). Kích thước khung coi như không đổi suốt một clip; nguồn đổi độ phân giải giữa file chưa có bài test và chưa xử lý. Ghi ngày 2026-11-09.
+
+### [Thấp] Đưa clip về kích thước project đang kéo giãn, downscale chỉ bilinear
+
+Package `scale` của `crates/d3d12-backend/src/compositor.rs` kéo giãn thẳng theo kích thước project, không giữ tỉ lệ và không có bộ lọc chất lượng cao hơn bilinear khi thu nhỏ mạnh (4K về 1080p). Cần chốt cách fit/fill ở giai đoạn sau và xem xét mipmap hoặc bicubic. Ghi ngày 2026-11-09.
+
+### [Thấp] Layer dưới cùng chưa ghép lên nền đen
+
+`crates/engine/src/render.rs` dùng thẳng ảnh của layer dưới cùng làm canvas. Nếu effect của layer đó tạo alpha nhỏ hơn 1 thì kết quả giữ alpha đó (encoder bỏ alpha). Hiện mọi nguồn là opaque nên chưa lộ. Ghi ngày 2026-11-09.
+
+### [Thấp] Hiệu năng render còn chờ CPU theo từng khung
+
+`D3d12Compositor::read` đọc ngược mỗi khung và chờ CPU, hash SHA-256 và NV12 chạy trên CPU; 1080p bản debug khoảng 6 khung/giây. Chưa đo bản release, chưa dùng đồng bộ GPU cho đường encode. Ghi ngày 2026-11-09.
