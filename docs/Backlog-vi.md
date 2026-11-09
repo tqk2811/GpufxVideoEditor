@@ -115,3 +115,19 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Tua qua ranh giới clip đóng decoder
 
 `crates/engine/src/render.rs:342`: `retain` đóng decoder của clip không dùng ở frame hiện tại, nên tua qua lại giữa hai clip phải mở lại file và decode lại từ keyframe. Nên làm vì scrub qua điểm nối bị khựng. Ghi ngày 2026-11-09.
+
+### [Thấp] Thiết bị không phải 48 kHz F32 bị từ chối, chưa có resample
+
+`crates/gpufx-editor/src/playback/plan.rs`, `choose_format`: thiết bị không có 48 kHz float thì không phát tiếng, chỉ chạy đồng hồ bằng timer và báo lý do ở thanh trạng thái. Nên làm vì máy dùng mix format 44,1 kHz hoặc 24-bit sẽ không nghe được gì. Ghi ngày 2026-11-09.
+
+### [Thấp] Mở thiết bị âm thanh trên luồng UI làm khựng lần bấm Space đầu tiên
+
+`crates/gpufx-editor/src/window.rs`, `apply_transport`: `Playback::open` chạy ngay trên luồng UI. Nên làm vì mở WASAPI có thể mất đáng kể, và UI đứng trong lúc đó. Ghi ngày 2026-11-09.
+
+### [Thấp] Đổi thiết bị mặc định làm dừng phát kèm lỗi, kể cả lúc đang rảnh
+
+`crates/gpufx-editor/src/playback/device.rs`, error callback của stream: thiết bị mặc định đổi thì stream báo lỗi, `Playback` bị bỏ và thanh trạng thái hiện lỗi dù đang không phát. Nên làm vì cắm tai nghe là thao tác thường ngày, không phải lỗi. Ghi ngày 2026-11-09.
+
+### [Thấp] Seek không có prefill, decoder nguội có thể gây giật
+
+`crates/gpufx-editor/src/playback/thread.rs`, `PreparingThread::seek`: gate vẫn mở khi seek, nên decoder nguội phải đuổi kịp trong lúc đang phát. Bài `measure_silence_with_a_slow_source` chỉ đo bằng nguồn giả; cần nghe thử trên media thật để quyết định có cần đóng gate tới khi đủ lead không. Ghi ngày 2026-11-09.
