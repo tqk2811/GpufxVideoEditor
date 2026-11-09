@@ -168,6 +168,8 @@ pub enum Message {
     ExportToolMissing(String),
     /// The renderer ended without a result.
     ExportChildCrashed { code: String, stderr: String },
+    /// The renderer beside the editor speaks another version of the progress protocol.
+    ExportRendererMismatch,
     EncoderAuto,
     EncoderNeedsGpl(String),
     EncoderMissing(String),

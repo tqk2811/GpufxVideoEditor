@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use d3d12_backend::{ExportReport, ProgressEvent};
+use d3d12_backend::{ExportReport, ProgressEvent, PROGRESS_PROTOCOL};
 
 use crate::i18n::Message;
 
@@ -20,24 +20,33 @@ pub struct ChildMachine {
     reserved: Vec<PathBuf>,
     /// Only the first end counts.
     end: Option<ProgressEvent>,
-    malformed: u64,
+    /// The child said `started`, so it understood the command line.
+    started: bool,
+    /// The child speaks another protocol version.
+    mismatched: bool,
     frames: i64,
 }
 
+/// What a `gpufx-render` older than the progress protocol prints for the flag it does not know.
+const OLD_RENDERER_USAGE: &str = "unknown argument --progress";
+
 impl ChildMachine {
-    /// Takes one line of stdout. Anything that is not an event is counted and otherwise ignored.
+    /// Takes one line of stdout. Anything that is not an event is ignored.
     pub fn take_line(&mut self, line: &[u8]) {
-        match std::str::from_utf8(line).ok().and_then(ProgressEvent::parse) {
-            Some(event) => self.take_event(event),
-            None => self.malformed += 1,
+        if let Some(event) = std::str::from_utf8(line).ok().and_then(ProgressEvent::parse) {
+            self.take_event(event);
         }
     }
 
     fn take_event(&mut self, event: ProgressEvent) {
-        if self.end.is_some() {
+        if self.end.is_some() || self.mismatched {
             return;
         }
         match event {
+            ProgressEvent::Started { protocol, .. } => {
+                self.started = true;
+                self.mismatched = protocol != PROGRESS_PROTOCOL;
+            }
             ProgressEvent::OutputReserved { path } => self.reserved.push(PathBuf::from(path)),
             ProgressEvent::Progress { frame, .. } => self.frames = frame,
             event if event.is_terminal() => self.end = Some(event),
@@ -50,17 +59,21 @@ impl ChildMachine {
         self.end.is_some()
     }
 
-    pub fn frames(&self) -> i64 {
-        self.frames
+    /// Whether the child speaks another protocol version, so nothing it says can be trusted.
+    pub fn mismatched(&self) -> bool {
+        self.mismatched
     }
 
-    pub fn malformed(&self) -> u64 {
-        self.malformed
+    pub fn frames(&self) -> i64 {
+        self.frames
     }
 
     /// The outcome once the child is gone, and the files that are now the caller's to remove.
     /// After an end the child has dealt with its own files, and may have kept a finished one.
     pub fn finish(self, cancel_requested: bool, exit_code: Option<i32>, stderr_tail: &str) -> (ExportOutcome, Vec<PathBuf>) {
+        if self.mismatched || (self.end.is_none() && !self.started && stderr_tail.contains(OLD_RENDERER_USAGE)) {
+            return (ExportOutcome::Failed(Message::ExportRendererMismatch), self.reserved);
+        }
         match self.end {
             Some(ProgressEvent::Finished { report }) => (ExportOutcome::Finished(report), Vec::new()),
             Some(ProgressEvent::Error { message }) => (ExportOutcome::Failed(Message::ExportFailed(message)), Vec::new()),
@@ -89,7 +102,6 @@ pub fn is_own_partial(path: &Path, outputs: &[&Path]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use d3d12_backend::PROGRESS_PROTOCOL;
 
     fn report() -> ExportReport {
         ExportReport { encoder: "x".into(), frames: 3, audio_samples: 0, clamped_samples: 0, pcm_sha256: None }
@@ -114,13 +126,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_lines_are_counted_and_do_not_stop_the_run() {
+    fn malformed_lines_do_not_stop_the_run() {
         let mut machine = ChildMachine::default();
         for line in [&b"gpu: x"[..], b"{", b"\xff\xfe", br#"{"event":"unknown"}"#] {
             machine.take_line(line);
         }
         feed(&mut machine, &[ProgressEvent::Finished { report: report() }]);
-        assert_eq!(machine.malformed(), 4);
         assert!(matches!(machine.finish(false, Some(0), "").0, ExportOutcome::Finished(_)));
     }
 
@@ -167,6 +178,27 @@ mod tests {
         let mut machine = ChildMachine::default();
         feed(&mut machine, &[ProgressEvent::Cancelled, ProgressEvent::Error { message: "late".into() }, reserved("late.tmp.mp4")]);
         assert_eq!(machine.finish(false, Some(1), ""), (ExportOutcome::Cancelled, Vec::new()));
+    }
+
+    #[test]
+    fn another_protocol_version_is_refused_whatever_it_says_next() {
+        let mut machine = ChildMachine::default();
+        feed(&mut machine, &[ProgressEvent::Started { protocol: PROGRESS_PROTOCOL + 1, adapter: "a".into(), total: 3, out: "o".into() }, ProgressEvent::Finished { report: report() }]);
+        assert!(machine.mismatched());
+        assert_eq!(machine.finish(false, Some(0), "").0, ExportOutcome::Failed(Message::ExportRendererMismatch));
+    }
+
+    #[test]
+    fn the_same_protocol_version_is_accepted() {
+        let mut machine = ChildMachine::default();
+        feed(&mut machine, &[ProgressEvent::Started { protocol: PROGRESS_PROTOCOL, adapter: "a".into(), total: 3, out: "o".into() }]);
+        assert!(!machine.mismatched());
+    }
+
+    #[test]
+    fn a_renderer_without_the_flag_is_asked_to_match() {
+        let tail = "unknown argument --progress\nusage: gpufx-render ...\n";
+        assert_eq!(ChildMachine::default().finish(false, Some(1), tail).0, ExportOutcome::Failed(Message::ExportRendererMismatch));
     }
 
     #[test]

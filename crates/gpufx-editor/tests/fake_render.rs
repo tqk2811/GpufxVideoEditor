@@ -100,6 +100,12 @@ fn main() {
             let partial = reserve(&out);
             finish(&partial, &out);
         }
+        "stale" => {
+            say(r#"{"event":"started","protocol":99,"adapter":"fake","total":3,"out":"o"}"#);
+            loop {
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        }
         "silent" => {}
         "error" => {
             let _partial = reserve(&out);

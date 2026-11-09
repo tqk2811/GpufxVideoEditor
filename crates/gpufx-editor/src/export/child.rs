@@ -255,7 +255,7 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
             gone_at = Some(Instant::now());
         }
         let overdue = |since: Option<Instant>| since.is_some_and(|at| at.elapsed() >= grace);
-        if gone_at.is_none() && (overdue(cancel_sent) || overdue(ended_at)) {
+        if gone_at.is_none() && (machine.mismatched() || overdue(cancel_sent) || overdue(ended_at)) {
             let _ = child.kill();
             gone_at = Some(Instant::now());
         }
@@ -552,6 +552,13 @@ mod tests {
             assert!(started.elapsed() < Duration::from_secs(10), "the child outlived its job");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn a_renderer_of_another_protocol_is_stopped_and_refused() {
+        let dir = scratch("stale");
+        let job = job(&dir, "stale");
+        assert_eq!(within(Duration::from_secs(20), move || run(&job, false, SHORT_GRACE)), ExportOutcome::Failed(Message::ExportRendererMismatch));
     }
 
     /// `work` on a thread, failing the test rather than hanging it.
