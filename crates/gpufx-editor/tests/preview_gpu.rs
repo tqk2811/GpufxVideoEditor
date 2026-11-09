@@ -4,9 +4,12 @@
 #![cfg(windows)]
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
-use d3d12_backend::Gpu;
+use d3d12_backend::{is_cancelled, Gpu, SequentialDecoder};
+use engine::render::Decoder;
 use engine::{Clip, Output, Project, Time, Track, TrackKind, SUPPORTED_VERSION};
 use gpufx_editor::preview::backend::{D3d12Producer, PreviewRequest};
 use gpufx_editor::preview::worker::{FrameProducer, ProduceError};
@@ -48,8 +51,99 @@ fn request(project: &Arc<Project>, frame: i64) -> PreviewRequest {
     PreviewRequest { revision: 0, project: project.clone(), frame }
 }
 
+/// One test at a time on the GPU.
+fn gpu_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// 30 fps, as every clip of test-clips: the time of `frame` in the source.
+fn at_frame(frame: i64) -> Time {
+    Time::from_ticks(frame * 3000)
+}
+
+/// Frames in each of the test clips.
+const FRAMES: i64 = 600;
+
+/// The timestamp of each frame, from decoding forward without a jump.
+fn sequential_pts(source: &Path, gpu: &Gpu) -> Vec<i64> {
+    let mut decoder = SequentialDecoder::open(source, gpu.raw_device()).expect("open the clip");
+    (0..FRAMES).map(|frame| decoder.frame_at(at_frame(frame)).expect("frame").pts).collect()
+}
+
+fn source_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(clip(name, Time::ZERO).source)
+}
+
+#[test]
+fn a_decoder_gives_the_same_frames_after_backward_and_far_forward_jumps() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    // gop250-a has keyframes 8.3 s apart, more than the forward seek threshold.
+    for name in ["clip-a.mp4", "gop250-a.mp4"] {
+        let source = source_path(name);
+        let expected = sequential_pts(&source, &gpu);
+        let mut decoder = SequentialDecoder::open(&source, gpu.raw_device()).expect("open the clip");
+        for frame in [0, 10, 300, 120, 5, 400, 405, 340, 599, 200, 280, FRAMES + 5000, 0, 590] {
+            let pts = decoder.frame_at(at_frame(frame)).expect("frame").pts;
+            let wanted = expected[frame.min(FRAMES - 1) as usize];
+            assert_eq!(pts, wanted, "{name}: frame {frame} after the jumps before it");
+        }
+    }
+}
+
+#[test]
+fn a_cancelled_decode_leaves_the_decoder_usable() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let source = source_path("gop250-a.mp4");
+    let expected = sequential_pts(&source, &gpu);
+    let mut decoder = SequentialDecoder::open(&source, gpu.raw_device()).expect("open the clip");
+    let abort = Arc::new(AtomicBool::new(false));
+    decoder.set_abort(abort.clone(), Duration::ZERO);
+
+    let frame = |decoder: &mut SequentialDecoder, frame: i64| decoder.frame_at(at_frame(frame)).map(|f| f.pts);
+    assert_eq!(frame(&mut decoder, 30).expect("frame 30"), expected[30]);
+
+    abort.store(true, Ordering::SeqCst);
+    let error = frame(&mut decoder, 400).expect_err("the flag stops the decode");
+    assert!(is_cancelled(&error.0), "{}", error.0);
+    // The flag has cleared again: a backward request after the cancelled forward jump.
+    abort.store(false, Ordering::SeqCst);
+    assert_eq!(frame(&mut decoder, 5).expect("frame 5"), expected[5]);
+    assert_eq!(frame(&mut decoder, 400).expect("frame 400"), expected[400]);
+}
+
+#[test]
+fn a_producer_shows_the_right_picture_after_scrubbing_and_jumping() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let seconds = Time::from_seconds(15).unwrap();
+    let project = project(vec![clip("gop250-a.mp4", seconds)]);
+
+    let mut walking = D3d12Producer::new(gpu.clone());
+    let mut wanted = std::collections::HashMap::new();
+    for frame in 0..=320 {
+        let image = walking.produce(&request(&project, frame)).expect("frame").expect("a picture");
+        if matches!(frame, 200 | 320) {
+            wanted.insert(frame, image.image.read_rgba(&gpu).expect("read"));
+        }
+        walking.recycle(image);
+    }
+
+    let mut jumping = D3d12Producer::new(gpu.clone());
+    for frame in [5, 320, 200] {
+        let image = jumping.produce(&request(&project, frame)).expect("frame").expect("a picture");
+        if let Some(rgba) = wanted.get(&frame) {
+            assert_eq!(&image.image.read_rgba(&gpu).expect("read"), rgba, "frame {frame} after jumping");
+        }
+        jumping.recycle(image);
+    }
+}
+
 #[test]
 fn frames_errors_edits_and_blanks_through_one_producer() {
+    let _lock = gpu_lock();
     let Some(gpu) = hardware_gpu() else { return };
     let mut producer = D3d12Producer::new(gpu.clone());
     let seconds = Time::from_seconds(3).unwrap();
