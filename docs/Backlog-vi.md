@@ -229,3 +229,8 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Editor chết giữa lúc xuất để lại file tạm
 
 `crates/gpufx-editor/src/export/child.rs:95`: job object giết `gpufx-render` ngay khi editor crash, nên file `*.tmp.mp4` cạnh file đích và project tạm `gpufx-export.*.tmp.json` trong thư mục temp còn lại. Nên dọn ở lần mở editor sau, chỉ xoá file có PID không còn sống. Ghi ngày 2026-11-09.
+
+
+### [Thấp] Chưa kiểm chứng việc cô lập khi GPU reset bằng TDR cưỡng bức
+
+`crates/gpufx-editor/src/export.rs:1`: việc tách export sang tiến trình con mới chứng minh được là crash trong tiến trình con không kéo editor chết. Một lần reset adapter có thể ảnh hưởng nhiều tiến trình cùng lúc, và `crates/gpufx-editor/src/window.rs:711-714` thoát app khi redraw lỗi (gọi ở `window.rs:758`), nên một TDR trong lúc xuất vẫn có thể đóng editor. Nên thử bằng TDR cưỡng bức trên máy thật rồi quyết định có giữ app sống khi mất device hay không. Ghi ngày 2026-11-09.

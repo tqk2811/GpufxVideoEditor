@@ -1,6 +1,7 @@
-//! Export in a child process: `gpufx-render --progress json` renders the project, so a lost device
-//! or a crash there cannot take the editor down. [`child`] runs it; this module holds what the UI
-//! needs and the thread that follows the child. The render path itself is `d3d12_backend::ExportJob`.
+//! Export in a child process: `gpufx-render --progress json` renders the project, so a crash there
+//! does not take the editor down. A lost device is not proven isolated: an adapter reset can hit
+//! several processes. [`child`] runs it; this module holds what the UI needs and the thread that
+//! follows the child. The render path itself is `d3d12_backend::ExportJob`.
 //!
 //! The preview and playback still stop during an export: the child needs the GPU memory and video
 //! decoders too, and editing stays off because the export shows the project it started with.
