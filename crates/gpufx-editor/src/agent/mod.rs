@@ -9,4 +9,4 @@ pub mod protocol;
 pub mod run;
 
 pub use protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget};
-pub use run::{execute, prepare, AgentHost, PendingFrame, Prepared, Step};
+pub use run::{check_export, execute, prepare, AgentHost, PendingFrame, Prepared, Step};

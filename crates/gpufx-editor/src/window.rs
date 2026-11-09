@@ -16,7 +16,7 @@ use engine::Project;
 use engine::{Time, TrackKind};
 
 use crate::agent::gateway::{pipe_name, AgentGateway};
-use crate::agent::{execute, AgentError, AgentHost};
+use crate::agent::{check_export, execute, AgentError, AgentHost};
 use crate::editor::{EditorState, Status};
 use crate::export::{encoder_options, export_blocker, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
 use crate::i18n::{Language, Message};
@@ -100,8 +100,8 @@ impl UiTimes {
     }
 }
 
-/// Sent to the event loop when the agent pipe has something. A redraw would not do: a minimised
-/// window gets none.
+/// Sent to the event loop when the agent pipe has something, so a request is served at once and
+/// does not wait for the next frame.
 #[derive(Debug, Clone, Copy)]
 struct AgentWake;
 
@@ -419,6 +419,10 @@ impl Session {
     /// preview stop first, so the child has the GPU memory and decoders; it starts once the preview
     /// has let go.
     fn start_export(&mut self, out: PathBuf, encoder: Option<EncoderChoice>) {
+        if self.state.is_exporting() {
+            self.state.report_refused(Message::ExportAlreadyRunning);
+            return;
+        }
         if let Some(reason) = export_blocker(self.state.project()) {
             self.state.report_error(reason);
             return;
@@ -603,7 +607,7 @@ impl Session {
     }
 
     fn save_project(&mut self, file: PathBuf) {
-        if self.state.project_file() != Some(file.as_path()) && held_elsewhere(&file) {
+        if !self.state.project_file().is_some_and(|current| d3d12_backend::same_file(current, &file)) && held_elsewhere(&file) {
             self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
             return;
         }
@@ -672,7 +676,7 @@ impl Session {
             }),
             Action::ReadProject { load, file } => {
                 let roots = self.package_roots.clone();
-                let own = self.state.project_file() == Some(file.as_path());
+                let own = self.state.project_file().is_some_and(|current| d3d12_backend::same_file(current, &file));
                 let in_use = self.state.language().t(Message::ProjectInUse(file.display().to_string()));
                 self.spawn_task("project-read", TaskId::Load(load), move || {
                     let result = if !own && held_elsewhere(&file) { Err(in_use) } else { load_project_file(&file, &roots) };
@@ -783,7 +787,7 @@ impl AgentHost for Session {
 
     fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError> {
         let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: encoder.clone(), hashes: None };
-        job.check().map_err(|message| AgentError::new("invalid_output", message))?;
+        check_export(&job)?;
         Session::start_export(self, out, Some(encoder));
         if self.state.is_exporting() {
             Ok(())
@@ -800,6 +804,14 @@ impl AgentHost for Session {
 
     fn tasks_busy(&self) -> bool {
         !self.tasks.is_idle()
+    }
+
+    fn paths(&self) -> Arc<ProjectPaths> {
+        self.paths.clone()
+    }
+
+    fn export_out(&self) -> Option<PathBuf> {
+        self.export_out.clone()
     }
 
     fn project_replaced(&mut self) {

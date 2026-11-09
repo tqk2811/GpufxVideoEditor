@@ -103,6 +103,7 @@ pub enum Message {
     AudioGapLine(u64),
     FinishDragFirst,
     ExportRunning,
+    ExportAlreadyRunning,
     NoNeighbour,
     NothingAtPlayhead,
     NothingToPlay,

@@ -93,6 +93,31 @@ fn identity(path: &Path) -> String {
     resolved.or_else(|| std::path::absolute(path).ok()).unwrap_or_else(|| path.to_path_buf()).to_string_lossy().to_lowercase()
 }
 
+/// Whether `first` and `second` name one file, however they are spelled.
+pub fn same_file(first: &Path, second: &Path) -> bool {
+    identity(first) == identity(second)
+}
+
+/// The files a render of `project` reads, each with what a message calls it.
+fn project_inputs(project: &Project, project_file: Option<&Path>, paths: &ProjectPaths) -> Vec<(PathBuf, &'static str)> {
+    let mut inputs: Vec<(PathBuf, &'static str)> = project_file.iter().map(|file| (file.to_path_buf(), "the project file")).collect();
+    for clip in project.tracks.iter().flat_map(|t| &t.clips) {
+        inputs.push((paths.source_path(&clip.source), "a source of the project"));
+    }
+    let packages = project.tracks.iter().flat_map(|t| t.clips.iter().flat_map(|c| c.effects.iter().map(|e| &e.package)).chain(t.transitions.iter().map(|t| &t.package)));
+    for package in packages {
+        if let Some(path) = paths.package_path(package) {
+            inputs.push((path, "a package of the project"));
+        }
+    }
+    inputs
+}
+
+/// What of `project` writing to `output` would destroy: a source or a package, by [`same_file`].
+pub fn overwritten_input(project: &Project, paths: &ProjectPaths, output: &Path) -> Option<&'static str> {
+    project_inputs(project, None, paths).into_iter().find(|(input, _)| same_file(input, output)).map(|(_, what)| what)
+}
+
 /// How many names [`reserve_temporary`] tries before giving up.
 const RESERVE_ATTEMPTS: u32 = 10_000;
 
@@ -194,21 +219,23 @@ impl ExportJob {
 
     /// [`ExportJob::check`], calling the two outputs `out` and `hashes` in its messages.
     pub fn check_named(&self, out: &str, hashes: &str) -> Result<(), String> {
+        self.check_project()?;
+        self.check_outputs(out, hashes)
+    }
+
+    /// Whether the project itself can be rendered.
+    pub fn check_project(&self) -> Result<(), String> {
         let errors = validate(&self.project, self.paths.as_ref());
         if !errors.is_empty() {
             let lines: Vec<String> = errors.iter().map(ToString::to_string).collect();
             return Err(format!("the project is not valid:\n  {}", lines.join("\n  ")));
         }
-        let mut inputs: Vec<(PathBuf, &str)> = self.project_file.iter().map(|file| (file.clone(), "the project file")).collect();
-        for clip in self.project.tracks.iter().flat_map(|t| &t.clips) {
-            inputs.push((self.paths.source_path(&clip.source), "a source of the project"));
-        }
-        let packages = self.project.tracks.iter().flat_map(|t| t.clips.iter().flat_map(|c| c.effects.iter().map(|e| &e.package)).chain(t.transitions.iter().map(|t| &t.package)));
-        for package in packages {
-            if let Some(path) = self.paths.package_path(package) {
-                inputs.push((path, "a package of the project"));
-            }
-        }
+        Ok(())
+    }
+
+    /// Refuses outputs that would overwrite an input, calling them `out` and `hashes` in messages.
+    pub fn check_outputs(&self, out: &str, hashes: &str) -> Result<(), String> {
+        let inputs = project_inputs(&self.project, self.project_file.as_deref(), &self.paths);
         let mut outputs = vec![(out, &self.out)];
         outputs.extend(self.hashes.as_ref().map(|path| (hashes, path)));
         for (name, output) in &outputs {

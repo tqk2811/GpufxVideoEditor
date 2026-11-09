@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 
-use d3d12_backend::{probe_media, read_package_info, EncoderChoice, MediaProbe, ProjectPaths};
+use d3d12_backend::{overwritten_input, probe_media, read_package_info, same_file, EncoderChoice, ExportJob, MediaProbe, ProjectPaths};
 use engine::{clip_at, frame_count, frame_time, nearest_free_start, Clip, ClipKey, Effect, Project, Time, TrackKind, Transition};
 use serde_json::{json, Map, Value};
 
@@ -72,10 +72,14 @@ pub trait AgentHost {
     fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError>;
     /// Asks the running export to stop.
     fn cancel_export(&mut self);
-    /// Whether a dialog or a load of the window is in the way of replacing the project.
+    /// Whether a dialog, a prompt or a load of the window is in the way.
     fn tasks_busy(&self) -> bool {
         false
     }
+    /// How files of the open project resolve.
+    fn paths(&self) -> Arc<ProjectPaths>;
+    /// The file the running export writes, if one runs.
+    fn export_out(&self) -> Option<PathBuf>;
     /// The project was replaced: what was built from the old one goes.
     fn project_replaced(&mut self) {}
 }
@@ -126,7 +130,18 @@ fn busy(reason: &str) -> AgentError {
     AgentError::new("busy", reason)
 }
 
+const TASKS_BUSY: &str = "a dialog, a prompt or a load is in progress";
+
+/// Checks an export job, telling a project that cannot be rendered from an output that may not be written.
+pub fn check_export(job: &ExportJob) -> Result<(), AgentError> {
+    job.check_project().map_err(|message| AgentError::new("invalid_project", message))?;
+    job.check_outputs("the output", "the hash file").map_err(|message| AgentError::new("invalid_output", message))
+}
+
 fn writable<H: AgentHost>(host: &mut H, expected: u64) -> Result<(), AgentError> {
+    if host.tasks_busy() {
+        return Err(busy(TASKS_BUSY));
+    }
     let state = host.state();
     if let Some(reason) = state.agent_busy_reason() {
         return Err(busy(reason));
@@ -164,9 +179,16 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
         return Err(AgentError::new("invalid_source", format!("{} has no usable {stream} stream{}", source.display(), problem.map_or_else(String::new, |reason| format!(": {reason}")))));
     }
     let absolute = std::path::absolute(source).map_err(|e| AgentError::new("invalid_path", e.to_string()))?;
-    let length = duration.or(stated.filter(|length| *length > Time::ZERO)).unwrap_or(DEFAULT_CLIP_DURATION);
+    let source_in = source_in.unwrap_or(Time::ZERO);
+    let known = stated.filter(|length| *length > Time::ZERO);
+    let remaining = match known {
+        Some(length) if source_in >= length => return Err(AgentError::new("out_of_range", format!("source_in {source_in} is at or past the {length} of the {stream} stream"))),
+        Some(length) => length.checked_sub(source_in),
+        None => None,
+    };
+    let length = duration.or(remaining).unwrap_or(DEFAULT_CLIP_DURATION);
     let mut clip = new_clip(&absolute.to_string_lossy(), start, length);
-    clip.source_in = source_in.unwrap_or(Time::ZERO);
+    clip.source_in = source_in;
     Ok(clip)
 }
 
@@ -219,11 +241,16 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
 
 fn replaceable<H: AgentHost>(host: &mut H, discard_changes: bool) -> Result<(), AgentError> {
     if host.tasks_busy() {
-        return Err(busy("a dialog or a load is in progress"));
+        return Err(busy(TASKS_BUSY));
     }
+    // Unsaved work in an open window is the user's: an agent may not throw it away.
+    let live = host.mode() == "live";
     let state = host.state();
     if let Some(reason) = state.agent_busy_reason() {
         return Err(busy(reason));
+    }
+    if state.is_dirty() && live {
+        return Err(AgentError::new("unsaved_changes", "the open window has unsaved changes: the user must save or discard them"));
     }
     if state.is_dirty() && !discard_changes {
         return Err(AgentError::new("unsaved_changes", "the project has unsaved changes: save it or pass discard_changes"));
@@ -248,7 +275,8 @@ fn project_open<H: AgentHost>(host: &mut H, path: &Path, discard_changes: bool, 
     Ok(json!({}))
 }
 
-fn project_save<H: AgentHost>(host: &mut H, path: Option<&Path>) -> Result<Value, AgentError> {
+fn project_save<H: AgentHost>(host: &mut H, path: Option<&Path>, overwrite: bool) -> Result<Value, AgentError> {
+    let (paths, running_out) = (host.paths(), host.export_out());
     let state = host.state();
     if state.is_live() {
         return Err(busy("the user is dragging a control"));
@@ -257,8 +285,19 @@ fn project_save<H: AgentHost>(host: &mut H, path: Option<&Path>) -> Result<Value
         Some(path) => std::path::absolute(path).map_err(|e| AgentError::new("invalid_path", e.to_string()))?,
         None => state.project_file().map(Path::to_path_buf).ok_or_else(|| AgentError::new("no_project_file", "the project has no file yet: give a path"))?,
     };
-    if state.project_file() != Some(file.as_path()) && project_lock::held_elsewhere(&file) {
-        return Err(locked_error(&file));
+    if let Some(what) = overwritten_input(state.project(), &paths, &file) {
+        return Err(AgentError::new("invalid_output", format!("{} is {what}; it would be overwritten", file.display())));
+    }
+    if running_out.is_some_and(|out| same_file(&out, &file)) {
+        return Err(AgentError::new("invalid_output", format!("{} is the output of the running export", file.display())));
+    }
+    if !state.project_file().is_some_and(|current| same_file(current, &file)) {
+        if project_lock::held_elsewhere(&file) {
+            return Err(locked_error(&file));
+        }
+        if file.exists() && !overwrite {
+            return Err(AgentError::new("file_exists", format!("{} exists: pass overwrite to replace it", file.display())));
+        }
     }
     save_project_file(state.project(), &file).map_err(|message| AgentError::new("save_failed", message))?;
     state.claim_project_lock(&file);
@@ -305,6 +344,9 @@ fn export_json(state: &EditorState, record: &AgentExport) -> Value {
 }
 
 fn export_start<H: AgentHost>(host: &mut H, out: &Path, overwrite: bool, encoder: Option<String>) -> Result<Value, AgentError> {
+    if host.tasks_busy() {
+        return Err(busy(TASKS_BUSY));
+    }
     let state = host.state();
     if let Some(reason) = state.agent_busy_reason() {
         return Err(busy(reason));
@@ -365,7 +407,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
             json!({})
         }),
         AgentRequest::ProjectOpen { path, discard_changes } => project_open(host, &path, discard_changes, loaded),
-        AgentRequest::ProjectSave { path } => project_save(host, path.as_deref()),
+        AgentRequest::ProjectSave { path, overwrite } => project_save(host, path.as_deref(), overwrite),
         AgentRequest::ProjectGet => Ok(project_summary(host.state().project())),
         AgentRequest::PackagesList { .. } => Ok(package_list.unwrap_or_default()),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
@@ -403,4 +445,114 @@ fn with_revision(result: AgentResult, revision: u64) -> AgentResult {
         }
         value
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::channel;
+
+    struct FakeHost {
+        state: EditorState,
+        mode: &'static str,
+        busy: bool,
+        running_out: Option<PathBuf>,
+        started: Vec<PathBuf>,
+    }
+
+    impl FakeHost {
+        fn new(mode: &'static str) -> Self {
+            Self { state: EditorState::default(), mode, busy: false, running_out: None, started: Vec::new() }
+        }
+
+        fn run(&mut self, request: AgentRequest) -> AgentResult {
+            match execute(self, prepare(request, &[])) {
+                Step::Done(result) => result,
+                Step::Frame(_) => panic!("no capture in these tests"),
+            }
+        }
+    }
+
+    impl AgentHost for FakeHost {
+        fn mode(&self) -> &'static str {
+            self.mode
+        }
+
+        fn state(&mut self) -> &mut EditorState {
+            &mut self.state
+        }
+
+        fn capture(&mut self, _project: Arc<Project>, _frame: i64) -> Receiver<Result<Vec<u8>, AgentError>> {
+            channel().1
+        }
+
+        fn start_export(&mut self, out: PathBuf, _encoder: EncoderChoice) -> Result<(), AgentError> {
+            self.started.push(out);
+            Ok(())
+        }
+
+        fn cancel_export(&mut self) {}
+
+        fn tasks_busy(&self) -> bool {
+            self.busy
+        }
+
+        fn paths(&self) -> Arc<ProjectPaths> {
+            Arc::new(ProjectPaths::new(Path::new("unsaved.json"), Vec::new()))
+        }
+
+        fn export_out(&self) -> Option<PathBuf> {
+            self.running_out.clone()
+        }
+    }
+
+    fn code(result: AgentResult) -> String {
+        result.expect_err("must be refused").code
+    }
+
+    #[test]
+    fn export_start_waits_for_a_dialog_or_a_load() {
+        let mut host = FakeHost::new("live");
+        host.busy = true;
+        let result = host.run(AgentRequest::ExportStart { out: PathBuf::from("out.mp4"), overwrite: false, encoder: None });
+        assert_eq!(code(result), "busy");
+        assert!(host.started.is_empty());
+    }
+
+    #[test]
+    fn edit_undo_and_redo_wait_for_a_dialog_a_prompt_or_a_load() {
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Video);
+        let revision = host.state.revision();
+        host.busy = true;
+        assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: revision, edit: AgentEdit::TrackAdd { kind: TrackKind::Audio } })), "busy");
+        assert_eq!(code(host.run(AgentRequest::Undo { expected_revision: revision })), "busy");
+        assert_eq!(code(host.run(AgentRequest::Redo { expected_revision: revision })), "busy");
+        assert_eq!(host.state.project().tracks.len(), 1, "nothing changed");
+    }
+
+    #[test]
+    fn a_live_window_keeps_unsaved_work_and_the_file_mode_can_discard() {
+        let mut live = FakeHost::new("live");
+        live.state.add_track(TrackKind::Video);
+        assert_eq!(code(live.run(AgentRequest::ProjectNew { discard_changes: true })), "unsaved_changes");
+        assert_eq!(live.state.project().tracks.len(), 1, "the user's work stays");
+        let mut file = FakeHost::new("file");
+        file.state.add_track(TrackKind::Video);
+        file.run(AgentRequest::ProjectNew { discard_changes: true }).expect("the file mode keeps discard_changes");
+        assert!(file.state.project().tracks.is_empty());
+    }
+
+    #[test]
+    fn saving_over_the_output_of_the_running_export_is_refused() {
+        let dir = std::env::temp_dir().join(format!("gpufx-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("out.mp4");
+        let mut host = FakeHost::new("file");
+        host.running_out = Some(out.clone());
+        let upper = dir.join("OUT.MP4");
+        assert_eq!(code(host.run(AgentRequest::ProjectSave { path: Some(upper), overwrite: true })), "invalid_output");
+        assert!(!out.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

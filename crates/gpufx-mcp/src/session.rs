@@ -9,8 +9,8 @@ use std::sync::Arc;
 use d3d12_backend::{D3d12Compositor, EncoderChoice, ExportJob, Gpu, ProjectPaths};
 use engine::render::{Compositor, FrameRenderer, RenderError};
 use engine::{frame_count, Project};
-use gpufx_editor::agent::gateway::pipe_name;
-use gpufx_editor::agent::{execute, prepare, AgentError, AgentHost, AgentRequest, AgentResult, Step};
+use gpufx_editor::agent::gateway::{self, pipe_name};
+use gpufx_editor::agent::{check_export, execute, prepare, AgentError, AgentHost, AgentRequest, AgentResult, Step};
 use gpufx_editor::editor::{EditorState, Status};
 use gpufx_editor::export::{sibling_render_exe, ExportWorker};
 use gpufx_editor::project_file::package_roots;
@@ -106,14 +106,23 @@ impl AgentHost for FileHost {
         receiver
     }
 
+    fn paths(&self) -> Arc<ProjectPaths> {
+        let anchor = self.state.project_file().map_or_else(|| PathBuf::from("unsaved.json"), PathBuf::from);
+        Arc::new(ProjectPaths::roots_only(&anchor, self.roots.clone()))
+    }
+
+    fn export_out(&self) -> Option<PathBuf> {
+        self.export.as_ref()?;
+        self.state.agent_export().map(|record| record.out.clone())
+    }
+
     fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError> {
         let file = self.state.project_file().map(PathBuf::from);
-        let anchor = file.clone().unwrap_or_else(|| PathBuf::from("unsaved.json"));
-        let paths = Arc::new(ProjectPaths::roots_only(&anchor, self.roots.clone()));
+        let paths = AgentHost::paths(self);
         let project = self.state.project().clone();
         let total = frame_count(&project);
         let job = ExportJob { project, project_file: file, paths, out, encoder, hashes: None };
-        job.check().map_err(|message| AgentError::new("invalid_output", message))?;
+        check_export(&job)?;
         // The child needs the GPU memory and decoders the captures hold.
         self.rig = None;
         let (released, gate) = channel();
@@ -164,8 +173,18 @@ pub struct LiveSession {
     connection: Option<BufReader<File>>,
 }
 
-fn no_app(detail: impl std::fmt::Display) -> AgentError {
-    AgentError::new("no_app", format!("no editor window is reachable: turn on agent access in its File menu ({detail})"))
+/// `ERROR_PIPE_BUSY`: the pipe has one instance and a client holds it.
+const PIPE_BUSY: i32 = 231;
+
+fn no_app(error: &std::io::Error) -> AgentError {
+    let message = if error.raw_os_error() == Some(PIPE_BUSY) {
+        format!("another agent is connected to the editor window, and only one can be at a time ({error})")
+    } else if error.kind() == std::io::ErrorKind::PermissionDenied && error.get_ref().is_some() {
+        error.to_string()
+    } else {
+        format!("no editor window is reachable: turn on agent access in its File menu ({error})")
+    };
+    AgentError::new("no_app", message)
 }
 
 impl LiveSession {
@@ -180,7 +199,7 @@ impl LiveSession {
 
     fn exchange(&mut self, line: &[u8]) -> std::io::Result<AgentResult> {
         if self.connection.is_none() {
-            let file = std::fs::OpenOptions::new().read(true).write(true).open(&self.name)?;
+            let file = gateway::connect(&self.name)?;
             self.connection = Some(BufReader::new(file));
         }
         let connection = self.connection.as_mut().expect("just connected");
@@ -201,7 +220,7 @@ impl EditorSession for LiveSession {
             Ok(result) => result,
             Err(error) => {
                 self.connection = None;
-                Err(no_app(error))
+                Err(no_app(&error))
             }
         }
     }

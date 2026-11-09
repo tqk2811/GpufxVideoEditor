@@ -60,6 +60,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::AudioGapLine(ms) => format!("Audio gaps: {ms} ms"),
         Message::FinishDragFirst => "Finish the drag first".to_owned(),
         Message::ExportRunning => "Editing is off while an export runs".to_owned(),
+        Message::ExportAlreadyRunning => "An export is already running; wait for it to finish".to_owned(),
         Message::NoNeighbour => "A transition needs a selected clip that touches another clip on its track".to_owned(),
         Message::NothingAtPlayhead => "Move the playhead inside the selected clip first".to_owned(),
         Message::NothingToPlay => "Nothing to play: playback length follows the video frames, and audio alone has none yet".to_owned(),

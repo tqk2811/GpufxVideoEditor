@@ -27,7 +27,7 @@ pub use audio::{AudioFileDecoder, AudioFiles};
 pub use compositor::{D3d12Compositor, SharedImage};
 pub use decoder::{is_cancelled, DecodedFrame, PublishClock, SequentialDecoder};
 pub use encoder::{encoder_exists, EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
-pub use export::{reserve_temporary, ExportControl, ExportError, ExportJob, ExportReport};
+pub use export::{overwritten_input, reserve_temporary, same_file, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;
 pub use packages::{expression_error, read_package_info, PackageInfo, ParamInfo, ParamKind};
 pub use paths::ProjectPaths;

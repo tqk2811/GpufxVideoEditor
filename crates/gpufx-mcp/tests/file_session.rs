@@ -91,7 +91,56 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         let next = engine::delete_clip(&expected, key(1, 0)).unwrap();
         step(&mut session, "clip_delete", json!({"clip": {"track": 1, "clip": 0}}), next)
     };
+    expected = {
+        let start = expected.tracks[0].clips[0].end().unwrap();
+        let next = engine::trim_start(&expected, key(0, 1), start.checked_add(t(0.25)).unwrap()).unwrap();
+        step(&mut session, "clip_trim_start", json!({"clip": {"track": 0, "clip": 1}, "start": start.ticks() + SECOND / 4}), next)
+    };
+    expected = {
+        let (a, _) = clip_paths();
+        let next = engine::add_clip(&expected, 0, gpufx_editor::editor::new_clip(&a, t(20.0), t(1.0))).unwrap();
+        step(&mut session, "clip_add", json!({"track": 0, "source": a, "start": 20 * SECOND, "duration": SECOND}), next)
+    };
+    expected = {
+        let next = engine::set_track_hidden(&expected, 0, true).unwrap();
+        step(&mut session, "track_set_hidden", json!({"track": 0, "hidden": true}), next)
+    };
     let _ = expected;
+}
+
+#[test]
+fn undo_and_redo_refuse_a_stale_revision() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let current = two_clips(&mut session);
+    assert_eq!(call_err(&mut session, "undo", json!({"expected_revision": current - 1})).code, "stale_revision");
+    let undone = revision(&call_ok(&mut session, "undo", json!({"expected_revision": current})));
+    assert_eq!(call_err(&mut session, "redo", json!({"expected_revision": undone - 1})).code, "stale_revision");
+}
+
+#[test]
+fn a_time_at_or_past_the_end_of_the_timeline_is_out_of_range() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    two_clips(&mut session);
+    let end = 4 * SECOND;
+    assert_eq!(call_err(&mut session, "frame_capture", json!({"time": end})).code, "out_of_range");
+    assert_eq!(call_err(&mut session, "frame_capture", json!({"time": end + SECOND})).code, "out_of_range");
+}
+
+#[test]
+fn opening_over_a_changed_project_needs_consent() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    two_clips(&mut session);
+    assert_eq!(call_err(&mut session, "project_open", json!({"path": "D:/nothing/project.json"})).code, "unsaved_changes");
+}
+
+#[test]
+fn an_export_output_that_is_a_source_is_refused_even_with_overwrite() {
+    let dir = scratch("export-source");
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let source = project_with_copy(&mut session, &dir);
+    let size = std::fs::metadata(&source).unwrap().len();
+    assert_eq!(call_err(&mut session, "export_start", json!({"out": source, "overwrite": true})).code, "invalid_output");
+    assert_eq!(std::fs::metadata(&source).unwrap().len(), size);
 }
 
 #[test]
@@ -187,10 +236,69 @@ fn replacing_a_changed_project_needs_consent() {
     assert!(project_of(&mut session).tracks.is_empty());
 }
 
+/// A project with a clip of a private copy of a test clip; returns the copy.
+fn project_with_copy(session: &mut FileSession, dir: &std::path::Path) -> std::path::PathBuf {
+    let (a, _) = clip_paths();
+    let source = dir.join("source.mp4");
+    std::fs::copy(a, &source).unwrap();
+    call_ok(session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    call_ok(session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": source, "start": 0, "duration": 2 * SECOND}));
+    source
+}
+
+#[test]
+fn saving_refuses_a_source_and_asks_before_replacing_another_file() {
+    let dir = scratch("save-guard");
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let source = project_with_copy(&mut session, &dir);
+    let size = std::fs::metadata(&source).unwrap().len();
+    assert_eq!(call_err(&mut session, "project_save", json!({"path": source, "overwrite": true})).code, "invalid_output");
+    assert_eq!(call_err(&mut session, "project_save", json!({"path": dir.join("SOURCE.MP4")})).code, "invalid_output", "whatever its case");
+    assert_eq!(std::fs::metadata(&source).unwrap().len(), size, "the source is intact");
+
+    let other = dir.join("other.json");
+    std::fs::write(&other, "x").unwrap();
+    assert_eq!(call_err(&mut session, "project_save", json!({"path": other})).code, "file_exists");
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "x");
+    call_ok(&mut session, "project_save", json!({"path": other, "overwrite": true}));
+    assert!(std::fs::read_to_string(&other).unwrap().len() > 1);
+    call_ok(&mut session, "project_save", json!({"path": other}));
+    call_ok(&mut session, "project_save", json!({"path": dir.join("OTHER.JSON")}));
+}
+
+#[test]
+fn an_export_of_a_broken_project_is_a_project_problem() {
+    let dir = scratch("export-invalid");
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let source = project_with_copy(&mut session, &dir);
+    std::fs::remove_file(&source).unwrap();
+    assert_eq!(call_err(&mut session, "export_start", json!({"out": dir.join("out.mp4")})).code, "invalid_project");
+}
+
+#[test]
+fn clip_add_measures_what_remains_after_source_in() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    let (a, _) = clip_paths();
+    let added = call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": a, "start": 0}));
+    let length = project_of(&mut session).tracks[0].clips[0].duration.ticks();
+    let trimmed = call_ok(&mut session, "clip_add", json!({"expected_revision": revision(&added), "track": 0, "source": a, "start": length, "source_in": 30_000}));
+    let project = project_of(&mut session);
+    assert_eq!(project.tracks[0].clips[1].duration.ticks(), length - 30_000);
+    assert_eq!(project.tracks[0].clips[1].source_in.ticks(), 30_000);
+    let current = revision(&trimmed);
+    for source_in in [length, length + 1] {
+        let error = call_err(&mut session, "clip_add", json!({"expected_revision": current, "track": 0, "source": a, "start": 20 * length, "source_in": source_in}));
+        assert_eq!(error.code, "out_of_range", "{source_in}");
+    }
+}
+
 #[test]
 fn bad_arguments_are_a_parameter_error_and_packages_can_be_listed() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
     assert_eq!(call_err(&mut session, "clip_split", json!({"expected_revision": 0})).code, "invalid_params");
+    assert_eq!(call_err(&mut session, "project_new", json!({"discard": true})).code, "invalid_params", "a misnamed parameter");
+    assert_eq!(call_err(&mut session, "clip_delete", json!({"expected_revision": 0, "clip": {"track": 0, "clip": 0, "extra": 1}})).code, "invalid_params", "a misnamed field of a clip");
     let listed = call_ok(&mut session, "packages_list", json!({"filter": "mix"}));
     assert!(listed["transitions"].as_array().unwrap().iter().any(|entry| entry["package"].as_str().unwrap().contains("mix")), "{listed}");
 }

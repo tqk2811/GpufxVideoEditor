@@ -2,6 +2,9 @@
 //! line per request and per answer. The pipe only admits the current user and never leaves the
 //! machine. Requests are handed to the UI thread, which alone touches the editor state.
 
+use std::fs::{File, OpenOptions};
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::AsRawHandle;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -13,9 +16,9 @@ use windows_sys::core::PCWSTR;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
 use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER};
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
-use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE};
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION};
+use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION};
 
 use super::protocol::{AgentError, AgentRequest, AgentResult};
 use super::run::{prepare, Prepared, Step};
@@ -24,6 +27,8 @@ const POLL: Duration = Duration::from_millis(5);
 const BUFFER: u32 = 64 * 1024;
 /// Longer request lines end the connection: no request is anywhere near this.
 const MAX_REQUEST: usize = 1024 * 1024;
+/// How long a client gets to take an answer; one that stops reading must not hold the only slot.
+const WRITE_DEADLINE: Duration = Duration::from_secs(30);
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -31,11 +36,17 @@ fn wide(text: &str) -> Vec<u16> {
 
 /// The SID of the user running this process, as text.
 fn user_sid() -> Result<String, String> {
+    // SAFETY: the pseudo handle of the current process is always valid.
+    process_sid(unsafe { GetCurrentProcess() })
+}
+
+/// The SID of the user running `process`, as text.
+fn process_sid(process: HANDLE) -> Result<String, String> {
     let last_error = |what: &str| format!("{what} failed: {}", std::io::Error::last_os_error());
     // SAFETY: every pointer is valid for its call, and what the system allocates is freed here.
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
             return Err(last_error("OpenProcessToken"));
         }
         let mut size = 0u32;
@@ -61,6 +72,43 @@ fn user_sid() -> Result<String, String> {
 /// The pipe of this user's editor.
 pub fn pipe_name() -> Result<String, String> {
     Ok(format!(r"\\.\pipe\gpufx-editor-agent-{}", user_sid()?))
+}
+
+/// The SID of the user whose process serves the pipe `pipe`, as text.
+fn server_sid(pipe: HANDLE) -> Result<String, String> {
+    let mut process_id = 0u32;
+    // SAFETY: the handle is a connected pipe and the out pointer is valid.
+    if unsafe { GetNamedPipeServerProcessId(pipe, &mut process_id) } == 0 {
+        return Err(format!("GetNamedPipeServerProcessId failed: {}", std::io::Error::last_os_error()));
+    }
+    // SAFETY: a handle only for querying, closed below.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return Err(format!("OpenProcess failed: {}", std::io::Error::last_os_error()));
+    }
+    let sid = process_sid(process);
+    // SAFETY: opened above and closed once.
+    unsafe { CloseHandle(process) };
+    sid
+}
+
+/// A pipe of another user, or one whose user cannot be told, is refused: it could be a process
+/// that took the name first.
+fn check_server_user(server: Result<String, String>, own: &str) -> Result<(), String> {
+    match server {
+        Ok(sid) if sid == own => Ok(()),
+        Ok(sid) => Err(format!("the agent pipe is served by another user ({sid}); refusing to use it")),
+        Err(message) => Err(format!("the user serving the agent pipe could not be checked ({message}); refusing to use it")),
+    }
+}
+
+/// Connects to the pipe `name` as a client that does not let the server impersonate it, and checks
+/// that the server runs as this user. Another user's server gives a `PermissionDenied` error.
+pub fn connect(name: &str) -> std::io::Result<File> {
+    let file = OpenOptions::new().read(true).write(true).security_qos_flags(SECURITY_IDENTIFICATION).open(name)?;
+    let own = user_sid().map_err(std::io::Error::other)?;
+    check_server_user(server_sid(file.as_raw_handle()), &own).map_err(|message| std::io::Error::new(std::io::ErrorKind::PermissionDenied, message))?;
+    Ok(file)
 }
 
 /// Creates the only instance of the pipe, usable by the current user alone.
@@ -177,10 +225,12 @@ impl Pipe {
         }
     }
 
-    /// False when the client left. The pipe does not block, so a full buffer takes several rounds.
-    fn write_all(&self, mut bytes: &[u8]) -> bool {
+    /// False when the client left, or did not take the bytes within `deadline`. The pipe does not
+    /// block, so a full buffer takes several rounds.
+    fn write_all(&self, mut bytes: &[u8], deadline: Duration) -> bool {
+        let started = std::time::Instant::now();
         while !bytes.is_empty() {
-            if self.stopping() {
+            if self.stopping() || started.elapsed() > deadline {
                 return false;
             }
             let mut written = 0u32;
@@ -225,7 +275,7 @@ fn serve(pipe: Pipe, roots: Vec<PathBuf>, inbound: Sender<Inbound>, connected: A
             let result = answer(&line, &roots, &inbound, &wake, &pipe.stop);
             let mut text = serde_json::to_vec(&result).unwrap_or_else(|_| br#"{"Err":{"code":"internal","message":"the answer could not be written"}}"#.to_vec());
             text.push(b'\n');
-            if !pipe.write_all(&text) {
+            if !pipe.write_all(&text, WRITE_DEADLINE) {
                 break;
             }
         }
@@ -272,5 +322,33 @@ impl Drop for AgentGateway {
                 let _ = handle.join();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_client_that_stops_reading_does_not_hold_the_pipe_forever() {
+        let name = format!(r"\\.\pipe\gpufx-gateway-test-{}", std::process::id());
+        let pipe = Pipe { handle: create_pipe(&name).unwrap(), stop: Arc::default() };
+        let client = OpenOptions::new().read(true).write(true).open(&name).unwrap();
+        assert!(pipe.accept());
+        let (done, result) = channel();
+        thread::spawn(move || {
+            let _ = done.send(pipe.write_all(&vec![0u8; 4 * BUFFER as usize], Duration::from_millis(100)));
+        });
+        assert_eq!(result.recv_timeout(Duration::from_secs(5)), Ok(false));
+        drop(client);
+    }
+
+    #[test]
+    fn only_a_server_of_this_user_is_accepted() {
+        assert_eq!(check_server_user(Ok("S-1-5-21-1".to_owned()), "S-1-5-21-1"), Ok(()));
+        let other = check_server_user(Ok("S-1-5-21-2".to_owned()), "S-1-5-21-1").unwrap_err();
+        assert!(other.contains("another user"), "{other}");
+        let unknown = check_server_user(Err("no access".to_owned()), "S-1-5-21-1").unwrap_err();
+        assert!(unknown.contains("could not be checked"), "{unknown}");
     }
 }

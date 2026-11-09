@@ -36,6 +36,7 @@ fn ticks(value: i64) -> Time {
 /// `{track, clip}` of an existing clip.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[schemars(inline)]
+#[serde(deny_unknown_fields)]
 pub struct ClipParam {
     pub track: usize,
     pub clip: usize,
@@ -50,6 +51,7 @@ impl From<ClipParam> for ClipRef {
 macro_rules! params {
     ($name:ident { $($(#[$meta:meta])* $field:ident : $kind:ty),* $(,)? }) => {
         #[derive(Deserialize, JsonSchema)]
+        #[serde(deny_unknown_fields)]
         pub struct $name { $($(#[$meta])* pub $field: $kind,)* }
     };
 }
@@ -57,7 +59,7 @@ macro_rules! params {
 params!(NoParams {});
 params!(ProjectNewParams { #[serde(default)] discard_changes: bool });
 params!(ProjectOpenParams { path: PathBuf, #[serde(default)] discard_changes: bool });
-params!(ProjectSaveParams { path: Option<PathBuf> });
+params!(ProjectSaveParams { path: Option<PathBuf>, #[serde(default)] overwrite: bool });
 params!(PackagesListParams { filter: Option<String> });
 params!(TrackAddParams { expected_revision: u64, kind: TrackKindParam });
 params!(TrackLockedParams { expected_revision: u64, track: usize, locked: bool });
@@ -149,9 +151,9 @@ fn frame_capture(p: FrameCaptureParams) -> Result<AgentRequest, AgentError> {
 pub fn all_tools() -> Vec<ToolDef> {
     vec![
         tool!("session_status", "The mode, project file, revision, and whether an export or a drag is going on.", NoParams, |_| Ok(AgentRequest::SessionStatus)),
-        tool!("project_new", "Replaces the project with an empty one. Refused with unsaved_changes unless discard_changes is true.", ProjectNewParams, |p| Ok(AgentRequest::ProjectNew { discard_changes: p.discard_changes })),
-        tool!("project_open", "Opens a project file. Refused with unsaved_changes unless discard_changes is true.", ProjectOpenParams, |p| Ok(AgentRequest::ProjectOpen { path: p.path, discard_changes: p.discard_changes })),
-        tool!("project_save", "Saves the project, to path or to its own file.", ProjectSaveParams, |p| Ok(AgentRequest::ProjectSave { path: p.path })),
+        tool!("project_new", "Replaces the project with an empty one. Refused with unsaved_changes unless discard_changes is true; in the open window (live mode) unsaved work is always kept, whatever discard_changes says.", ProjectNewParams, |p| Ok(AgentRequest::ProjectNew { discard_changes: p.discard_changes })),
+        tool!("project_open", "Opens a project file. Refused with unsaved_changes unless discard_changes is true; in the open window (live mode) unsaved work is always kept, whatever discard_changes says.", ProjectOpenParams, |p| Ok(AgentRequest::ProjectOpen { path: p.path, discard_changes: p.discard_changes })),
+        tool!("project_save", "Saves the project, to path or to its own file. Another existing file is refused with file_exists unless overwrite is true; a source, package or the running export's output is always refused.", ProjectSaveParams, |p| Ok(AgentRequest::ProjectSave { path: p.path, overwrite: p.overwrite })),
         tool!("project_get", "The project JSON, its duration and frame count. Clips are named by {track, clip} indexes, which change after an edit.", NoParams, |_| Ok(AgentRequest::ProjectGet)),
         tool!("packages_list", "Effect and transition packages, filtered by a text.", PackagesListParams, |p| Ok(AgentRequest::PackagesList { filter: p.filter })),
         tool!("track_add", "Adds an empty track on top; returns its index.", TrackAddParams, |p| edit(p.expected_revision, AgentEdit::TrackAdd { kind: p.kind.into() })),

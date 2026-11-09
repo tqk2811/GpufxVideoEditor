@@ -96,13 +96,14 @@ Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế đ�
 
 ## Lỗi
 
-Kết quả lỗi có `code`, `message` và dữ liệu kèm theo. `EditError` đổi sang code ổn định, ví dụ `overlap`, `clip_not_found`, `no_room`, `invalid_project`. Thêm `stale_revision`, `busy` (đang kéo hoặc đang xuất), `no_app` (chế độ live không tìm thấy app), `gpu_unavailable`, `invalid_params`, `out_of_range`, `unsaved_changes` (`project_new`, `project_open` trên project chưa lưu mà thiếu `discard_changes`), `project_locked`, `source_not_found`, `invalid_source`, `package_not_found`, `file_exists`, `job_not_found`, `capture_failed`. Lỗi không làm chết server. GPU hỏng thì báo lỗi rõ và phải khởi động lại phiên.
+Kết quả lỗi có `code`, `message` và dữ liệu kèm theo. `EditError` đổi sang code ổn định, ví dụ `overlap`, `clip_not_found`, `no_room`, `invalid_project`. Thêm `stale_revision`, `busy` (đang kéo hoặc đang xuất), `no_app` (chế độ live không tìm thấy app), `gpu_unavailable`, `invalid_params`, `out_of_range`, `unsaved_changes` (`project_new`, `project_open` trên project chưa lưu mà thiếu `discard_changes`; ở chế độ live luôn trả lỗi này, vì agent không được bỏ việc chưa lưu của user), `project_locked`, `source_not_found`, `invalid_source`, `package_not_found`, `file_exists`, `job_not_found`, `capture_failed`. Lỗi không làm chết server. GPU hỏng thì báo lỗi rõ và phải khởi động lại phiên.
 
 ## An toàn
 
 - Pipe chỉ cho user hiện tại truy cập, không mở cổng mạng.
 - App chỉ nhận lệnh khi user bật tuỳ chọn, và hiện dấu báo đang có agent nối vào.
-- Đường dẫn trong tham số được chuẩn hoá. Lưu, xuất và ghi đè không bao giờ ghi vào file nguồn đang dùng, theo kiểm tra sẵn có của `ExportJob`.
+- Đường dẫn trong tham số được chuẩn hoá. Lưu, xuất và ghi đè không bao giờ ghi vào file nguồn đang dùng, theo kiểm tra sẵn có của `ExportJob`. `project_save` còn từ chối file đích của lượt xuất đang chạy, và trả `file_exists` với file khác đã có nếu thiếu `overwrite: true`.
+- Lúc app đang mở hộp thoại, prompt hoặc đang tải, lệnh sửa, undo, redo và `export_start` trả `busy`.
 - Package là code shader nạp từ đĩa. Agent chỉ thêm và mở được package từ package root (`ProjectPaths::roots_only`). Ở chế độ live, project do chính user mở bằng tay vẫn dùng được package cạnh project như trước.
 
 ## Cách chạy

@@ -43,6 +43,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::AudioGapLine(ms) => format!("Mất tiếng: {ms} ms"),
         Message::FinishDragFirst => "Hãy thả chuột để kết thúc thao tác kéo trước".to_owned(),
         Message::ExportRunning => "Không sửa được khi đang xuất video".to_owned(),
+        Message::ExportAlreadyRunning => "Đang có một lượt xuất video, hãy chờ nó xong".to_owned(),
         Message::NoNeighbour => "Chuyển cảnh cần một clip đã chọn liền kề với clip khác trên cùng track".to_owned(),
         Message::NothingAtPlayhead => "Hãy đưa đầu phát vào trong clip đã chọn trước".to_owned(),
         Message::NothingToPlay => "Không có gì để phát: độ dài phát theo các khung hình video, chỉ có âm thanh thì chưa phát được".to_owned(),

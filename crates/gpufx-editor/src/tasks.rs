@@ -273,6 +273,10 @@ impl Tasks {
                     }
                     FileDialog::SaveProject if state.refuse_while_live() => Action::Nothing,
                     FileDialog::SaveProject => Action::SaveTo(path),
+                    FileDialog::Export if state.is_exporting() => {
+                        state.report_refused(Message::ExportAlreadyRunning);
+                        Action::Nothing
+                    }
                     FileDialog::Export => Action::StartExport(path),
                 }
             }
@@ -390,6 +394,16 @@ mod tests {
         state.add_track(TrackKind::Audio);
         state.mark_saved(PathBuf::from("p.json"));
         state
+    }
+
+    #[test]
+    fn an_export_dialog_that_finishes_during_an_export_starts_nothing() {
+        let mut state = with_tracks();
+        let mut tasks = Tasks::default();
+        state.begin_export(10);
+        let action = tasks.on_arrival(&mut state, picked(FileDialog::Export, "second.mp4"));
+        assert!(matches!(action, Action::Nothing), "{action:?}");
+        assert_eq!(state.status(), &Status::Refused(Message::ExportAlreadyRunning));
     }
 
     fn picked(dialog: FileDialog, path: &str) -> Arrival {

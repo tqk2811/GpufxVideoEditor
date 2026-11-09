@@ -197,6 +197,10 @@ fn exports_refuses_to_overwrite_and_its_frames_hash_like_the_cli() {
     assert!(out.is_file());
     let (content, error) = client.tool("export_start", json!({"out": out}));
     assert!(error && content[0]["text"].as_str().unwrap().contains("file_exists"));
+    std::fs::write(&out, "x").unwrap();
+    let (again, _) = client.ok("export_start", json!({"out": out, "overwrite": true}));
+    assert!(wait_for(120, || client.ok("export_status", json!({"job": again["job"]})).0["state"] != "running"), "the second export ended");
+    assert!(std::fs::metadata(&out).unwrap().len() > 1, "overwrite replaced the file");
 
     // The picture an agent sees is the picture the renderer writes.
     let hashes = dir.join("hashes.txt");

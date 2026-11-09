@@ -63,7 +63,7 @@ pub enum AgentRequest {
     SessionStatus,
     ProjectNew { discard_changes: bool },
     ProjectOpen { path: PathBuf, discard_changes: bool },
-    ProjectSave { path: Option<PathBuf> },
+    ProjectSave { path: Option<PathBuf>, overwrite: bool },
     ProjectGet,
     PackagesList { filter: Option<String> },
     Edit { expected_revision: u64, edit: AgentEdit },

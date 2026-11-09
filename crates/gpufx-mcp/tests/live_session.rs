@@ -66,6 +66,15 @@ impl AgentHost for Host {
             export.cancel();
         }
     }
+
+    fn paths(&self) -> Arc<ProjectPaths> {
+        self.paths.clone()
+    }
+
+    fn export_out(&self) -> Option<PathBuf> {
+        self.export.as_ref()?;
+        self.state.agent_export().map(|record| record.out.clone())
+    }
 }
 
 type Poke = Box<dyn FnOnce(&mut Host) + Send>;
@@ -84,7 +93,10 @@ fn pipe_for_test() -> String {
 
 impl App {
     fn start(gpu: Option<Arc<Gpu>>) -> Self {
-        let pipe = pipe_for_test();
+        Self::start_on(pipe_for_test(), gpu)
+    }
+
+    fn start_on(pipe: String, gpu: Option<Arc<Gpu>>) -> Self {
         let (pokes, incoming) = channel::<Poke>();
         let (ready, started) = channel();
         let name = pipe.clone();
@@ -229,15 +241,80 @@ fn a_held_control_makes_an_edit_wait_and_a_lock_is_refused_like_in_the_window() 
 
 #[test]
 fn no_window_is_an_error_of_the_tool_and_a_new_window_is_found_again() {
-    let mut session = LiveSession::on_pipe(pipe_for_test());
+    let pipe = pipe_for_test();
+    let mut session = LiveSession::on_pipe(pipe.clone());
     assert_eq!(call_err(&mut session, "session_status", json!({})).code, "no_app");
-    let app = App::start(None);
-    let mut session = app.session();
+    let app = App::start_on(pipe.clone(), None);
     call_ok(&mut session, "session_status", json!({}));
-    let name = app.pipe.clone();
     drop(app);
     assert_eq!(call_err(&mut session, "session_status", json!({})).code, "no_app");
-    assert!(!Path::new(&name).exists());
+    assert!(!Path::new(&pipe).exists());
+    let _app = App::start_on(pipe, None);
+    call_ok(&mut session, "session_status", json!({}));
+}
+
+#[test]
+fn an_agent_cannot_discard_the_unsaved_work_of_the_open_window() {
+    let app = App::start(None);
+    let mut session = app.session();
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    assert_eq!(call_err(&mut session, "project_new", json!({"discard_changes": true})).code, "unsaved_changes");
+    assert_eq!(app.poke(|host| host.state.project().tracks.len()), 1);
+}
+
+#[test]
+fn a_second_agent_is_told_another_one_is_connected() {
+    let app = App::start(None);
+    let mut first = app.session();
+    call_ok(&mut first, "session_status", json!({}));
+    let error = call_err(&mut app.session(), "session_status", json!({}));
+    assert_eq!(error.code, "no_app");
+    assert!(error.message.contains("another agent"), "{}", error.message);
+}
+
+/// A plain client of the pipe, for what `LiveSession` never sends.
+fn raw_client(app: &App) -> std::fs::File {
+    std::fs::OpenOptions::new().read(true).write(true).open(&app.pipe).expect("the pipe is open")
+}
+
+fn answer_of(client: std::fs::File) -> (String, std::io::BufReader<std::fs::File>) {
+    let mut reader = std::io::BufReader::new(client);
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut line).expect("an answer");
+    (line, reader)
+}
+
+#[test]
+fn a_malformed_line_gets_an_error_and_the_connection_goes_on() {
+    use std::io::Write;
+    let app = App::start(None);
+    let mut client = raw_client(&app);
+    client.write_all(b"this is not json\n").unwrap();
+    let (line, mut reader) = answer_of(client);
+    assert!(line.contains("invalid_request"), "{line}");
+    reader.get_mut().write_all(b"{\"request\":\"session_status\"}\n").unwrap();
+    let mut second = String::new();
+    std::io::BufRead::read_line(&mut reader, &mut second).unwrap();
+    assert!(second.contains("revision"), "{second}");
+}
+
+#[test]
+fn an_oversized_line_ends_the_connection_and_a_new_client_is_served() {
+    use std::io::{Read, Write};
+    let app = App::start(None);
+    let mut client = raw_client(&app);
+    // No newline: the gateway gives up past its limit. Writing fails once it has hung up.
+    let _ = client.write_all(&vec![b'x'; 2 * 1024 * 1024]);
+    let mut rest = Vec::new();
+    let _ = client.read_to_end(&mut rest);
+    assert!(rest.is_empty(), "no answer to a line past the limit: {} bytes", rest.len());
+    drop(client);
+    let mut session = app.session();
+    let began = Instant::now();
+    while call(&mut session, "session_status", json!({})).is_err() {
+        assert!(began.elapsed() < Duration::from_secs(10), "the slot never came back");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn gpu() -> Option<Arc<Gpu>> {
@@ -306,6 +383,24 @@ fn capture_matches_the_file_mode_and_leaves_playhead_and_preview_alone() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(call_err(&mut live, "frame_capture", json!({"frame": 150})).code, "out_of_range");
+}
+
+#[test]
+fn a_capture_larger_than_the_pipe_buffer_arrives_whole() {
+    let _gpu = gpu_lock();
+    let Some(device) = gpu() else { return };
+    let app = App::start(Some(device));
+    let mut live = app.session();
+    let (a, _) = clip_paths();
+    call_ok(&mut live, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    call_ok(&mut live, "clip_add", json!({"expected_revision": 1, "track": 0, "source": a, "start": 0, "duration": 30 * FRAME}));
+    // Noise, so the PNG does not compress below the pipe buffer.
+    call_ok(&mut live, "effect_add", json!({"expected_revision": 2, "clip": {"track": 0, "clip": 0}, "package": "noise", "params": {"strength": 40}}));
+    let capture = call_ok(&mut live, "frame_capture", json!({"frame": 10, "max_width": 1920}));
+    let text = capture["png"].as_str().expect("a png");
+    assert!(text.len() > 64 * 1024, "the test needs an answer past the pipe buffer: {}", text.len());
+    assert_eq!(capture["width"], 1920);
+    assert!(text.ends_with('=') || text.len() % 4 == 0, "whole base64");
 }
 
 #[test]
