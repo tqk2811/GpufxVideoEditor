@@ -29,8 +29,6 @@ const ZOOM_SLIDER_WIDTH: f32 = 130.0;
 const PLAYHEAD_MARKER: f32 = 6.0;
 /// The picture shape used until a source says its own.
 const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
-const BARS_COLOR: Color32 = Color32::from_rgb(96, 208, 158);
-const BARS_MUTED: Color32 = Color32::from_rgb(120, 120, 130);
 const DRAGGED_OPACITY: f32 = 0.5;
 const HIDDEN_OPACITY: f32 = 0.35;
 
@@ -38,7 +36,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let rect = ui.max_rect();
     let toolbar_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), TOOLBAR_HEIGHT.min(rect.height())));
     let body = Rect::from_min_max(Pos2::new(rect.left(), toolbar_rect.bottom()), rect.max);
-    ui.painter_at(rect).hline(rect.x_range(), toolbar_rect.bottom(), Stroke::new(1.0, theme::BORDER));
+    ui.painter_at(rect).hline(rect.x_range(), toolbar_rect.bottom(), Stroke::new(1.0, theme::border()));
     ui.scope_builder(UiBuilder::new().max_rect(toolbar_rect.shrink2(Vec2::new(6.0, 0.0))), |ui| toolbar(ui, state, toolbar_rect));
     if body.height() > RULER_HEIGHT {
         ui.scope_builder(UiBuilder::new().max_rect(body), |ui| timeline(ui, state, requests, body));
@@ -125,12 +123,12 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     state.view.clamp_scroll(&view_area(state, tracks_rect));
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, CornerRadius::ZERO, theme::PANEL);
+    painter.rect_filled(rect, CornerRadius::ZERO, theme::panel());
     draw_rows(ui, state, tracks_rect);
     draw_ruler(&painter, state, ruler_rect);
     add_track_menu(ui, state, Rect::from_min_max(rect.min, Pos2::new(tracks_left, ruler_rect.bottom())));
     headers(ui, state, header_rect, requests);
-    painter.vline(tracks_left, rect.y_range(), Stroke::new(1.0, theme::BORDER));
+    painter.vline(tracks_left, rect.y_range(), Stroke::new(1.0, theme::border()));
     draw_playhead(&painter, state, ruler_rect, tracks_rect);
     let moving_out = state.drag.is_some_and(|drag| matches!(drag.kind, DragKind::Move)) && ui.ctx().pointer_latest_pos().is_some_and(|pointer| outside_the_rows(state, tracks_rect, pointer));
     if moving_out || media_hint {
@@ -156,7 +154,7 @@ fn handle_media_drop(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rect
     let ctx = ui.ctx().clone();
     let Some(item) = egui::DragAndDrop::payload::<MediaItem>(&ctx) else { return false };
     let Some(pointer) = ctx.pointer_latest_pos() else { return false };
-    ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("media-drag"))).text(pointer + Vec2::new(14.0, 14.0), Align2::LEFT_TOP, &item.name, FontId::proportional(13.0), theme::TEXT);
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("media-drag"))).text(pointer + Vec2::new(14.0, 14.0), Align2::LEFT_TOP, &item.name, FontId::proportional(13.0), theme::text());
     if !timeline_rect.contains(pointer) {
         return false;
     }
@@ -191,7 +189,7 @@ fn resolve_file_drops(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rec
 /// The top row of the track area, where the new track a drop here makes will appear.
 fn draw_new_track_hint(ui: &egui::Ui, tracks_rect: Rect) {
     let row = Rect::from_min_size(tracks_rect.left_top(), Vec2::new(tracks_rect.width(), TRACK_HEIGHT as f32)).shrink(1.0);
-    ui.painter_at(tracks_rect).rect_stroke(row, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+    ui.painter_at(tracks_rect).rect_stroke(row, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
 }
 
 fn add_track_menu(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
@@ -312,7 +310,7 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
     let track_count = project.tracks.len();
     for (t, track) in project.tracks.iter().enumerate() {
         let row = row_rect(state, tracks_rect, t, track_count);
-        painter.rect_filled(row, CornerRadius::ZERO, if t % 2 == 0 { theme::ROW_EVEN } else { theme::ROW_ODD });
+        painter.rect_filled(row, CornerRadius::ZERO, if t % 2 == 0 { theme::row_even() } else { theme::row_odd() });
         for (c, clip) in track.clips.iter().enumerate() {
             let key = ClipKey { track: t, clip: c };
             let rect = span_rect(state, tracks_rect, row, clip.start, clip.start.saturating_add(clip.duration));
@@ -358,8 +356,8 @@ impl ClipPaint<'_> {
 /// Paints a clip's body, name strip, pictures, level bars and selection.
 pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     let (body, header) = match paint.kind {
-        TrackKind::Video => (theme::VIDEO_CLIP, theme::VIDEO_CLIP_HEADER),
-        TrackKind::Audio => (theme::AUDIO_CLIP, theme::AUDIO_CLIP_HEADER),
+        TrackKind::Video => (theme::video_clip(), theme::video_clip_header()),
+        TrackKind::Audio => (theme::audio_clip(), theme::audio_clip_header()),
     };
     let dim = |color: Color32| color.gamma_multiply(paint.opacity());
     let radius = CornerRadius::same(CLIP_RADIUS);
@@ -367,20 +365,20 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     let strip = paint.rect.with_max_y(paint.rect.top() + CLIP_HEADER_HEIGHT);
     painter.rect_filled(strip, CornerRadius { nw: CLIP_RADIUS, ne: CLIP_RADIUS, sw: 0, se: 0 }, dim(header));
     let text = painter.with_clip_rect(paint.rect.intersect(paint.clip_area));
-    text.text(strip.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_label(&paint.clip.source), FontId::proportional(11.0), theme::TEXT);
+    text.text(strip.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_label(&paint.clip.source), FontId::proportional(11.0), theme::on_clip());
     if paint.clip.has_speed() {
         let at = strip.right_center() - Vec2::new(6.0, 0.0);
         let font = FontId::proportional(11.0);
-        let galley = text.layout_no_wrap(format_speed(paint.clip.speed), font, theme::ACCENT_TEXT);
+        let galley = text.layout_no_wrap(format_speed(paint.clip.speed), font, theme::on_clip_accent());
         let badge = Align2::RIGHT_CENTER.anchor_size(at, galley.size());
         text.rect_filled(badge.expand2(Vec2::new(3.0, 1.0)), CornerRadius::same(3), dim(header));
-        text.galley(badge.min, galley, theme::ACCENT_TEXT);
+        text.galley(badge.min, galley, theme::on_clip_accent());
     }
     if let Some(visuals) = paint.visuals {
         draw_clip_media(painter, paint, &mut visuals.borrow_mut(), paint.rect.with_min_y(strip.bottom()));
     }
     if paint.selected {
-        painter.rect_stroke(paint.rect, radius, Stroke::new(2.0, theme::SELECTED), StrokeKind::Inside);
+        painter.rect_stroke(paint.rect, radius, Stroke::new(2.0, theme::selected()), StrokeKind::Inside);
     }
 }
 
@@ -440,7 +438,7 @@ fn draw_level_bars(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut
         painter.rect_filled(strip, CornerRadius::ZERO, Color32::from_black_alpha(90));
         return;
     };
-    let color = if paint.clip.muted { BARS_MUTED } else { BARS_COLOR };
+    let color = if paint.clip.muted { theme::bars_muted() } else { theme::bars() };
     let color = color.gamma_multiply(paint.opacity());
     let mut mesh = Mesh::default();
     for index in cells {
@@ -464,8 +462,8 @@ fn draw_transitions(painter: &egui::Painter, state: &EditorState, tracks_rect: R
         let rect = span_rect(state, tracks_rect, row, start, start.saturating_add(transition.duration));
         if rect.intersects(tracks_rect) {
             let opacity = if track.hidden { HIDDEN_OPACITY } else { 1.0 };
-            painter.rect_filled(rect, CornerRadius::same(CLIP_RADIUS), theme::TRANSITION.gamma_multiply(opacity));
-            painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.0, theme::ACCENT_TEXT.gamma_multiply(opacity)), StrokeKind::Inside);
+            painter.rect_filled(rect, CornerRadius::same(CLIP_RADIUS), theme::transition().gamma_multiply(opacity));
+            painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.0, theme::accent_text().gamma_multiply(opacity)), StrokeKind::Inside);
         }
     }
 }
@@ -490,22 +488,22 @@ fn draw_drag_preview(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
     let Some(span) = command.landing(state.project()) else { return };
     let row = row_rect(state, tracks_rect, span.track, track_count);
     let rect = span_rect(state, tracks_rect, row, span.start, span.end);
-    ui.painter_at(tracks_rect).rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(2.0, Color32::WHITE), StrokeKind::Inside);
+    ui.painter_at(tracks_rect).rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(2.0, theme::drop_outline()), StrokeKind::Inside);
 }
 
 fn draw_ruler(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect) {
     let ruler = painter.with_clip_rect(ruler_rect);
-    ruler.rect_filled(ruler_rect, CornerRadius::ZERO, theme::RULER);
+    ruler.rect_filled(ruler_rect, CornerRadius::ZERO, theme::ruler());
     let step = major_step(&state.view);
     for tick in ruler_ticks(&state.view, f64::from(ruler_rect.width())) {
         let x = ruler_rect.left() + tick.x as f32;
         let height = if tick.major { 10.0 } else { 5.0 };
-        ruler.line_segment([Pos2::new(x, ruler_rect.bottom() - height), Pos2::new(x, ruler_rect.bottom())], Stroke::new(1.0, theme::TICK));
+        ruler.line_segment([Pos2::new(x, ruler_rect.bottom() - height), Pos2::new(x, ruler_rect.bottom())], Stroke::new(1.0, theme::tick()));
         if tick.major {
-            ruler.text(Pos2::new(x + 3.0, ruler_rect.top() + 3.0), Align2::LEFT_TOP, format_time(tick.time, step), FontId::monospace(11.0), theme::TEXT_DIM);
+            ruler.text(Pos2::new(x + 3.0, ruler_rect.top() + 3.0), Align2::LEFT_TOP, format_time(tick.time, step), FontId::monospace(11.0), theme::text_dim());
         }
     }
-    ruler.hline(ruler_rect.x_range(), ruler_rect.bottom(), Stroke::new(1.0, theme::BORDER));
+    ruler.hline(ruler_rect.x_range(), ruler_rect.bottom(), Stroke::new(1.0, theme::border()));
 }
 
 fn draw_playhead(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect, tracks_rect: Rect) {
@@ -514,9 +512,9 @@ fn draw_playhead(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect,
         return;
     }
     let top = ruler_rect.top() + 1.0;
-    painter.line_segment([Pos2::new(x, top), Pos2::new(x, tracks_rect.bottom())], Stroke::new(1.5, theme::PLAYHEAD));
+    painter.line_segment([Pos2::new(x, top), Pos2::new(x, tracks_rect.bottom())], Stroke::new(1.5, theme::playhead()));
     let marker = vec![Pos2::new(x - PLAYHEAD_MARKER, top), Pos2::new(x + PLAYHEAD_MARKER, top), Pos2::new(x + PLAYHEAD_MARKER, top + 7.0), Pos2::new(x, top + 13.0), Pos2::new(x - PLAYHEAD_MARKER, top + 7.0)];
-    painter.add(Shape::convex_polygon(marker, theme::PLAYHEAD, Stroke::NONE));
+    painter.add(Shape::convex_polygon(marker, theme::playhead(), Stroke::NONE));
 }
 
 /// The short label and tooltip of track `t`, numbered within its kind from the first of the kind.
@@ -549,7 +547,7 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
                 continue;
             }
             let (locked, hidden) = state.project().tracks.get(t).map_or((false, false), |track| (track.locked, track.hidden));
-            let tint = if hidden { theme::TICK } else { theme::TEXT_DIM };
+            let tint = if hidden { theme::tick() } else { theme::text_dim() };
             let icon = if kind == TrackKind::Video { Icon::Film } else { Icon::Music };
             let (label, tip) = track_label(language, &kinds, t);
             let icon_rect = Rect::from_center_size(Pos2::new(row.left() + 14.0, row.center().y), Vec2::splat(14.0));

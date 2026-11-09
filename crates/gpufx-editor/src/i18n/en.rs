@@ -151,6 +151,11 @@ pub(super) fn text(message: &Message) -> String {
         Message::ProjectInUse(path) => format!("{path} is open in another process"),
         Message::AgentAccessFailed(detail) => format!("Could not open the agent connection: {detail}"),
         Message::MenuLanguage => "Language".to_owned(),
+        Message::MenuTheme => "Theme".to_owned(),
+        Message::ThemeSystem => "System".to_owned(),
+        Message::ThemeDark => "Dark".to_owned(),
+        Message::ThemeLight => "Light".to_owned(),
+        Message::ThemeSaveFailed(detail) => format!("The theme could not be saved: {detail}"),
         Message::Cancel => "Cancel".to_owned(),
         Message::ExportVideo => "Export video".to_owned(),
 

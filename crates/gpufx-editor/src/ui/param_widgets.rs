@@ -157,9 +157,9 @@ fn expression(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &
     let response = ui.add(egui::TextEdit::singleline(&mut text).id(id.with("edit")).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
     let error = expression_error(&text, &info.vars);
     if let Some(message) = &error {
-        ui.colored_label(theme::REFUSED, message);
+        ui.colored_label(theme::refused(), message);
     } else if !info.vars.is_empty() {
-        ui.colored_label(theme::TEXT_DIM, language.t(Message::Variables(info.vars.join(", "))));
+        ui.colored_label(theme::text_dim(), language.t(Message::Variables(info.vars.join(", "))));
     }
     if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         remove_draft(ui.ctx(), id);

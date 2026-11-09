@@ -158,6 +158,7 @@ impl Session {
         let mut state = EditorState::default();
         state.set_language(crate::settings::startup_language());
         state.ui.panel_sizes = crate::settings::startup_panel_sizes();
+        state.ui.theme = crate::settings::startup_theme();
         #[cfg(debug_assertions)]
         let smoke = {
             let mut smoke = Smoke::default();
@@ -723,6 +724,13 @@ impl Session {
         }
     }
 
+    fn set_theme(&mut self, choice: crate::ui::theme::ThemeChoice) {
+        self.state.ui.theme = choice;
+        if let Err(message) = crate::settings::save_theme(choice) {
+            self.state.report_error(Message::ThemeSaveFailed(message));
+        }
+    }
+
     /// Runs outside the frame, so what it starts cannot disturb the UI pass.
     fn handle(&mut self, request: UiRequest) {
         if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport | UiRequest::ToggleFullscreen | UiRequest::SavePanelSizes | UiRequest::SetAgentAccess(_)) {
@@ -748,6 +756,7 @@ impl Session {
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
             UiRequest::SetLanguage(language) => self.set_language(language),
+            UiRequest::SetTheme(choice) => self.set_theme(choice),
             UiRequest::SetAgentAccess(enabled) => {
                 self.set_agent_access(enabled);
                 if let Err(message) = crate::settings::save_agent_access(self.state.agent_access) {

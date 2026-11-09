@@ -6,11 +6,13 @@ use serde_json::{json, Map, Value};
 
 use crate::i18n::Language;
 use crate::layout::PanelSizes;
+use crate::ui::theme::ThemeChoice;
 
 const FOLDER: &str = "gpufx-editor";
 const FILE: &str = "settings.json";
 const LANGUAGE_KEY: &str = "language";
 const PANELS_KEY: &str = "panels";
+const THEME_KEY: &str = "theme";
 const AGENT_ACCESS_KEY: &str = "agent_access";
 
 /// `%APPDATA%\gpufx-editor\settings.json`, when the variable is set.
@@ -118,6 +120,26 @@ pub fn save_language(language: Language) -> Result<(), String> {
     write_language(&file, language)
 }
 
+/// The theme saved in `file`. Missing, or a name the editor does not know, follows the system.
+fn saved_theme(file: &Path) -> ThemeChoice {
+    read_settings(file).get(THEME_KEY).and_then(Value::as_str).and_then(ThemeChoice::from_code).unwrap_or_default()
+}
+
+fn write_theme(file: &Path, choice: ThemeChoice) -> Result<(), String> {
+    write_setting(file, THEME_KEY, json!(choice.code()))
+}
+
+/// The theme to start with: the saved choice, else the system's.
+pub fn startup_theme() -> ThemeChoice {
+    settings_file().map_or_else(ThemeChoice::default, |file| saved_theme(&file))
+}
+
+/// Saves the choice in the settings file of this user.
+pub fn save_theme(choice: ThemeChoice) -> Result<(), String> {
+    let file = settings_file().ok_or("APPDATA is not set")?;
+    write_theme(&file, choice)
+}
+
 fn panel_size(panels: &Value, name: &str) -> Option<f32> {
     panels.get(name).and_then(Value::as_f64).map(|size| size as f32).filter(|size| size.is_finite() && *size > 0.0)
 }
@@ -174,6 +196,43 @@ mod tests {
         assert!(!saved_agent_access(&file));
         write_setting(&file, AGENT_ACCESS_KEY, json!(true)).unwrap();
         assert!(saved_agent_access(&file));
+    }
+
+    #[test]
+    fn the_theme_follows_the_system_until_chosen_and_a_choice_is_read_back() {
+        let file = temp_file("theme");
+        assert_eq!(saved_theme(&file), ThemeChoice::System, "no file");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, r#"{"language":"vi"}"#).unwrap();
+        assert_eq!(saved_theme(&file), ThemeChoice::System, "missing key");
+        for choice in ThemeChoice::ALL {
+            write_theme(&file, choice).unwrap();
+            assert_eq!(saved_theme(&file), choice);
+        }
+        assert_eq!(saved_language(&file), Some(Language::Vietnamese), "saving the theme keeps the language");
+        write_language(&file, Language::English).unwrap();
+        assert_eq!(saved_theme(&file), ThemeChoice::Light, "saving the language keeps the theme");
+    }
+
+    #[test]
+    fn an_unknown_or_mistyped_theme_follows_the_system() {
+        let file = temp_file("theme-bad");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        for text in [r#"{"theme":"sepia"}"#, r#"{"theme":3}"#, r#"{"theme":null}"#, "not json"] {
+            std::fs::write(&file, text).unwrap();
+            assert_eq!(saved_theme(&file), ThemeChoice::System, "{text}");
+        }
+    }
+
+    #[test]
+    fn saving_the_theme_keeps_other_settings() {
+        let file = temp_file("theme-other");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, r#"{"other":1,"panels":{"left":300.0}}"#).unwrap();
+        write_theme(&file, ThemeChoice::Dark).unwrap();
+        assert_eq!(read_settings(&file).get("other"), Some(&json!(1)));
+        assert_eq!(saved_panel_sizes(&file).left, Some(300.0));
+        assert_eq!(read_settings(&file).get("theme"), Some(&json!("dark")));
     }
 
     fn temp_file(name: &str) -> PathBuf {

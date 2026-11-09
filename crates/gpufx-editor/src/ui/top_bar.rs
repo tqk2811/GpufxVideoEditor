@@ -5,7 +5,7 @@ use super::{theme, UiRequest};
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
 use egui::text::{LayoutJob, TextWrapping};
-use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, Vec2};
+use egui::{Align, Align2, CornerRadius, FontId, Layout, Pos2, Rect, Vec2};
 
 const EXPORT_BAR_WIDTH: f32 = 200.0;
 const NAME_MARGIN: f32 = 16.0;
@@ -15,9 +15,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     ui.allocate_ui_with_layout(rect.size(), Layout::left_to_right(Align::Center), |ui| {
         ui.add_space(10.0);
         let (language, agent_access) = (state.language(), state.agent_access);
-        file_menu(ui, language, agent_access, state.is_exporting(), requests);
+        file_menu(ui, language, state.ui.theme, agent_access, state.is_exporting(), requests);
         if state.agent_connected {
-            ui.colored_label(theme::ACCENT, language.t(Message::AgentConnected));
+            ui.colored_label(theme::accent(), language.t(Message::AgentConnected));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(10.0);
@@ -39,25 +39,25 @@ fn project_name(ui: &egui::Ui, state: &EditorState, rect: Rect, free: Rect) {
     let dirty_label = state.language().t(Message::Dirty);
     let font = FontId::proportional(15.0);
     let painter = ui.painter_at(rect);
-    let mut job = LayoutJob::simple_singleline(name.clone(), font.clone(), theme::TEXT);
-    let pill_width = if state.is_dirty() { painter.layout_no_wrap(dirty_label.clone(), FontId::proportional(12.0), theme::TEXT_DIM).size().x + 18.0 } else { 0.0 };
+    let mut job = LayoutJob::simple_singleline(name.clone(), font.clone(), theme::text());
+    let pill_width = if state.is_dirty() { painter.layout_no_wrap(dirty_label.clone(), FontId::proportional(12.0), theme::text_dim()).size().x + 18.0 } else { 0.0 };
     let pill_room = if state.is_dirty() { pill_width + 8.0 } else { 0.0 };
     job.wrap = TextWrapping::truncate_at_width((free.width() - pill_room - NAME_MARGIN).max(1.0));
     let galley = painter.layout_job(job);
     let total = galley.size().x + pill_room;
     let left = name_left(rect.center().x, total, free.left() + NAME_MARGIN / 2.0, free.right() - NAME_MARGIN / 2.0);
     let name_rect = Rect::from_min_size(Pos2::new(left, rect.center().y - galley.size().y / 2.0), galley.size());
-    painter.galley(name_rect.min, galley, theme::TEXT);
+    painter.galley(name_rect.min, galley, theme::text());
     ui.interact(name_rect, ui.scope_id().with("project-name"), egui::Sense::hover()).on_hover_text(name);
     if state.is_dirty() {
         let pill = Rect::from_min_size(Pos2::new(left + total - pill_width, rect.center().y - 11.0), Vec2::new(pill_width, 22.0));
-        painter.rect_filled(pill, CornerRadius::same(11), theme::PANEL_RAISED);
-        painter.text(pill.center(), Align2::CENTER_CENTER, dirty_label, FontId::proportional(12.0), theme::TEXT_DIM);
+        painter.rect_filled(pill, CornerRadius::same(11), theme::panel_raised());
+        painter.text(pill.center(), Align2::CENTER_CENTER, dirty_label, FontId::proportional(12.0), theme::text_dim());
     }
 }
 
 /// During an export only the agent access stays usable, so the user can revoke it at any time.
-fn file_menu(ui: &mut egui::Ui, language: Language, agent_access: bool, exporting: bool, requests: &mut Vec<UiRequest>) {
+fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeChoice, agent_access: bool, exporting: bool, requests: &mut Vec<UiRequest>) {
     ui.menu_button(language.t(Message::MenuFile), |ui| {
         ui.add_enabled_ui(!exporting, |ui| {
             for (label, request) in [(Message::MenuNewProject, UiRequest::NewProject), (Message::MenuOpen, UiRequest::OpenProject), (Message::MenuSave, UiRequest::SaveProject), (Message::MenuSaveAs, UiRequest::SaveProjectAs)] {
@@ -83,6 +83,20 @@ fn file_menu(ui: &mut egui::Ui, language: Language, agent_access: bool, exportin
                     }
                 }
             });
+            ui.menu_button(language.t(Message::MenuTheme), |ui| {
+                for choice in theme::ThemeChoice::ALL {
+                    let label = language.t(match choice {
+                        theme::ThemeChoice::System => Message::ThemeSystem,
+                        theme::ThemeChoice::Dark => Message::ThemeDark,
+                        theme::ThemeChoice::Light => Message::ThemeLight,
+                    });
+                    let mut current = choice == theme_choice;
+                    if ui.checkbox(&mut current, label).clicked() {
+                        requests.push(UiRequest::SetTheme(choice));
+                        ui.close();
+                    }
+                }
+            });
         });
     });
 }
@@ -96,7 +110,7 @@ fn export_area(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
         ui.add(egui::ProgressBar::new(progress.fraction()).desired_width(EXPORT_BAR_WIDTH).text(language.t(Message::ExportProgress { done: progress.done, total: progress.total })));
         return;
     }
-    if icons::label_button(ui, Icon::Export, &language.t(Message::ExportVideo), theme::ACCENT, Color32::WHITE, None).clicked() {
+    if icons::label_button(ui, Icon::Export, &language.t(Message::ExportVideo), theme::accent(), theme::on_accent(), None).clicked() {
         requests.push(UiRequest::Export);
     }
     let selected = state.encoders.get(state.encoder).map_or_else(String::new, |option| language.text(&option.label));

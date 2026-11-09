@@ -24,7 +24,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let rect = ui.max_rect();
     let tabs_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), TAB_HEIGHT.min(rect.height())));
     tabs(ui, state, tabs_rect);
-    ui.painter_at(rect).hline(rect.x_range(), tabs_rect.bottom(), Stroke::new(1.0, theme::BORDER));
+    ui.painter_at(rect).hline(rect.x_range(), tabs_rect.bottom(), Stroke::new(1.0, theme::border()));
     let content = Rect::from_min_max(egui::pos2(rect.left(), tabs_rect.bottom()), rect.max).shrink(10.0);
     if content.width() < 1.0 || content.height() < 1.0 {
         return;
@@ -45,9 +45,9 @@ fn tabs(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
         let response = ui.interact(cell, ui.scope_id().with(("left-tab", index)), Sense::click());
         let selected = state.ui.left_tab == tab;
         if response.hovered() && !selected {
-            ui.painter().rect_filled(cell.shrink(3.0), CornerRadius::same(theme::CONTROL_RADIUS), theme::PANEL_RAISED);
+            ui.painter().rect_filled(cell.shrink(3.0), CornerRadius::same(theme::CONTROL_RADIUS), theme::panel_raised());
         }
-        let color = if selected { theme::ACCENT_TEXT } else { theme::TEXT_DIM };
+        let color = if selected { theme::accent_text() } else { theme::text_dim() };
         let painter = ui.painter_at(cell);
         let icon_rect = Rect::from_center_size(egui::pos2(cell.center().x, cell.top() + 18.0), Vec2::splat(16.0));
         icons::paint(&painter, icon_rect, icon, color);
@@ -55,7 +55,7 @@ fn tabs(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
         let natural = painter.layout_no_wrap(label.clone(), FontId::proportional(TAB_FONT), color).size().x;
         painter.text(egui::pos2(cell.center().x, cell.top() + 37.0), Align2::CENTER_CENTER, label, FontId::proportional(tab_font_size(natural, cell.width())), color);
         if selected {
-            painter.hline(cell.shrink2(Vec2::new(14.0, 0.0)).x_range(), cell.bottom() - 2.0, Stroke::new(2.0, theme::ACCENT));
+            painter.hline(cell.shrink2(Vec2::new(14.0, 0.0)).x_range(), cell.bottom() - 2.0, Stroke::new(2.0, theme::accent()));
         }
         if response.clicked() {
             state.ui.left_tab = tab;
@@ -77,7 +77,7 @@ fn search_box(ui: &mut egui::Ui, text: &mut String, hint: &str) {
 fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, kind: MediaKind) {
     let language = state.language();
     let audio_only = kind == MediaKind::Audio;
-    if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportFromComputer), theme::ACCENT_SOFT, theme::ACCENT_TEXT, Some(ui.available_width())).clicked() {
+    if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportFromComputer), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
         requests.push(UiRequest::ImportMedia { audio_only });
     }
     let hint = language.t(if audio_only { Message::SearchAudio } else { Message::SearchMedia });
@@ -85,10 +85,10 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
     let search = if audio_only { state.ui.audio_search.clone() } else { state.ui.media_search.clone() };
     let items: Vec<MediaItem> = state.library.visible(kind, &search).into_iter().cloned().collect();
     if items.is_empty() {
-        ui.add(egui::Label::new(egui::RichText::new(language.t(empty_message(&search))).color(theme::TEXT_DIM)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(language.t(empty_message(&search))).color(theme::text_dim())).wrap());
         return;
     }
-    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::AddHint)).color(theme::TEXT_DIM)).wrap());
+    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::AddHint)).color(theme::text_dim())).wrap());
     let mut chosen = None;
     egui::ScrollArea::vertical().id_salt("media-grid").auto_shrink([false, false]).show(ui, |ui| {
         let width = ui.available_width();
@@ -127,11 +127,11 @@ fn media_cell(ui: &mut egui::Ui, state: &EditorState, item: &MediaItem, size: Ve
     response.dnd_set_drag_payload(item.clone());
     let painter = ui.painter_at(rect);
     let radius = CornerRadius::same(theme::CONTROL_RADIUS);
-    painter.rect_filled(rect, radius, theme::PANEL_RAISED);
-    let stroke = if response.hovered() { Stroke::new(1.0, theme::ACCENT) } else { Stroke::new(1.0, theme::BORDER) };
+    painter.rect_filled(rect, radius, theme::panel_raised());
+    let stroke = if response.hovered() { Stroke::new(1.0, theme::accent()) } else { Stroke::new(1.0, theme::border()) };
     painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
     let thumb = Rect::from_min_size(rect.min, Vec2::new(rect.width(), rect.height() - CELL_CAPTION)).shrink(4.0);
-    painter.rect_filled(thumb, CornerRadius::same(4), Color32::from_rgb(16, 16, 24));
+    painter.rect_filled(thumb, CornerRadius::same(4), theme::thumb_bg());
     // Only a tile scrolled into view asks for its picture.
     let poster = (kind == MediaKind::Video && ui.is_rect_visible(thumb)).then(|| state.visuals.borrow_mut().poster(&item.source, item.duration)).flatten();
     match poster {
@@ -139,22 +139,22 @@ fn media_cell(ui: &mut egui::Ui, state: &EditorState, item: &MediaItem, size: Ve
             let picture = Rect::from_center_size(thumb.center(), fit_size(thumb.size(), aspect));
             painter.image(texture, picture, Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
         }
-        None => icons::paint(&painter, Rect::from_center_size(thumb.center(), Vec2::splat(22.0)), if kind == MediaKind::Audio { Icon::Music } else { Icon::Film }, theme::TEXT_DIM),
+        None => icons::paint(&painter, Rect::from_center_size(thumb.center(), Vec2::splat(22.0)), if kind == MediaKind::Audio { Icon::Music } else { Icon::Film }, theme::text_dim()),
     }
     let duration = match (item.duration, item.estimated) {
         (Some(duration), false) => format_duration(duration),
         (Some(duration), true) => format!("~{}", format_duration(duration)),
         (None, _) => "--:--".to_owned(),
     };
-    let pill = painter.layout_no_wrap(duration, FontId::monospace(11.0), theme::TEXT);
+    let pill = painter.layout_no_wrap(duration, FontId::monospace(11.0), theme::on_clip());
     let pill_rect = Rect::from_min_size(egui::pos2(thumb.right() - pill.size().x - 8.0, thumb.top() + 3.0), pill.size() + Vec2::new(5.0, 2.0));
     painter.rect_filled(pill_rect, CornerRadius::same(3), Color32::from_black_alpha(180));
-    painter.galley(pill_rect.min + Vec2::new(2.5, 1.0), pill, theme::TEXT);
+    painter.galley(pill_rect.min + Vec2::new(2.5, 1.0), pill, theme::on_clip());
     let plus = Rect::from_min_size(thumb.left_top() + Vec2::splat(3.0), Vec2::splat(18.0));
-    painter.rect_filled(plus, CornerRadius::same(4), theme::ACCENT);
-    icons::paint(&painter, plus.shrink(4.0), Icon::Plus, Color32::WHITE);
+    painter.rect_filled(plus, CornerRadius::same(4), theme::accent());
+    icons::paint(&painter, plus.shrink(4.0), Icon::Plus, theme::on_accent());
     let caption = rect.with_min_y(rect.bottom() - CELL_CAPTION).shrink2(Vec2::new(8.0, 0.0));
-    painter.with_clip_rect(caption).text(caption.left_center(), Align2::LEFT_CENTER, &item.name, FontId::proportional(12.0), theme::TEXT);
+    painter.with_clip_rect(caption).text(caption.left_center(), Align2::LEFT_CENTER, &item.name, FontId::proportional(12.0), theme::text());
     let response = response.on_hover_text(&item.source);
     response.clicked() && !response.double_clicked() && !response.triple_clicked()
 }
@@ -177,9 +177,9 @@ fn picker(ui: &mut egui::Ui, state: &mut EditorState) {
     });
     search_box(ui, &mut state.picker.filter, &language.t(Message::SearchEffects));
     if !state.catalog.loaded {
-        ui.colored_label(theme::TEXT_DIM, language.t(Message::ReadingPackages));
+        ui.colored_label(theme::text_dim(), language.t(Message::ReadingPackages));
     } else if state.catalog.effects.is_empty() && state.catalog.transitions.is_empty() {
-        ui.colored_label(theme::REFUSED, language.t(Message::NoPackages(crate::project_file::PACKAGE_ROOT_VARIABLE.to_owned())));
+        ui.colored_label(theme::refused(), language.t(Message::NoPackages(crate::project_file::PACKAGE_ROOT_VARIABLE.to_owned())));
     }
     picker_list(ui, state);
     let selected = state.picker.addable(&state.catalog);
@@ -233,7 +233,7 @@ fn picker_problems(ui: &mut egui::Ui, state: &EditorState) {
     }
     egui::CollapsingHeader::new(state.language().t(Message::PackageProblems(state.catalog.problems.len()))).id_salt("package-problems").show(ui, |ui| {
         for problem in &state.catalog.problems {
-            ui.colored_label(theme::REFUSED, format!("{}: {}", short_name(&problem.package), problem.message));
+            ui.colored_label(theme::refused(), format!("{}: {}", short_name(&problem.package), problem.message));
         }
     });
 }

@@ -30,8 +30,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let key = state.selection().filter(|key| clip_of(state, *key).is_some());
     follow_clip(ui.ctx(), state, key);
     let title = state.language().t(if key.is_some() { Message::ClipTitle } else { Message::ProjectTitle });
-    ui.painter_at(rect).text(header.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), theme::ACCENT_TEXT);
-    ui.painter_at(rect).hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::BORDER));
+    ui.painter_at(rect).text(header.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), theme::accent_text());
+    ui.painter_at(rect).hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::border()));
     let body = Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max).shrink2(Vec2::new(10.0, 8.0));
     if body.width() < 1.0 || body.height() < 1.0 {
         return;
@@ -74,7 +74,7 @@ fn clip_of(state: &EditorState, key: ClipKey) -> Option<&engine::Clip> {
 
 fn field(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.colored_label(theme::TEXT_DIM, label);
+        ui.colored_label(theme::text_dim(), label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.monospace(value));
     });
 }
@@ -88,7 +88,7 @@ fn project_summary(ui: &mut egui::Ui, state: &EditorState) {
     field(ui, &language.t(Message::FieldDuration), &format_timecode(content_end(state.project()), output.frame_duration));
     ui.add_space(8.0);
     ui.separator();
-    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::SelectClipHint)).color(theme::TEXT_DIM)).wrap());
+    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::SelectClipHint)).color(theme::text_dim())).wrap());
 }
 
 fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
@@ -98,7 +98,7 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     let editable = !state.is_track_locked(key.track);
     ui.add(egui::Label::new(egui::RichText::new(clip_label(&clip.source)).strong()).truncate());
     if !editable {
-        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::TEXT_DIM)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::text_dim())).wrap());
     }
     ui.add_enabled_ui(editable, |ui| {
         let full_source = state.source_remaining(key).filter(|left| clip.timeline_ticks(*left) != clip.duration);
@@ -111,7 +111,7 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         ui.separator();
 
         let mut gain = clip.gain_db;
-        ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldVolume));
+        ui.colored_label(theme::text_dim(), language.t(Message::FieldVolume));
         let changed = ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
             let mut changed = ui.add(slider(&mut gain, GAIN_RANGE)).changed();
@@ -155,7 +155,7 @@ fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f
         None => actual,
     };
     ui.horizontal(|ui| {
-        ui.colored_label(theme::TEXT_DIM, label);
+        ui.colored_label(theme::text_dim(), label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (response, changed) = drag_field(ui, &mut value, 0.0..=f64::MAX, 0.02, 3, " s", None);
             if changed && !state.hold_cancelled() {
@@ -181,7 +181,7 @@ fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f
 /// puts the clip back where it fits the frame, and is off when it already does.
 fn placement_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, placed: bool) {
     ui.horizontal(|ui| {
-        ui.colored_label(theme::TEXT_DIM, label);
+        ui.colored_label(theme::text_dim(), label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let tooltip = state.language().t(Message::Reset);
             let clicked = ui.add_enabled_ui(placed && !state.is_holding(), |ui| icons::button_of_size(ui, Icon::Undo, &tooltip, false, RESET_BUTTON_SIDE).clicked()).inner;
@@ -196,7 +196,7 @@ fn placement_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, placed
 /// live edit path, so a drag is one undo step and Esc restores the clip.
 fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, label: &str, speed: f64) {
     let mut value = speed;
-    ui.colored_label(theme::TEXT_DIM, label);
+    ui.colored_label(theme::text_dim(), label);
     let changeable = speed_limits(state.project(), key).is_some();
     ui.add_enabled_ui(changeable, |ui| {
         ui.horizontal(|ui| {
@@ -216,7 +216,7 @@ fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, label: &s
         });
     });
     if !changeable {
-        ui.add(egui::Label::new(egui::RichText::new(state.language().t(Message::SpeedBlockedByEndTransition)).color(theme::TEXT_DIM)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(state.language().t(Message::SpeedBlockedByEndTransition)).color(theme::text_dim())).wrap());
     }
 }
 
@@ -248,7 +248,7 @@ fn pointer_moved(ui: &egui::Ui, id: egui::Id, pressed: bool) -> bool {
 }
 
 fn fade_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, value: Time, longest: Time, enabled: bool, mut apply: impl FnMut(&mut EditorState, Time)) {
-    ui.colored_label(theme::TEXT_DIM, label);
+    ui.colored_label(theme::text_dim(), label);
     let mut seconds = to_seconds(value);
     let max = to_seconds(longest).max(0.0);
     ui.add_enabled_ui(enabled, |ui| {
@@ -268,7 +268,7 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: b
     let language = state.language();
     ui.strong(language.t(Message::TabEffects));
     if clip.effects.is_empty() {
-        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::NoEffectsYet)).color(theme::TEXT_DIM)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::NoEffectsYet)).color(theme::text_dim())).wrap());
     }
     let mut remove = None;
     for (index, effect) in clip.effects.iter().enumerate() {
@@ -291,7 +291,7 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: b
                             }
                         }
                         None => {
-                            ui.colored_label(theme::TEXT_DIM, language.t(Message::PackageParamsUnreadable));
+                            ui.colored_label(theme::text_dim(), language.t(Message::PackageParamsUnreadable));
                         }
                     }
                 });
@@ -336,7 +336,7 @@ fn transition_controls(ui: &mut egui::Ui, state: &mut EditorState, track: usize,
     if let Some((shortest, longest)) = transition_duration_limits(state.project(), track, transition.after_clip) {
         let mut seconds = to_seconds(transition.duration);
         let (low, high) = (to_seconds(shortest), to_seconds(longest));
-        ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldDuration));
+        ui.colored_label(theme::text_dim(), language.t(Message::FieldDuration));
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
             let mut changed = ui.add(slider(&mut seconds, low..=high)).changed();

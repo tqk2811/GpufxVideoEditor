@@ -175,6 +175,7 @@ pub struct UiState {
     /// The clip the inspector showed last, to notice when that changes.
     pub inspector_clip: Option<(ClipKey, String, i64)>,
     pub panel_sizes: PanelSizes,
+    pub theme: crate::ui::theme::ThemeChoice,
     /// The splitter in the user's hand. Not a hold: edits go on while it moves.
     pub splitter: Option<SplitterDrag>,
     /// Files the window was given, with where the pointer was in physical pixels when known.

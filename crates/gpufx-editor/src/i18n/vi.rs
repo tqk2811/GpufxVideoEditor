@@ -134,6 +134,11 @@ pub(super) fn text(message: &Message) -> String {
         Message::ProjectInUse(path) => format!("{path} đang được mở ở tiến trình khác"),
         Message::AgentAccessFailed(detail) => format!("Không mở được kết nối cho agent: {detail}"),
         Message::MenuLanguage => "Ngôn ngữ".to_owned(),
+        Message::MenuTheme => "Giao diện".to_owned(),
+        Message::ThemeSystem => "Theo hệ thống".to_owned(),
+        Message::ThemeDark => "Tối".to_owned(),
+        Message::ThemeLight => "Sáng".to_owned(),
+        Message::ThemeSaveFailed(detail) => format!("Không lưu được giao diện: {detail}"),
         Message::Cancel => "Hủy".to_owned(),
         Message::ExportVideo => "Xuất video".to_owned(),
 

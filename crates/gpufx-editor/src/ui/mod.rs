@@ -8,7 +8,7 @@ mod numeric;
 mod param_widgets;
 mod placement;
 mod player;
-mod theme;
+pub mod theme;
 mod timeline_panel;
 mod top_bar;
 
@@ -31,12 +31,13 @@ pub enum UiRequest {
     CancelExport,
     ToggleFullscreen,
     SetLanguage(Language),
+    SetTheme(theme::ThemeChoice),
     SavePanelSizes,
     SetAgentAccess(bool),
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
-    theme::apply(root.ctx());
+    theme::apply(root.ctx(), state.ui.theme);
     state.visuals.borrow_mut().begin_frame(root.ctx());
     state.visuals.borrow_mut().sync_project(state.revision(), state.project());
     track_fullscreen_activity(root.ctx(), state);
@@ -79,7 +80,7 @@ fn editing_panels(root: &mut egui::Ui, state: &mut EditorState, requests: &mut V
     let screen = root.max_rect();
     let layout = panels(screen.size(), &state.ui.panel_sizes);
     let Panels { top_bar, left, center, right, timeline, status } = layout;
-    root.painter().rect_filled(screen, CornerRadius::ZERO, theme::BACKGROUND);
+    root.painter().rect_filled(screen, CornerRadius::ZERO, theme::background());
     let enabled = !state.is_exporting();
     in_rect(root, "top-bar", top_bar, |ui| top_bar::show(ui, state, requests));
     panel(root, "left-panel", left, |ui| {
@@ -122,8 +123,8 @@ fn panel(root: &mut egui::Ui, id: &str, rect: Rect, add_contents: impl FnOnce(&m
         return;
     }
     let radius = CornerRadius::same(theme::PANEL_RADIUS);
-    root.painter().rect_filled(rect, radius, theme::PANEL);
-    root.painter().rect_stroke(rect, radius, Stroke::new(1.0, theme::BORDER), StrokeKind::Inside);
+    root.painter().rect_filled(rect, radius, theme::panel());
+    root.painter().rect_stroke(rect, radius, Stroke::new(1.0, theme::border()), StrokeKind::Inside);
     in_rect(root, id, rect.shrink(1.0), add_contents);
 }
 
@@ -158,7 +159,7 @@ fn splitters(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
         }
         if response.hovered() || active.is_some() {
             let line = if splitter.is_vertical_bar() { Rect::from_center_size(gap.center(), egui::vec2(2.0, gap.height())) } else { Rect::from_center_size(gap.center(), egui::vec2(gap.width(), 2.0)) };
-            root.painter().rect_filled(line, CornerRadius::ZERO, theme::ACCENT);
+            root.painter().rect_filled(line, CornerRadius::ZERO, theme::accent());
         }
         if response.double_clicked() {
             let reset = match splitter {
@@ -276,33 +277,33 @@ fn status_line(ui: &mut egui::Ui, state: &EditorState) {
         match state.status() {
             Status::Idle if loading.is_some() => {}
             Status::Idle => {
-                ui.colored_label(theme::TEXT_DIM, language.t(Message::Ready));
+                ui.colored_label(theme::text_dim(), language.t(Message::Ready));
             }
             Status::Info(message) => {
-                ui.colored_label(theme::TEXT_DIM, language.text(message));
+                ui.colored_label(theme::text_dim(), language.text(message));
             }
             Status::Refused(message) => {
-                ui.colored_label(theme::REFUSED, language.t(Message::RefusedLine(language.text(message))));
+                ui.colored_label(theme::refused(), language.t(Message::RefusedLine(language.text(message))));
             }
             Status::Error(message) => {
-                ui.colored_label(theme::REFUSED, language.text(message));
+                ui.colored_label(theme::refused(), language.text(message));
             }
         }
         if let Some(message) = state.preview_error() {
             ui.separator();
-            ui.colored_label(theme::REFUSED, language.t(Message::PreviewLine(message.to_owned())));
+            ui.colored_label(theme::refused(), language.t(Message::PreviewLine(message.to_owned())));
         }
         if let Some(message) = state.playback_message() {
             ui.separator();
-            ui.colored_label(theme::REFUSED, language.t(Message::AudioLine(message.to_owned())));
+            ui.colored_label(theme::refused(), language.t(Message::AudioLine(message.to_owned())));
         }
         if let Some(reason) = state.no_sound() {
             ui.separator();
-            ui.colored_label(theme::REFUSED, language.t(Message::NoSoundLine(reason.to_owned())));
+            ui.colored_label(theme::refused(), language.t(Message::NoSoundLine(reason.to_owned())));
         }
         if state.silence_ms() > 0 {
             ui.separator();
-            ui.colored_label(theme::TEXT_DIM, language.t(Message::AudioGapLine(state.silence_ms())));
+            ui.colored_label(theme::text_dim(), language.t(Message::AudioGapLine(state.silence_ms())));
         }
     });
 }

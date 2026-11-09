@@ -29,13 +29,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let area = Rect::from_min_max(Pos2::new(rect.left(), header.bottom()), Pos2::new(rect.right(), controls.top()));
 
     let painter = ui.painter_at(rect);
-    painter.text(header.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, state.language().t(Message::Player), FontId::proportional(14.0), theme::TEXT);
-    painter.hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::BORDER));
+    painter.text(header.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, state.language().t(Message::Player), FontId::proportional(14.0), theme::text());
+    painter.hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::border()));
     draw_picture(ui, area, preview);
     let output = &state.project().output;
     let frame = picture_rect(area, (output.width, output.height));
     placement::show(ui, state, area, frame);
-    painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::BORDER));
+    painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::border()));
     ui.scope_builder(UiBuilder::new().max_rect(controls.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, controls));
 }
 
@@ -69,12 +69,12 @@ fn fullscreen_errors(state: &EditorState) -> Option<String> {
 
 /// Paints `errors` just above the fullscreen bar.
 fn draw_fullscreen_errors(ui: &egui::Ui, bar: Rect, screen: Rect, errors: String) {
-    let galley = ui.painter().layout(errors, FontId::proportional(14.0), theme::REFUSED, (bar.width() - 2.0 * FULLSCREEN_ERROR_PADDING).max(1.0));
+    let galley = ui.painter().layout(errors, FontId::proportional(14.0), theme::refused(), (bar.width() - 2.0 * FULLSCREEN_ERROR_PADDING).max(1.0));
     let size = galley.size() + Vec2::splat(2.0 * FULLSCREEN_ERROR_PADDING);
     let top = (bar.top() - FULLSCREEN_ERROR_GAP - size.y).max(screen.top());
     let panel = Rect::from_min_size(Pos2::new(bar.center().x - size.x / 2.0, top), size);
-    ui.painter().rect_filled(panel, CornerRadius::same(theme::PANEL_RADIUS), theme::PANEL.gamma_multiply(0.9));
-    ui.painter().galley(panel.min + Vec2::splat(FULLSCREEN_ERROR_PADDING), galley, theme::REFUSED);
+    ui.painter().rect_filled(panel, CornerRadius::same(theme::PANEL_RADIUS), theme::panel().gamma_multiply(0.9));
+    ui.painter().galley(panel.min + Vec2::splat(FULLSCREEN_ERROR_PADDING), galley, theme::refused());
 }
 
 /// The picture on the whole screen, letterboxed, with the transport floating over it until the
@@ -97,7 +97,7 @@ pub fn show_fullscreen(ui: &mut egui::Ui, state: &mut EditorState, requests: &mu
     if let Some(errors) = errors {
         draw_fullscreen_errors(ui, bar, screen, errors);
     }
-    ui.painter().rect_filled(bar, CornerRadius::same(theme::PANEL_RADIUS), theme::PANEL.gamma_multiply(0.9));
+    ui.painter().rect_filled(bar, CornerRadius::same(theme::PANEL_RADIUS), theme::panel().gamma_multiply(0.9));
     ui.scope_builder(UiBuilder::new().id_salt("fullscreen-transport").max_rect(bar.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, bar));
 }
 
@@ -129,13 +129,13 @@ fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
     let current = format_timecode(state.playhead(), frame_duration);
     let total = format_timecode(content_end(state.project()), frame_duration);
     let total = format!("/ {total}");
-    let width_of = |text: &str, style: egui::TextStyle| ui.painter().layout_no_wrap(text.to_owned(), style.resolve(ui.style()), theme::TEXT).size().x;
+    let width_of = |text: &str, style: egui::TextStyle| ui.painter().layout_no_wrap(text.to_owned(), style.resolve(ui.style()), theme::text()).size().x;
     let beside_play = controls.width() / 2.0 - PLAY_HALF_WIDTH - ui.spacing().item_spacing.x;
     let (show_total, show_aspect) = transport_fit(beside_play, width_of(&current, egui::TextStyle::Monospace), width_of(&total, egui::TextStyle::Monospace), width_of(&size, egui::TextStyle::Body), ui.spacing().item_spacing.x);
     ui.allocate_ui_with_layout(ui.max_rect().size(), Layout::left_to_right(Align::Center), |ui| {
-        ui.colored_label(theme::ACCENT_TEXT, egui::RichText::new(current).monospace());
+        ui.colored_label(theme::accent_text(), egui::RichText::new(current).monospace());
         if show_total {
-            ui.colored_label(theme::TEXT_DIM, egui::RichText::new(total).monospace());
+            ui.colored_label(theme::text_dim(), egui::RichText::new(total).monospace());
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let (icon, tip) = if state.ui.fullscreen { (Icon::Exit, Message::ExitFullscreen) } else { (Icon::Fullscreen, Message::Fullscreen) };
@@ -151,10 +151,10 @@ fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
     let enabled = !state.is_exporting();
     let response = ui.interact(button, ui.scope_id().with("play"), if enabled { Sense::click() } else { Sense::hover() });
     if response.hovered() && enabled {
-        ui.painter().rect_filled(button, CornerRadius::same(16), theme::PANEL_RAISED);
+        ui.painter().rect_filled(button, CornerRadius::same(16), theme::panel_raised());
     }
     let icon = if state.is_playing() { Icon::Stop } else { Icon::Play };
-    let tint = if enabled { theme::TEXT } else { theme::TICK };
+    let tint = if enabled { theme::text() } else { theme::tick() };
     icons::paint(ui.painter(), button.shrink(7.0), icon, tint);
     if response.on_hover_text(state.language().t(if state.is_playing() { Message::StopShortcut } else { Message::PlayShortcut })).clicked() {
         state.toggle_playback();
@@ -182,7 +182,7 @@ fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
                 }
             }
             ui.separator();
-            ui.colored_label(theme::TEXT_DIM, language.t(Message::OutputSizeCustom));
+            ui.colored_label(theme::text_dim(), language.t(Message::OutputSizeCustom));
             let (mut draft_width, mut draft_height) = ui.data(|data| data.get_temp::<(u32, u32)>(draft_id)).unwrap_or((width, height));
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut draft_width).range(2..=7680).speed(2));
@@ -195,7 +195,7 @@ fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
                 ui.close();
             }
             ui.separator();
-            ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldFrameRate));
+            ui.colored_label(theme::text_dim(), language.t(Message::FieldFrameRate));
             for preset in OUTPUT_FRAME_DURATIONS {
                 if ui.selectable_label(preset == frame_duration, format_fps(preset)).clicked() {
                     state.set_frame_duration(preset);

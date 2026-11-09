@@ -197,9 +197,9 @@ pub fn button_of_size(ui: &mut egui::Ui, icon: Icon, tooltip: &str, selected: bo
     let enabled = ui.is_enabled();
     let (rect, response) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     let fill = if selected {
-        theme::ACCENT_SOFT
+        theme::accent_soft()
     } else if response.hovered() && enabled {
-        theme::PANEL_RAISED
+        theme::panel_raised()
     } else {
         Color32::TRANSPARENT
     };
@@ -207,11 +207,11 @@ pub fn button_of_size(ui: &mut egui::Ui, icon: Icon, tooltip: &str, selected: bo
         ui.painter().rect_filled(rect, CornerRadius::same(theme::CONTROL_RADIUS), fill);
     }
     let color = if !enabled {
-        theme::TICK
+        theme::tick()
     } else if selected {
-        theme::ACCENT_TEXT
+        theme::accent_text()
     } else {
-        theme::TEXT
+        theme::text()
     };
     paint(ui.painter(), rect.shrink(side * 0.21), icon, color);
     response.on_hover_text(tooltip)
