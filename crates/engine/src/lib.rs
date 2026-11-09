@@ -7,10 +7,12 @@
 //! * [`Project`] is the JSON project model ([`Project::from_json`] rejects unknown versions).
 //! * [`validate`] checks a project and reports every problem with its location.
 //! * [`schedule`] turns a project and a frame index into the layers to composite.
+//! * [`render`] drives a project through decoder, compositor and sink traits a backend implements.
 //!
 //! Floating point is never used on timeline paths.
 
 pub mod project;
+pub mod render;
 pub mod schedule;
 pub mod time;
 pub mod validate;
