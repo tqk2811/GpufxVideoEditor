@@ -373,6 +373,13 @@ fn keep_output_unless<I>(check: Result<(), String>, output: I, release: impl FnO
     }
 }
 
+/// Reads the input of a clip, then takes its output image. The input comes first: an unusable frame
+/// must not cost an image, which nothing could give back.
+fn input_then_output<F, I>(input: impl FnOnce() -> Result<F, String>, output: impl FnOnce() -> Result<I, String>) -> Result<(F, I), String> {
+    let input = input()?;
+    Ok((input, output()?))
+}
+
 fn package_path(paths: &ProjectPaths, package: &str) -> Result<std::path::PathBuf, String> {
     paths.package_path(package).ok_or_else(|| format!("package {package} not found"))
 }
@@ -433,9 +440,9 @@ impl Compositor for D3d12Compositor {
 
     fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SequentialDecoder as Decoder>::Frame, effects: &[ProjectEffect], at: FrameContext) -> Result<ImageId, RenderError> {
         let info = Self::info(at);
-        let output = self.acquire()?;
+        let (input, output) = input_then_output(|| decoded_input(frame), || self.acquire())?;
         let (width, height) = (self.width, self.height);
-        let mut inputs = [decoded_input(frame)?];
+        let mut inputs = [input];
         let (gpu, paths) = (&self.gpu, &self.paths);
         let result = self
             .clip_graphs
@@ -529,6 +536,25 @@ mod tests {
         let result = keep_output_unless(Err("wgpu error".to_owned()), 7, |image| released.set(Some(image)));
         assert_eq!(result, Err(RenderError("wgpu error".to_owned())));
         assert_eq!(released.get(), Some(7), "the caller has no handle to release");
+    }
+
+    #[test]
+    fn an_unusable_input_takes_no_output_image() {
+        let taken = Cell::new(false);
+        let result = input_then_output(
+            || Err::<i32, _>("unsupported colorspace".to_owned()),
+            || {
+                taken.set(true);
+                Ok(7)
+            },
+        );
+        assert_eq!(result, Err("unsupported colorspace".to_owned()));
+        assert!(!taken.get(), "the image would never be released");
+    }
+
+    #[test]
+    fn a_usable_input_gets_its_output_image() {
+        assert_eq!(input_then_output(|| Ok::<_, String>(1), || Ok(7)), Ok((1, 7)));
     }
 
     #[test]
