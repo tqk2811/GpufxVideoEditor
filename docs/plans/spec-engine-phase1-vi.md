@@ -68,5 +68,5 @@ Hash chỉ so trên cùng máy và driver, vì GPU khác có thể lệch nhỏ.
 ## Phụ thuộc và rủi ro
 
 - FFmpeg GPL: release hiện chỉ có bản LGPL. Engine dựng và test được với bản LGPL vì cùng API, x264 chỉ cần khi xuất. Cần một bản GPL cùng commit trước khi test xuất x264.
-- `GpuContext::from_device` và zero-copy cho texture 1920x1088 đang chờ phía gpufx. Engine dùng đường vòng của POC cho tới khi có.
+- `GpuContext::from_device` đã công khai và gpufx đã đọc tại chỗ texture lớn hơn khung (nhánh `feat/editor-api` của submodule). Khung D3D12VA dạng texture array vẫn đi đường copy. Engine dùng một wgpu device và phải tuần tự hoá mọi `submit` với `process_d3d12`.
 - Clip GOP dài tua chậm (p95 502 ms ở POC). Render tuần tự ít bị ảnh hưởng; preview xử lý ở giai đoạn proxy.
