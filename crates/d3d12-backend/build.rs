@@ -5,7 +5,7 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const LINKED_LIBRARIES: [&str; 3] = ["avcodec", "avformat", "avutil"];
+const LINKED_LIBRARIES: [&str; 4] = ["avcodec", "avformat", "avutil", "swresample"];
 const RUNTIME_DLL_PREFIXES: [&str; 5] = ["avcodec-", "avformat-", "avutil-", "swresample-", "swscale-"];
 
 fn main() {

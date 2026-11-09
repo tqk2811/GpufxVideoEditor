@@ -8,6 +8,7 @@
 
 #![cfg(windows)]
 
+mod audio;
 mod compositor;
 mod decoder;
 mod encoder;
@@ -15,6 +16,7 @@ mod ffi;
 mod gpu;
 mod paths;
 
+pub use audio::{AudioFileDecoder, AudioFiles};
 pub use compositor::D3d12Compositor;
 pub use decoder::{DecodedFrame, SequentialDecoder};
 pub use encoder::{EncoderChoice, Mp4Encoder, AUTO_ENCODERS};

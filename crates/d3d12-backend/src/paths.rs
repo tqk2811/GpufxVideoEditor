@@ -60,4 +60,9 @@ impl Resolver for ProjectPaths {
     fn package_exists(&self, package: &str) -> bool {
         self.package_path(package).is_some()
     }
+
+    /// A file FFmpeg cannot open has no audio it could read, so it counts as having none.
+    fn source_has_audio(&self, source: &str) -> bool {
+        crate::audio::has_audio_stream(&self.source_path(source))
+    }
 }

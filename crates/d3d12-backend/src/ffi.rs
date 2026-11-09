@@ -18,6 +18,39 @@ pub const AV_CODEC_FLAG_GLOBAL_HEADER: i32 = 1 << 22;
 pub const AVFMT_NOFILE: i32 = 0x0001;
 /// `AVIO_FLAG_WRITE`
 pub const AVIO_FLAG_WRITE: i32 = 2;
+/// `AV_DISPOSITION_ATTACHED_PIC`
+pub const AV_DISPOSITION_ATTACHED_PIC: i32 = 0x0400;
+/// `AVERROR_STREAM_NOT_FOUND`, that is `FFERRTAG(0xF8, 'S', 'T', 'R')`.
+pub const AVERROR_STREAM_NOT_FOUND: i32 = -(0xF8 | (0x53 << 8) | (0x54 << 16) | (0x52 << 24));
+
+/// libswresample's opaque context.
+#[repr(C)]
+pub struct SwrContext {
+    _unused: [u8; 0],
+}
+
+unsafe extern "C" {
+    pub fn swr_alloc_set_opts2(
+        context: *mut *mut SwrContext,
+        out_layout: *const AVChannelLayout,
+        out_format: AVSampleFormat,
+        out_rate: core::ffi::c_int,
+        in_layout: *const AVChannelLayout,
+        in_format: AVSampleFormat,
+        in_rate: core::ffi::c_int,
+        log_offset: core::ffi::c_int,
+        log_context: *mut core::ffi::c_void,
+    ) -> core::ffi::c_int;
+    pub fn swr_init(context: *mut SwrContext) -> core::ffi::c_int;
+    pub fn swr_free(context: *mut *mut SwrContext);
+    pub fn swr_convert(context: *mut SwrContext, out: *const *mut u8, out_count: core::ffi::c_int, input: *const *const u8, in_count: core::ffi::c_int) -> core::ffi::c_int;
+    pub fn swr_get_delay(context: *mut SwrContext, base: i64) -> i64;
+    pub fn swr_get_out_samples(context: *mut SwrContext, in_samples: core::ffi::c_int) -> core::ffi::c_int;
+    pub fn av_channel_layout_default(layout: *mut AVChannelLayout, channels: core::ffi::c_int);
+    pub fn av_channel_layout_compare(first: *const AVChannelLayout, second: *const AVChannelLayout) -> core::ffi::c_int;
+    pub fn av_channel_layout_copy(destination: *mut AVChannelLayout, source: *const AVChannelLayout) -> core::ffi::c_int;
+    pub fn av_channel_layout_uninit(layout: *mut AVChannelLayout);
+}
 
 unsafe extern "C" {
     pub fn avcodec_find_encoder_by_name(name: *const core::ffi::c_char) -> *const AVCodec;

@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 pub const CLIP_WIDTH: u32 = 640;
@@ -115,6 +116,44 @@ pub fn cropped_clip() -> PathBuf {
             .status()
             .expect("ffmpeg runs");
         assert!(status.success(), "generating the cropped clip failed");
+    }
+    path
+}
+
+/// The frequency that sounds during second `second` of the stepped test tone.
+pub fn stepped_tone_frequency(second: i64) -> f64 {
+    300.0 + 200.0 * second as f64
+}
+
+/// The stepped test tone at `seconds`, matching [`STEPPED_TONE`].
+pub fn stepped_tone(seconds: f64) -> f64 {
+    0.5 * (2.0 * std::f64::consts::PI * stepped_tone_frequency(seconds.floor() as i64) * seconds).sin()
+}
+
+/// A lavfi expression: a sine whose frequency steps once per second.
+pub const STEPPED_TONE: &str = "0.5*sin(2*PI*(300+200*floor(t))*t)";
+
+/// Six seconds of the stepped tone at `rate`, in `channels`, written once per run to `name`.
+pub fn stepped_tone_clip(name: &str, rate: u32, channels: u32, codec: &str) -> PathBuf {
+    audio_test_file(name, &["-f", "lavfi", "-i", &format!("aevalsrc='{STEPPED_TONE}':s={rate}:d=6"), "-ac", &channels.to_string(), "-c:a", codec])
+}
+
+/// Runs the ffmpeg of third_party with `arguments` to make `name` in the clips directory, unless it exists.
+pub fn audio_test_file(name: &str, arguments: &[&str]) -> PathBuf {
+    let dir = clips_dir();
+    std::fs::create_dir_all(&dir).expect("create the clips directory");
+    let path = dir.join(name);
+    if !path.is_file() {
+        // Named per process and call, so parallel tests never see a half-written clip.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let unique = format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let temporary = dir.join(format!("{}.{unique}.tmp.{}", path.file_stem().unwrap_or_default().to_string_lossy(), path.extension().unwrap_or_default().to_string_lossy()));
+        let status = Command::new(ffmpeg_tool()).args(["-hide_banner", "-y", "-v", "error"]).args(arguments).arg(&temporary).status().expect("ffmpeg runs");
+        assert!(status.success(), "generating {} failed", path.display());
+        if std::fs::rename(&temporary, &path).is_err() {
+            let _ = std::fs::remove_file(&temporary);
+            assert!(path.is_file(), "publishing {} failed", path.display());
+        }
     }
     path
 }
