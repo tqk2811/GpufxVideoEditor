@@ -36,11 +36,15 @@ const TRANSITION: Color32 = Color32::from_rgba_premultiplied(120, 90, 30, 170);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiRequest {
     PickClipFile { track: usize },
+    NewProject,
+    OpenProject,
+    SaveProject,
+    SaveProjectAs,
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
-    handle_shortcuts(root.ctx(), state);
-    egui::Panel::top("toolbar").show(root, |ui| toolbar(ui, state));
+    handle_shortcuts(root.ctx(), state, requests);
+    egui::Panel::top("toolbar").show(root, |ui| toolbar(ui, state, requests));
     egui::Panel::bottom("status").show(root, |ui| status_line(ui, state));
     egui::Panel::right("packages").default_size(PICKER_WIDTH).show(root, |ui| picker(ui, state));
     egui::CentralPanel::default().show(root, |ui| {
@@ -74,7 +78,7 @@ fn consume_exact(input: &mut egui::InputState, wanted: Modifiers, key: Key) -> b
     input.modifiers.matches_exact(wanted) && input.consume_key(wanted, key)
 }
 
-fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState) {
+fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     // Only a text edit needs the keys. A focused button or slider must not turn them off.
     if ctx.text_edit_focused() {
         return;
@@ -88,6 +92,15 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState) {
         }
         if consume_exact(input, Modifiers::COMMAND, Key::Y) || consume_exact(input, Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) {
             state.redo();
+        }
+        if consume_exact(input, Modifiers::COMMAND, Key::S) {
+            requests.push(UiRequest::SaveProject);
+        }
+        if consume_exact(input, Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+            requests.push(UiRequest::SaveProjectAs);
+        }
+        if consume_exact(input, Modifiers::COMMAND, Key::O) {
+            requests.push(UiRequest::OpenProject);
         }
         if consume_exact(input, Modifiers::NONE, Key::S) {
             state.split_selected();
@@ -103,8 +116,14 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState) {
     });
 }
 
-fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
+fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     ui.horizontal(|ui| {
+        for (label, request) in [("New", UiRequest::NewProject), ("Open", UiRequest::OpenProject), ("Save", UiRequest::SaveProject), ("Save As", UiRequest::SaveProjectAs)] {
+            if ui.button(label).clicked() {
+                requests.push(request);
+            }
+        }
+        ui.separator();
         if ui.button("Add video track").clicked() {
             state.add_track(TrackKind::Video);
         }
@@ -226,6 +245,7 @@ fn status_line(ui: &mut egui::Ui, state: &EditorState) {
             Status::Idle => ui.label("Ready"),
             Status::Info(message) => ui.label(message),
             Status::Refused(message) => ui.colored_label(REFUSED, format!("Refused: {message}")),
+            Status::Error(message) => ui.colored_label(REFUSED, message),
         };
         if let Some(message) = state.preview_error() {
             ui.separator();
@@ -510,17 +530,28 @@ mod tests {
         output.textures_delta.clear();
     }
 
-    fn press_in(ctx: &egui::Context, state: &mut EditorState, key: Key, modifiers: Modifiers, mut extra: impl FnMut(&egui::Context)) {
+    fn press_in(ctx: &egui::Context, state: &mut EditorState, key: Key, modifiers: Modifiers, mut extra: impl FnMut(&egui::Context)) -> Vec<UiRequest> {
+        let mut requests = Vec::new();
         let event = Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers };
         let raw = egui::RawInput { events: vec![Event::ModifiersChanged(modifiers), event], ..Default::default() };
         run_frame(ctx, raw, |ui| {
-            handle_shortcuts(ui.ctx(), state);
+            handle_shortcuts(ui.ctx(), state, &mut requests);
             extra(ui.ctx());
         });
+        requests
     }
 
-    fn press(state: &mut EditorState, key: Key, modifiers: Modifiers) {
-        press_in(&egui::Context::default(), state, key, modifiers, |_| {});
+    fn press(state: &mut EditorState, key: Key, modifiers: Modifiers) -> Vec<UiRequest> {
+        press_in(&egui::Context::default(), state, key, modifiers, |_| {})
+    }
+
+    #[test]
+    fn file_shortcuts_become_requests_and_do_not_split() {
+        let mut state = state();
+        assert_eq!(press(&mut state, Key::S, Modifiers::COMMAND), vec![UiRequest::SaveProject]);
+        assert_eq!(press(&mut state, Key::S, Modifiers::COMMAND | Modifiers::SHIFT), vec![UiRequest::SaveProjectAs]);
+        assert_eq!(press(&mut state, Key::O, Modifiers::COMMAND), vec![UiRequest::OpenProject]);
+        assert_eq!(state.project().tracks[0].clips.len(), 1, "Ctrl+S does not split");
     }
 
     #[test]

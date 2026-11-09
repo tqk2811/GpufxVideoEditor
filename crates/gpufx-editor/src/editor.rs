@@ -10,7 +10,7 @@ use engine::{
     EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use serde_json::Map;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const UNDO_DEPTH: usize = 200;
 const DRAG_FIRST: &str = "Finish the drag first";
@@ -29,6 +29,7 @@ pub enum Status {
     Idle,
     Info(String),
     Refused(String),
+    Error(String),
 }
 
 pub struct EditorState {
@@ -38,6 +39,10 @@ pub struct EditorState {
     status: Status,
     /// Counts the changes of the project; equal values mean an equal project.
     revision: u64,
+    /// The file the project was last saved to or opened from.
+    project_file: Option<PathBuf>,
+    /// The revision that is on disk.
+    saved_revision: u64,
     preview_error: Option<String>,
     playing: bool,
     transport: Vec<TransportCommand>,
@@ -95,6 +100,8 @@ impl EditorState {
             playhead: Time::ZERO,
             status: Status::Idle,
             revision: 0,
+            project_file: None,
+            saved_revision: 0,
             preview_error: None,
             playing: false,
             transport: Vec::new(),
@@ -131,6 +138,55 @@ impl EditorState {
 
     pub fn preview_error(&self) -> Option<&str> {
         self.preview_error.as_deref()
+    }
+
+    pub fn project_file(&self) -> Option<&Path> {
+        self.project_file.as_deref()
+    }
+
+    /// Whether the project changed since it was last saved or opened.
+    pub fn is_dirty(&self) -> bool {
+        self.revision != self.saved_revision
+    }
+
+    /// Records a successful save to `file`.
+    pub fn mark_saved(&mut self, file: PathBuf) {
+        self.status = Status::Info(format!("Saved {}", file.display()));
+        self.project_file = Some(file);
+        self.saved_revision = self.revision;
+    }
+
+    pub fn report_error(&mut self, message: String) {
+        self.status = Status::Error(message);
+    }
+
+    /// Replaces the project with a new or opened one: a fresh history, and a new revision so preview
+    /// and audio rebuild. The new project counts as saved.
+    pub fn replace_project(&mut self, project: Project, file: Option<PathBuf>) {
+        if self.playing {
+            self.transport.push(TransportCommand::Stop);
+        }
+        self.history = EditHistory::new(project, UNDO_DEPTH);
+        self.revision += 1;
+        self.saved_revision = self.revision;
+        self.status = match &file {
+            Some(file) => Status::Info(format!("Opened {}", file.display())),
+            None => Status::Idle,
+        };
+        self.project_file = file;
+        self.selection = None;
+        self.playhead = Time::ZERO;
+        self.playing = false;
+        self.scrub_target = None;
+        self.preview_error = None;
+        self.playback_message = None;
+        self.view = TimelineView::default();
+        self.drag = None;
+    }
+
+    /// An empty project, replacing the current one.
+    pub fn new_project(&mut self) {
+        self.replace_project(default_project(), None);
     }
 
     pub fn set_preview_error(&mut self, error: Option<String>) {
@@ -884,6 +940,47 @@ mod tests {
         assert!(state.project().tracks[0].transitions.is_empty());
         state.undo();
         assert_eq!(state.project().tracks[0].transitions.len(), 1);
+    }
+
+    #[test]
+    fn a_change_makes_the_project_dirty_and_a_save_clean() {
+        let mut state = EditorState::default();
+        assert!(!state.is_dirty());
+        state.add_track(TrackKind::Video);
+        assert!(state.is_dirty());
+        state.mark_saved(PathBuf::from("a.json"));
+        assert!(!state.is_dirty());
+        assert_eq!(state.project_file(), Some(Path::new("a.json")));
+        state.add_track(TrackKind::Audio);
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn opening_a_project_replaces_the_history_and_counts_as_saved() {
+        let mut state = state_with_clip();
+        state.toggle_playback();
+        state.take_transport();
+        let revision = state.revision();
+        let opened = state.project().clone();
+        state.replace_project(opened.clone(), Some(PathBuf::from("b.json")));
+
+        assert_eq!(state.revision(), revision + 1, "preview and audio must refresh");
+        assert!(!state.can_undo() && !state.can_redo(), "a fresh history");
+        assert!(!state.is_dirty());
+        assert!(!state.is_playing());
+        assert_eq!(state.take_transport(), vec![TransportCommand::Stop]);
+        assert_eq!(state.selection(), None);
+        assert_eq!(state.playhead(), Time::ZERO);
+        assert_eq!(state.project(), &opened);
+    }
+
+    #[test]
+    fn a_new_project_has_no_file() {
+        let mut state = state_with_clip();
+        state.mark_saved(PathBuf::from("a.json"));
+        state.new_project();
+        assert_eq!(state.project_file(), None);
+        assert!(state.project().tracks.is_empty());
     }
 
     #[test]

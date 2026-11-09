@@ -1,6 +1,6 @@
 //! The window and its event loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use crate::presenter::Presenter;
 use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
-use crate::project_file::{package_roots, project_paths};
+use crate::project_file::{load_project_file, package_roots, project_paths, save_project_file};
 use crate::ui::{self, UiRequest};
 
 /// How often the playhead moves while playing.
@@ -74,6 +74,10 @@ struct Session {
     package_roots: Vec<PathBuf>,
     /// How files of the open project resolve; shared by preview, playback and export.
     paths: Arc<ProjectPaths>,
+    /// The project file the paths were built for.
+    paths_file: Option<PathBuf>,
+    /// The title now on the window.
+    title: String,
     catalog: Option<Receiver<Catalog>>,
     #[cfg(debug_assertions)]
     smoke: Smoke,
@@ -119,6 +123,8 @@ impl Session {
             audio_revision: 0,
             package_roots,
             paths,
+            paths_file: None,
+            title: String::new(),
             catalog: Some(catalog),
             #[cfg(debug_assertions)]
             smoke,
@@ -327,6 +333,8 @@ impl Session {
         for request in requests {
             self.handle(request);
         }
+        self.sync_project_paths();
+        self.sync_title();
         self.sync_audio_project();
         self.apply_transport();
         self.request_preview();
@@ -348,9 +356,66 @@ impl Session {
         self.smoke_exit_at().is_some_and(|at| at <= Instant::now())
     }
 
+    /// Keeps the shared paths with the file the project now belongs to. Audio threads hold the old
+    /// paths, so playback is reopened on the next play.
+    fn sync_project_paths(&mut self) {
+        if self.paths_file.as_deref() == self.state.project_file() {
+            return;
+        }
+        self.paths_file = self.state.project_file().map(Path::to_path_buf);
+        self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.playback = None;
+    }
+
+    fn sync_title(&mut self) {
+        let name = self.state.project_file().and_then(Path::file_name).map_or_else(|| "Untitled".to_owned(), |name| name.to_string_lossy().into_owned());
+        let title = format!("{name}{} - gpufx editor", if self.state.is_dirty() { " *" } else { "" });
+        if title != self.title {
+            self.presenter.window().set_title(&title);
+            self.title = title;
+        }
+    }
+
+    /// Whether the user accepts losing `action`'s unsaved changes; asked only when there are some.
+    fn discard_accepted(&self, action: &str) -> bool {
+        !self.state.is_dirty() || confirm(self.presenter.window(), &format!("The project has unsaved changes. {action} anyway and lose them?"))
+    }
+
+    fn project_dialog(&self) -> rfd::FileDialog {
+        rfd::FileDialog::new().add_filter("Project", &["json"]).set_parent(self.presenter.window())
+    }
+
+    fn open_project(&mut self) {
+        if !self.discard_accepted("Open another project") {
+            return;
+        }
+        let Some(file) = self.project_dialog().pick_file() else { return };
+        match load_project_file(&file, &self.package_roots) {
+            Ok(project) => self.state.replace_project(project, Some(file)),
+            Err(message) => self.state.report_error(message),
+        }
+    }
+
+    fn save_project(&mut self, file: Option<PathBuf>) {
+        let picked = file.or_else(|| self.project_dialog().set_file_name("project.json").save_file());
+        let Some(file) = picked else { return };
+        match save_project_file(self.state.project(), &file) {
+            Ok(()) => self.state.mark_saved(file),
+            Err(message) => self.state.report_error(message),
+        }
+    }
+
     /// Runs outside the frame, because the file dialog blocks this thread.
     fn handle(&mut self, request: UiRequest) {
         match request {
+            UiRequest::NewProject => {
+                if self.discard_accepted("Start a new project") {
+                    self.state.new_project();
+                }
+            }
+            UiRequest::OpenProject => self.open_project(),
+            UiRequest::SaveProject => self.save_project(self.state.project_file().map(Path::to_path_buf)),
+            UiRequest::SaveProjectAs => self.save_project(None),
             UiRequest::PickClipFile { track } => {
                 let picked = rfd::FileDialog::new()
                     .add_filter("Media", &MEDIA_EXTENSIONS)
@@ -377,6 +442,11 @@ fn spawn_catalog_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<Cata
         eprintln!("gpufx-editor: the package scan could not start: {e}");
     }
     receiver
+}
+
+/// Asks a yes or no question over `window`.
+fn confirm(window: &Window, question: &str) -> bool {
+    rfd::MessageDialog::new().set_parent(window).set_title("gpufx editor").set_description(question).set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes
 }
 
 #[derive(Default)]
@@ -413,7 +483,11 @@ impl ApplicationHandler for EditorApp {
             session.presenter.window().request_redraw();
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if session.discard_accepted("Close") {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(size) => {
                 let resized = session.presenter.resize(&session.gpu, size.width, size.height);
                 // A minimised window asks for nothing, so it says nothing about an earlier failure.
