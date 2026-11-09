@@ -237,11 +237,27 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Thấp] Server MCP bị kill giữa lúc xuất để lại project tạm
 
-`crates/gpufx-editor/src/export/child.rs:72` (`TemporaryProject`): tiến trình con tự dừng sạch khi stdin đóng và không để lại file video tạm, nhưng project tạm `gpufx-export.*.tmp.json` trong thư mục temp thì không ai xoá khi `gpufx-mcp` chết. Nên dọn chung với việc dọn file tạm của editor. Ghi ngày 2026-11-09.
+`crates/gpufx-editor/src/export/child.rs:72` (`TemporaryProject`): tiến trình con tự dừng sạch khi stdin đóng và không để lại file video tạm, nhưng project tạm `gpufx-export.*.tmp.json` trong thư mục temp thì không ai xoá khi `gpufx-mcp` chết. Tiến trình con kẹt quá hạn 30 s (`crates/gpufx-render/src/main.rs:24,119`) tự thoát bằng `process::exit`, nên còn để lại cả file `*.tmp.mp4` cạnh file đích. Nên dọn chung với việc dọn file tạm của editor. Ghi ngày 2026-11-09.
+
+### [Thấp] `export_start` chỉ kiểm `overwrite: false` lúc bắt đầu
+
+`crates/gpufx-editor/src/agent/run.rs:358`: file đích xuất hiện sau bước kiểm (app khác tạo ra trong lúc render) vẫn bị bước đổi tên cuối cùng ghi đè dù `overwrite` là false. Nên để bước đổi tên từ chối ghi đè khi không được phép. Ghi ngày 2026-11-09.
+
+### [Thấp] Tắt quyền agent trong lúc chụp chặn UI 1 giây và bật lại báo sai lỗi
+
+`crates/gpufx-editor/src/agent/gateway.rs:312` (`Drop`): luồng pipe đang chờ một lần chụp thì UI đứng tới 1 s, và luồng đó còn giữ pipe nên bật lại ngay sẽ báo lỗi tạo pipe (kiểu "có editor khác đang mở") thay vì nói là chờ một chút. Nên tách việc đóng pipe khỏi việc chờ, hoặc thử lại khi bật. Ghi ngày 2026-11-09.
+
+### [Thấp] Pipe của agent dùng PIPE_NOWAIT và thăm dò 5 ms
+
+`crates/gpufx-editor/src/agent/gateway.rs:126`: `PIPE_NOWAIT` là chế độ Microsoft chỉ giữ để tương thích, và vòng thăm dò đánh thức luồng liên tục kể cả khi không có client. Nên đổi sang overlapped I/O, cũng giúp huỷ được lần ghi/đọc đang chờ. Ghi ngày 2026-11-09.
+
+### [Thấp] Client của pipe đọc không có timeout
+
+`crates/gpufx-mcp/src/session.rs:208`: `LiveSession` chờ câu trả lời vô hạn, nên cửa sổ treo thì tool của agent cũng treo theo. Nên có hạn chờ và trả `no_app`, nhưng phải trừ đủ thời gian cho một lần chụp dài. Ghi ngày 2026-11-09.
 
 ### [Thấp] Hai chương trình tranh nhau file khoá thì cửa sổ vẫn cho sửa
 
-`crates/gpufx-editor/src/window.rs:575` (`sync_project_paths`): nếu không lấy được khoá sau khi project đã đổi (ca hiếm, vì lúc mở đã kiểm trước) thì chỉ hiện thông báo, cửa sổ vẫn sửa và lưu được. Nên chuyển sang chỉ đọc hoặc bỏ project nếu ca này gặp thật. Ghi ngày 2026-11-09.
+`crates/gpufx-editor/src/window.rs:585` (`sync_project_paths`): nếu không lấy được khoá sau khi project đã đổi (ca hiếm, vì lúc mở đã kiểm trước) thì chỉ hiện thông báo, cửa sổ vẫn sửa và lưu được. Open từ giao diện cũng đi qua nhánh này, nên project đã được thay rồi mới biết khoá thất bại. Nên chuyển sang chỉ đọc hoặc bỏ project nếu ca này gặp thật. Ghi ngày 2026-11-09.
 
 ### [Vừa] MCP chưa được thử với client MCP thật và cửa sổ thật
 
