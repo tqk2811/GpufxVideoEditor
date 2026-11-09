@@ -273,7 +273,7 @@ mod tests {
     }
 
     fn probe(video: Option<i64>, audio: Option<i64>) -> MediaProbe {
-        MediaProbe { has_video: video.is_some(), has_audio: audio.is_some(), video_duration: video.map(seconds), audio_duration: audio.map(seconds) }
+        MediaProbe { has_video: video.is_some(), has_audio: audio.is_some(), video_duration: video.map(seconds), audio_duration: audio.map(seconds), video_problem: None, audio_problem: None }
     }
 
     fn with_tracks() -> EditorState {

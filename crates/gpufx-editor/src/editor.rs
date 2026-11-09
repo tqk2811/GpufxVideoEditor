@@ -440,20 +440,24 @@ impl EditorState {
     }
 
     /// Adds a file a background probe has read to `track`, as long as the stream it runs on. A file
-    /// lacking the stream the track plays is refused, because a project holding one would not open
-    /// again.
+    /// lacking the stream the track plays is refused: on an audio track a project holding one would
+    /// not validate (`SourceHasNoAudio`), and a video track would have nothing to show. The status
+    /// says why the stream is unusable when the probe knows.
     pub fn add_probed_file(&mut self, track: usize, path: &Path, probe: &MediaProbe) {
         let name = clip_label(&path.to_string_lossy()).to_owned();
         let Some(kind) = self.project().tracks.get(track).map(|target| target.kind) else {
             self.refuse(&EditError::TrackNotFound { track });
             return;
         };
-        let (present, stated, needed) = match kind {
-            TrackKind::Video => (probe.has_video, probe.video_duration, "video"),
-            TrackKind::Audio => (probe.has_audio, probe.audio_duration, "audio"),
+        let (present, stated, needed, problem) = match kind {
+            TrackKind::Video => (probe.has_video, probe.video_duration, "video", probe.video_problem.as_deref()),
+            TrackKind::Audio => (probe.has_audio, probe.audio_duration, "audio", probe.audio_problem.as_deref()),
         };
         if !present {
-            self.status = Status::Refused(format!("{name} has no {needed} stream"));
+            self.status = Status::Refused(match problem {
+                Some(reason) => format!("{name} has a {needed} stream it cannot use: {reason}"),
+                None => format!("{name} has no {needed} stream"),
+            });
             return;
         }
         let length = stated.filter(|length| *length > Time::ZERO);
@@ -640,6 +644,8 @@ mod tests {
             has_audio: audio.is_some(),
             video_duration: video.map(seconds),
             audio_duration: audio.map(seconds),
+            video_problem: None,
+            audio_problem: None,
         }
     }
 
@@ -666,6 +672,14 @@ mod tests {
     }
 
     #[test]
+    fn an_unusable_stream_is_refused_with_its_real_reason() {
+        let mut state = state_with_clip();
+        let probe = MediaProbe { video_problem: Some("no decoder for its video codec hevc".to_owned()), ..video_probe(None, Some(4)) };
+        state.add_probed_file(0, Path::new("movie.mkv"), &probe);
+        assert!(matches!(state.status(), Status::Refused(message) if message.contains("no decoder for its video codec hevc")), "{:?}", state.status());
+    }
+
+    #[test]
     fn a_probed_clip_takes_the_length_of_the_stream_its_track_plays() {
         let mut state = EditorState::default();
         state.add_track(TrackKind::Video);
@@ -681,7 +695,7 @@ mod tests {
     fn a_probed_clip_with_no_stated_length_gets_the_default_and_says_so() {
         let mut state = EditorState::default();
         state.add_track(TrackKind::Video);
-        let unknown = MediaProbe { has_video: true, has_audio: false, video_duration: None, audio_duration: None };
+        let unknown = MediaProbe { has_video: true, has_audio: false, video_duration: None, audio_duration: None, video_problem: None, audio_problem: None };
         state.add_probed_file(0, Path::new("raw.h264"), &unknown);
         assert_eq!(state.project().tracks[0].clips[0].duration, DEFAULT_CLIP_DURATION);
         assert!(matches!(state.status(), Status::Info(message) if message.contains("states no length")), "{:?}", state.status());
