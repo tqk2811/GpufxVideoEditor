@@ -1,6 +1,6 @@
 //! The one wgpu Direct3D 12 device shared by the compositor and gpufx.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use gpufx_core::GpuContext;
 use wgpu::hal::api::Dx12;
@@ -23,9 +23,15 @@ pub struct Gpu {
     pub queue: wgpu::Queue,
     pub context: Arc<GpuContext>,
     pub adapter_name: String,
+    /// The instance and adapter the device came from, for making a surface on the same device.
+    pub instance: wgpu::Instance,
+    pub adapter: wgpu::Adapter,
     raw: ID3D12Device,
     /// The first error wgpu reported outside an error scope.
     error: Arc<Mutex<Option<String>>>,
+    /// Set once when the device is lost; never cleared.
+    lost: Arc<Mutex<Option<String>>>,
+    submit_gate: Mutex<()>,
 }
 
 impl Gpu {
@@ -73,9 +79,15 @@ impl Gpu {
         let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let sink = error.clone();
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-            let mut slot = sink.lock().expect("not poisoned");
+            let mut slot = sink.lock().unwrap_or_else(|p| p.into_inner());
             slot.get_or_insert_with(|| e.to_string());
         }));
+        let lost: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let lost_sink = lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            let mut slot = lost_sink.lock().unwrap_or_else(|p| p.into_inner());
+            slot.get_or_insert_with(|| format!("{reason:?}: {message}"));
+        });
 
         // SAFETY: the device is only cloned here; wgpu's use of it is not disturbed.
         let raw = {
@@ -83,7 +95,14 @@ impl Gpu {
             hal.raw_device().clone()
         };
         let context = GpuContext::from_device(&adapter, device.clone(), queue.clone(), None).map_err(|e| format!("GpuContext::from_device failed: {e}"))?;
-        Ok(Some(Self { device, queue, context, adapter_name, raw, error }))
+        Ok(Some(Self { device, queue, context, adapter_name, instance, adapter, raw, error, lost, submit_gate: Mutex::new(()) }))
+    }
+
+    /// Held across every `queue.submit` and `process_d3d12` on this device. gpufx stages fences on
+    /// the queue that the next submit from anyone consumes, so no submit may overlap
+    /// `process_d3d12` (the contract of `GpuContext::from_device`). Never held while decoding.
+    pub fn lock_submits(&self) -> MutexGuard<'_, ()> {
+        self.submit_gate.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// The `ID3D12Device` behind the wgpu device.
@@ -91,11 +110,25 @@ impl Gpu {
         &self.raw
     }
 
-    /// `Err` when wgpu reported an error since the device was made.
+    /// `Err` when the device is lost, or wgpu reported an error since the device was made or since
+    /// the last [`Gpu::take_error`].
     pub fn check_errors(&self) -> Result<(), String> {
-        match self.error.lock().expect("not poisoned").as_ref() {
+        if let Some(message) = self.device_lost() {
+            return Err(format!("the GPU device was lost: {message}"));
+        }
+        match self.error.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             Some(message) => Err(format!("wgpu error: {message}")),
             None => Ok(()),
         }
+    }
+
+    /// Why the device was lost, once it has been.
+    pub fn device_lost(&self) -> Option<String> {
+        self.lost.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Takes the reported wgpu error, so one bad frame does not fail the frames after it.
+    pub fn take_error(&self) -> Option<String> {
+        self.error.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 }

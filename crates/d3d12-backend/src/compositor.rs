@@ -30,6 +30,7 @@ use crate::gpu::Gpu;
 use crate::paths::ProjectPaths;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const MAX_SPARE_IMAGES: usize = 3;
 
 /// An index into the image pool, or [`BLANK_IMAGE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +45,31 @@ struct Image {
     fence_value: u64,
     barrier_texture: hal::dx12::Texture,
     copy_source: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
+fn import_texture(gpu: &Gpu, resource: &ID3D12Resource, size: wgpu::Extent3d, usage: wgpu::TextureUsages, state: wgpu::TextureUses) -> wgpu::Texture {
+    let hal_texture = unsafe { hal::dx12::Device::texture_from_raw(resource.clone(), OUTPUT_FORMAT, wgpu::TextureDimension::D2, size, 1, 1) };
+    // SAFETY: the resource is valid and stays alive through the clones held by the wrappers.
+    // Each use is bracketed by `record_transition` into the `state` declared here.
+    unsafe {
+        gpu.device.create_texture_from_hal::<Dx12>(
+            hal_texture,
+            &wgpu::TextureDescriptor {
+                label: Some("gpufx-render image"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: OUTPUT_FORMAT,
+                usage,
+                view_formats: &[],
+            },
+            state,
+        )
+    }
 }
 
 fn extent(width: u32, height: u32) -> wgpu::Extent3d {
@@ -80,27 +106,12 @@ impl Image {
         };
         let resource = created.ok_or("CreateCommittedResource returned no resource")?;
         let size = extent(width, height);
-        // SAFETY: the resource is valid and stays alive through the clones held by the wrappers;
-        // `read` puts it in the state the wrapper declares before using it.
-        let (copy_source, barrier_texture) = unsafe {
-            let hal_texture = hal::dx12::Device::texture_from_raw(resource.clone(), OUTPUT_FORMAT, wgpu::TextureDimension::D2, size, 1, 1);
-            let copy_source = gpu.device.create_texture_from_hal::<Dx12>(
-                hal_texture,
-                &wgpu::TextureDescriptor {
-                    label: Some("gpufx-render image"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: OUTPUT_FORMAT,
-                    usage: wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                },
-                wgpu::TextureUses::COPY_SRC,
-            );
-            (copy_source, hal::dx12::Device::texture_from_raw(resource.clone(), OUTPUT_FORMAT, wgpu::TextureDimension::D2, size, 1, 1))
-        };
-        Ok(Self { resource, fence, fence_value: 0, barrier_texture, copy_source })
+        let copy_source = import_texture(gpu, &resource, size, wgpu::TextureUsages::COPY_SRC, wgpu::TextureUses::COPY_SRC);
+        let display = import_texture(gpu, &resource, size, wgpu::TextureUsages::TEXTURE_BINDING, wgpu::TextureUses::RESOURCE);
+        let view = display.create_view(&wgpu::TextureViewDescriptor::default());
+        // SAFETY: the resource is valid and this wrapper only records barriers on it.
+        let barrier_texture = unsafe { hal::dx12::Device::texture_from_raw(resource.clone(), OUTPUT_FORMAT, wgpu::TextureDimension::D2, size, 1, 1) };
+        Ok(Self { resource, fence, fence_value: 0, barrier_texture, copy_source, view, width, height })
     }
 
     fn frame(&self, width: u32, height: u32) -> D3d12Frame {
@@ -116,12 +127,11 @@ impl Image {
         }
     }
 
-    /// Records the barrier between COMMON (where gpufx leaves and expects the resource) and COPY_SRC.
-    fn record_transition(&self, encoder: &mut wgpu::CommandEncoder, to_common: bool) {
-        let state = wgpu::TextureUses::COPY_SRC;
+    /// Records the barrier between COMMON (where gpufx leaves and expects the resource) and `state`.
+    fn record_transition(&self, encoder: &mut wgpu::CommandEncoder, state: wgpu::TextureUses, to_common: bool) {
         let (from, to) = if to_common { (state, wgpu::TextureUses::UNINITIALIZED) } else { (wgpu::TextureUses::UNINITIALIZED, state) };
         // SAFETY: the texture is valid; the caller waited for the image's fence, so nothing else
-        // uses the resource, and the wrapper declares COPY_SRC around these barriers.
+        // uses the resource, and the wrapper declares `state` around these barriers.
         unsafe {
             encoder.as_hal_mut::<Dx12, _, _>(|raw| {
                 if let Some(raw) = raw {
@@ -138,6 +148,90 @@ impl Image {
     fn wait(&self) -> Result<(), String> {
         // SAFETY: a null event makes SetEventOnCompletion block until the value is reached.
         unsafe { self.fence.SetEventOnCompletion(self.fence_value, HANDLE::default()) }.map_err(|e| format!("image fence wait failed: {e}"))
+    }
+
+    /// Copies the image, whose fence has been waited for, into `rgba` as tight RGBA8 rows.
+    fn read_rgba(&self, gpu: &Gpu, buffer: &wgpu::Buffer, rgba: &mut Vec<u8>) -> Result<(), String> {
+        let (width, height) = (self.width as usize, self.height as usize);
+        let row_bytes = self.width * 4;
+        let aligned_row = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let mut before = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("read-back state") });
+        self.record_transition(&mut before, wgpu::TextureUses::COPY_SRC, false);
+        let mut copy = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("read-back") });
+        copy.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &self.copy_source, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(aligned_row), rows_per_image: Some(self.height) } },
+            extent(self.width, self.height),
+        );
+        let mut after = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("read-back state back") });
+        self.record_transition(&mut after, wgpu::TextureUses::COPY_SRC, true);
+        let submission = {
+            let _gate = gpu.lock_submits();
+            gpu.queue.submit([before.finish(), copy.finish(), after.finish()])
+        };
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None }).map_err(|e| format!("waiting for the GPU failed: {e}"))?;
+        rgba.clear();
+        {
+            let mapped = slice.get_mapped_range().map_err(|e| format!("mapping the read-back buffer failed: {e}"))?;
+            rgba.reserve(width * height * 4);
+            for row in mapped.chunks_exact(aligned_row as usize) {
+                rgba.extend_from_slice(&row[..row_bytes as usize]);
+            }
+        }
+        buffer.unmap();
+        Ok(())
+    }
+}
+
+fn readback_buffer(gpu: &Gpu, width: u32, height: u32) -> wgpu::Buffer {
+    let aligned_row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpufx-render read-back"),
+        size: u64::from(aligned_row) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    })
+}
+
+/// A finished composited image detached from the compositor's pool. The GPU work on it is done, and
+/// it is in COMMON between uses. Give it back with [`D3d12Compositor::recycle`] once the GPU has
+/// finished every use of it, or drop it.
+pub struct SharedImage {
+    image: Image,
+}
+
+impl SharedImage {
+    pub fn width(&self) -> u32 {
+        self.image.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.image.height
+    }
+
+    /// The shader-readable view of the image.
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.image.view
+    }
+
+    /// Records the barrier that makes the image readable by shaders.
+    pub fn record_begin_sampling(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.image.record_transition(encoder, wgpu::TextureUses::RESOURCE, false);
+    }
+
+    /// Records the barrier that returns the image to COMMON, after sampling.
+    pub fn record_end_sampling(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.image.record_transition(encoder, wgpu::TextureUses::RESOURCE, true);
+    }
+
+    /// Reads the image back as tight RGBA8 rows. For verification.
+    pub fn read_rgba(&self, gpu: &Gpu) -> Result<Vec<u8>, String> {
+        let buffer = readback_buffer(gpu, self.image.width, self.image.height);
+        let mut rgba = Vec::new();
+        self.image.read_rgba(gpu, &buffer, &mut rgba)?;
+        Ok(rgba)
     }
 }
 
@@ -183,6 +277,8 @@ pub struct D3d12Compositor {
     height: u32,
     images: Vec<Image>,
     free: Vec<usize>,
+    /// Images handed back through [`D3d12Compositor::recycle`], ready to be reused.
+    spares: Vec<Image>,
     clip_graphs: ClipCache<[ProjectEffect], EffectGraph>,
     transition_graphs: HashMap<String, EffectGraph>,
     overlay: EffectGraph,
@@ -193,7 +289,7 @@ impl D3d12Compositor {
     /// A compositor writing images of `width` x `height`.
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, readback: None })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, readback: None })
     }
 
     fn acquire(&mut self) -> Result<ImageId, String> {
@@ -209,12 +305,35 @@ impl D3d12Compositor {
         FrameInfo::new(at.time.ticks() as f64 / engine::TICKS_PER_SECOND as f64, at.index as u64)
     }
 
+    /// Waits for `image` and takes it out of the pool for use outside the compositor, leaving
+    /// another image in its slot. `None` for the blank image. The caller still releases `image`.
+    pub fn publish(&mut self, image: ImageId) -> Result<Option<SharedImage>, String> {
+        if image == BLANK_IMAGE {
+            return Ok(None);
+        }
+        self.images[image.0].wait()?;
+        let replacement = match self.spares.pop() {
+            Some(spare) => spare,
+            None => Image::create(&self.gpu, self.width, self.height)?,
+        };
+        Ok(Some(SharedImage { image: std::mem::replace(&mut self.images[image.0], replacement) }))
+    }
+
+    /// Takes back a published image for reuse. Every GPU use of it must have finished.
+    pub fn recycle(&mut self, shared: SharedImage) {
+        if shared.image.width == self.width && shared.image.height == self.height && self.spares.len() < MAX_SPARE_IMAGES {
+            self.spares.push(shared.image);
+        }
+    }
+
     /// Runs `graph` into the image `output` and records the fence value it will reach.
-    fn run_graph(graph: &mut EffectGraph, inputs: &mut [D3d12Frame], images: &mut [Image], output: ImageId, width: u32, height: u32, info: &FrameInfo) -> Result<(), String> {
+    fn run_graph(gpu: &Gpu, graph: &mut EffectGraph, inputs: &mut [D3d12Frame], images: &mut [Image], output: ImageId, width: u32, height: u32, info: &FrameInfo) -> Result<(), String> {
         let mut outputs = [images[output.0].frame(width, height)];
+        // A submit from another thread must not consume the fences this call stages.
+        let _gate = gpu.lock_submits();
         // SAFETY: the resources and fences are live objects of the shared device, in COMMON once
         // their fences reach the values passed, and not reused by others before the fences signal.
-        // No submit overlaps this call: the render loop is single threaded.
+        // The submit gate is held, so no submit overlaps this call.
         unsafe { graph.process_d3d12(inputs, &mut outputs, Some(info)) }.map_err(|e| format!("process_d3d12 failed: {e}"))?;
         images[output.0].fence_value = outputs[0].fence_value;
         Ok(())
@@ -290,7 +409,7 @@ impl Compositor for D3d12Compositor {
         let result = self
             .clip_graphs
             .get_or_build(key, effects, || build_clip_graph(&gpu.context, paths, width, height, effects))
-            .and_then(|graph| Self::run_graph(graph, &mut inputs, &mut self.images, output, width, height, &info));
+            .and_then(|graph| Self::run_graph(gpu, graph, &mut inputs, &mut self.images, output, width, height, &info));
         if let Err(e) = result {
             self.release_image(output);
             return Err(RenderError(e));
@@ -315,7 +434,7 @@ impl Compositor for D3d12Compositor {
             let images = &mut self.images;
             let graph = self.transition_graphs.get_mut(&graph_key).expect("graph exists");
             match graph.set_param("progress", &[value]) {
-                Ok(()) => Self::run_graph(graph, &mut inputs, images, output, width, height, &info),
+                Ok(()) => Self::run_graph(&self.gpu, graph, &mut inputs, images, output, width, height, &info),
                 Err(e) => Err(format!("package {package}: setting progress failed: {e}")),
             }
         };
@@ -334,7 +453,7 @@ impl Compositor for D3d12Compositor {
         let output = self.acquire()?;
         let (width, height) = (self.width, self.height);
         let mut inputs = [self.images[base.0].frame(width, height), self.images[top.0].frame(width, height)];
-        let result = Self::run_graph(&mut self.overlay, &mut inputs, &mut self.images, output, width, height, &info);
+        let result = Self::run_graph(&self.gpu, &mut self.overlay, &mut inputs, &mut self.images, output, width, height, &info);
         if let Err(e) = result {
             self.release_image(output);
             return Err(RenderError(e));
@@ -351,43 +470,17 @@ impl Compositor for D3d12Compositor {
 
     fn read(&mut self, image: ImageId, rgba: &mut Vec<u8>) -> Result<(), RenderError> {
         let (width, height) = (self.width as usize, self.height as usize);
-        rgba.clear();
         if image == BLANK_IMAGE {
+            rgba.clear();
             rgba.resize(width * height * 4, 0);
             rgba.iter_mut().skip(3).step_by(4).for_each(|alpha| *alpha = 255);
             return Ok(());
         }
+        let gpu = self.gpu.clone();
         let source = &self.images[image.0];
         source.wait()?;
-        let row_bytes = self.width * 4;
-        let aligned_row = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let size = u64::from(aligned_row) * u64::from(self.height);
-        let gpu = self.gpu.clone();
-        let buffer = self.readback.get_or_insert_with(|| {
-            gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("gpufx-render read-back"), size, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false })
-        });
-        let mut before = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("read-back state") });
-        source.record_transition(&mut before, false);
-        let mut copy = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("read-back") });
-        copy.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &source.copy_source, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(aligned_row), rows_per_image: Some(self.height) } },
-            extent(self.width, self.height),
-        );
-        let mut after = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("read-back state back") });
-        source.record_transition(&mut after, true);
-        let submission = gpu.queue.submit([before.finish(), copy.finish(), after.finish()]);
-        let slice = buffer.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        gpu.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None }).map_err(|e| RenderError(format!("waiting for the GPU failed: {e}")))?;
-        {
-            let mapped = slice.get_mapped_range().map_err(|e| RenderError(format!("mapping the read-back buffer failed: {e}")))?;
-            rgba.reserve(width * height * 4);
-            for row in mapped.chunks_exact(aligned_row as usize) {
-                rgba.extend_from_slice(&row[..row_bytes as usize]);
-            }
-        }
-        buffer.unmap();
+        let buffer = self.readback.get_or_insert_with(|| readback_buffer(&gpu, source.width, source.height));
+        source.read_rgba(&gpu, buffer, rgba)?;
         gpu.check_errors()?;
         Ok(())
     }
