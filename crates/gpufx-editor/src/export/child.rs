@@ -429,9 +429,12 @@ mod tests {
         let paths = ProjectPaths::new(Path::new("p.json"), Vec::new());
         let (first, second) = (TemporaryProject::write(&project("a", "b"), &paths).expect("write"), TemporaryProject::write(&project("a", "b"), &paths).expect("write"));
         assert_ne!(first.0, second.0);
-        let kept = first.0.clone();
-        drop(first);
-        assert!(!kept.exists() && second.0.exists());
+        assert!(first.0.exists() && second.0.exists());
+        // In a folder of its own: another test of this process may take a freed name at once.
+        let own = scratch("temporary-project").join("project.json");
+        std::fs::write(&own, b"{}").expect("write");
+        drop(TemporaryProject(own.clone()));
+        assert!(!own.exists());
     }
 
     #[test]

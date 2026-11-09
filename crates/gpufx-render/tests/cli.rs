@@ -481,6 +481,7 @@ fn a_failed_rename_is_one_error_event_and_the_finished_file_stays() {
     if !hardware_available() {
         return;
     }
+    let _ = std::fs::remove_dir_all(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli-json-locked"));
     let dir = scratch_dir("cli-json-locked");
     let project = write_project(&dir, &two_clip_project());
     let out = dir.join("locked.mp4");
@@ -543,6 +544,7 @@ fn the_end_of_stdin_stops_a_run_that_asked_for_it() {
     if !hardware_available() {
         return;
     }
+    let _ = std::fs::remove_dir_all(PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cli-json-stdin-eof"));
     let dir = scratch_dir("cli-json-stdin-eof");
     let project = write_project(&dir, &two_clip_project());
     let out = dir.join("eof.mp4");
