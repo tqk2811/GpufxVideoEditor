@@ -7,8 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common::*;
-use d3d12_backend::{D3d12Compositor, Gpu, ProjectPaths, SequentialDecoder};
-use engine::render::{render, Decoder, FrameSink, RenderError};
+use d3d12_backend::{AudioFiles, D3d12Compositor, Gpu, ProjectPaths, SequentialDecoder};
+use engine::render::{render, render_with_audio, Decoder, FrameSink, RenderError};
 use engine::{validate, Project, Time};
 use sha2::{Digest, Sha256};
 
@@ -30,11 +30,13 @@ struct Capture {
     wanted: Vec<i64>,
     frames: Vec<(i64, Vec<u8>)>,
     hashes: Vec<String>,
+    audio: Sha256,
+    audio_samples: usize,
 }
 
 impl Capture {
     fn new(wanted: &[i64]) -> Self {
-        Self { wanted: wanted.to_vec(), frames: Vec::new(), hashes: Vec::new() }
+        Self { wanted: wanted.to_vec(), frames: Vec::new(), hashes: Vec::new(), audio: Sha256::new(), audio_samples: 0 }
     }
 
     fn frame(&self, index: i64) -> &[u8] {
@@ -48,6 +50,14 @@ impl FrameSink for Capture {
         if self.wanted.contains(&index) {
             self.frames.push((index, rgba.to_vec()));
         }
+        Ok(())
+    }
+
+    fn write_audio(&mut self, samples: &[f32]) -> Result<(), RenderError> {
+        for sample in samples {
+            self.audio.update(sample.to_le_bytes());
+        }
+        self.audio_samples += samples.len();
         Ok(())
     }
 }
@@ -72,6 +82,39 @@ fn project_json(width: u32, height: u32, tracks: &str) -> String {
 
 const W: u32 = CLIP_WIDTH;
 const H: u32 = CLIP_HEIGHT;
+
+/// Renders `json` with its audio through the real decoder; returns the mixed samples and their hash.
+fn render_pcm(gpu: &Arc<Gpu>, json: &str) -> (usize, String) {
+    let project = Project::from_json(json).expect("project parses");
+    let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
+    let errors = validate(&project, paths.as_ref());
+    assert!(errors.is_empty(), "invalid project: {errors:?}");
+    let mut files = AudioFiles::new(paths.clone());
+    let mut compositor = D3d12Compositor::new(gpu.clone(), paths, project.output.width, project.output.height).expect("compositor");
+    let mut capture = Capture::new(&[]);
+    render_with_audio(&project, &mut compositor, &mut capture, Some(&mut files)).expect("render");
+    let digest: String = capture.audio.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    (capture.audio_samples, digest)
+}
+
+#[test]
+fn the_mixed_pcm_repeats_exactly_between_renders() {
+    let _lock = gpu_lock();
+    let clip = tone_clip_with_video();
+    let Some(gpu) = gpu() else { return };
+    let source = json_path(&clip);
+    let json = format!(
+        r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+            {{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":120000,"fade_in":9000}},
+                       {{"source":"{source}","start":120000,"source_in":270000,"duration":120000,"gain_db":-3.0}}],
+              "transitions":[{{"after_clip":0,"package":"mix","duration":30000}}]}}]}}"#
+    );
+    let first = render_pcm(&gpu, &json);
+    let second = render_pcm(&gpu, &json);
+    // 240000 ticks is 128000 stereo samples.
+    assert_eq!(first.0, 128_000 * 2, "the mix covers the timeline exactly");
+    assert_eq!(first, second, "the PCM before the encoder differs between two renders");
+}
 
 #[test]
 fn rendering_twice_gives_identical_frames() {

@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use d3d12_backend::{D3d12Compositor, EncoderChoice, Gpu, Mp4Encoder, ProjectPaths};
-use engine::render::{render, FrameSink, RenderError};
-use engine::{frame_count, validate, Project};
+use d3d12_backend::{AudioFiles, D3d12Compositor, EncoderChoice, Gpu, Mp4Encoder, ProjectPaths};
+use engine::render::{render_with_audio, FrameSink, RenderError};
+use engine::{frame_count, validate, AudioSource, Project};
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]...\n\
@@ -147,6 +147,10 @@ impl FrameSink for HashingSink {
         }
         self.encoder.write_frame(index, rgba)
     }
+
+    fn write_audio(&mut self, samples: &[f32]) -> Result<(), RenderError> {
+        self.encoder.write_audio(samples)
+    }
 }
 
 fn run() -> Result<(), String> {
@@ -166,6 +170,7 @@ fn run() -> Result<(), String> {
     let gpu = Arc::new(Gpu::create()?);
     println!("gpu: {}", gpu.adapter_name);
     let (width, height) = (project.output.width, project.output.height);
+    let mut audio_files = project.output.audio.map(|_| AudioFiles::new(paths.clone()));
     let mut compositor = D3d12Compositor::new(gpu, paths, width, height)?;
     // Declared before the sink, so they drop after it has closed its files.
     let mut out_file = PendingFile::new(&arguments.out);
@@ -181,7 +186,8 @@ fn run() -> Result<(), String> {
     let mut sink = HashingSink { encoder, hashes };
 
     let total = frame_count(&project);
-    let summary = render(&project, &mut compositor, &mut sink).map_err(|e| e.to_string())?;
+    let audio = audio_files.as_mut().map(|files| files as &mut dyn AudioSource);
+    let summary = render_with_audio(&project, &mut compositor, &mut sink, audio).map_err(|e| e.to_string())?;
     if summary.frames != total {
         return Err(format!("rendered {} of {total} frames", summary.frames));
     }
@@ -194,6 +200,9 @@ fn run() -> Result<(), String> {
     out_file.commit()?;
     if let Some(file) = &mut hashes_file {
         file.commit()?;
+    }
+    if project.output.audio.is_some() {
+        println!("audio: {} samples, {} clamped", summary.audio_samples, summary.clamped_samples);
     }
     println!("wrote {} frames to {}", summary.frames, arguments.out.display());
     Ok(())

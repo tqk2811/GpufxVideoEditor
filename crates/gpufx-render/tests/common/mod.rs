@@ -158,6 +158,49 @@ pub fn audio_test_file(name: &str, arguments: &[&str]) -> PathBuf {
     path
 }
 
+/// A clip with both streams, made once per run under `name` with the video encoder of
+/// [`test_clips`]. `video_filter` shapes the picture, `audio` is a lavfi source.
+pub fn clip_with_audio(name: &str, video_filter: &str, audio: &str, seconds: u32) -> PathBuf {
+    let dir = clips_dir();
+    std::fs::create_dir_all(&dir).expect("create the clips directory");
+    let (tool, codec, options) = encoder_tool();
+    let path = dir.join(format!("{name}-{codec}.mp4"));
+    if !path.is_file() {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let temporary = dir.join(format!("{name}.{}-{}.tmp.mp4", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let color = format!("color=c=black:s={CLIP_WIDTH}x{CLIP_HEIGHT}:r=30:d={seconds}");
+        let status = Command::new(tool)
+            .args(["-hide_banner", "-y", "-v", "error", "-f", "lavfi", "-i", &color, "-f", "lavfi", "-i", audio, "-vf", video_filter, "-c:v", codec, "-pix_fmt", "yuv420p"])
+            .args(options)
+            .args(["-c:a", "aac", "-b:a", "192k", "-shortest"])
+            .arg(&temporary)
+            .status()
+            .expect("ffmpeg runs");
+        assert!(status.success(), "generating {} failed", path.display());
+        if std::fs::rename(&temporary, &path).is_err() {
+            let _ = std::fs::remove_file(&temporary);
+            assert!(path.is_file(), "publishing {} failed", path.display());
+        }
+    }
+    path
+}
+
+/// Four seconds of black video and silence, with one white flash and one 1 kHz beep together
+/// from 1.5 s, for five frames.
+pub fn flash_and_beep_clip() -> PathBuf {
+    clip_with_audio(
+        "flash-beep",
+        "format=yuv420p,drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='between(n,45,49)'",
+        "aevalsrc='if(between(t,1.5,1.66667),0.7*sin(2*PI*1000*t),0)':s=48000:d=4",
+        4,
+    )
+}
+
+/// Six seconds of frame-numbered video with the stepped tone.
+pub fn tone_clip_with_video() -> PathBuf {
+    clip_with_audio("tone-video", &bar_filter(), &format!("aevalsrc='{STEPPED_TONE}':s=44100:d=6"), 6)
+}
+
 /// Paths use forward slashes so they can be pasted into JSON text.
 pub fn json_path(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")

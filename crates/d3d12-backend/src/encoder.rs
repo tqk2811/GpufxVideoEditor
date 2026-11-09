@@ -5,7 +5,7 @@ use std::path::Path;
 use std::ptr;
 
 use engine::render::{FrameSink, RenderError};
-use engine::{Output, TICKS_PER_SECOND};
+use engine::{AudioOutput, Output, TICKS_PER_SECOND};
 
 use crate::ffi::{self, check, describe_error};
 
@@ -34,6 +34,42 @@ pub struct Mp4Encoder {
     /// Duration of one frame in the codec time base (1, as the time base is one frame).
     frame_duration: i64,
     encoder_name: String,
+    /// `None` when the project has no audio output: the file then has no audio stream.
+    audio: Option<AudioTrack>,
+}
+
+/// The AAC stream: samples wait in `fifo` until a whole encoder frame has arrived.
+struct AudioTrack {
+    codec_context: *mut ffi::AVCodecContext,
+    stream: *mut ffi::AVStream,
+    frame: *mut ffi::AVFrame,
+    /// Interleaved stereo samples not encoded yet.
+    fifo: Vec<f32>,
+    /// Timestamp of the next frame sent to the encoder, in samples.
+    next_pts: i64,
+    /// Samples per channel of an encoder frame; 1024 for AAC.
+    frame_size: usize,
+}
+
+impl Drop for AudioTrack {
+    fn drop(&mut self) {
+        // SAFETY: each pointer is null or owned by self, and these calls accept null.
+        unsafe {
+            ffi::av_frame_free(&mut self.frame);
+            ffi::avcodec_free_context(&mut self.codec_context);
+        }
+    }
+}
+
+/// Plain copy of a layout that owns no memory.
+const fn stereo_layout() -> ffi::AVChannelLayout {
+    ffi::AVChannelLayout {
+        order: ffi::AV_CHANNEL_ORDER_NATIVE,
+        nb_channels: 2,
+        // AV_CH_LAYOUT_STEREO: front left and front right.
+        u: ffi::AVChannelLayout__bindgen_ty_1 { mask: 3 },
+        opaque: ptr::null_mut(),
+    }
 }
 
 fn gcd(a: i64, b: i64) -> i64 {
@@ -78,6 +114,7 @@ impl Mp4Encoder {
             height: output.height as usize,
             frame_duration: 0,
             encoder_name: name.to_owned(),
+            audio: None,
         };
         // SAFETY: on error, Drop releases what was created so far.
         unsafe { encoder.initialize(&c_path, &c_name, output)? };
@@ -128,6 +165,10 @@ impl Mp4Encoder {
         self.frame_duration = Self::duration_in_time_base(duration, time_base);
         check(ffi::avcodec_parameters_from_context((*self.stream).codecpar, self.codec_context), "avcodec_parameters_from_context")?;
 
+        if let Some(settings) = output.audio {
+            self.add_audio_stream(settings)?;
+        }
+
         if (*(*self.format_context).oformat).flags & ffi::AVFMT_NOFILE == 0 {
             check(ffi::avio_open(&mut (*self.format_context).pb, path.as_ptr(), ffi::AVIO_FLAG_WRITE), "avio_open")?;
         }
@@ -142,6 +183,49 @@ impl Mp4Encoder {
         (*self.frame).width = output.width as i32;
         (*self.frame).height = output.height as i32;
         check(ffi::av_frame_get_buffer(self.frame, 0), "av_frame_get_buffer")?;
+        Ok(())
+    }
+
+    /// Opens the AAC encoder and adds its stream. Runs before the header is written.
+    unsafe fn add_audio_stream(&mut self, settings: AudioOutput) -> Result<(), String> {
+        let codec = ffi::avcodec_find_encoder_by_name(c"aac".as_ptr());
+        if codec.is_null() {
+            return Err("aac: this FFmpeg does not have it".to_owned());
+        }
+        let mut track = AudioTrack { codec_context: ffi::avcodec_alloc_context3(codec), stream: ptr::null_mut(), frame: ptr::null_mut(), fifo: Vec::new(), next_pts: 0, frame_size: 0 };
+        if track.codec_context.is_null() {
+            return Err("aac: avcodec_alloc_context3 failed".to_owned());
+        }
+        let time_base = ffi::AVRational { num: 1, den: settings.sample_rate as i32 };
+        let context = &mut *track.codec_context;
+        context.sample_fmt = ffi::AV_SAMPLE_FMT_FLTP;
+        context.sample_rate = settings.sample_rate as i32;
+        context.ch_layout = stereo_layout();
+        context.bit_rate = i64::from(settings.bitrate);
+        context.time_base = time_base;
+        if (*(*self.format_context).oformat).flags & ffi::AVFMT_GLOBALHEADER != 0 {
+            context.flags |= ffi::AV_CODEC_FLAG_GLOBAL_HEADER;
+        }
+        check(ffi::avcodec_open2(track.codec_context, codec, ptr::null_mut()), "avcodec_open2(aac)")?;
+        track.frame_size = (*track.codec_context).frame_size as usize;
+
+        track.stream = ffi::avformat_new_stream(self.format_context, ptr::null());
+        if track.stream.is_null() {
+            return Err("avformat_new_stream(aac) failed".to_owned());
+        }
+        (*track.stream).time_base = time_base;
+        check(ffi::avcodec_parameters_from_context((*track.stream).codecpar, track.codec_context), "avcodec_parameters_from_context(aac)")?;
+
+        track.frame = ffi::av_frame_alloc();
+        if track.frame.is_null() {
+            return Err("allocating the audio frame failed".to_owned());
+        }
+        (*track.frame).format = ffi::AV_SAMPLE_FMT_FLTP;
+        (*track.frame).sample_rate = settings.sample_rate as i32;
+        (*track.frame).ch_layout = stereo_layout();
+        (*track.frame).nb_samples = track.frame_size as i32;
+        check(ffi::av_frame_get_buffer(track.frame, 0), "av_frame_get_buffer(aac)")?;
+        self.audio = Some(track);
         Ok(())
     }
 
@@ -164,21 +248,58 @@ impl Mp4Encoder {
     }
 
     fn drain(&mut self) -> Result<(), String> {
-        // SAFETY: the contexts and packet are valid after open; packet is unreferenced after each use.
-        unsafe {
-            loop {
-                let status = ffi::avcodec_receive_packet(self.codec_context, self.packet);
-                if status == ffi::AVERROR_EAGAIN || status == ffi::AVERROR_EOF {
-                    return Ok(());
-                }
-                check(status, "avcodec_receive_packet")?;
-                let packet = &mut *self.packet;
-                packet.stream_index = 0;
-                ffi::av_packet_rescale_ts(packet, (*self.codec_context).time_base, (*self.stream).time_base);
-                let written = ffi::av_interleaved_write_frame(self.format_context, packet);
-                ffi::av_packet_unref(packet);
-                check(written, "av_interleaved_write_frame")?;
+        // SAFETY: the contexts and packet are valid after open.
+        unsafe { self.drain_codec(self.codec_context, self.stream) }
+    }
+
+    /// Writes the packets `codec` has ready to `stream`. The muxer interleaves the streams.
+    unsafe fn drain_codec(&mut self, codec: *mut ffi::AVCodecContext, stream: *mut ffi::AVStream) -> Result<(), String> {
+        loop {
+            let status = ffi::avcodec_receive_packet(codec, self.packet);
+            if status == ffi::AVERROR_EAGAIN || status == ffi::AVERROR_EOF {
+                return Ok(());
             }
+            check(status, "avcodec_receive_packet")?;
+            let packet = &mut *self.packet;
+            packet.stream_index = (*stream).index;
+            ffi::av_packet_rescale_ts(packet, (*codec).time_base, (*stream).time_base);
+            let written = ffi::av_interleaved_write_frame(self.format_context, packet);
+            ffi::av_packet_unref(packet);
+            check(written, "av_interleaved_write_frame")?;
+        }
+    }
+
+    /// Encodes every whole frame in the audio FIFO, and with `finish` the short frame left over.
+    fn encode_audio(&mut self, finish: bool) -> Result<(), String> {
+        let Some(track) = self.audio.as_mut() else { return Ok(()) };
+        let (codec, stream, frame_size) = (track.codec_context, track.stream, track.frame_size);
+        loop {
+            let track = self.audio.as_mut().expect("checked above");
+            let waiting = track.fifo.len() / 2;
+            if waiting == 0 || (waiting < frame_size && !finish) {
+                return Ok(());
+            }
+            let count = waiting.min(frame_size);
+            // SAFETY: the frame's buffers hold `frame_size` samples per plane and count is not
+            // above that; av_frame_make_writable makes it safe to overwrite a frame the encoder
+            // may still reference.
+            unsafe {
+                check(ffi::av_frame_make_writable(track.frame), "av_frame_make_writable(aac)")?;
+                let frame = &mut *track.frame;
+                let left = std::slice::from_raw_parts_mut(frame.data[0].cast::<f32>(), count);
+                let right = std::slice::from_raw_parts_mut(frame.data[1].cast::<f32>(), count);
+                for (i, sample) in track.fifo[..count * 2].chunks_exact(2).enumerate() {
+                    left[i] = sample[0];
+                    right[i] = sample[1];
+                }
+                frame.nb_samples = count as i32;
+                frame.pts = track.next_pts;
+                check(ffi::avcodec_send_frame(codec, track.frame), "avcodec_send_frame(aac)")?;
+            }
+            track.next_pts += count as i64;
+            track.fifo.drain(..count * 2);
+            // SAFETY: the contexts and packet are valid after open.
+            unsafe { self.drain_codec(codec, stream)? };
         }
     }
 
@@ -188,6 +309,12 @@ impl Mp4Encoder {
         unsafe {
             check(ffi::avcodec_send_frame(self.codec_context, ptr::null()), "avcodec_send_frame(flush)")?;
             self.drain()?;
+            self.encode_audio(true)?;
+            if let Some(track) = &self.audio {
+                let (codec, stream) = (track.codec_context, track.stream);
+                check(ffi::avcodec_send_frame(codec, ptr::null()), "avcodec_send_frame(flush aac)")?;
+                self.drain_codec(codec, stream)?;
+            }
             check(ffi::av_write_trailer(self.format_context), "av_write_trailer")?;
         }
         Ok(())
@@ -239,12 +366,20 @@ impl FrameSink for Mp4Encoder {
         }
         self.drain().map_err(RenderError)
     }
+
+    fn write_audio(&mut self, samples: &[f32]) -> Result<(), RenderError> {
+        let Some(track) = self.audio.as_mut() else { return Ok(()) };
+        track.fifo.extend_from_slice(samples);
+        self.encode_audio(false).map_err(RenderError)
+    }
 }
 
 impl Drop for Mp4Encoder {
     fn drop(&mut self) {
         // SAFETY: each pointer is null or owned by self, and these calls accept null.
         unsafe {
+            // Before the format context, which owns the stream it points at.
+            self.audio = None;
             ffi::av_frame_free(&mut self.frame);
             ffi::av_packet_free(&mut self.packet);
             ffi::avcodec_free_context(&mut self.codec_context);

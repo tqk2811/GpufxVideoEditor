@@ -133,6 +133,137 @@ fn the_lgpl_build_has_no_libx264() {
     assert!(!output.status.success(), "the LGPL build must not be able to open libx264");
 }
 
+const AUDIO_OUTPUT: &str = r#","audio":{"sample_rate":48000,"channels":2,"bitrate":192000}"#;
+
+/// One clip of `seconds`, starting `source_in` seconds into `source`.
+fn audio_project(source: &std::path::Path, source_in: i64, seconds: i64, audio_output: &str) -> String {
+    format!(
+        r#"{{"version":2,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}{audio_output}}},"tracks":[{{"clips":[
+           {{"source":"{}","start":0,"source_in":{},"duration":{}}}]}}]}}"#,
+        json_path(source),
+        source_in * 90_000,
+        seconds * 90_000,
+    )
+}
+
+fn stream_field(file: &PathBuf, stream: &str, field: &str) -> String {
+    probe(&["-v", "error", "-select_streams", stream, "-show_entries", &format!("stream={field}"), "-of", "csv=p=0"], file)
+}
+
+fn seconds_of(file: &PathBuf, stream: &str, field: &str) -> f64 {
+    let text = stream_field(file, stream, field);
+    text.parse().unwrap_or_else(|_| panic!("{field} of {stream} is not a number: {text:?}"))
+}
+
+#[test]
+fn exports_aac_stereo_at_48k_as_long_as_the_video() {
+    let _lock = gpu_lock();
+    let clip = tone_clip_with_video();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("cli-audio");
+    let project = write_project(&dir, &audio_project(&clip, 1, 3, AUDIO_OUTPUT));
+    let out = dir.join("out.mp4");
+    let result = render(&project, &out, &dir.join("hashes.txt"));
+    assert!(result.status.success(), "render failed: {}", String::from_utf8_lossy(&result.stderr));
+    let printed = String::from_utf8_lossy(&result.stdout);
+    assert!(printed.lines().any(|l| l == "audio: 144000 samples, 0 clamped"), "the audio report is missing: {printed}");
+
+    assert_eq!(stream_field(&out, "a:0", "codec_name"), "aac");
+    assert_eq!(stream_field(&out, "a:0", "sample_rate"), "48000");
+    assert_eq!(stream_field(&out, "a:0", "channels"), "2");
+    assert_eq!(stream_field(&out, "v:0", "codec_name"), "h264");
+    assert_eq!(probe(&["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"], &out), "90");
+
+    let (audio, video) = (seconds_of(&out, "a:0", "duration"), seconds_of(&out, "v:0", "duration"));
+    let limit = (1024.0 + 1024.0) / 48_000.0;
+    assert!((audio - video).abs() < limit, "audio {audio} s, video {video} s, limit {limit} s");
+
+    let decode = Command::new(ffmpeg_tool()).args(["-hide_banner", "-v", "error", "-i"]).arg(&out).args(["-f", "null", "-"]).output().expect("run ffmpeg");
+    assert!(decode.status.success() && decode.stderr.is_empty(), "decoding failed: {}", String::from_utf8_lossy(&decode.stderr));
+}
+
+/// Decodes a stream of `file` to raw bytes.
+fn extract(dir: &std::path::Path, file: &PathBuf, map: &str, format: &[&str]) -> Vec<u8> {
+    let raw = dir.join("extracted.raw");
+    let status = Command::new(ffmpeg_tool()).args(["-hide_banner", "-v", "error", "-y", "-i"]).arg(file).args(["-map", map]).args(format).arg(&raw).status().expect("run ffmpeg");
+    assert!(status.success(), "extracting {map} failed");
+    std::fs::read(&raw).expect("read the extracted stream")
+}
+
+#[test]
+fn a_flash_and_its_beep_stay_together_in_the_exported_file() {
+    let _lock = gpu_lock();
+    let clip = flash_and_beep_clip();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("cli-sync");
+    // The flash is 1.5 s into the source and the clip starts 1 s in, so a seek is involved.
+    let project = write_project(&dir, &audio_project(&clip, 1, 2, AUDIO_OUTPUT));
+    let out = dir.join("out.mp4");
+    let result = render(&project, &out, &dir.join("hashes.txt"));
+    assert!(result.status.success(), "render failed: {}", String::from_utf8_lossy(&result.stderr));
+
+    let frame_bytes = (CLIP_WIDTH * CLIP_HEIGHT) as usize;
+    let grey = extract(&dir, &out, "0:v", &["-f", "rawvideo", "-pix_fmt", "gray"]);
+    let first_white = grey.chunks_exact(frame_bytes).position(|frame| frame.iter().map(|b| u64::from(*b)).sum::<u64>() / frame_bytes as u64 > 128).expect("the flash is in the export");
+    let flash_time = seconds_of(&out, "v:0", "start_time") + first_white as f64 / 30.0;
+
+    let pcm: Vec<f32> = extract(&dir, &out, "0:a", &["-f", "f32le", "-ac", "1", "-ar", "48000"]).chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let first_loud = pcm.chunks_exact(240).position(|window| (window.iter().map(|s| s * s).sum::<f32>() / 240.0).sqrt() > 0.1).expect("the beep is in the export");
+    let beep_time = seconds_of(&out, "a:0", "start_time") + first_loud as f64 * 240.0 / 48_000.0;
+
+    let frame = 1.0 / 30.0;
+    assert!((flash_time - 0.5).abs() < frame, "the flash is at {flash_time} s, expected 0.5 s");
+    assert!((beep_time - flash_time).abs() < frame, "beep at {beep_time} s, flash at {flash_time} s: more than one frame apart");
+}
+
+#[test]
+fn a_project_without_audio_output_keeps_its_frames_and_has_no_audio_stream() {
+    let _lock = gpu_lock();
+    let clip = tone_clip_with_video();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("cli-no-audio");
+    let silent = write_project(&dir, &audio_project(&clip, 1, 1, ""));
+    let (silent_out, silent_hashes) = (dir.join("silent.mp4"), dir.join("silent.txt"));
+    let result = render(&silent, &silent_out, &silent_hashes);
+    assert!(result.status.success(), "render failed: {}", String::from_utf8_lossy(&result.stderr));
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("audio:"), "no audio report without audio");
+    assert_eq!(stream_field(&silent_out, "a", "codec_name"), "", "the source has audio but the project asks for none");
+
+    let with_audio = dir.join("with-audio.json");
+    std::fs::write(&with_audio, audio_project(&clip, 1, 1, AUDIO_OUTPUT)).expect("write the project");
+    let (out, hashes) = (dir.join("audio.mp4"), dir.join("audio.txt"));
+    let result = render(&with_audio, &out, &hashes);
+    assert!(result.status.success(), "render failed: {}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(std::fs::read_to_string(&silent_hashes).expect("hashes"), std::fs::read_to_string(&hashes).expect("hashes"), "adding audio changed the frames");
+}
+
+#[test]
+fn a_failed_render_with_audio_leaves_existing_outputs_untouched() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("failed-render-audio");
+    std::fs::write(dir.join("broken.mp4"), b"this is not a video").expect("write the broken source");
+    let json = audio_project(&dir.join("broken.mp4"), 0, 1, AUDIO_OUTPUT);
+    let project = write_project(&dir, &json);
+    let (out, hashes) = (dir.join("existing.mp4"), dir.join("existing.txt"));
+    std::fs::write(&out, b"previous output").expect("write the existing output");
+    std::fs::write(&hashes, b"previous hashes").expect("write the existing hashes");
+    let result = render_with(&project, &out, &[&hashes]);
+    assert!(!result.status.success(), "the render must fail");
+    assert_eq!(std::fs::read(&out).expect("read the output"), b"previous output");
+    assert_eq!(std::fs::read(&hashes).expect("read the hashes"), b"previous hashes");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).expect("list the directory").flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".tmp")).collect();
+    assert!(leftovers.is_empty(), "temporary files left behind: {leftovers:?}");
+}
+
 fn invalid_project(tracks: &str) -> String {
     format!(r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000}},"tracks":[{tracks}]}}"#)
 }

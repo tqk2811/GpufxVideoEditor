@@ -8,6 +8,8 @@
 //! [`Decoder::wait_idle`] on every decoder involved, composites, and reads the result. Decoders are
 //! opened per clip the first time the clip is needed and dropped once the clip is no longer in use.
 
+use crate::audio_mix::{mix_audio, AudioSource, MixReport};
+use crate::audio_schedule::{sample_position, MIX_CHANNELS};
 use crate::project::{Effect, Project};
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, LayerContent, Progress, SourceSample,
@@ -128,6 +130,12 @@ pub trait Compositor {
 pub trait FrameSink {
     /// Receives output frame `index` as tightly packed RGBA8 rows. Frames arrive in order.
     fn write_frame(&mut self, index: i64, rgba: &[u8]) -> Result<(), RenderError>;
+
+    /// Receives the next mixed samples, interleaved stereo at 48 kHz, in order and without gaps.
+    /// Called only for a project that has an audio output, after the frame they accompany.
+    fn write_audio(&mut self, _samples: &[f32]) -> Result<(), RenderError> {
+        Ok(())
+    }
 }
 
 /// What a finished render produced.
@@ -135,6 +143,10 @@ pub trait FrameSink {
 pub struct RenderSummary {
     /// Number of frames given to the sink.
     pub frames: i64,
+    /// Number of mixed stereo samples given to the sink; 0 for a project without audio output.
+    pub audio_samples: i64,
+    /// Channel samples that had to be clamped during the audio mix.
+    pub clamped_samples: u64,
 }
 
 /// Decoded frames kept alive until the compositor has read the output of the current frame.
@@ -233,12 +245,29 @@ fn layer_clips(content: &LayerContent<'_>, track: usize) -> Vec<ClipKey> {
     }
 }
 
-/// Renders every frame of `project` (which must have passed [`crate::validate`]) into `sink`.
+/// Renders every frame of `project` (which must have passed [`crate::validate`]) into `sink`,
+/// without audio.
 pub fn render<C: Compositor, S: FrameSink>(
     project: &Project,
     compositor: &mut C,
     sink: &mut S,
 ) -> Result<RenderSummary, RenderError> {
+    render_with_audio(project, compositor, sink, None)
+}
+
+/// Like [`render`], and after each frame also mixes audio up to the end of that frame and sends it
+/// to the sink, so a muxer can interleave the streams. Audio is produced only when `audio` is given
+/// and the project has an audio output.
+pub fn render_with_audio<C: Compositor, S: FrameSink>(
+    project: &Project,
+    compositor: &mut C,
+    sink: &mut S,
+    audio: Option<&mut dyn AudioSource>,
+) -> Result<RenderSummary, RenderError> {
+    let mut audio = audio.filter(|_| project.output.audio.is_some());
+    let mut mixed = 0i64;
+    let mut clamped_samples = 0u64;
+    let mut samples: Vec<f32> = Vec::new();
     let mut decoders: HashMap<ClipKey, C::Decoder> = HashMap::new();
     let mut rgba = Vec::new();
     let frames = frame_count(project);
@@ -284,10 +313,27 @@ pub fn render<C: Compositor, S: FrameSink>(
         drop(kept);
         sink.write_frame(index, &rgba)
             .map_err(|e| RenderError(format!("frame {index}: {e}")))?;
+        if let Some(source) = &mut audio {
+            let end = frame_time(project, index + 1)
+                .map(sample_position)
+                .ok_or_else(|| RenderError(format!("frame {index}: time overflows")))?;
+            samples.resize((end - mixed) as usize * MIX_CHANNELS, 0.0);
+            let MixReport { clamped_samples: clamped } =
+                mix_audio(project, &mut **source, mixed, &mut samples)
+                    .map_err(|e| RenderError(format!("frame {index}, audio: {e}")))?;
+            clamped_samples += clamped;
+            sink.write_audio(&samples)
+                .map_err(|e| RenderError(format!("frame {index}, audio: {e}")))?;
+            mixed = end;
+        }
         // A clip is contiguous on its track, so a clip unused in this frame is finished.
         decoders.retain(|key, _| used.contains(key));
     }
-    Ok(RenderSummary { frames })
+    Ok(RenderSummary {
+        frames,
+        audio_samples: mixed,
+        clamped_samples,
+    })
 }
 
 #[cfg(test)]
@@ -522,6 +568,104 @@ mod tests {
         assert_eq!(journal.acquired, journal.released);
         let open_a = journal.events.iter().filter(|e| *e == "open a").count();
         assert_eq!(open_a, 1);
+    }
+
+    /// Samples equal to their own source position.
+    struct CountingSource;
+
+    impl AudioSource for CountingSource {
+        fn read(
+            &mut self,
+            _key: ClipKey,
+            _source: &str,
+            position: i64,
+            out: &mut [f32],
+        ) -> Result<(), RenderError> {
+            for (i, frame) in out.chunks_exact_mut(2).enumerate() {
+                let value = (position + i as i64) as f32 * 1e-4;
+                frame[0] = value;
+                frame[1] = value;
+            }
+            Ok(())
+        }
+    }
+
+    struct FailingSource;
+
+    impl AudioSource for FailingSource {
+        fn read(
+            &mut self,
+            _key: ClipKey,
+            _source: &str,
+            _position: i64,
+            _out: &mut [f32],
+        ) -> Result<(), RenderError> {
+            Err(RenderError("broken audio".to_owned()))
+        }
+    }
+
+    #[derive(Default)]
+    struct AudioSink {
+        events: Vec<String>,
+        samples: Vec<f32>,
+    }
+
+    impl FrameSink for AudioSink {
+        fn write_frame(&mut self, index: i64, _rgba: &[u8]) -> Result<(), RenderError> {
+            self.events.push(format!("frame {index}"));
+            Ok(())
+        }
+
+        fn write_audio(&mut self, samples: &[f32]) -> Result<(), RenderError> {
+            self.events.push(format!("audio {}", samples.len() / 2));
+            self.samples.extend_from_slice(samples);
+            Ok(())
+        }
+    }
+
+    const WITH_AUDIO: &str = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":100,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
+        {"clips":[{"source":"a","start":0,"source_in":0,"duration":300}]}]}"#;
+
+    fn run_audio(json: &str, source: &mut dyn AudioSource) -> Result<(AudioSink, RenderSummary), RenderError> {
+        let project = Project::from_json(json).expect("valid json");
+        let journal = Rc::new(RefCell::new(Journal::default()));
+        let mut compositor = FakeCompositor { journal };
+        let mut sink = AudioSink::default();
+        let summary = render_with_audio(&project, &mut compositor, &mut sink, Some(source))?;
+        Ok((sink, summary))
+    }
+
+    #[test]
+    fn each_frame_is_followed_by_the_audio_up_to_its_end() {
+        let (sink, summary) = run_audio(WITH_AUDIO, &mut CountingSource).expect("render");
+        // 100 ticks is 53.33 samples: the blocks round so that they add up exactly.
+        assert_eq!(
+            sink.events,
+            ["frame 0", "audio 53", "frame 1", "audio 53", "frame 2", "audio 54"]
+        );
+        assert_eq!(summary.audio_samples, 160);
+        assert_eq!(sink.samples.len(), 320);
+        for (i, frame) in sink.samples.chunks_exact(2).enumerate() {
+            assert_eq!(frame[0], i as f32 * 1e-4, "no gap or overlap at sample {i}");
+        }
+    }
+
+    #[test]
+    fn a_project_without_audio_output_sends_no_audio() {
+        let json = WITH_AUDIO.replace(
+            r#","audio":{"sample_rate":48000,"channels":2,"bitrate":128000}"#,
+            "",
+        );
+        let (sink, summary) = run_audio(&json, &mut FailingSource).expect("the source is not read");
+        assert_eq!(sink.events, ["frame 0", "frame 1", "frame 2"]);
+        assert_eq!(summary.audio_samples, 0);
+    }
+
+    #[test]
+    fn an_audio_failure_fails_the_render() {
+        let error = run_audio(WITH_AUDIO, &mut FailingSource).err().expect("must fail");
+        assert!(error.0.contains("audio"), "{}", error.0);
+        assert!(error.0.contains("broken audio"), "{}", error.0);
     }
 
     #[test]
