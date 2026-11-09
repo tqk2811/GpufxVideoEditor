@@ -145,7 +145,7 @@ fn run() -> Result<(), Failure> {
         let progress = |frame: i64, total: i64| emit(&ProgressEvent::Progress { frame, total, elapsed_ms: started.elapsed().as_millis() as u64 });
         let encoder_opened = |name: &str| emit(&ProgressEvent::Encoder { name: name.to_owned() });
         let reserved = |path: &Path| emit(&ProgressEvent::OutputReserved { path: path_text(path) });
-        // The end goes out as soon as the files are settled, ahead of the GPU teardown.
+        // The end, a failure included, goes out ahead of the GPU teardown. A cancel is reported in `main`.
         let settled_reported = Cell::new(false);
         let settled = |result: &Result<ExportReport, String>| {
             settled_reported.set(true);

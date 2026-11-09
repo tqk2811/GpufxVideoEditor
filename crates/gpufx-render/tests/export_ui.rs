@@ -143,6 +143,33 @@ fn raise_wgpu_error(gpu: &Gpu) {
 }
 
 #[test]
+fn a_failure_before_the_rename_is_reported_once_before_the_gpu_is_released() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let dir = scratch("export-failure-before-teardown");
+    let file = dir.join("project.json");
+    save_project_file(&project_with_transition_and_sound(), &file).expect("save the project");
+    let out = dir.join("failed.mp4");
+    let job = export_job(&file, &out, None);
+    let raiser = gpu.clone();
+    let progress = move |done: i64, total: i64| {
+        if done == total {
+            raise_wgpu_error(&raiser);
+        }
+    };
+    let seen = std::cell::RefCell::new(Vec::new());
+    let settled = |result: &Result<ExportReport, String>| seen.borrow_mut().push((Arc::strong_count(&gpu), result.clone().err()));
+    let result = job.run(gpu.clone(), ExportControl { progress: Some(&progress), settled: Some(&settled), ..ExportControl::default() });
+    let Err(ExportError::Failed(message)) = result else { panic!("the export must fail: {result:?}") };
+    let seen = seen.into_inner();
+    assert_eq!(seen.len(), 1, "exactly one final event: {seen:?}");
+    assert_eq!(seen[0].1.as_deref(), Some(message.as_str()), "the reason that was returned");
+    // The progress closure's clone, this test, `run`, `render`, and the compositor that is torn down last.
+    assert!(seen[0].0 >= 5, "the compositor had already released the GPU: {} holders", seen[0].0);
+    assert!(!out.exists(), "a failed export publishes nothing");
+}
+
+#[test]
 fn a_wgpu_error_belongs_to_the_thread_that_raised_it() {
     let _lock = gpu_lock();
     let Some(gpu) = hardware_gpu() else { return };

@@ -1,5 +1,6 @@
 //! Renders a project to a video file: the one path `gpufx-render` and the editor both use.
 
+use std::cell::Cell;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -63,8 +64,9 @@ pub struct ExportControl<'a> {
     pub encoder_opened: Option<&'a dyn Fn(&str)>,
     /// Called with each temporary file as soon as it exists, so a process that may be killed can name it.
     pub reserved: Option<&'a dyn Fn(&Path)>,
-    /// Called once the output files are settled, before the GPU is released: a crash or hang while
-    /// it is released cannot change what is on disk. `Err` holds a message naming any file kept.
+    /// Called once, when the export has ended in a result or a failure other than a cancel, before the
+    /// GPU is released: a crash or hang while it is released cannot lose the outcome or change what is
+    /// on disk. `Err` holds the reason, which names any file kept.
     pub settled: Option<&'a dyn Fn(&Result<ExportReport, String>)>,
 }
 
@@ -233,15 +235,42 @@ impl ExportJob {
         result
     }
 
+    /// Every failure is passed to `control.settled` while the compositor, and so the GPU, is still
+    /// held, so exactly one event is reported however the export ends and whatever the teardown does.
     fn render(&self, gpu: Arc<Gpu>, control: ExportControl<'_>) -> Result<ExportReport, ExportError> {
-        let cancelled = || control.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::SeqCst));
+        let reported = Cell::new(false);
+        let settle = |result: &Result<ExportReport, String>| {
+            if let Some(notify) = control.settled {
+                reported.set(true);
+                notify(result);
+            }
+        };
         let (width, height) = (self.project.output.width, self.project.output.height);
-        let mut audio_files = self.project.output.audio.map(|_| AudioFiles::new(self.paths.clone()));
-        let mut compositor = D3d12Compositor::new(gpu.clone(), self.paths.clone(), width, height)?;
+        let mut compositor = match D3d12Compositor::new(gpu.clone(), self.paths.clone(), width, height) {
+            Ok(compositor) => compositor,
+            Err(message) => {
+                settle(&Err(message.clone()));
+                return Err(message.into());
+            }
+        };
         if let Some(cancel) = &control.cancel {
             compositor.set_abort(cancel.clone(), Duration::ZERO);
             compositor.set_closing(cancel.clone());
         }
+        let result = self.render_into_files(&gpu, &mut compositor, &control, &settle);
+        if let Err(ExportError::Failed(message)) = &result {
+            if !reported.get() {
+                settle(&Err(message.clone()));
+            }
+        }
+        result
+    }
+
+    /// The render itself. `settle` is called here only for the end of a run that got as far as
+    /// renaming; the caller reports any other failure.
+    fn render_into_files(&self, gpu: &Gpu, compositor: &mut D3d12Compositor, control: &ExportControl<'_>, settle: &dyn Fn(&Result<ExportReport, String>)) -> Result<ExportReport, ExportError> {
+        let cancelled = || control.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::SeqCst));
+        let mut audio_files = self.project.output.audio.map(|_| AudioFiles::new(self.paths.clone()));
         // Declared before the sink, so they drop after it has closed its files.
         let mut out_file = PendingFile::new(&self.out)?;
         let mut hashes_file = self.hashes.as_deref().map(PendingFile::new).transpose()?;
@@ -266,7 +295,7 @@ impl ExportJob {
         let mut sink = ExportSink { encoder, hashes, pcm: Sha256::new(), cancel: control.cancel.as_deref(), progress: control.progress, total };
 
         let audio = audio_files.as_mut().map(|files| files as &mut dyn AudioSource);
-        let summary = match render_with_audio(&self.project, &mut compositor, &mut sink, audio) {
+        let summary = match render_with_audio(&self.project, compositor, &mut sink, audio) {
             Ok(summary) => summary,
             Err(_) if cancelled() => return Err(ExportError::Cancelled),
             Err(e) => return Err(ExportError::Failed(e.to_string())),
@@ -287,9 +316,7 @@ impl ExportJob {
         gpu.check_errors()?;
         let report = ExportReport { encoder: encoder_name, frames: summary.frames, audio_samples: summary.audio_samples, clamped_samples: summary.clamped_samples, pcm_sha256 };
         let settled = commit_outputs(&mut out_file, hashes_file.as_mut()).map(|()| report);
-        if let Some(notify) = control.settled {
-            notify(&settled);
-        }
+        settle(&settled);
         Ok(settled?)
     }
 }

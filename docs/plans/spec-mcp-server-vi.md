@@ -87,7 +87,7 @@ Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế đ�
 | `error` | `message` | Thất bại, kèm lý do bằng tiếng Anh |
 
 - Mỗi lượt chạy kết thúc bằng đúng một trong `finished`, `cancelled`, `error`. Lỗi đọc tham số và đọc project cũng thành `error`. Mã thoát là 0 chỉ khi `finished`.
-- `finished` và `error` của bước đổi tên được ghi ngay sau bước đó, trước khi giải phóng GPU. Tiến trình crash hoặc treo sau sự kiện kết thúc không làm đổi kết quả: bên gọi tin sự kiện kết thúc, kể cả khi mã thoát khác 0, và tự kill tiến trình nếu nó không thoát sau một khoảng chờ.
+- `finished` và `error` được ghi ngay khi kết quả đã rõ (sau bước đổi tên, hoặc ngay khi một bước trước đó thất bại), trước khi giải phóng GPU. Tiến trình crash hoặc treo sau sự kiện kết thúc không làm đổi kết quả: bên gọi tin sự kiện kết thúc, kể cả khi mã thoát khác 0, và tự kill tiến trình nếu nó không thoát sau một khoảng chờ.
 - Bên đọc phải bỏ qua dòng không phải JSON hợp lệ và `event` chưa biết, vì thư viện có thể ghi vào stdout và sự kiện có thể được bổ sung về sau. `protocol` chỉ tăng khi một sự kiện có sẵn mất hoặc đổi trường.
 - Gửi dòng `cancel` vào stdin để dừng sạch. Mặc định stdin đóng không có ý nghĩa gì. Thêm cờ `--cancel-on-stdin-eof` (chỉ dùng được với `--progress json`) thì stdin đóng cũng là huỷ: server headless phải bật cờ này để tiến trình con tự dừng khi server chết, vì khi đó stdin đóng theo. Editor không dùng cờ, vì đã có job object kill-on-close.
 - Một dòng không dài quá 64 KB; thông báo `error` quá dài bị cắt bớt ngay trong JSON. Nếu đã xong mọi khung mà dòng cuối không đọc được thì đó có thể là sự kiện kết thúc: bên gọi không được xoá file tạm và phải báo là không rõ kết quả.
