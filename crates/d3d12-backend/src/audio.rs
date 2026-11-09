@@ -485,7 +485,7 @@ pub(crate) fn has_audio_stream(path: &Path) -> bool {
 /// clips of one file would otherwise make each other seek.
 pub struct AudioFiles {
     paths: Arc<ProjectPaths>,
-    open: HashMap<ClipKey, (AudioFileDecoder, u64)>,
+    open: HashMap<ClipKey, (AudioFileDecoder, u64, String)>,
     uses: u64,
 }
 
@@ -499,16 +499,20 @@ impl AudioFiles {
 impl AudioSource for AudioFiles {
     fn read(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
         self.uses += 1;
+        // Edits renumber clips, so a key can come back naming another file.
+        if self.open.get(&key).is_some_and(|(_, _, opened)| opened != source) {
+            self.open.remove(&key);
+        }
         if !self.open.contains_key(&key) {
             if self.open.len() >= MAX_OPEN_FILES {
-                if let Some(oldest) = self.open.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| *k) {
+                if let Some(oldest) = self.open.iter().min_by_key(|(_, (_, used, _))| *used).map(|(k, _)| *k) {
                     self.open.remove(&oldest);
                 }
             }
             let decoder = AudioFileDecoder::open(&self.paths.source_path(source)).map_err(RenderError)?;
-            self.open.insert(key, (decoder, 0));
+            self.open.insert(key, (decoder, 0, source.to_owned()));
         }
-        let (decoder, used) = self.open.get_mut(&key).expect("inserted above");
+        let (decoder, used, _) = self.open.get_mut(&key).expect("inserted above");
         *used = self.uses;
         decoder.read(position, out).map_err(|e| RenderError(format!("{}: {e}", decoder.path)))
     }
@@ -553,6 +557,21 @@ mod tests {
         assert_eq!(first_frame_position(Some(500), false, 123), Ok(500));
         let error = first_frame_position(None, false, 123).expect_err("position unknown after a mid-file seek");
         assert!(error.contains("no timestamp"), "{error}");
+    }
+
+    #[test]
+    fn a_clip_key_that_now_names_another_file_reads_that_file() {
+        let quiet = generated_clip("level-quarter.wav", &["-f", "lavfi", "-i", "aevalsrc=0.25|0.25:s=48000:d=1", "-c:a", "pcm_s16le"]);
+        generated_clip("level-half.wav", &["-f", "lavfi", "-i", "aevalsrc=0.5|0.5:s=48000:d=1", "-c:a", "pcm_s16le"]);
+        let paths = Arc::new(ProjectPaths::new(&quiet.with_file_name("project.json"), Vec::new()));
+        let mut files = AudioFiles::new(paths);
+        let key = ClipKey { track: 0, clip: 0 };
+        let mut out = [0.0_f32; 64];
+        files.read(key, "level-quarter.wav", 0, &mut out).expect("read the first file");
+        assert!((out[0] - 0.25).abs() < 1e-3, "{}", out[0]);
+        // Deleting an earlier clip renumbers this one onto the old key.
+        files.read(key, "level-half.wav", 0, &mut out).expect("read the second file");
+        assert!((out[0] - 0.5).abs() < 1e-3, "{}", out[0]);
     }
 
     /// A scratch file generated once by the ffmpeg of third_party.

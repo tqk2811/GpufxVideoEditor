@@ -374,14 +374,17 @@ fn cut_keeps_samples(clip: &Clip, offset: i64) -> bool {
     in_source == on_timeline
 }
 
-/// The offset of the cut nearest `wanted` that is inside the clip and keeps the audio aligned, the
-/// earlier one on a tie. The rounding repeats every 15 ticks, so looking 14 away is enough.
-fn aligned_cut(clip: &Clip, wanted: i64) -> Option<i64> {
-    let inside = |offset: i64| offset > 0 && offset < clip.duration.ticks();
+/// The offset of the cut nearest `wanted` within `earliest..=latest` that is inside the clip and
+/// keeps the audio aligned, the earlier one on a tie. The rounding repeats every 15 ticks, so
+/// looking 14 away is enough.
+fn aligned_cut(clip: &Clip, wanted: i64, earliest: i64, latest: i64) -> Option<i64> {
+    let allowed = |offset: i64| {
+        offset > 0 && offset < clip.duration.ticks() && offset >= earliest && offset <= latest
+    };
     (0..15).find_map(|distance| {
-        [wanted - distance, wanted + distance]
+        [wanted.saturating_sub(distance), wanted.saturating_add(distance)]
             .into_iter()
-            .find(|&offset| inside(offset) && cut_keeps_samples(clip, offset))
+            .find(|&offset| allowed(offset) && cut_keeps_samples(clip, offset))
     })
 }
 
@@ -394,23 +397,31 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     if wanted <= Time::ZERO || wanted >= clip.duration {
         return Err(outside);
     }
-    let offset = Time::from_ticks(aligned_cut(clip, wanted.ticks()).ok_or(outside)?);
-    let rest = clip.duration.saturating_sub(offset);
-    if offset < clip.fade_in || rest < clip.fade_out {
+    let wanted_rest = clip.duration.saturating_sub(wanted);
+    if wanted < clip.fade_in || wanted_rest < clip.fade_out {
         return Err(EditError::SplitInsideFade { key, at });
     }
 
+    // The window gives half (rounded down) to the earlier clip and the rest to the later one.
     let track = &project.tracks[key.track];
-    let inside_transition = track.transitions.iter().any(|tr| {
-        // The window gives half (rounded down) to the earlier clip and the rest to the later one.
+    let mut head = Time::ZERO;
+    let mut tail = Time::ZERO;
+    for tr in &track.transitions {
         let before = tr.duration.half_floor();
-        let after = tr.duration.saturating_sub(before);
-        (tr.after_clip == key.clip && rest < before)
-            || (tr.after_clip.checked_add(1) == Some(key.clip) && offset < after)
-    });
-    if inside_transition {
+        if tr.after_clip == key.clip {
+            tail = before;
+        } else if tr.after_clip.checked_add(1) == Some(key.clip) {
+            head = tr.duration.saturating_sub(before);
+        }
+    }
+    if wanted < head || wanted_rest < tail {
         return Err(EditError::SplitInsideTransition { key, at });
     }
+
+    let earliest = clip.fade_in.max(head).ticks();
+    let latest = clip.duration.saturating_sub(clip.fade_out.max(tail)).ticks();
+    let offset = Time::from_ticks(aligned_cut(clip, wanted.ticks(), earliest, latest).ok_or(outside)?);
+    let rest = clip.duration.saturating_sub(offset);
 
     let mut second = clip.clone();
     second.start = clip.start.saturating_add(offset);

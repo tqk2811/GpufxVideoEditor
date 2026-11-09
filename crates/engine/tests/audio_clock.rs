@@ -274,6 +274,26 @@ fn a_timeline_change_rebuilds_the_clock_from_the_new_project() {
 }
 
 #[test]
+fn a_timeline_change_never_undoes_a_seek() {
+    let (mut producer, _consumer, clock) = channel();
+    let current = project();
+    // Bounded so the 20-bit generation cannot wrap back onto the idle consumer's.
+    let changes = std::thread::spawn(move || {
+        for _ in 0..300_000 {
+            producer.set_project(current.clone());
+        }
+    });
+    let mut round = 0_i64;
+    while round < 300_000 && !changes.is_finished() {
+        let target = sample_time(1_000 + round % 1_000);
+        clock.seek(target);
+        assert_eq!(clock.position(), sample_position(target), "round {round}");
+        round += 1;
+    }
+    changes.join().expect("the timeline changes finish");
+}
+
+#[test]
 fn a_timeline_change_past_the_position_moves_it_to_the_new_end() {
     let (mut producer, _consumer, clock) = channel();
     clock.seek(Time::from_ticks(45_000));

@@ -112,31 +112,45 @@ struct Shared {
 }
 
 impl Shared {
-    fn position(&self) -> i64 {
-        let (seek_generation, seek_position) = unpack(self.seek.load(Ordering::Acquire));
-        let (generation, position) = unpack(self.consumed.load(Ordering::Acquire));
-        if generation == seek_generation {
-            position
-        } else {
-            seek_position
-        }
+    /// The pair of states to derive a position from. `consumed` is read first: the consumer only
+    /// publishes a generation it saw in `seek`, so the `seek` read after it is never older.
+    fn states(&self) -> (u64, u64) {
+        let consumed = self.consumed.load(Ordering::Acquire);
+        (consumed, self.seek.load(Ordering::Acquire))
     }
 
-    fn publish_seek(&self, position: i64) {
-        let position = position.clamp(0, self.end.load(Ordering::Acquire));
-        let mut current = self.seek.load(Ordering::Relaxed);
+    fn position(&self) -> i64 {
+        let (consumed, seek) = self.states();
+        position_of(consumed, seek)
+    }
+
+    /// Publishes a seek to `target`, or to the current position when it is `None`. The position
+    /// and the end are read again on every attempt, so a racing seek or timeline change is kept.
+    fn publish_seek(&self, target: Option<i64>) {
         loop {
+            let (consumed, current) = self.states();
+            let position = target
+                .unwrap_or_else(|| position_of(consumed, current))
+                .clamp(0, self.end.load(Ordering::Acquire));
             let generation = unpack(current).0.wrapping_add(1) & GENERATION_MASK;
-            match self.seek.compare_exchange_weak(
-                current,
-                pack(generation, position),
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(actual) => current = actual,
+            if self
+                .seek
+                .compare_exchange_weak(current, pack(generation, position), Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
             }
         }
+    }
+}
+
+fn position_of(consumed: u64, seek: u64) -> i64 {
+    let (generation, position) = unpack(consumed);
+    let (seek_generation, seek_position) = unpack(seek);
+    if generation == seek_generation {
+        position
+    } else {
+        seek_position
     }
 }
 
@@ -213,7 +227,7 @@ impl AudioClock {
 
     /// Moves to the sample of `time`, limited to the timeline, and discards the prepared samples.
     pub fn seek(&self, time: Time) {
-        self.shared.publish_seek(sample_position(time));
+        self.shared.publish_seek(Some(sample_position(time)));
     }
 }
 
@@ -240,17 +254,16 @@ impl AudioProducer {
 
     /// Frames mixed for the current position and waiting for the device.
     pub fn prepared_frames(&self) -> usize {
-        let (seek_generation, seek_position) = unpack(self.shared.seek.load(Ordering::Acquire));
-        if self.generation != seek_generation {
+        let (consumed, seek) = self.shared.states();
+        if self.generation != unpack(seek).0 {
             return 0;
         }
-        let (generation, position) = unpack(self.shared.consumed.load(Ordering::Acquire));
-        let base = if generation == seek_generation { position } else { seek_position };
-        (self.next - base).max(0) as usize
+        (self.next - position_of(consumed, seek)).max(0) as usize
     }
 
     /// Mixes up to `frames` more frames after what is prepared, stopping at the end of the timeline
-    /// or when the ring is full. Ask again until enough is prepared.
+    /// or when the ring is full. Ask again until enough is prepared. Each call fills whole blocks
+    /// where it can but a short request still takes a block, so ask in multiples of the block size.
     pub fn prepare<S: AudioSource + ?Sized>(
         &mut self,
         source: &mut S,
@@ -298,7 +311,7 @@ impl AudioProducer {
         self.project = project;
         self.end = end;
         self.shared.end.store(end, Ordering::Release);
-        self.shared.publish_seek(self.shared.position());
+        self.shared.publish_seek(None);
         self.sync();
     }
 }

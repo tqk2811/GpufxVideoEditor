@@ -330,6 +330,20 @@ fn a_trim_below_the_fades_is_refused() {
 }
 
 #[test]
+fn a_cut_on_the_fade_edge_snaps_to_the_valid_side() {
+    let mut base = chain();
+    base.tracks[0].transitions.clear();
+    let clip = &mut base.tracks[0].clips[0];
+    clip.start = t(0);
+    clip.source_in = t(1);
+    clip.fade_in = t(16);
+    // Tick 16 misaligns the audio; 15 is aligned but inside the fade, 17 is aligned and outside.
+    let next = split_clip(&base, key(0, 0), t(16)).expect("a valid aligned cut exists");
+    assert_eq!(next.tracks[0].clips[1].start, t(17));
+    assert_valid(&next);
+}
+
+#[test]
 fn split_makes_two_touching_halves() {
     let base = project(3000, vec![track(vec![clip("a", 15_000, 30_000, 60_000)], vec![])]);
     let p = split_clip(&base, key(0, 0), t(45_000)).unwrap();
