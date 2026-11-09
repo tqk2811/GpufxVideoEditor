@@ -86,6 +86,8 @@ pub struct SplitterDrag {
     pub splitter: Splitter,
     pub start_size: f32,
     pub before: PanelSizes,
+    /// What the drag starts from; see [`PanelSizes::frozen_for_drag`].
+    pub frozen: PanelSizes,
 }
 
 fn body_bounds(height: f32) -> (f32, f32) {
@@ -99,6 +101,19 @@ fn columns_width(width: f32) -> f32 {
 }
 
 impl PanelSizes {
+    /// These sizes with the side panel across from `splitter` held at the size it is displayed at
+    /// in `laid_out`. A saved size too big for this window would otherwise come back as the drag
+    /// makes room, and that panel would jump. A panel following the window stays that way.
+    pub fn frozen_for_drag(self, splitter: Splitter, laid_out: &Panels) -> Self {
+        let mut frozen = self;
+        match splitter {
+            Splitter::Left if self.right.is_some() => frozen.right = Some(laid_out.right.width()),
+            Splitter::Right if self.left.is_some() => frozen.left = Some(laid_out.left.width()),
+            _ => {}
+        }
+        frozen
+    }
+
     /// These sizes with the panel of `splitter` at `wanted`, kept inside its limits in a window of
     /// `size` with the other panels as they are, so the bar stops where the panel can go no further.
     pub fn dragged_to(self, size: Vec2, splitter: Splitter, wanted: f32) -> Self {

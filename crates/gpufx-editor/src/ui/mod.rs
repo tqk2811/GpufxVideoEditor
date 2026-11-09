@@ -142,14 +142,15 @@ fn splitters(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
         let cursor = if splitter.is_vertical_bar() { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical };
         let response = root.interact(gap.expand2(margin), root.scope_id().with(("splitter", splitter)), Sense::click_and_drag());
         if response.drag_started() {
-            state.ui.splitter = Some(SplitterDrag { splitter, start_size: splitter.size_in(layout), before: state.ui.panel_sizes });
+            let before = state.ui.panel_sizes;
+            state.ui.splitter = Some(SplitterDrag { splitter, start_size: splitter.size_in(layout), before, frozen: before.frozen_for_drag(splitter, layout) });
         }
         // A cancelled drag is still dragged for egui until the release, but no longer here.
         let active = state.ui.splitter.filter(|drag| drag.splitter == splitter && response.dragged());
         if let Some(drag) = active {
             let moved = root.ctx().input(|input| input.pointer.press_origin().zip(input.pointer.latest_pos()).map(|(from, to)| to - from));
             if let Some(moved) = moved {
-                state.ui.panel_sizes = drag.before.dragged_to(window, splitter, drag.start_size + splitter.growth(moved));
+                state.ui.panel_sizes = drag.frozen.dragged_to(window, splitter, drag.start_size + splitter.growth(moved));
                 root.ctx().request_repaint();
             }
         }
@@ -420,6 +421,29 @@ mod tests {
             let after = crate::layout::panels(window(), &state.ui.panel_sizes);
             assert!((splitter.size_in(&after) - size_before - growth).abs() < 0.5, "{splitter:?} {after:?}");
         }
+    }
+
+    #[test]
+    fn dragging_a_splitter_leaves_a_squeezed_saved_panel_where_it_is_displayed() {
+        let mut state = state();
+        // Saved on a bigger screen: in this window the two share out what the centre needs.
+        state.ui.panel_sizes = crate::layout::PanelSizes { left: Some(300.0), right: Some(380.0), timeline: None };
+        let size = egui::vec2(800.0, 500.0);
+        let frame = |ctx: &egui::Context, state: &mut EditorState, events: Vec<Event>| {
+            let mut requests = Vec::new();
+            run_frame(ctx, egui::RawInput { events, ..window_input(size.x, size.y) }, |ui| show(ui, state, &mut requests, None));
+        };
+        let before = crate::layout::panels(size, &state.ui.panel_sizes);
+        assert!(before.right.width() < 380.0, "the window must squeeze it for this to mean anything: {before:?}");
+        let at = Splitter::Left.rect_in(&before).center();
+        let ctx = egui::Context::default();
+        frame(&ctx, &mut state, vec![]);
+        frame(&ctx, &mut state, vec![Event::PointerMoved(at)]);
+        frame(&ctx, &mut state, pointer_press(at));
+        frame(&ctx, &mut state, vec![Event::PointerMoved(at - egui::vec2(20.0, 0.0))]);
+        let after = crate::layout::panels(size, &state.ui.panel_sizes);
+        assert!((after.left.width() - before.left.width() + 20.0).abs() < 0.5, "{before:?} {after:?}");
+        assert!((after.right.width() - before.right.width()).abs() < 0.5, "the other panel jumped: {before:?} {after:?}");
     }
 
     #[test]
