@@ -10,9 +10,11 @@
 //! * [`render`] drives a project through decoder, compositor and sink traits a backend implements.
 //! * [`audio_schedule`] turns a project and a sample range into the source segments to mix.
 //! * [`audio_mix`] sums those segments, reading sources through a trait a backend implements.
+//! * [`audio_clock`] is the device-independent audio clock and pull API.
 //!
 //! Floating point is never used on timeline paths. Audio uses it only for gains and sample values.
 
+pub mod audio_clock;
 pub mod audio_mix;
 pub mod audio_schedule;
 pub mod project;
@@ -21,6 +23,7 @@ pub mod schedule;
 pub mod time;
 pub mod validate;
 
+pub use audio_clock::{sample_time, AudioClock, PullReport};
 pub use audio_mix::{mix_audio, AudioSource, MixReport};
 pub use audio_schedule::{
     audio_sample_count, audio_segments, sample_position, AudioSegment, GainEnvelope, MIX_CHANNELS,
