@@ -16,10 +16,11 @@ Không dựng editor bằng cách sinh lệnh FFmpeg cho preview: filter graph c
 |---|---|---|
 | Tên project | GpufxVideoEditor | Đã chốt |
 | Cách dùng thư viện | FFmpegGpuFilter làm submodule | Đã chốt |
-| Nền tảng đầu tiên | Desktop Windows, nơi đường GPU được test nhiều nhất; web với WebCodecs để sau | Đề xuất, chờ chốt |
-| UI | Rust + egui cho bản đầu, dùng chung wgpu device nên preview không qua interop; WPF hoặc Avalonia thì engine giữ nguyên nhưng nhúng preview khó hơn | Đề xuất, chờ chốt |
-| Đối tượng | Kiểu CapCut (nhanh, nhiều hiệu ứng) thay vì kiểu Premiere | Đề xuất, chờ chốt |
-| Giấy phép | Code của project MIT hoặc đóng mã; FFmpeg LGPL dạng DLL; encoder phần cứng | Đề xuất, chờ chốt |
+| Nền tảng | Windows và Linux; web nếu làm được | Đã chốt |
+| UI | Rust + egui, dùng chung wgpu device nên preview không qua interop | Đã chốt |
+| Đối tượng | Kiểu CapCut (nhanh, nhiều hiệu ứng) | Đã chốt |
+| Giấy phép code | MIT | Đã chốt |
+| FFmpeg | LGPL dạng DLL; encoder phần cứng | Đề xuất, chờ chốt |
 
 ## Các editor open-source đang làm gì
 
