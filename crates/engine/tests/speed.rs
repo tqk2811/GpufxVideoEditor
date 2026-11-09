@@ -419,14 +419,14 @@ fn worst_key_dip(speed: f64, hz: f64) -> f64 {
 }
 
 /// Key grains are not aligned, so that a seek replays little; two grains out of phase used to
-/// cancel by up to 18 dB in their overlap. 3 dB is where a dip starts to be heard on a tone, and
-/// the worst measured after the join gain is 1.7 dB.
+/// cancel by up to 18 dB in their overlap. The join gain is capped at 2 so that it cannot burst what
+/// did not cancel, which leaves a worst measured dip of 4.7 dB here (0.1x, 3 kHz).
 #[test]
 fn a_key_grain_does_not_dip_the_level() {
     for speed in [0.5, 0.1, 2.0] {
         for hz in [110.0, 233.0, 440.0, 1000.0, 3000.0] {
             let dip = worst_key_dip(speed, hz);
-            assert!(dip < 3.0, "{speed}x {hz} Hz: {dip:.2} dB at a key");
+            assert!(dip < 6.0, "{speed}x {hz} Hz: {dip:.2} dB at a key");
         }
     }
 }
@@ -452,7 +452,8 @@ impl AudioSource for Sweep {
             let time = (position + i as i64) as f64 / 48_000.0;
             let sample = ((220.0 + 200.0 * time) * time * 2.0 * std::f64::consts::PI).sin() as f32 * 0.4;
             frame[0] = sample;
-            frame[1] = -sample;
+            // Both channels alike: a mono of zero would skip the alignment this test is about.
+            frame[1] = sample * 0.5;
         }
         Ok(())
     }
@@ -480,6 +481,34 @@ fn the_output_does_not_depend_on_the_block_size_or_on_seeking() {
         let mut block = vec![0.0f32; 2048 * 2];
         mix_audio_with(&project, &mut Sweep, &mut seek, start, &mut block).unwrap();
         assert_eq!(&block[..], &whole[start as usize * 2..(start as usize + 2048) * 2], "seek to {start}");
+    }
+}
+
+/// A strong bass in both channels and a weak tone only in their difference.
+struct BassAndSide;
+
+impl AudioSource for BassAndSide {
+    fn read(&mut self, _key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        for (i, frame) in out.chunks_exact_mut(2).enumerate() {
+            let time = (position + i as i64) as f64 / 48_000.0;
+            let bass = (80.0 * time * 2.0 * std::f64::consts::PI).sin() as f32 * 0.6;
+            let side = (1300.0 * time * 2.0 * std::f64::consts::PI).sin() as f32 * 0.15;
+            frame[0] = bass + side;
+            frame[1] = bass - side;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_key_join_on_cancelling_bass_does_not_burst_what_did_not_cancel() {
+    for speed in [1.5, 3.0] {
+        let project = project_of(vec![sped_clip(0, SECOND, 12 * SECOND, speed)]);
+        let frames = 12 * 48_000;
+        let mut out = vec![0.0f32; frames * 2];
+        mix_audio(&project, &mut BassAndSide, 0, &mut out).expect("mix");
+        let peak = out[8192..(frames - 4096) * 2].chunks_exact(2).map(|frame| ((frame[0] - frame[1]) * 0.5).abs()).fold(0.0f32, f32::max);
+        assert!(peak <= 0.15 * 2.6, "the side tone of 0.15 reaches {peak} at {speed}x");
     }
 }
 

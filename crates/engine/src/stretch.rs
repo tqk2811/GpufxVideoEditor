@@ -54,8 +54,9 @@ const KEPT_POSITIONS: usize = 3;
 const MIN_WEIGHT: f32 = 0.01;
 /// From this sum of window weights the sample is complete.
 const FULL_WEIGHT: f32 = 0.999;
-/// The strongest correction of the join at a key grain, a limit on how far a cancellation is undone.
-const MAX_JOIN_GAIN: f32 = 8.0;
+/// The strongest correction of the join at a key grain. One gain serves every frequency, so a high
+/// limit undoing a cancelled bass would burst the treble and the side signal that did not cancel.
+const MAX_JOIN_GAIN: f32 = 2.0;
 
 /// Where a stretched segment reads from. Equal specs produce equal audio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
