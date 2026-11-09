@@ -429,7 +429,7 @@ impl Session {
     }
 
     /// Keeps the shared paths with the file the project now belongs to. Audio threads hold the old
-    /// paths, so playback is reopened on the next play.
+    /// paths, so playback is closed here and, if it was running, reopened from the playhead.
     fn sync_project_paths(&mut self) {
         if self.paths_file.as_deref() == self.state.project_file() {
             return;
@@ -437,6 +437,7 @@ impl Session {
         self.paths_file = self.state.project_file().map(Path::to_path_buf);
         self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
         self.playback = None;
+        self.state.reopen_playback();
     }
 
     fn sync_title(&mut self) {

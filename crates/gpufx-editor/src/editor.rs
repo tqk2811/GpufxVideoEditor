@@ -255,6 +255,16 @@ impl EditorState {
         self.silence_ms = silence_ms;
     }
 
+    /// The audio thread was replaced while the state still says playing: plays on from the playhead.
+    pub fn reopen_playback(&mut self) {
+        if !self.playing {
+            return;
+        }
+        let from = start_time(self.playhead, audio_sample_count(self.project()));
+        self.playhead = from;
+        self.transport.push(TransportCommand::Play { from });
+    }
+
     /// Space: starts from the playhead or stops where it is. A timeline with no samples cannot play.
     pub fn toggle_playback(&mut self) {
         if self.is_exporting() {
@@ -849,6 +859,25 @@ mod tests {
         assert!(!state.is_playing());
         assert!(state.take_transport().is_empty());
         assert_eq!(state.status(), &Status::Info(NOTHING_TO_PLAY.to_owned()));
+    }
+
+    #[test]
+    fn a_reopened_playback_plays_on_from_the_playhead() {
+        let mut state = playable();
+        state.toggle_playback();
+        state.take_transport();
+        state.follow_clock(seconds(4));
+        state.reopen_playback();
+        assert!(state.is_playing());
+        assert_eq!(state.take_transport(), vec![TransportCommand::Play { from: seconds(4) }]);
+    }
+
+    #[test]
+    fn a_stopped_timeline_is_not_reopened() {
+        let mut state = playable();
+        state.reopen_playback();
+        assert!(state.take_transport().is_empty());
+        assert!(!state.is_playing());
     }
 
     #[test]
