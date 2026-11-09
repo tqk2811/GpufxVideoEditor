@@ -16,6 +16,11 @@ const HEADER_HEIGHT: f32 = 34.0;
 /// As far up as a project may go; validation sets no floor.
 const GAIN_RANGE: std::ops::RangeInclusive<f64> = -60.0..=60.0;
 const SPEED_RANGE: std::ops::RangeInclusive<f64> = engine::MIN_SPEED..=engine::MAX_SPEED;
+/// The speed slider takes 1x for anything within this ratio of it, so going back to exactly 1x
+/// does not need a steady hand: one pixel of the slider is about 2.9%.
+const SPEED_SNAP_RATIO: f64 = 1.04;
+/// How far the pointer must go from where it was pressed before the slider counts as dragged.
+const SLIDER_MOVE_POINTS: f32 = 2.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let rect = ui.max_rect();
@@ -163,16 +168,50 @@ fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, label: &s
     ui.add_enabled_ui(changeable, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-            let mut changed = ui.add(slider(&mut value, SPEED_RANGE).logarithmic(true)).changed();
-            changed |= speed_field(ui, &mut value, SPEED_RANGE).1;
-            if changed {
-                state.live_speed(value);
+            let response = ui.add(slider(&mut value, SPEED_RANGE).logarithmic(true));
+            // The frame of the release sets a value too, so it counts as part of the press.
+            let pressed = response.interact_pointer_pos().is_some();
+            let mut applied = slider_speed(response.changed(), pressed, pointer_moved(ui, response.id, pressed), value);
+            // A press alone must not show the value under the pointer either.
+            value = applied.unwrap_or(speed);
+            if speed_field(ui, &mut value, SPEED_RANGE).1 {
+                applied = Some(value);
+            }
+            if let Some(next) = applied {
+                state.live_speed(next);
             }
         });
     });
     if !changeable {
         ui.add(egui::Label::new(egui::RichText::new(state.language().t(Message::SpeedBlockedByEndTransition)).color(theme::TEXT_DIM)).wrap());
     }
+}
+
+/// What the speed slider sets this frame, if anything. A press alone is not a change: pressing
+/// moves the slider under the pointer, and on a slider of this scale one pixel is 2.9% of the
+/// length of the clip. The keyboard changes it without a press.
+fn slider_speed(changed: bool, pressed: bool, moved: bool, value: f64) -> Option<f64> {
+    (changed && (!pressed || moved)).then(|| snap_speed(value))
+}
+
+/// `value`, or exactly 1x when it is close to it.
+fn snap_speed(value: f64) -> f64 {
+    if (value / SPEED_SNAP_RATIO..=value * SPEED_SNAP_RATIO).contains(&1.0) {
+        1.0
+    } else {
+        value
+    }
+}
+
+/// Whether the pointer pressed on widget `id` has gone anywhere since the press, and stays true
+/// until the press ends, however the pointer comes back.
+fn pointer_moved(ui: &egui::Ui, id: egui::Id, pressed: bool) -> bool {
+    let now = ui.input(|input| input.pointer.press_origin().zip(input.pointer.latest_pos()).is_some_and(|(origin, latest)| origin.distance(latest) >= SLIDER_MOVE_POINTS));
+    ui.data_mut(|data| {
+        let moved = data.get_temp_mut_or(id, false);
+        *moved = (*moved || now) && pressed;
+        *moved
+    })
 }
 
 fn fade_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, value: Time, longest: Time, enabled: bool, mut apply: impl FnMut(&mut EditorState, Time)) {
@@ -304,6 +343,71 @@ mod tests {
 
     fn typed_draft(ctx: &egui::Context) {
         param_widgets::store_test_draft(ctx, "1+x", "x");
+    }
+
+    #[test]
+    fn a_speed_slider_change_waits_for_the_pointer_to_move() {
+        assert_eq!(slider_speed(true, true, false, 2.0), None, "a press alone");
+        assert_eq!(slider_speed(true, true, true, 2.0), Some(2.0), "a real drag");
+        assert_eq!(slider_speed(false, true, true, 2.0), None, "nothing changed");
+        assert_eq!(slider_speed(true, false, false, 2.0), Some(2.0), "the keyboard");
+    }
+
+    #[test]
+    fn the_speed_slider_snaps_back_to_exactly_one() {
+        for near in [1.0, 1.02, 0.97, 1.039] {
+            assert_eq!(snap_speed(near), 1.0, "{near}");
+        }
+        for far in [1.05, 0.95, 2.0, 0.1] {
+            assert_eq!(snap_speed(far), far, "{far}");
+        }
+    }
+
+    /// One pass of the speed row alone, so a point on the row is a point on its slider.
+    fn speed_pass(ctx: &egui::Context, state: &mut EditorState, key: ClipKey, events: Vec<egui::Event>) {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 120.0));
+        let speed = state.project().tracks[key.track].clips[key.clip].speed;
+        let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+        let mut output = ctx.run_ui(raw, |ui| speed_row(ui, state, key, "Speed", speed));
+        output.textures_delta.clear();
+    }
+
+    fn button(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    #[test]
+    fn pressing_the_speed_slider_without_moving_changes_nothing_and_a_drag_does() {
+        let ctx = egui::Context::default();
+        let mut state = selected_clip();
+        let key = ClipKey { track: 0, clip: 0 };
+        let before = state.project().clone();
+        speed_pass(&ctx, &mut state, key, vec![]);
+        speed_pass(&ctx, &mut state, key, vec![]);
+        for y in (2..60).step_by(4) {
+            let at = egui::pos2(30.0, y as f32);
+            speed_pass(&ctx, &mut state, key, vec![egui::Event::PointerMoved(at)]);
+            speed_pass(&ctx, &mut state, key, vec![button(at, true)]);
+            speed_pass(&ctx, &mut state, key, vec![button(at, false)]);
+            speed_pass(&ctx, &mut state, key, vec![]);
+        }
+        assert_eq!(state.project(), &before, "the slider only jumped under a press");
+
+        let mut moved = false;
+        for y in (2..60).step_by(4) {
+            let at = egui::pos2(30.0, y as f32);
+            speed_pass(&ctx, &mut state, key, vec![egui::Event::PointerMoved(at)]);
+            speed_pass(&ctx, &mut state, key, vec![button(at, true)]);
+            speed_pass(&ctx, &mut state, key, vec![egui::Event::PointerMoved(egui::pos2(160.0, y as f32))]);
+            moved |= state.project().tracks[0].clips[0].speed != 1.0;
+            speed_pass(&ctx, &mut state, key, vec![button(egui::pos2(160.0, y as f32), false)]);
+            speed_pass(&ctx, &mut state, key, vec![]);
+            state.cancel_live();
+            if moved {
+                break;
+            }
+        }
+        assert!(moved, "dragging the slider does set a speed");
     }
 
     #[test]
