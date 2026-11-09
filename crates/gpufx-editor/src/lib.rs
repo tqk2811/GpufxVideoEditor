@@ -7,6 +7,7 @@ pub mod editor;
 pub mod playback;
 pub mod presenter;
 pub mod preview;
+pub mod project_file;
 pub mod timeline;
 pub mod ui;
 pub mod window;

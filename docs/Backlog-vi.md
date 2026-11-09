@@ -104,10 +104,6 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/d3d12-backend/src/gpu.rs` giữ một ô lỗi cho cả device; `check_errors` của worker đọc ô đó nên một lỗi wgpu từ luồng UI bị báo là frame hỏng. Nên làm vì thông báo sai chỗ và frame đúng vẫn bị bỏ. Ghi ngày 2026-11-09.
 
-### [Thấp] Package root và `ProjectPaths` của preview đang cố định
-
-`crates/gpufx-editor/src/preview/backend.rs:17` lấy package root từ `CARGO_MANIFEST_DIR`, hỏng khi chạy ở máy khác; `crates/gpufx-editor/src/preview/backend.rs:20` và `:23` cố định `ProjectPaths` vào `unsaved.json`. Bước 6 phải giải quyết. Ghi ngày 2026-11-09.
-
 ### [Thấp] `clip_graphs` và `transition_graphs` không bao giờ được dọn
 
 `crates/d3d12-backend/src/compositor.rs:284-285`: hai cache này chỉ thêm, nên preview chạy lâu hoặc project nhiều clip giữ graph của mọi clip và mọi transition đã gặp. Nên làm vì bộ nhớ GPU tăng theo số clip đã xem. Ghi ngày 2026-11-09.

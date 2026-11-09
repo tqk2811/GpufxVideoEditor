@@ -1,5 +1,6 @@
 //! The window and its event loop.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,7 +9,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use d3d12_backend::Gpu;
+use d3d12_backend::{Gpu, ProjectPaths};
 use engine::Project;
 #[cfg(debug_assertions)]
 use engine::{Time, TrackKind};
@@ -17,9 +18,10 @@ use crate::editor::EditorState;
 use crate::playback::device::Playback;
 use crate::playback::plan::{frames_to_ms, TransportCommand};
 use crate::presenter::Presenter;
-use crate::preview::backend::{editor_paths, D3d12Producer, PreviewImage, PreviewRequest};
+use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
+use crate::project_file::{package_roots, project_paths};
 use crate::ui::{self, UiRequest};
 
 /// How often the playhead moves while playing.
@@ -67,6 +69,9 @@ struct Session {
     surface_error: Option<String>,
     /// The revision the audio thread has.
     audio_revision: u64,
+    package_roots: Vec<PathBuf>,
+    /// How files of the open project resolve; shared by preview, playback and export.
+    paths: Arc<ProjectPaths>,
     #[cfg(debug_assertions)]
     smoke: Smoke,
 }
@@ -93,6 +98,8 @@ impl Session {
             }
             smoke
         };
+        let package_roots = package_roots();
+        let paths = Arc::new(project_paths(None, &package_roots));
         Ok(Self {
             playback: None,
             preview,
@@ -105,6 +112,8 @@ impl Session {
             snapshot: None,
             surface_error: None,
             audio_revision: 0,
+            package_roots,
+            paths,
             #[cfg(debug_assertions)]
             smoke,
         })
@@ -229,7 +238,7 @@ impl Session {
             match command {
                 TransportCommand::Play { from } => {
                     if self.playback.is_none() {
-                        match Playback::open(self.state.project(), Arc::new(editor_paths())) {
+                        match Playback::open(self.state.project(), self.paths.clone()) {
                             Ok(playback) => {
                                 self.audio_revision = self.state.revision();
                                 self.state.set_no_sound(playback.no_sound().map(str::to_owned));
@@ -271,7 +280,7 @@ impl Session {
             self.snapshot = Some((revision, Arc::new(self.state.project().clone())));
         }
         if let Some((_, project)) = &self.snapshot {
-            self.preview.request(PreviewRequest { revision, project: project.clone(), frame });
+            self.preview.request(PreviewRequest { revision, project: project.clone(), paths: self.paths.clone(), frame });
         }
     }
 

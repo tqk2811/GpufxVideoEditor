@@ -1,7 +1,6 @@
 //! The preview frame producer on the D3D12 backend. This is the only place that runs compositing
 //! work in the editor.
 
-use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,16 +12,6 @@ use engine::{layers_at_frame, Project};
 use super::plan::RequestId;
 use super::worker::{FrameProducer, ProduceError};
 
-/// The checkout's effect packages, as `gpufx-render` uses by default.
-const PACKAGE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/FFmpegGpuFilter");
-/// A project has no file yet, and clips added from a dialog hold absolute paths, which
-/// [`ProjectPaths`] keeps as they are.
-const UNSAVED_PROJECT_FILE: &str = "unsaved.json";
-/// How the editor finds files until projects have a place on disk.
-pub fn editor_paths() -> ProjectPaths {
-    ProjectPaths::new(Path::new(UNSAVED_PROJECT_FILE), vec![PathBuf::from(PACKAGE_ROOT)])
-}
-
 const RECYCLE_WAIT: Duration = Duration::from_secs(1);
 /// How long a decode runs before a newer request can stop it. Short decodes finish, so a continuous
 /// scrub keeps showing frames; a long catch-up is stopped soon after it is no longer wanted, unless
@@ -32,6 +21,7 @@ const ABORT_GRACE: Duration = Duration::from_millis(150);
 pub struct PreviewRequest {
     pub revision: u64,
     pub project: Arc<Project>,
+    pub paths: Arc<ProjectPaths>,
     pub frame: i64,
 }
 
@@ -49,7 +39,7 @@ struct Sized {
 
 pub struct D3d12Producer {
     gpu: Arc<Gpu>,
-    paths: Arc<ProjectPaths>,
+    paths: Option<Arc<ProjectPaths>>,
     compositor: Option<Sized>,
     renderer: FrameRenderer<D3d12Compositor>,
     abort: Option<Arc<AtomicBool>>,
@@ -67,8 +57,16 @@ fn classify(message: String) -> ProduceError {
 
 impl D3d12Producer {
     pub fn new(gpu: Arc<Gpu>) -> Self {
-        let paths = Arc::new(editor_paths());
-        Self { gpu, paths, compositor: None, renderer: FrameRenderer::default(), abort: None, closing: None }
+        Self { gpu, paths: None, compositor: None, renderer: FrameRenderer::default(), abort: None, closing: None }
+    }
+
+    /// A compositor and decoders resolved files through the old paths, so they go with them.
+    fn use_paths(&mut self, paths: &Arc<ProjectPaths>) {
+        if !self.paths.as_ref().is_some_and(|current| Arc::ptr_eq(current, paths)) {
+            self.compositor = None;
+            self.renderer = FrameRenderer::default();
+            self.paths = Some(paths.clone());
+        }
     }
 
     fn compositor_for(&mut self, width: u32, height: u32) -> Result<&mut D3d12Compositor, String> {
@@ -77,7 +75,7 @@ impl D3d12Producer {
             self.compositor = None;
         }
         if self.compositor.is_none() {
-            let mut compositor = D3d12Compositor::new(self.gpu.clone(), self.paths.clone(), width, height)?;
+            let mut compositor = D3d12Compositor::new(self.gpu.clone(), self.paths.clone().ok_or("no project paths yet")?, width, height)?;
             if let Some(abort) = &self.abort {
                 compositor.set_abort(abort.clone(), ABORT_GRACE);
             }
@@ -106,6 +104,7 @@ impl FrameProducer for D3d12Producer {
         if layers_at_frame(&request.project, request.frame).is_empty() {
             return Ok(None);
         }
+        self.use_paths(&request.paths);
         let output = &request.project.output;
         let (width, height) = (output.width, output.height);
         let mut renderer = std::mem::take(&mut self.renderer);

@@ -8,11 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use d3d12_backend::{is_cancelled, Gpu, SequentialDecoder};
+use d3d12_backend::{is_cancelled, Gpu, ProjectPaths, SequentialDecoder};
 use engine::render::Decoder;
 use engine::{Clip, Output, Project, Time, Track, TrackKind, SUPPORTED_VERSION};
 use gpufx_editor::preview::backend::{D3d12Producer, PreviewRequest};
 use gpufx_editor::preview::worker::{FrameProducer, ProduceError};
+use gpufx_editor::project_file::{package_roots, project_paths};
 
 fn clip(name: &str, duration: Time) -> Clip {
     let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-clips")).join(name);
@@ -48,7 +49,9 @@ fn hardware_gpu() -> Option<Arc<Gpu>> {
 }
 
 fn request(project: &Arc<Project>, frame: i64) -> PreviewRequest {
-    PreviewRequest { revision: 0, project: project.clone(), frame }
+    static PATHS: std::sync::OnceLock<Arc<ProjectPaths>> = std::sync::OnceLock::new();
+    let paths = PATHS.get_or_init(|| Arc::new(project_paths(None, &package_roots()))).clone();
+    PreviewRequest { revision: 0, project: project.clone(), paths, frame }
 }
 
 /// One test at a time on the GPU.
@@ -176,4 +179,25 @@ fn frames_errors_edits_and_blanks_through_one_producer() {
     assert!(producer.produce(&request(&first, 9_000)).expect("past the end is not an error").is_none());
     let empty = project(Vec::new());
     assert!(producer.produce(&request(&empty, 0)).expect("an empty timeline is not an error").is_none());
+}
+
+#[test]
+fn a_relative_source_follows_the_paths_of_the_request() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let mut relative = clip("clip-a.mp4", Time::from_seconds(1).unwrap());
+    relative.source = "clip-a.mp4".to_owned();
+    let project = project(vec![relative]);
+    let clips = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-clips"));
+    let roots = package_roots();
+    let mut producer = D3d12Producer::new(gpu);
+
+    let beside = Arc::new(project_paths(Some(&clips.join("project.json")), &roots));
+    let found = PreviewRequest { revision: 0, project: project.clone(), paths: beside, frame: 3 };
+    producer.produce(&found).expect("found next to the project").expect("a picture");
+
+    let elsewhere = Arc::new(project_paths(Some(Path::new(r"C:
+o-such-folder\project.json")), &roots));
+    let missing = PreviewRequest { revision: 1, project, paths: elsewhere, frame: 3 };
+    assert!(matches!(producer.produce(&missing), Err(ProduceError::Failed(_))), "the old decoder must not serve the moved project");
 }
