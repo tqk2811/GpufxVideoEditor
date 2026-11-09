@@ -647,9 +647,9 @@ impl ApplicationHandler for EditorApp {
                 }
             }
             WindowEvent::Resized(size) => {
-                let resized = session.presenter.resize(&session.gpu, size.width, size.height);
-                // A minimised window asks for nothing, so it says nothing about an earlier failure.
-                if size.width != 0 && size.height != 0 {
+                // Nothing is said when nothing was tried (minimised, or the gate busy): an earlier
+                // failure stays until a resize really applied.
+                if let Some(resized) = session.presenter.resize(&session.gpu, size.width, size.height) {
                     session.set_surface_error(resized.err());
                 }
             }

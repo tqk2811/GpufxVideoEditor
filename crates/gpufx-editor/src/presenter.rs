@@ -1,7 +1,7 @@
 //! Draws egui into a window surface.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use d3d12_backend::Gpu;
 use winit::window::Window;
@@ -12,6 +12,9 @@ use crate::preview::backend::PreviewImage;
 const SURFACE_RETRY: Duration = Duration::from_millis(100);
 /// How soon a frame is tried again when the preview holds the GPU's submit gate.
 const SUBMIT_BUSY_RETRY: Duration = Duration::from_millis(8);
+
+/// How long a resize that really failed to configure waits before it is tried again.
+const RESIZE_BACKOFF: Duration = Duration::from_millis(250);
 
 /// The current preview frame as egui sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +35,8 @@ pub struct Presenter {
     frame_texture: Option<egui::TextureId>,
     /// A window size that could not be applied yet; retried on the next resize, Outdated status or redraw.
     wanted_size: Option<(u32, u32)>,
+    /// Set after a configure that failed: the redraw retry waits until then. A new resize ignores it.
+    retry_after: Option<Instant>,
 }
 
 impl Presenter {
@@ -56,7 +61,7 @@ impl Presenter {
         let renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
         let context = egui::Context::default();
         let state = egui_winit::State::new(context.clone(), egui::ViewportId::ROOT, window.as_ref(), Some(window.scale_factor() as f32), None, None);
-        Ok(Self { window, surface, config, renderer, state, context, frame: None, frame_texture: None, wanted_size: None })
+        Ok(Self { window, surface, config, renderer, state, context, frame: None, frame_texture: None, wanted_size: None, retry_after: None })
     }
 
     /// Shows `frame` from the next [`Presenter::render`] on and returns the frame it replaces.
@@ -91,17 +96,28 @@ impl Presenter {
 
     /// Reconfigures the surface for a new window size. On failure the old size stays configured but
     /// the new one is kept as wanted, so the next resize, Outdated status or redraw tries it again.
-    pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) -> Result<(), String> {
+    /// `None` when nothing was tried: the window is minimised, or the preview holds the submit gate
+    /// and the size waits for a later redraw. Only `Some(Ok)` means the new size is in place.
+    pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) -> Option<Result<(), String>> {
         if width == 0 || height == 0 {
-            return Ok(());
+            return None;
         }
         self.wanted_size = Some((width, height));
-        self.apply_wanted_size(gpu).unwrap_or(Ok(()))
+        self.retry_after = None;
+        self.apply_wanted_size(gpu)
     }
 
-    /// Tries the size a failed resize left wanted. `None` when there is none.
+    /// Tries the size a failed resize left wanted. `None` when there is none, when the last try
+    /// failed a moment ago, or when the preview holds the submit gate.
     pub fn retry_resize(&mut self, gpu: &Gpu) -> Option<Result<(), String>> {
-        self.apply_wanted_size(gpu)
+        if is_backing_off(self.retry_after, Instant::now()) {
+            return None;
+        }
+        let result = self.apply_wanted_size(gpu);
+        if let Some(result) = &result {
+            self.retry_after = backoff_after(result, Instant::now());
+        }
+        result
     }
 
     /// Whether a resize still waits, for a busy GPU or after a failure.
@@ -123,15 +139,20 @@ impl Presenter {
     }
 
     /// Runs the UI and presents. Returns how long egui can wait before the next frame.
+    ///
+    /// The submit gate is held only around the submit and the present. A peek at the start skips the
+    /// frame while a long holder runs, before anything that could not be undone (taking the input
+    /// from egui); the surface is acquired and the UI run outside the gate, so the preview and the
+    /// export are not held up by them.
     pub fn render(&mut self, gpu: &Gpu, mut ui: impl FnMut(&mut egui::Ui, Option<PreviewTexture>)) -> Result<Duration, String> {
-        // Taken before anything that could not be undone: input stays with egui for the next try.
-        let Some(gate) = gpu.try_lock_submits() else { return Ok(SUBMIT_BUSY_RETRY) };
+        if gpu.try_lock_submits().is_none() {
+            return Ok(SUBMIT_BUSY_RETRY);
+        }
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(SURFACE_RETRY),
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface_loss_error(gpu.device_lost())?;
-                drop(gate);
                 // On failure the status repeats and this runs again on the retry. A wanted size
                 // that is still pending is the one to configure.
                 if self.apply_wanted_size(gpu).is_none() {
@@ -192,7 +213,8 @@ impl Presenter {
             frame.image.record_end_sampling(&mut after);
             buffers.push(after.finish());
         }
-        let submission = gpu.submit_and_present(gate, buffers, surface_texture);
+        // From here to the end of the present nothing returns: the acquired texture must be presented.
+        let submission = gpu.submit_and_present(gpu.lock_submits(), buffers, surface_texture);
         if let Some(frame) = &mut self.frame {
             frame.last_use = Some(submission);
         }
@@ -208,6 +230,16 @@ impl Presenter {
 /// and retrying forever would freeze the window without saying why.
 fn surface_loss_error(device_lost: Option<String>) -> Result<(), String> {
     device_lost.map_or(Ok(()), |message| Err(format!("the GPU device was lost: {message}")))
+}
+
+/// When to try again after `result`: later for a configure that failed, at once otherwise.
+fn backoff_after(result: &Result<(), String>, now: Instant) -> Option<Instant> {
+    result.as_ref().err().map(|_| now + RESIZE_BACKOFF)
+}
+
+/// Whether a retry that waits until `until` has to wait still at `now`.
+fn is_backing_off(until: Option<Instant>, now: Instant) -> bool {
+    until.is_some_and(|until| now < until)
 }
 
 /// Runs `configure` with `config` at the new size and records that size only when it succeeded.
@@ -258,6 +290,22 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(asked, (200, 80), "the new size was tried");
         assert_eq!((current.width, current.height), (100, 50), "the surface still has the old size");
+    }
+
+    #[test]
+    fn a_failed_configure_backs_off_and_a_success_does_not() {
+        let now = Instant::now();
+        assert_eq!(backoff_after(&Err("timed out".to_owned()), now), Some(now + RESIZE_BACKOFF));
+        assert_eq!(backoff_after(&Ok(()), now), None);
+    }
+
+    #[test]
+    fn a_backoff_holds_until_its_time_and_no_backoff_never_holds() {
+        let now = Instant::now();
+        assert!(!is_backing_off(None, now));
+        assert!(is_backing_off(Some(now + RESIZE_BACKOFF), now));
+        assert!(is_backing_off(Some(now + RESIZE_BACKOFF), now + RESIZE_BACKOFF / 2));
+        assert!(!is_backing_off(Some(now + RESIZE_BACKOFF), now + RESIZE_BACKOFF));
     }
 
     #[test]
