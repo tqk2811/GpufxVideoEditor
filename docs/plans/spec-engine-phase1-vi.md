@@ -21,7 +21,7 @@ Linux và web chưa làm ở giai đoạn này, nhưng code decode và GPU phả
 
 ## Thời gian
 
-`Time` là `i64`, đơn vị 1/90000 giây. Đơn vị này biểu diễn chính xác 24, 25, 30, 60 fps và các nhịp 1000/1001. Mọi phép tính trên timeline dùng số nguyên, không dùng số thực.
+`Time` là `i64`, đơn vị 1/90000 giây. Đơn vị này biểu diễn chính xác 24, 25, 30, 60 và 29,97 fps (29,97 là 3003 tick mỗi khung). Hai nhịp 23,976 và 59,94 fps thì không chính xác: một khung dài 3753,75 và 1501,5 tick, nên với `frame_duration` là số nguyên thì đầu ra 23,976 và 59,94 fps không biểu diễn đúng được. Mọi phép tính trên timeline dùng số nguyên, không dùng số thực.
 
 ## Project JSON
 
