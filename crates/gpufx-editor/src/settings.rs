@@ -51,6 +51,12 @@ pub fn startup_language() -> Language {
     settings_file().and_then(|file| saved_language(&file)).unwrap_or_else(system_language)
 }
 
+/// The temporary file of this process, so that another editor saving at the same moment has its
+/// own and a failure here cannot delete it.
+fn temporary_file(file: &Path) -> PathBuf {
+    file.with_extension(format!("json.{}.tmp", std::process::id()))
+}
+
 /// Records `language` in `file`, through a temporary file and keeping any other setting.
 fn write_language(file: &Path, language: Language) -> Result<(), String> {
     let mut settings = read_settings(file);
@@ -59,7 +65,7 @@ fn write_language(file: &Path, language: Language) -> Result<(), String> {
     if let Some(folder) = file.parent() {
         std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
     }
-    let temporary = file.with_extension("json.tmp");
+    let temporary = temporary_file(file);
     std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, file)).map_err(|e| {
         let _ = std::fs::remove_file(&temporary);
         e.to_string()
@@ -107,6 +113,18 @@ mod tests {
         assert_eq!(saved_language(&file), None);
         std::fs::write(&file, r#"{"language":"xx"}"#).unwrap();
         assert_eq!(saved_language(&file), None);
+    }
+
+    #[test]
+    fn a_failed_save_removes_only_the_temporary_file_of_this_process() {
+        let file = temp_file("foreign");
+        // A folder at the path of the file makes the final rename fail.
+        std::fs::create_dir_all(&file).unwrap();
+        let foreign = file.with_extension("json.tmp");
+        std::fs::write(&foreign, "another editor").unwrap();
+        assert!(write_language(&file, Language::English).is_err());
+        assert_eq!(std::fs::read_to_string(&foreign).unwrap(), "another editor");
+        assert!(!temporary_file(&file).exists());
     }
 
     #[test]

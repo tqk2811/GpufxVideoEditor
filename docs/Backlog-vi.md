@@ -184,3 +184,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Lưới thư viện dựng lại toàn bộ mỗi khung
 
 `crates/gpufx-editor/src/ui/left_panel.rs:71,83`: clone danh sách và `to_lowercase` mỗi khung, lưới chưa dùng `show_rows`. Thư viện vài trăm file sẽ tốn thời gian khung. Ghi ngày 2026-11-09.
+
+### [Thấp] Ngôn ngữ hệ thống và đường dẫn cài đặt chỉ chạy trên Windows
+
+`crates/gpufx-editor/src/settings.rs:16-19,35-38`: dùng `GetUserDefaultUILanguage` của kernel32 và biến `APPDATA`. Khi làm bản Linux phải có cách lấy locale và đường dẫn cài đặt riêng, nếu không crate sẽ không link được. Ghi ngày 2026-11-09.
