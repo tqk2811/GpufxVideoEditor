@@ -140,6 +140,49 @@ fn opens_a_project_edits_it_and_captures_by_time_and_by_frame() {
     client.ok("session_status", json!({}));
 }
 
+#[test]
+fn clip_set_speed_changes_what_a_capture_shows() {
+    let _gpu = gpu_lock();
+    if !gpu_available() {
+        return;
+    }
+    let (a, _) = clip_paths();
+    let dir = scratch("speed");
+    let file = dir.join("project.json");
+    let project = json!({"version": 2, "output": {"width": 640, "height": 360, "frame_duration": FRAME}, "tracks": [{"clips": [{"source": a, "start": 0, "source_in": 0, "duration": 60 * FRAME}]}]});
+    std::fs::write(&file, project.to_string()).unwrap();
+
+    let mut client = Client::start();
+    let tools = client.rpc("tools/list", json!({}));
+    assert!(tools["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "clip_set_speed"));
+    let (opened, _) = client.ok("project_open", json!({"path": file}));
+    let (set, _) = client.ok("clip_set_speed", json!({"expected_revision": opened["revision"], "clip": {"track": 0, "clip": 0}, "speed": 2.0}));
+
+    // The 60 source frames now last 30 timeline frames: frame 10 shows source frame 20.
+    let (by_frame, content) = client.ok("frame_capture", json!({"frame": 10}));
+    assert_eq!(by_frame["revision"], set["revision"]);
+    let (width, _, pixels) = decode_png(&content[1]);
+    assert_eq!(read_frame_number(&pixels, width), 20, "source frame of 2x");
+    let (read, _) = client.ok("project_get", json!({}));
+    assert_eq!(read["project"]["tracks"][0]["clips"][0]["speed"], json!(2.0), "{read}");
+    assert_eq!(read["frames"], json!(30));
+    let (content, error) = client.tool("frame_capture", json!({"frame": 45}));
+    assert!(error && content[0]["text"].as_str().unwrap().contains("out_of_range"), "the timeline got shorter");
+
+    // A stale revision and an out of range speed are refused without changing anything.
+    let (content, error) = client.tool("clip_set_speed", json!({"expected_revision": 0, "clip": {"track": 0, "clip": 0}, "speed": 0.5}));
+    assert!(error && content[0]["text"].as_str().unwrap().contains("stale_revision"));
+    let (content, error) = client.tool("clip_set_speed", json!({"expected_revision": set["revision"], "clip": {"track": 0, "clip": 0}, "speed": 20.0}));
+    assert!(error && content[0]["text"].as_str().unwrap().contains("invalid_project"), "{content:?}");
+    // clip_add takes a speed, and the default length follows it.
+    let (added, _) = client.ok("clip_add", json!({"expected_revision": set["revision"], "track": 0, "source": a, "start": 90 * FRAME, "speed": 2.0}));
+    let (read, _) = client.ok("project_get", json!({}));
+    let clips = read["project"]["tracks"][0]["clips"].as_array().unwrap();
+    assert_eq!(clips.len(), 2);
+    assert_eq!(clips[1]["speed"], json!(2.0));
+    assert_eq!(added["clip"], json!({"track": 0, "clip": 1}));
+}
+
 fn render_tool() -> std::path::PathBuf {
     let tool = std::path::Path::new(env!("CARGO_BIN_EXE_gpufx-mcp")).with_file_name("gpufx-render.exe");
     assert!(tool.is_file(), "build gpufx-render too: {}", tool.display());

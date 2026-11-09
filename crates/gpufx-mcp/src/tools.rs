@@ -64,7 +64,7 @@ params!(PackagesListParams { filter: Option<String> });
 params!(TrackAddParams { expected_revision: u64, kind: TrackKindParam });
 params!(TrackLockedParams { expected_revision: u64, track: usize, locked: bool });
 params!(TrackHiddenParams { expected_revision: u64, track: usize, hidden: bool });
-params!(ClipAddParams { expected_revision: u64, track: usize, source: PathBuf, start: i64, source_in: Option<i64>, duration: Option<i64> });
+params!(ClipAddParams { expected_revision: u64, track: usize, source: PathBuf, start: i64, source_in: Option<i64>, duration: Option<i64>, speed: Option<f64> });
 params!(ClipMoveParams { expected_revision: u64, clip: ClipParam, track: usize, start: i64 });
 params!(ClipTrimStartParams { expected_revision: u64, clip: ClipParam, start: i64 });
 params!(ClipTrimEndParams { expected_revision: u64, clip: ClipParam, end: i64 });
@@ -75,6 +75,7 @@ params!(EffectRemoveParams { expected_revision: u64, clip: ClipParam, effect: us
 params!(TransitionAddParams { expected_revision: u64, track: usize, after_clip: usize, package: String, duration: Option<i64>, #[serde(default)] params: Map<String, Value> });
 params!(TransitionRemoveParams { expected_revision: u64, track: usize, after_clip: usize });
 params!(GainParams { expected_revision: u64, clip: ClipParam, gain_db: f64 });
+params!(SpeedParams { expected_revision: u64, clip: ClipParam, speed: f64 });
 params!(MutedParams { expected_revision: u64, clip: ClipParam, muted: bool });
 params!(FadesParams { expected_revision: u64, clip: ClipParam, fade_in: i64, fade_out: i64 });
 params!(RevisionParams { expected_revision: u64 });
@@ -159,7 +160,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("track_add", "Adds an empty track on top; returns its index.", TrackAddParams, |p| edit(p.expected_revision, AgentEdit::TrackAdd { kind: p.kind.into() })),
         tool!("track_set_locked", "Locks or unlocks a track. Edits of a locked track fail with track_locked.", TrackLockedParams, |p| edit(p.expected_revision, AgentEdit::TrackSetLocked { track: p.track, locked: p.locked })),
         tool!("track_set_hidden", "Hides or shows a track in picture and sound.", TrackHiddenParams, |p| edit(p.expected_revision, AgentEdit::TrackSetHidden { track: p.track, hidden: p.hidden })),
-        tool!("clip_add", "Adds a source file as a clip at start (ticks). duration defaults to the length of the stream the track plays. Returns the new clip.", ClipAddParams, |p| edit(p.expected_revision, AgentEdit::ClipAdd { track: p.track, source: p.source, start: ticks(p.start), source_in: p.source_in.map(ticks), duration: p.duration.map(ticks) })),
+        tool!("clip_add", "Adds a source file as a clip at start (ticks). duration defaults to what the stream the track plays still holds at that speed. speed defaults to 1, between 0.1 and 10. Returns the new clip.", ClipAddParams, |p| edit(p.expected_revision, AgentEdit::ClipAdd { track: p.track, source: p.source, start: ticks(p.start), source_in: p.source_in.map(ticks), duration: p.duration.map(ticks), speed: p.speed })),
         tool!("clip_move", "Moves a clip to a track, as near start as the other clips allow. Returns where it landed.", ClipMoveParams, |p| edit(p.expected_revision, AgentEdit::ClipMove { clip: p.clip.into(), track: p.track, start: ticks(p.start) })),
         tool!("clip_trim_start", "Moves the start edge of a clip, keeping the frames under the end edge.", ClipTrimStartParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimStart { clip: p.clip.into(), start: ticks(p.start) })),
         tool!("clip_trim_end", "Moves the end edge of a clip.", ClipTrimEndParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimEnd { clip: p.clip.into(), end: ticks(p.end) })),
@@ -169,6 +170,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("effect_remove", "Removes an effect of a clip by index.", EffectRemoveParams, |p| edit(p.expected_revision, AgentEdit::EffectRemove { clip: p.clip.into(), effect: p.effect })),
         tool!("transition_add", "Adds a transition between clip after_clip and the next, which must touch.", TransitionAddParams, |p| edit(p.expected_revision, AgentEdit::TransitionAdd { track: p.track, after_clip: p.after_clip, package: p.package, duration: p.duration.map(ticks), params: p.params })),
         tool!("transition_remove", "Removes the transition after a clip.", TransitionRemoveParams, |p| edit(p.expected_revision, AgentEdit::TransitionRemove { track: p.track, after_clip: p.after_clip })),
+        tool!("clip_set_speed", "Sets the playback speed of a clip, 0.1 to 10; 2 plays twice as fast. Keeps the source range, so the timeline length becomes source length / speed. Audio keeps its pitch. Refused with speed_overlap when the clip would run into the next one, and with transition_on_edge when its end holds a transition.", SpeedParams, |p| edit(p.expected_revision, AgentEdit::ClipSetSpeed { clip: p.clip.into(), speed: p.speed })),
         tool!("clip_set_gain", "Sets the gain of a clip in decibels.", GainParams, |p| edit(p.expected_revision, AgentEdit::ClipSetGain { clip: p.clip.into(), gain_db: p.gain_db })),
         tool!("clip_set_muted", "Mutes or unmutes a clip.", MutedParams, |p| edit(p.expected_revision, AgentEdit::ClipSetMuted { clip: p.clip.into(), muted: p.muted })),
         tool!("clip_set_fades", "Sets the audio fades of a clip, in ticks.", FadesParams, |p| edit(p.expected_revision, AgentEdit::ClipSetFades { clip: p.clip.into(), fade_in: ticks(p.fade_in), fade_out: ticks(p.fade_out) })),

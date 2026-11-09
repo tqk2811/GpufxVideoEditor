@@ -166,7 +166,7 @@ fn landing_start(project: &Project, clip: ClipRef, track: usize, start: Time) ->
 }
 
 /// The clip of a `clip_add`, checked against what the track plays.
-fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, source_in: Option<Time>, duration: Option<Time>, probe: Option<Result<MediaProbe, AgentError>>) -> Result<Clip, AgentError> {
+fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, source_in: Option<Time>, duration: Option<Time>, speed: Option<f64>, probe: Option<Result<MediaProbe, AgentError>>) -> Result<Clip, AgentError> {
     let probe = probe.unwrap_or_else(|| Err(AgentError::new("internal", "the source was not probed")))?;
     let Some(target) = state.project().tracks.get(track) else {
         return Err(AgentError::from_edit(&engine::EditError::TrackNotFound { track }));
@@ -186,9 +186,12 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
         Some(length) => length.checked_sub(source_in),
         None => None,
     };
-    let length = duration.or(remaining).unwrap_or(DEFAULT_CLIP_DURATION);
-    let mut clip = new_clip(&absolute.to_string_lossy(), start, length);
+    // What the source still holds lasts longer or shorter on the timeline at another speed.
+    let speed = speed.unwrap_or(1.0);
+    let mut clip = new_clip(&absolute.to_string_lossy(), start, Time::ZERO);
     clip.source_in = source_in;
+    clip.speed = if engine::speed_in_range(speed) { engine::speed_milli(speed) as f64 / engine::SPEED_SCALE as f64 } else { speed };
+    clip.duration = duration.or(remaining.map(|length| clip.timeline_ticks(length))).unwrap_or(DEFAULT_CLIP_DURATION);
     Ok(clip)
 }
 
@@ -202,8 +205,8 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         }
         AgentEdit::TrackSetLocked { track, locked } => state.set_track_locked(track, locked).map_err(refused)?,
         AgentEdit::TrackSetHidden { track, hidden } => state.apply_agent_command(|project| engine::set_track_hidden(project, track, hidden)).map_err(refused)?,
-        AgentEdit::ClipAdd { track, source, start, source_in, duration } => {
-            let clip = added_clip(state, track, &source, start, source_in, duration, probe)?;
+        AgentEdit::ClipAdd { track, source, start, source_in, duration, speed } => {
+            let clip = added_clip(state, track, &source, start, source_in, duration, speed, probe)?;
             state.apply_agent_command(|project| engine::add_clip(project, track, clip)).map_err(refused)?;
             result.insert("clip".to_owned(), clip_json(clip_at(state.project(), track, start)));
         }
@@ -214,7 +217,8 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         }
         AgentEdit::ClipTrimStart { clip, start } => {
             state.apply_agent_command(|project| engine::trim_start(project, clip.into(), start)).map_err(refused)?;
-            result.insert("clip".to_owned(), clip_json(clip_at(state.project(), clip.track, start)));
+            // A trim keeps the order of the clips, and at another speed lands near `start`.
+            result.insert("clip".to_owned(), json!(clip));
         }
         AgentEdit::ClipTrimEnd { clip, end } => {
             state.apply_agent_command(|project| engine::trim_end(project, clip.into(), end)).map_err(refused)?;
@@ -232,6 +236,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             state.apply_agent_command(|project| engine::add_transition(project, track, transition)).map_err(refused)?;
         }
         AgentEdit::TransitionRemove { track, after_clip } => state.apply_agent_command(|project| engine::remove_transition(project, track, after_clip)).map_err(refused)?,
+        AgentEdit::ClipSetSpeed { clip, speed } => state.apply_agent_command(|project| engine::set_speed(project, clip.into(), speed)).map_err(refused)?,
         AgentEdit::ClipSetGain { clip, gain_db } => state.apply_agent_command(|project| engine::set_gain(project, clip.into(), gain_db)).map_err(refused)?,
         AgentEdit::ClipSetMuted { clip, muted } => state.apply_agent_command(|project| engine::set_muted(project, clip.into(), muted)).map_err(refused)?,
         AgentEdit::ClipSetFades { clip, fade_in, fade_out } => state.apply_agent_command(|project| engine::set_fades(project, clip.into(), fade_in, fade_out)).map_err(refused)?,

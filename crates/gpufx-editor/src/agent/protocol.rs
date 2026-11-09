@@ -33,7 +33,7 @@ pub enum AgentEdit {
     TrackSetLocked { track: usize, locked: bool },
     TrackSetHidden { track: usize, hidden: bool },
     /// `duration` defaults to the length of the stream the track plays.
-    ClipAdd { track: usize, source: PathBuf, start: Time, source_in: Option<Time>, duration: Option<Time> },
+    ClipAdd { track: usize, source: PathBuf, start: Time, source_in: Option<Time>, duration: Option<Time>, speed: Option<f64> },
     ClipMove { clip: ClipRef, track: usize, start: Time },
     ClipTrimStart { clip: ClipRef, start: Time },
     ClipTrimEnd { clip: ClipRef, end: Time },
@@ -44,6 +44,7 @@ pub enum AgentEdit {
     TransitionAdd { track: usize, after_clip: usize, package: String, duration: Option<Time>, params: Map<String, Value> },
     TransitionRemove { track: usize, after_clip: usize },
     ClipSetGain { clip: ClipRef, gain_db: f64 },
+    ClipSetSpeed { clip: ClipRef, speed: f64 },
     ClipSetMuted { clip: ClipRef, muted: bool },
     ClipSetFades { clip: ClipRef, fade_in: Time, fade_out: Time },
 }
