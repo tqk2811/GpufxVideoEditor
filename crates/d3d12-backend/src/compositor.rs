@@ -377,6 +377,7 @@ impl D3d12Compositor {
     }
 
     /// Runs `work` with no abort flag, so what it decodes is not stopped by a newer preview request.
+    /// The closing flag still stops it.
     pub fn without_abort<R>(&mut self, work: impl FnOnce(&mut Self) -> R) -> R {
         let saved = self.abort.take();
         let result = work(self);
@@ -526,6 +527,8 @@ impl Compositor for D3d12Compositor {
         if let Some((flag, grace)) = &self.abort {
             decoder.set_abort(flag.clone(), *grace);
             decoder.set_abort_policy(self.closing.clone(), Some(self.publish_clock.clone()));
+        } else {
+            decoder.set_abort_policy(self.closing.clone(), None);
         }
         Ok(decoder)
     }

@@ -292,6 +292,22 @@ fn a_relative_source_follows_the_paths_of_the_request() {
 /// Covers `Gpu::try_lock_submits` only: a held gate is refused and a free one is taken. It does not
 /// run the presenter, so the skipped frame of `Presenter::render` is not tested here.
 #[test]
+fn a_capture_is_not_stopped_by_a_newer_request_but_stops_at_once_on_closing() {
+    let _gpu = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let (newer, closing) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicBool::new(false)));
+    let mut producer = D3d12Producer::new(gpu);
+    producer.set_abort(newer);
+    producer.set_closing(closing.clone());
+    let timeline = project(vec![clip("clip-a.mp4", at_frame(60))]);
+    let paths = Arc::new(project_paths(None, &package_roots()));
+    producer.capture(&timeline, &paths, 30).expect("a newer preview request does not stop a capture");
+    closing.store(true, Ordering::SeqCst);
+    let error = producer.capture(&timeline, &paths, 30).expect_err("closing stops the capture");
+    assert!(is_cancelled(&error), "{error}");
+}
+
+#[test]
 fn try_lock_submits_refuses_a_held_gate_and_takes_a_free_one() {
     let _exclusive = gpu_lock();
     let Some(gpu) = hardware_gpu() else { return };
