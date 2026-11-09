@@ -412,12 +412,18 @@ impl D3d12Compositor {
     /// Runs `graph` into the image `output` and records the fence value it will reach.
     fn run_graph(gpu: &Gpu, graph: &mut EffectGraph, inputs: &mut [D3d12Frame], images: &mut [Image], output: ImageId, width: u32, height: u32, info: &FrameInfo) -> Result<(), String> {
         let mut outputs = [images[output.0].frame(width, height)];
-        // A submit from another thread must not consume the fences this call stages.
-        let _gate = gpu.lock_submits();
+        let pads: Vec<(u32, u32)> = inputs.iter().map(|frame| (frame.width, frame.height)).collect();
+        // A shader that computes an output size submits once for new input sizes, so it happens
+        // here, under the gate; the call below then finds the answer. Its error comes back there.
+        {
+            let _gate = gpu.lock_submits();
+            let _ = graph.output_size(0, &pads);
+        }
         // SAFETY: the resources and fences are live objects of the shared device, in COMMON once
         // their fences reach the values passed, and not reused by others before the fences signal.
-        // The submit gate is held, so no submit overlaps this call.
-        unsafe { graph.process_d3d12(inputs, &mut outputs, Some(info)) }.map_err(|e| format!("process_d3d12 failed: {e}"))?;
+        // A submit from another thread must not consume the fences this call stages: the submit
+        // gate is held for that part only, so building pipelines does not stop the UI.
+        unsafe { graph.process_d3d12_with_submit_lock(inputs, &mut outputs, Some(info), || gpu.lock_submits()) }.map_err(|e| format!("process_d3d12 failed: {e}"))?;
         images[output.0].fence_value = outputs[0].fence_value;
         Ok(())
     }

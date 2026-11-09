@@ -92,9 +92,9 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/poc/src/presenter.rs:132` duyệt `TexturesDelta` mà không `drain`. Cùng kiểu mã này đã panic ("Dropped TexturesDelta with unapplied deltas") ở bản debug của editor; chưa xác nhận trong POC. Ghi ngày 2026-11-09.
 
-### [Vừa] `process_d3d12` của gpufx-core poll GPU trong lúc giữ cổng submit
+### [Thấp] Khung đầu tiên trên device mới vẫn ra trễ khoảng 1 giây vì dựng pipeline
 
-`external/FFmpegGpuFilter/crates/gpufx-core/src/d3d12.rs:491` gọi `device.poll(Wait)` bên trong đoạn app giữ `Gpu::lock_submits` (`crates/d3d12-backend/src/compositor.rs`, `run_graph`), nên trong lúc đó khung UI không present được. `Presenter::render` đã dùng `try_lock_submits` nên vòng lặp không còn đứng, nhưng hình vẫn dừng: lần `process_d3d12` đầu tiên của clip mới giữ cổng 0,9 đến 1,7 giây (đo 2026-11-09, debug và opt-level 3 như nhau). Cần nhờ FFmpegGpuFilter dựng pipeline và poll ngoài cổng, hoặc có API warm-up; chưa có phiên FFmpegGpuFilter nào đang mở để nhận việc. Nên làm vì mở clip đầu tiên và effect nặng vẫn làm hình đứng. Ghi ngày 2026-11-09.
+`external/FFmpegGpuFilter/crates/gpufx-core/src/convert.rs:354` dựng pipeline chuyển đổi khung GPU (`to_rgba_gpu`) ở lần dùng đầu của mỗi `GpuContext`, mất khoảng 970 ms (đo 2026-11-09). Việc này đã nằm ngoài cổng submit nên UI vẫn present được (cổng giữ tối đa khoảng 13 ms), nhưng khung đầu tiên vẫn hiện sau khoảng 1,1 giây. Nên làm nếu muốn hình đầu ra nhanh hơn: dựng sẵn lúc khởi tạo device ở luồng nền, hoặc cache pipeline. Ghi ngày 2026-11-09.
 
 ### [Thấp] Lỗi wgpu của luồng UI chỉ hiện chớp qua ở dòng preview
 

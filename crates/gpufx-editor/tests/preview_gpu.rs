@@ -301,3 +301,41 @@ fn try_lock_submits_refuses_a_held_gate_and_takes_a_free_one() {
     drop(held);
     assert!(gpu.try_lock_submits().is_some(), "a free gate must be taken");
 }
+
+/// The first frame on a device builds the pipelines of GPU frames, about a second. The UI must be
+/// able to present meanwhile, so the submit gate is only taken for short moments, and the submits
+/// made alongside must not change the picture.
+#[test]
+fn the_first_frame_on_a_device_leaves_the_submit_gate_free_while_it_builds_pipelines() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let project = project(vec![clip("clip-a.mp4", Time::from_seconds(2).unwrap())]);
+    let stop = AtomicBool::new(false);
+    let (longest, picture) = std::thread::scope(|scope| {
+        // Takes the gate and submits as a frame of the UI does, between short sleeps.
+        let ui = scope.spawn(|| {
+            let (mut refused_since, mut longest) = (None, Duration::ZERO);
+            while !stop.load(Ordering::SeqCst) {
+                match gpu.try_lock_submits() {
+                    Some(_gate) => {
+                        refused_since = None;
+                        gpu.queue.submit([]);
+                    }
+                    None => longest = longest.max(refused_since.get_or_insert_with(std::time::Instant::now).elapsed()),
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            longest
+        });
+        let mut producer = D3d12Producer::new(gpu.clone());
+        let image = producer.produce(&request(&project, 0)).expect("frame").expect("a picture");
+        let picture = image.image.read_rgba(&gpu).expect("read");
+        stop.store(true, Ordering::SeqCst);
+        (ui.join().expect("the thread ends"), picture)
+    });
+    assert!(longest < Duration::from_millis(300), "the submit gate stayed taken for {longest:?}");
+
+    let mut quiet = D3d12Producer::new(gpu.clone());
+    let image = quiet.produce(&request(&project, 0)).expect("frame").expect("a picture");
+    assert_eq!(image.image.read_rgba(&gpu).expect("read"), picture, "the submits alongside changed the picture");
+}

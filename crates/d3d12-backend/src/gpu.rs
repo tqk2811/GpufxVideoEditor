@@ -101,16 +101,17 @@ impl Gpu {
         Ok(Some(Self { device, queue, context, adapter_name, instance, adapter, raw, errors, lost, submit_gate: Mutex::new(()) }))
     }
 
-    /// Held across every `queue.submit` and `process_d3d12` on this device. gpufx stages fences on
-    /// the queue that the next submit from anyone consumes, so no submit may overlap
-    /// `process_d3d12` (the contract of `GpuContext::from_device`). Never held while decoding.
+    /// Held across every `queue.submit` and the submission inside `process_d3d12` on this device.
+    /// gpufx stages fences on the queue that the next submit from anyone consumes, so no submit may
+    /// overlap that part (the contract of `GpuContext::from_device`). Never held while decoding, or
+    /// while gpufx builds pipelines or waits for its previous frame.
     pub fn lock_submits(&self) -> MutexGuard<'_, ()> {
         self.submit_gate.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// The submit gate if it is free right now. A frame of the UI asks with this instead of
-    /// [`Self::lock_submits`], because the first `process_d3d12` of a graph holds the gate for about
-    /// a second and the window must keep answering meanwhile.
+    /// [`Self::lock_submits`], because other long holders may appear and the window must keep
+    /// answering meanwhile.
     pub fn try_lock_submits(&self) -> Option<MutexGuard<'_, ()>> {
         match self.submit_gate.try_lock() {
             Ok(gate) => Some(gate),
