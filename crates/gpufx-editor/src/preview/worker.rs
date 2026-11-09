@@ -51,6 +51,22 @@ pub struct PreviewWorker<P: FrameProducer> {
     results: Arc<LatestSlot<Outcome<P::Frame>>>,
     returned: Sender<P::Frame>,
     handle: Option<JoinHandle<()>>,
+    spawn_error: Option<String>,
+}
+
+/// Recycles `frame`; a panic in there must not end the thread.
+fn recycle_guarded<P: FrameProducer>(producer: &mut P, frame: P::Frame) {
+    if catch_unwind(AssertUnwindSafe(|| producer.recycle(frame))).is_err() {
+        producer.reset();
+    }
+}
+
+/// The thread handle, or the message for a thread that could not start.
+fn spawned(result: std::io::Result<JoinHandle<()>>) -> (Option<JoinHandle<()>>, Option<String>) {
+    match result {
+        Ok(handle) => (Some(handle), None),
+        Err(e) => (None, Some(format!("the preview thread could not start: {e}"))),
+    }
 }
 
 impl<P: FrameProducer + 'static> PreviewWorker<P> {
@@ -66,7 +82,7 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
             producer.set_abort(abort);
             while let Some(request) = thread_requests.wait() {
                 for frame in returned_frames.try_iter() {
-                    producer.recycle(frame);
+                    recycle_guarded(&mut producer, frame);
                 }
                 let result = match catch_unwind(AssertUnwindSafe(|| producer.produce(&request))) {
                     Ok(Ok(frame)) => Ok(frame),
@@ -79,12 +95,13 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
                 };
                 let outcome = Outcome { id: P::request_id(&request), result };
                 if let Some(Outcome { result: Ok(Some(unread)), .. }) = thread_results.put(outcome) {
-                    producer.recycle(unread);
+                    recycle_guarded(&mut producer, unread);
                 }
                 wake();
             }
         });
-        Self { requests, results, returned, handle: handle.ok() }
+        let (handle, spawn_error) = spawned(handle);
+        Self { requests, results, returned, handle, spawn_error }
     }
 
     /// Asks for `request` instead of whatever has not started yet. Never blocks on the work.
@@ -95,6 +112,11 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
     /// The newest finished result, if one arrived since the last call.
     pub fn poll(&self) -> Option<Outcome<P::Frame>> {
         self.results.take()
+    }
+
+    /// Why the thread could not start, if it could not. No request will ever finish then.
+    pub fn spawn_error(&self) -> Option<&str> {
+        self.spawn_error.as_deref()
     }
 
     /// Hands back a frame the UI has stopped showing.
@@ -125,6 +147,8 @@ mod tests {
     const LONG_FRAME: Duration = Duration::from_secs(5);
     /// The request of the fake's long frame.
     const LONG: i32 = -3;
+    /// A frame the fake's recycle panics on.
+    const PANICS_IN_RECYCLE: i32 = -4;
 
     #[derive(Default)]
     struct Log {
@@ -183,7 +207,8 @@ mod tests {
             }
         }
 
-        fn recycle(&mut self, _frame: i32) {
+        fn recycle(&mut self, frame: i32) {
+            assert_ne!(frame, PANICS_IN_RECYCLE, "deliberate test panic");
             self.0.recycled.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -237,6 +262,31 @@ mod tests {
         worker.request(2);
         assert_eq!(worker.poll(), None);
         set(&log.release_first);
+    }
+
+    #[test]
+    fn a_panic_in_recycle_does_not_end_the_thread() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.give_back(PANICS_IN_RECYCLE);
+        worker.give_back(8);
+        worker.request(5);
+        assert_eq!(next(&worker, &wake), Ok(Some(5)));
+        assert_eq!(log.recycled.load(Ordering::SeqCst), 1, "the frame after the panic was recycled");
+    }
+
+    #[test]
+    fn a_thread_that_cannot_start_is_reported() {
+        let (handle, message) = spawned(Err(std::io::Error::other("out of threads")));
+        assert!(handle.is_none());
+        assert!(message.expect("a message").contains("out of threads"));
+    }
+
+    #[test]
+    fn a_started_thread_reports_nothing() {
+        let log = Arc::new(Log::default());
+        let (worker, _wake) = start(&log);
+        assert_eq!(worker.spawn_error(), None);
     }
 
     #[test]

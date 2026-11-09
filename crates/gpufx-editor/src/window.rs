@@ -95,6 +95,10 @@ impl Session {
         if let Some(outcome) = self.preview.poll() {
             self.apply_outcome(outcome);
         }
+        if let Some(message) = self.preview.spawn_error() {
+            let message = message.to_owned();
+            self.state.set_preview_error(Some(message));
+        }
         if let Some(message) = self.gpu.device_lost() {
             self.state.set_preview_error(Some(format!("the GPU device was lost: {message}")));
         }
