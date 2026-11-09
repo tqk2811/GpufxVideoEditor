@@ -33,6 +33,7 @@ fn sample_project_is_valid_and_schedules() {
     let resolver = SetResolver {
         sources: vec!["a.mp4", "b.mp4", "overlay.png"],
         packages: vec!["mix", "blur"],
+        without_audio: Vec::new(),
     };
     assert_eq!(validate(&p, &resolver), vec![]);
     assert_eq!(frame_count(&p), 240);

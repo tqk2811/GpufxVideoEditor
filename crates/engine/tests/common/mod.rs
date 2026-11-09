@@ -1,7 +1,7 @@
 //! Helpers shared by the integration tests.
 #![allow(dead_code)]
 
-use engine::{Clip, Effect, Output, Project, Resolver, Time, Track, Transition};
+use engine::{Clip, Effect, Output, Project, Resolver, Time, Track, TrackKind, Transition};
 
 pub fn t(ticks: i64) -> Time {
     Time::from_ticks(ticks)
@@ -14,6 +14,10 @@ pub fn clip(source: &str, start: i64, source_in: i64, duration: i64) -> Clip {
         source_in: t(source_in),
         duration: t(duration),
         effects: Vec::new(),
+        gain_db: 0.0,
+        muted: false,
+        fade_in: Time::ZERO,
+        fade_out: Time::ZERO,
     }
 }
 
@@ -40,19 +44,33 @@ pub fn project(frame_duration: i64, tracks: Vec<Track>) -> Project {
             width: 1920,
             height: 1080,
             frame_duration: t(frame_duration),
+            audio: None,
         },
         tracks,
     }
 }
 
 pub fn track(clips: Vec<Clip>, transitions: Vec<Transition>) -> Track {
-    Track { clips, transitions }
+    Track {
+        kind: TrackKind::Video,
+        clips,
+        transitions,
+    }
+}
+
+pub fn audio_track(clips: Vec<Clip>) -> Track {
+    Track {
+        kind: TrackKind::Audio,
+        clips,
+        transitions: Vec::new(),
+    }
 }
 
 /// Knows a fixed set of sources and packages.
 pub struct SetResolver {
     pub sources: Vec<&'static str>,
     pub packages: Vec<&'static str>,
+    pub without_audio: Vec<&'static str>,
 }
 
 impl Default for SetResolver {
@@ -60,6 +78,7 @@ impl Default for SetResolver {
         SetResolver {
             sources: vec!["a.mp4", "b.mp4", "c.mp4"],
             packages: vec!["mix", "blur"],
+            without_audio: Vec::new(),
         }
     }
 }
@@ -70,5 +89,8 @@ impl Resolver for SetResolver {
     }
     fn package_exists(&self, package: &str) -> bool {
         self.packages.contains(&package)
+    }
+    fn source_has_audio(&self, source: &str) -> bool {
+        !self.without_audio.contains(&source)
     }
 }

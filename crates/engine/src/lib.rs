@@ -17,7 +17,10 @@ pub mod schedule;
 pub mod time;
 pub mod validate;
 
-pub use project::{Clip, Effect, LoadError, Output, Project, Track, Transition, SUPPORTED_VERSION};
+pub use project::{
+    AudioOutput, Clip, Effect, LoadError, Output, Project, Track, TrackKind, Transition,
+    MIN_SUPPORTED_VERSION, SUPPORTED_VERSION,
+};
 pub use schedule::{
     frame_count, frame_time, layers_at_frame, Layer, LayerContent, Progress, SourceSample,
     PROGRESS_PPM_SCALE,

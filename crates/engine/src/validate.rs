@@ -12,6 +12,11 @@ pub trait Resolver {
     fn source_exists(&self, source: &str) -> bool;
     /// Whether an effect or transition package can be found.
     fn package_exists(&self, package: &str) -> bool;
+    /// Whether the source has an audio stream. Asked only for existing sources of audio tracks.
+    /// The default accepts every source, so resolvers that cannot tell keep working.
+    fn source_has_audio(&self, _source: &str) -> bool {
+        true
+    }
 }
 
 /// A resolver that accepts everything, for checking structure only.
@@ -33,6 +38,10 @@ pub enum ValidationError {
     InvalidOutputSize { width: u32, height: u32 },
     /// `output.frame_duration` is zero or negative.
     NonPositiveFrameDuration { frame_duration: Time },
+    /// `output.audio.sample_rate` is not 48000.
+    UnsupportedSampleRate { sample_rate: u32 },
+    /// `output.audio.channels` is not 2.
+    UnsupportedChannelCount { channels: u32 },
     /// A clip duration is zero or negative.
     NonPositiveClipDuration {
         track: usize,
@@ -97,6 +106,37 @@ pub enum ValidationError {
         transition: usize,
         after_clip: usize,
     },
+    /// A clip `gain_db` is infinite or not a number.
+    NonFiniteGain { track: usize, clip: usize },
+    /// A clip `fade_in` or `fade_out` is negative.
+    NegativeFade {
+        track: usize,
+        clip: usize,
+        field: &'static str,
+        value: Time,
+    },
+    /// `fade_in + fade_out` is longer than the clip.
+    FadesExceedClip {
+        track: usize,
+        clip: usize,
+        fade_in: Time,
+        fade_out: Time,
+        duration: Time,
+    },
+    /// A track of kind `audio` has a transition.
+    AudioTrackTransition { track: usize, transition: usize },
+    /// A clip on a track of kind `audio` has an effect.
+    AudioTrackEffect {
+        track: usize,
+        clip: usize,
+        effect: usize,
+    },
+    /// The source of a clip on a track of kind `audio` has no audio stream.
+    SourceHasNoAudio {
+        track: usize,
+        clip: usize,
+        source: String,
+    },
     /// One side of the transition window is longer than the part of its clip that is
     /// not already used by the neighbouring transition of the same clip.
     TransitionTooLong {
@@ -120,6 +160,12 @@ impl fmt::Display for ValidationError {
             }
             NonPositiveFrameDuration { frame_duration } => {
                 write!(f, "output: frame_duration {frame_duration} must be positive")
+            }
+            UnsupportedSampleRate { sample_rate } => {
+                write!(f, "output: audio sample_rate {sample_rate} must be 48000")
+            }
+            UnsupportedChannelCount { channels } => {
+                write!(f, "output: audio channels {channels} must be 2")
             }
             NonPositiveClipDuration { track, clip, duration } => {
                 write!(f, "track {track}, clip {clip}: duration {duration} must be positive")
@@ -161,6 +207,25 @@ impl fmt::Display for ValidationError {
                 "track {track}, transition {transition}: clips {after_clip} and {} are not adjacent",
                 after_clip + 1
             ),
+            NonFiniteGain { track, clip } => {
+                write!(f, "track {track}, clip {clip}: gain_db must be finite")
+            }
+            NegativeFade { track, clip, field, value } => {
+                write!(f, "track {track}, clip {clip}: {field} {value} must not be negative")
+            }
+            FadesExceedClip { track, clip, fade_in, fade_out, duration } => write!(
+                f,
+                "track {track}, clip {clip}: fade_in {fade_in} plus fade_out {fade_out} is longer than duration {duration}"
+            ),
+            AudioTrackTransition { track, transition } => {
+                write!(f, "track {track}, transition {transition}: an audio track cannot have transitions")
+            }
+            AudioTrackEffect { track, clip, effect } => {
+                write!(f, "track {track}, clip {clip}, effect {effect}: an audio track cannot have effects")
+            }
+            SourceHasNoAudio { track, clip, source } => {
+                write!(f, "track {track}, clip {clip}: source '{source}' has no audio stream")
+            }
             TransitionTooLong { track, transition, clip, needed, usable } => write!(
                 f,
                 "track {track}, transition {transition}: needs {needed} from clip {clip} but only {usable} is usable"
@@ -189,6 +254,18 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
         errors.push(NonPositiveFrameDuration {
             frame_duration: project.output.frame_duration,
         });
+    }
+    if let Some(audio) = &project.output.audio {
+        if audio.sample_rate != 48_000 {
+            errors.push(UnsupportedSampleRate {
+                sample_rate: audio.sample_rate,
+            });
+        }
+        if audio.channels != 2 {
+            errors.push(UnsupportedChannelCount {
+                channels: audio.channels,
+            });
+        }
     }
 
     for (t, track) in project.tracks.iter().enumerate() {
@@ -233,8 +310,52 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                     clip: c,
                     source: clip.source.clone(),
                 });
+            } else if track.is_audio() && !resolver.source_has_audio(&clip.source) {
+                errors.push(SourceHasNoAudio {
+                    track: t,
+                    clip: c,
+                    source: clip.source.clone(),
+                });
+            }
+            if !clip.gain_db.is_finite() {
+                errors.push(NonFiniteGain { track: t, clip: c });
+            }
+            let mut fades_ok = true;
+            for (field, value) in [("fade_in", clip.fade_in), ("fade_out", clip.fade_out)] {
+                if value < Time::ZERO {
+                    errors.push(NegativeFade {
+                        track: t,
+                        clip: c,
+                        field,
+                        value,
+                    });
+                    fades_ok = false;
+                }
+            }
+            // A duration that is not positive has its own error already.
+            if fades_ok
+                && clip.duration > Time::ZERO
+                && clip
+                    .fade_in
+                    .checked_add(clip.fade_out)
+                    .is_none_or(|total| total > clip.duration)
+            {
+                errors.push(FadesExceedClip {
+                    track: t,
+                    clip: c,
+                    fade_in: clip.fade_in,
+                    fade_out: clip.fade_out,
+                    duration: clip.duration,
+                });
             }
             for (e, effect) in clip.effects.iter().enumerate() {
+                if track.is_audio() {
+                    errors.push(AudioTrackEffect {
+                        track: t,
+                        clip: c,
+                        effect: e,
+                    });
+                }
                 if !resolver.package_exists(&effect.package) {
                     errors.push(EffectPackageNotFound {
                         track: t,
@@ -268,6 +389,12 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
         let mut seen: HashMap<usize, usize> = HashMap::new();
         let mut valid: Vec<(usize, usize, Time)> = Vec::new(); // (transition, after_clip, duration)
         for (i, tr) in track.transitions.iter().enumerate() {
+            if track.is_audio() {
+                errors.push(AudioTrackTransition {
+                    track: t,
+                    transition: i,
+                });
+            }
             let mut ok = true;
             if tr.duration <= Time::ZERO {
                 errors.push(NonPositiveTransitionDuration {

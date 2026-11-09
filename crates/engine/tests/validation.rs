@@ -29,10 +29,10 @@ fn valid_project_has_no_errors() {
 
 #[test]
 fn rejects_unknown_version() {
-    let text = r#"{"version":2,"output":{"width":1,"height":1,"frame_duration":3000},"tracks":[]}"#;
+    let text = r#"{"version":3,"output":{"width":1,"height":1,"frame_duration":3000},"tracks":[]}"#;
     match Project::from_json(text) {
-        Err(LoadError::UnsupportedVersion(2)) => {}
-        other => panic!("expected UnsupportedVersion(2), got {other:?}"),
+        Err(LoadError::UnsupportedVersion(3)) => {}
+        other => panic!("expected UnsupportedVersion(3), got {other:?}"),
     }
 }
 
