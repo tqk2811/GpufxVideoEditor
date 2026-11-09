@@ -95,3 +95,23 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] POC duyệt TexturesDelta không drain
 
 `crates/poc/src/presenter.rs:132` duyệt `TexturesDelta` mà không `drain`. Cùng kiểu mã này đã panic ("Dropped TexturesDelta with unapplied deltas") ở bản debug của editor; chưa xác nhận trong POC. Ghi ngày 2026-11-09.
+
+### [Vừa] `process_d3d12` của gpufx-core poll GPU trong lúc giữ cổng submit
+
+`external/FFmpegGpuFilter/crates/gpufx-core/src/d3d12.rs:491` gọi `device.poll(Wait)` bên trong đoạn app giữ `Gpu::lock_submits` (`crates/d3d12-backend/src/compositor.rs`, `run_graph`), nên effect nặng làm UI đứng đúng bằng thời gian GPU của nó, kể cả lần `configure_surface` khi đổi kích thước cửa sổ. Cần nhờ FFmpegGpuFilter cho phép poll chạy ngoài cổng; chưa có phiên FFmpegGpuFilter nào đang mở để nhận việc. Nên làm vì scrub và resize giật theo độ nặng của effect. Ghi ngày 2026-11-09.
+
+### [Thấp] `Gpu.error` dùng chung nên lỗi wgpu của luồng UI làm hỏng frame của worker
+
+`crates/d3d12-backend/src/gpu.rs` giữ một ô lỗi cho cả device; `check_errors` của worker đọc ô đó nên một lỗi wgpu từ luồng UI bị báo là frame hỏng. Nên làm vì thông báo sai chỗ và frame đúng vẫn bị bỏ. Ghi ngày 2026-11-09.
+
+### [Thấp] Package root và `ProjectPaths` của preview đang cố định
+
+`crates/gpufx-editor/src/preview/backend.rs:17` lấy package root từ `CARGO_MANIFEST_DIR`, hỏng khi chạy ở máy khác; `crates/gpufx-editor/src/preview/backend.rs:20` và `:63` cố định `ProjectPaths` vào `unsaved.json`. Bước 6 phải giải quyết. Ghi ngày 2026-11-09.
+
+### [Thấp] `clip_graphs` và `transition_graphs` không bao giờ được dọn
+
+`crates/d3d12-backend/src/compositor.rs:284-285`: hai cache này chỉ thêm, nên preview chạy lâu hoặc project nhiều clip giữ graph của mọi clip và mọi transition đã gặp. Nên làm vì bộ nhớ GPU tăng theo số clip đã xem. Ghi ngày 2026-11-09.
+
+### [Thấp] Tua qua ranh giới clip đóng decoder
+
+`crates/engine/src/render.rs:342`: `retain` đóng decoder của clip không dùng ở frame hiện tại, nên tua qua lại giữa hai clip phải mở lại file và decode lại từ keyframe. Nên làm vì scrub qua điểm nối bị khựng. Ghi ngày 2026-11-09.
