@@ -12,18 +12,16 @@ use engine::render::{render, Decoder, FrameSink, RenderError};
 use engine::{validate, Project, Time};
 use sha2::{Digest, Sha256};
 
-/// `None` (test skipped) without a hardware D3D12 adapter: WARP cannot decode with D3D12VA.
+/// `None` (test skipped) only when there is no hardware D3D12 adapter: WARP cannot decode with
+/// D3D12VA. Any other failure to open the GPU fails the test.
 fn gpu() -> Option<Arc<Gpu>> {
-    match Gpu::create() {
-        Ok(gpu) if gpu.adapter_name.contains("Microsoft Basic Render") => {
-            eprintln!("skipping: only the WARP software adapter is available");
+    match Gpu::create_hardware() {
+        Ok(Some(gpu)) => Some(Arc::new(gpu)),
+        Ok(None) => {
+            eprintln!("skipping: no D3D12 hardware adapter is available");
             None
         }
-        Ok(gpu) => Some(Arc::new(gpu)),
-        Err(message) => {
-            eprintln!("skipping: {message}");
-            None
-        }
+        Err(message) => panic!("opening the GPU failed: {message}"),
     }
 }
 

@@ -47,16 +47,13 @@ fn probe(args: &[&str], file: &PathBuf) -> String {
 }
 
 fn hardware_available() -> bool {
-    match Gpu::create() {
-        Ok(gpu) if gpu.adapter_name.contains("Microsoft Basic Render") => {
-            eprintln!("skipping: only the WARP software adapter is available");
+    match Gpu::create_hardware() {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            eprintln!("skipping: no D3D12 hardware adapter is available");
             false
         }
-        Ok(_) => true,
-        Err(message) => {
-            eprintln!("skipping: {message}");
-            false
-        }
+        Err(message) => panic!("opening the GPU failed: {message}"),
     }
 }
 

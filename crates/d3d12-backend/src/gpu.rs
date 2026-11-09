@@ -32,16 +32,35 @@ impl Gpu {
     /// Opens the high-performance Direct3D 12 adapter, or the first adapter whose name contains
     /// the `GPUFX_ADAPTER` environment variable (for example `Intel` or `NVIDIA`).
     pub fn create() -> Result<Self, String> {
+        Self::open(false)?.ok_or_else(|| "no D3D12 adapter".to_owned())
+    }
+
+    /// Like [`Gpu::create`], but `Ok(None)` when the machine has no hardware adapter: no adapter
+    /// at all, or only the WARP software one (it cannot decode with D3D12VA). Tests skip on this
+    /// alone. Every other failure is an `Err`, including a `GPUFX_ADAPTER` that matches nothing
+    /// and a device that fails to open.
+    pub fn create_hardware() -> Result<Option<Self>, String> {
+        Self::open(true)
+    }
+
+    fn open(hardware_only: bool) -> Result<Option<Self>, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::DX12, ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let adapter = match std::env::var("GPUFX_ADAPTER") {
             Ok(wanted) if !wanted.is_empty() => pollster::block_on(instance.enumerate_adapters(wgpu::Backends::DX12))
                 .into_iter()
                 .find(|a| a.get_info().name.to_lowercase().contains(&wanted.to_lowercase()))
                 .ok_or_else(|| format!("no D3D12 adapter name contains {wanted}"))?,
-            _ => pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() }))
-                .map_err(|e| format!("no D3D12 adapter: {e}"))?,
+            _ => match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })) {
+                Ok(adapter) => adapter,
+                Err(wgpu::RequestAdapterError::NotFound { .. }) if hardware_only => return Ok(None),
+                Err(e) => return Err(format!("no D3D12 adapter: {e}")),
+            },
         };
-        let adapter_name = adapter.get_info().name;
+        let info = adapter.get_info();
+        if hardware_only && (info.device_type == wgpu::DeviceType::Cpu || info.name.contains("Microsoft Basic Render")) {
+            return Ok(None);
+        }
+        let adapter_name = info.name;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("gpufx-render"),
             required_features: GpuContext::wanted_features(&adapter),
@@ -64,7 +83,7 @@ impl Gpu {
             hal.raw_device().clone()
         };
         let context = GpuContext::from_device(&adapter, device.clone(), queue.clone(), None).map_err(|e| format!("GpuContext::from_device failed: {e}"))?;
-        Ok(Self { device, queue, context, adapter_name, raw, error })
+        Ok(Some(Self { device, queue, context, adapter_name, raw, error }))
     }
 
     /// The `ID3D12Device` behind the wgpu device.
