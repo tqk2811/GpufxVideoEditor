@@ -1,6 +1,8 @@
 //! The one wgpu Direct3D 12 device shared by the compositor and gpufx.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::{self, ThreadId};
 
 use gpufx_core::GpuContext;
 use wgpu::hal::api::Dx12;
@@ -27,8 +29,9 @@ pub struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     raw: ID3D12Device,
-    /// The first error wgpu reported outside an error scope.
-    error: Arc<Mutex<Option<String>>>,
+    /// The first error wgpu reported outside an error scope, per thread: wgpu calls its handler on
+    /// the thread that made the failing call, so one thread's error is not another's.
+    errors: Arc<Mutex<HashMap<ThreadId, String>>>,
     /// Set once when the device is lost; never cleared.
     lost: Arc<Mutex<Option<String>>>,
     submit_gate: Mutex<()>,
@@ -76,11 +79,11 @@ impl Gpu {
         .map_err(|e| format!("wgpu device creation failed: {e}"))?;
         pin_d3d12_module()?;
 
-        let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let sink = error.clone();
+        let errors: Arc<Mutex<HashMap<ThreadId, String>>> = Arc::default();
+        let sink = errors.clone();
         device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-            let mut slot = sink.lock().unwrap_or_else(|p| p.into_inner());
-            slot.get_or_insert_with(|| e.to_string());
+            let mut slots = sink.lock().unwrap_or_else(|p| p.into_inner());
+            slots.entry(thread::current().id()).or_insert_with(|| e.to_string());
         }));
         let lost: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let lost_sink = lost.clone();
@@ -95,7 +98,7 @@ impl Gpu {
             hal.raw_device().clone()
         };
         let context = GpuContext::from_device(&adapter, device.clone(), queue.clone(), None).map_err(|e| format!("GpuContext::from_device failed: {e}"))?;
-        Ok(Some(Self { device, queue, context, adapter_name, instance, adapter, raw, error, lost, submit_gate: Mutex::new(()) }))
+        Ok(Some(Self { device, queue, context, adapter_name, instance, adapter, raw, errors, lost, submit_gate: Mutex::new(()) }))
     }
 
     /// Held across every `queue.submit` and `process_d3d12` on this device. gpufx stages fences on
@@ -135,13 +138,13 @@ impl Gpu {
         &self.raw
     }
 
-    /// `Err` when the device is lost, or wgpu reported an error since the device was made or since
-    /// the last [`Gpu::take_error`].
+    /// `Err` when the device is lost, or wgpu reported an error on this thread since the device was
+    /// made or since this thread's last [`Gpu::take_error`].
     pub fn check_errors(&self) -> Result<(), String> {
         if let Some(message) = self.device_lost() {
             return Err(format!("the GPU device was lost: {message}"));
         }
-        match self.error.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        match self.errors.lock().unwrap_or_else(|p| p.into_inner()).get(&thread::current().id()) {
             Some(message) => Err(format!("wgpu error: {message}")),
             None => Ok(()),
         }
@@ -152,8 +155,8 @@ impl Gpu {
         self.lost.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    /// Takes the reported wgpu error, so one bad frame does not fail the frames after it.
+    /// Takes the wgpu error reported on this thread, so one bad frame does not fail the frames after it.
     pub fn take_error(&self) -> Option<String> {
-        self.error.lock().unwrap_or_else(|p| p.into_inner()).take()
+        self.errors.lock().unwrap_or_else(|p| p.into_inner()).remove(&thread::current().id())
     }
 }

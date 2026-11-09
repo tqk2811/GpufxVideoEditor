@@ -186,6 +186,10 @@ impl Session {
             let message = message.to_owned();
             self.state.set_preview_error(Some(message));
         }
+        // An error of this thread, the presenter's: the worker and the export have their own.
+        if let Some(message) = self.gpu.take_error() {
+            self.state.set_preview_error(Some(format!("wgpu error: {message}")));
+        }
         if let Some(message) = self.gpu.device_lost() {
             self.state.set_preview_error(Some(format!("the GPU device was lost: {message}")));
         }

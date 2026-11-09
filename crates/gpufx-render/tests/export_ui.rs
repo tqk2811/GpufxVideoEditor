@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use d3d12_backend::{EncoderChoice, ExportJob, Gpu};
+use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, Gpu};
 use engine::{AudioOutput, Clip, Output, Project, Time, Track, TrackKind, Transition, SUPPORTED_VERSION};
 use gpufx_editor::export::{ExportOutcome, ExportWorker};
 use gpufx_editor::project_file::{load_project_file, package_roots, project_paths, save_project_file};
@@ -51,11 +51,15 @@ fn project_with_transition_and_sound() -> Project {
     }
 }
 
-/// Starts the UI's worker on `file`, already past the wait for the preview.
-fn start_export(gpu: &Arc<Gpu>, file: &Path, out: &Path, hashes: Option<&Path>) -> ExportWorker {
+fn export_job(file: &Path, out: &Path, hashes: Option<&Path>) -> ExportJob {
     let roots = package_roots();
     let project = load_project_file(file, &roots).expect("the saved project opens");
-    let job = ExportJob { project, project_file: Some(file.to_path_buf()), paths: Arc::new(project_paths(Some(file), &roots)), out: out.to_path_buf(), encoder: EncoderChoice::Auto, hashes: hashes.map(Path::to_path_buf) };
+    ExportJob { project, project_file: Some(file.to_path_buf()), paths: Arc::new(project_paths(Some(file), &roots)), out: out.to_path_buf(), encoder: EncoderChoice::Auto, hashes: hashes.map(Path::to_path_buf) }
+}
+
+/// Starts the UI's worker on `file`, already past the wait for the preview.
+fn start_export(gpu: &Arc<Gpu>, file: &Path, out: &Path, hashes: Option<&Path>) -> ExportWorker {
+    let job = export_job(file, out, hashes);
     let (released, gate) = channel();
     released.send(()).expect("the receiver is alive");
     ExportWorker::start(job, gpu.clone(), gate, || {}).expect("the export starts")
@@ -107,6 +111,62 @@ fn the_ui_export_matches_the_cli_in_frames_and_pcm() {
     let (cli_pcm, ui_pcm) = (decoded_pcm(&cli_out), decoded_pcm(&ui_out));
     assert!(cli_pcm.chunks_exact(4).any(|sample| f32::from_le_bytes(sample.try_into().expect("four bytes")).abs() > 0.01), "the sound must not be silence");
     assert_eq!(Sha256::digest(&cli_pcm), Sha256::digest(&ui_pcm), "the encoded audio differs");
+}
+
+/// A validation error that no error scope captures: a buffer cannot map both ways.
+fn raise_wgpu_error(gpu: &Gpu) {
+    let _ = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 4, usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE, mapped_at_creation: false });
+}
+
+#[test]
+fn a_wgpu_error_belongs_to_the_thread_that_raised_it() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let other = gpu.clone();
+    std::thread::spawn(move || {
+        raise_wgpu_error(&other);
+        assert!(other.check_errors().is_err(), "the raising thread sees it");
+        assert!(other.take_error().is_some());
+        raise_wgpu_error(&other);
+    })
+    .join()
+    .expect("the thread finished");
+    assert!(gpu.check_errors().is_ok(), "another thread's error is not this thread's");
+    assert_eq!(gpu.take_error(), None);
+}
+
+#[test]
+fn a_wgpu_error_from_before_the_export_does_not_fail_it() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let dir = scratch("export-error-before");
+    let file = dir.join("project.json");
+    save_project_file(&project_with_transition_and_sound(), &file).expect("save the project");
+    raise_wgpu_error(&gpu);
+    export_job(&file, &dir.join("out.mp4"), None).run(gpu, ExportControl::default()).expect("an earlier error is not the export's");
+}
+
+#[test]
+fn a_wgpu_error_after_the_last_frame_is_the_exports_and_is_taken() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let dir = scratch("export-error-after");
+    let file = dir.join("project.json");
+    save_project_file(&project_with_transition_and_sound(), &file).expect("save the project");
+    let out = dir.join("out.mp4");
+    let raiser = gpu.clone();
+    let progress = move |done: i64, total: i64| {
+        if done == total {
+            raise_wgpu_error(&raiser);
+        }
+    };
+    let result = export_job(&file, &out, None).run(gpu.clone(), ExportControl { progress: Some(&progress), ..Default::default() });
+    match result {
+        Err(ExportError::Failed(message)) => assert!(message.contains("wgpu error"), "{message}"),
+        other => panic!("the export must report it: {other:?}"),
+    }
+    assert_eq!(gpu.take_error(), None, "the next frame is not blamed");
+    assert!(!out.exists(), "a failed export publishes nothing");
 }
 
 #[test]

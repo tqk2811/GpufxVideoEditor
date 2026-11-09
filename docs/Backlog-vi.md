@@ -100,9 +100,9 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `external/FFmpegGpuFilter/crates/gpufx-core/src/d3d12.rs:491` gọi `device.poll(Wait)` bên trong đoạn app giữ `Gpu::lock_submits` (`crates/d3d12-backend/src/compositor.rs`, `run_graph`), nên effect nặng làm UI đứng đúng bằng thời gian GPU của nó, kể cả lần `configure_surface` khi đổi kích thước cửa sổ. Cần nhờ FFmpegGpuFilter cho phép poll chạy ngoài cổng; chưa có phiên FFmpegGpuFilter nào đang mở để nhận việc. Nên làm vì scrub và resize giật theo độ nặng của effect. Ghi ngày 2026-11-09.
 
-### [Thấp] `Gpu.error` dùng chung nên lỗi wgpu của luồng UI làm hỏng frame của worker
+### [Thấp] Lỗi wgpu của luồng UI chỉ hiện chớp qua ở dòng preview
 
-`crates/d3d12-backend/src/gpu.rs` giữ một ô lỗi cho cả device; `check_errors` của worker đọc ô đó nên một lỗi wgpu từ luồng UI bị báo là frame hỏng. Nên làm vì thông báo sai chỗ và frame đúng vẫn bị bỏ. Ghi ngày 2026-11-09.
+`crates/d3d12-backend/src/gpu.rs` giờ giữ lỗi theo từng luồng (wgpu gọi handler trên luồng gây lỗi), nên lỗi của luồng UI không còn làm hỏng frame hay export. `crates/gpufx-editor/src/window.rs` (`collect_preview`) chỉ đưa lỗi của luồng UI vào `preview_error`, và frame preview kế tiếp ghi đè nó. Nên làm vì lỗi UI thật có thể trôi mất; nên có chỗ hiển thị riêng. Ghi ngày 2026-11-09.
 
 ### [Thấp] `clip_graphs` và `transition_graphs` không bao giờ được dọn
 

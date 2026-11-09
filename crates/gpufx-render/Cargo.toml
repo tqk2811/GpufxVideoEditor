@@ -14,4 +14,6 @@ sha2 = "0.10"
 
 [dev-dependencies]
 gpufx-editor = { path = "../gpufx-editor" }
+# Must stay the wgpu major version d3d12-backend uses.
+wgpu = { version = "30", default-features = false, features = ["dx12"] }
 serde_json = "1"

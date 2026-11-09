@@ -210,12 +210,21 @@ impl ExportJob {
         Ok(())
     }
 
-    /// Renders the project (which [`ExportJob::check`] passed) to the output file.
+    /// Renders the project (which [`ExportJob::check`] passed) to the output file. wgpu errors are
+    /// per thread: one from before the render is not this export's, and one from during it is
+    /// reported here and not left for whatever this thread renders next.
     pub fn run(&self, gpu: Arc<Gpu>, control: ExportControl<'_>) -> Result<ExportReport, ExportError> {
+        gpu.take_error();
+        let result = self.render(gpu.clone(), control);
+        gpu.take_error();
+        result
+    }
+
+    fn render(&self, gpu: Arc<Gpu>, control: ExportControl<'_>) -> Result<ExportReport, ExportError> {
         let cancelled = || control.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::SeqCst));
         let (width, height) = (self.project.output.width, self.project.output.height);
         let mut audio_files = self.project.output.audio.map(|_| AudioFiles::new(self.paths.clone()));
-        let mut compositor = D3d12Compositor::new(gpu, self.paths.clone(), width, height)?;
+        let mut compositor = D3d12Compositor::new(gpu.clone(), self.paths.clone(), width, height)?;
         if let Some(cancel) = &control.cancel {
             compositor.set_abort(cancel.clone(), Duration::ZERO);
             compositor.set_closing(cancel.clone());
@@ -253,6 +262,7 @@ impl ExportJob {
         let pcm_sha256 = self.project.output.audio.map(|_| sink.pcm.clone().finalize().iter().map(|b| format!("{b:02x}")).collect());
         // Closes the output and hash files, which the renames need.
         drop(sink);
+        gpu.check_errors()?;
         out_file.commit()?;
         if let Some(file) = &mut hashes_file {
             file.commit()?;
