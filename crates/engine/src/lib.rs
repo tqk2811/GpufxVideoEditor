@@ -11,12 +11,14 @@
 //! * [`audio_schedule`] turns a project and a sample range into the source segments to mix.
 //! * [`audio_mix`] sums those segments, reading sources through a trait a backend implements.
 //! * [`audio_clock`] is the device-independent audio clock and pull API.
+//! * [`edit`] holds the pure timeline edit commands and the undo history.
 //!
 //! Floating point is never used on timeline paths. Audio uses it only for gains and sample values.
 
 pub mod audio_clock;
 pub mod audio_mix;
 pub mod audio_schedule;
+pub mod edit;
 pub mod project;
 pub mod render;
 pub mod schedule;
@@ -28,6 +30,11 @@ pub use audio_mix::{mix_audio, AudioSource, MixReport};
 pub use audio_schedule::{
     audio_sample_count, audio_segments, sample_position, AudioSegment, GainEnvelope, MIX_CHANNELS,
     MIX_SAMPLE_RATE,
+};
+pub use edit::{
+    add_clip, add_effect, add_track, add_transition, clip_at, delete_clip, move_clip,
+    nearest_free_start, remove_effect, remove_transition, set_fades, set_gain, set_muted,
+    split_clip, trim_end, trim_start, EditError, EditHistory,
 };
 pub use project::{
     AudioOutput, Clip, Effect, LoadError, Output, Project, Track, TrackKind, Transition,
