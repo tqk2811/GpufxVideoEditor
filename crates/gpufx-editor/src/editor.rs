@@ -195,9 +195,15 @@ pub enum ClipField {
     Duration(f64),
 }
 
-/// A speed as the factor shown to the user, for example `2.00x`.
+/// A speed as the factor the project stores, without trailing zeros: `1.237`, `2`.
+pub fn speed_text(speed: f64) -> String {
+    let text = format!("{speed:.3}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+/// A speed as the factor shown to the user, for example `2x` or `1.237x`.
 pub fn format_speed(speed: f64) -> String {
-    format!("{speed:.2}x")
+    format!("{}x", speed_text(speed))
 }
 
 /// A clip of the whole default length at `start`, with no effects.
@@ -1699,6 +1705,16 @@ mod tests {
         state.trim_start_to_playhead();
         assert_ne!(state.project().tracks[0].clips[0].start, Time::ZERO);
         assert_eq!(state.selection(), Some(key));
+    }
+
+    #[test]
+    fn a_speed_shows_every_decimal_the_project_stores_and_no_more() {
+        assert_eq!(format_speed(1.237), "1.237x");
+        assert_eq!(format_speed(1.004), "1.004x");
+        assert_eq!(format_speed(2.0), "2x");
+        assert_eq!(format_speed(0.1), "0.1x");
+        assert_eq!(format_speed(10.0), "10x");
+        assert_eq!(speed_text(1.5), "1.5");
     }
 
     #[test]

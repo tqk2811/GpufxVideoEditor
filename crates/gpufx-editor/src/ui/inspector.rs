@@ -1,6 +1,6 @@
 //! The panel on the right: the project figures, or everything about the selected clip.
 
-use super::numeric::drag_field;
+use super::numeric::{drag_field, speed_field};
 use super::param_widgets;
 use super::theme;
 use crate::editor::{applied_to, clip_label, transition_duration_limits, ClipField, EditorState};
@@ -162,7 +162,7 @@ fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, speed: f64
     ui.horizontal(|ui| {
         ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
         let mut changed = ui.add(slider(&mut value, SPEED_RANGE).logarithmic(true)).changed();
-        changed |= drag_field(ui, &mut value, SPEED_RANGE, 0.01, 2, "x", None).1;
+        changed |= speed_field(ui, &mut value, SPEED_RANGE).1;
         if changed {
             state.live_speed(value);
         }

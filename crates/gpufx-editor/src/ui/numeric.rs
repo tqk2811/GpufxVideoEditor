@@ -1,8 +1,12 @@
 //! The number field of the panels. It changes the project only when the user changed the number.
 
+use crate::editor::speed_text;
 use egui::emath::round_to_decimals;
 use egui::{DragValue, Response, Ui};
 use std::ops::RangeInclusive;
+
+/// The decimals of a speed in the project.
+const SPEED_DECIMALS: usize = 3;
 
 /// `range` grown to hold `old`, so that text left as it was comes back as `old` and only a value
 /// the user entered can land on a bound.
@@ -20,10 +24,26 @@ pub(super) fn drag_field(ui: &mut Ui, value: &mut f64, range: RangeInclusive<f64
         Some(size) => ui.add_sized(size, field),
         None => ui.add(field),
     };
-    let changed = response.changed() && *value != round_to_decimals(old, decimals);
+    let changed = settle(response.changed(), value, old, decimals, &range);
+    (response, changed)
+}
+
+/// The field of a clip speed: as [`drag_field`], showing every decimal the project stores and none
+/// that are zeros, so `1.237x` and `2x`.
+pub(super) fn speed_field(ui: &mut Ui, value: &mut f64, range: RangeInclusive<f64>) -> (Response, bool) {
+    let old = *value;
+    let field = DragValue::new(value).range(range_holding(old, &range)).speed(0.01).max_decimals(SPEED_DECIMALS).custom_formatter(|number, _| speed_text(number)).suffix("x").update_while_editing(false).clamp_existing_to_range(false);
+    let response = ui.add(field);
+    let changed = settle(response.changed(), value, old, SPEED_DECIMALS, &range);
+    (response, changed)
+}
+
+/// Whether the user really changed `value`, leaving it as it was otherwise and within `range` if so.
+fn settle(changed: bool, value: &mut f64, old: f64, decimals: usize, range: &RangeInclusive<f64>) -> bool {
+    let changed = changed && *value != round_to_decimals(old, decimals);
     // Not `f64::clamp`: it panics on a reversed range, which a package manifest can state.
     *value = if changed { value.max(*range.start()).min(*range.end()) } else { old };
-    (response, changed)
+    changed
 }
 
 #[cfg(test)]
@@ -45,6 +65,11 @@ mod tests {
 
     /// As [`click_in_and_out`], typing `typed` over the whole field in between.
     fn edit_field(start: f64, range: RangeInclusive<f64>, typed: Option<&str>) -> (f64, bool) {
+        edit_with(start, range, typed, |ui, value, range| drag_field(ui, value, range, 0.02, 3, " s", None))
+    }
+
+    /// Runs the clicks on the field that `field` draws.
+    fn edit_with(start: f64, range: RangeInclusive<f64>, typed: Option<&str>, mut draw: impl FnMut(&mut Ui, &mut f64, RangeInclusive<f64>) -> (Response, bool)) -> (f64, bool) {
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 200.0));
         let mut value = start;
@@ -53,7 +78,7 @@ mod tests {
         let mut frame = |events: Vec<Event>| {
             let raw = RawInput { screen_rect: Some(screen), events, ..Default::default() };
             let mut output = ctx.run_ui(raw, |ui| {
-                let (response, changed) = drag_field(ui, &mut value, range.clone(), 0.02, 3, " s", None);
+                let (response, changed) = draw(ui, &mut value, range.clone());
                 field_rect.set(response.rect);
                 changed_ever |= changed;
             });
@@ -88,6 +113,14 @@ mod tests {
             output.textures_delta.clear();
         }
         assert_eq!(value, 70.0);
+    }
+
+    /// Clicking into the speed field and out must not round the stored value away.
+    #[test]
+    fn the_speed_field_keeps_three_decimals() {
+        let speed = |typed| edit_with(1.237, 0.1..=10.0, typed, speed_field);
+        assert_eq!(speed(None), (1.237, false));
+        assert_eq!(speed(Some("1.24")), (1.24, true), "1.24 over 1.237 is a change");
     }
 
     #[test]
