@@ -1294,6 +1294,8 @@ version = "0.1.0"
 dependencies = [
  "d3d12-backend",
  "engine",
+ "gpufx-editor",
+ "serde_json",
  "sha2",
 ]
 

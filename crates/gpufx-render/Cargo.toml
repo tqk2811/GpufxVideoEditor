@@ -11,3 +11,7 @@ ffmpeg-gpl = ["d3d12-backend/ffmpeg-gpl"]
 engine = { path = "../engine" }
 d3d12-backend = { path = "../d3d12-backend" }
 sha2 = "0.10"
+
+[dev-dependencies]
+gpufx-editor = { path = "../gpufx-editor" }
+serde_json = "1"
