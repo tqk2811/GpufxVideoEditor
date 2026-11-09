@@ -3,7 +3,7 @@
 use super::numeric::{drag_field, speed_field};
 use super::param_widgets;
 use super::theme;
-use crate::editor::{applied_to, clip_label, transition_duration_limits, ClipField, EditorState};
+use crate::editor::{applied_to, clip_label, speed_limits, transition_duration_limits, ClipField, EditorState};
 use crate::i18n::Message;
 use crate::packages::short_name;
 use crate::timecode::{aspect_label, format_fps, format_timecode, from_seconds, to_seconds};
@@ -96,7 +96,7 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     ui.add_enabled_ui(editable, |ui| {
         time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start);
         time_field(ui, state, &language.t(Message::FieldDuration), to_seconds(clip.duration), ClipField::Duration);
-        speed_row(ui, state, &language.t(Message::FieldSpeed), clip.speed);
+        speed_row(ui, state, key, &language.t(Message::FieldSpeed), clip.speed);
         ui.separator();
 
         let mut gain = clip.gain_db;
@@ -156,17 +156,23 @@ fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f
 
 /// The speed of the clip: a logarithmic slider and a number shown as the factor. Goes through the
 /// live edit path, so a drag is one undo step and Esc restores the clip.
-fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, speed: f64) {
+fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, label: &str, speed: f64) {
     let mut value = speed;
     ui.colored_label(theme::TEXT_DIM, label);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-        let mut changed = ui.add(slider(&mut value, SPEED_RANGE).logarithmic(true)).changed();
-        changed |= speed_field(ui, &mut value, SPEED_RANGE).1;
-        if changed {
-            state.live_speed(value);
-        }
+    let changeable = speed_limits(state.project(), key).is_some();
+    ui.add_enabled_ui(changeable, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+            let mut changed = ui.add(slider(&mut value, SPEED_RANGE).logarithmic(true)).changed();
+            changed |= speed_field(ui, &mut value, SPEED_RANGE).1;
+            if changed {
+                state.live_speed(value);
+            }
+        });
     });
+    if !changeable {
+        ui.add(egui::Label::new(egui::RichText::new(state.language().t(Message::SpeedBlockedByEndTransition)).color(theme::TEXT_DIM)).wrap());
+    }
 }
 
 fn fade_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, value: Time, longest: Time, enabled: bool, mut apply: impl FnMut(&mut EditorState, Time)) {

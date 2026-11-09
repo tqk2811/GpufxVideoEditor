@@ -214,5 +214,6 @@ pub(super) fn text(message: &Message) -> String {
         Message::HideTrack => "Hide the track from the picture, the sound and the export".to_owned(),
         Message::ShowTrack => "Show the track".to_owned(),
         Message::TrackLockedNote => "This track is locked: its clips can be looked at, not changed".to_owned(),
+        Message::SpeedBlockedByEndTransition => "A transition sits on the end of this clip: remove it to change the speed".to_owned(),
     }
 }

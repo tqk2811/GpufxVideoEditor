@@ -206,6 +206,46 @@ pub fn format_speed(speed: f64) -> String {
     format!("{}x", speed_text(speed))
 }
 
+/// The first value in `low..=high` where `holds` is true, for a `holds` that stays true once it
+/// is, or `high + 1` when there is none.
+fn first_holding(mut low: i64, mut high: i64, holds: impl Fn(i64) -> bool) -> i64 {
+    let end = high + 1;
+    let mut found = end;
+    while low <= high {
+        let middle = low + (high - low) / 2;
+        if holds(middle) {
+            found = middle;
+            high = middle - 1;
+        } else {
+            low = middle + 1;
+        }
+    }
+    found
+}
+
+/// The speeds clip `key` may take where it is, as `(lowest, highest)` in project units: the lowest
+/// keeps it clear of the next clip and the highest leaves room for its fades and the transition at
+/// its start. Always holds the current speed. `None` when the clip has a transition on its end,
+/// where the speed cannot change at all. Mirrors the rounding of [`engine::set_speed`].
+pub fn speed_limits(project: &Project, key: ClipKey) -> Option<(f64, f64)> {
+    let track = project.tracks.get(key.track)?;
+    let clip = track.clips.get(key.clip)?;
+    if track.transitions.iter().any(|transition| transition.after_clip == key.clip) {
+        return None;
+    }
+    let source_length = i128::from(clip.duration.ticks()) * i128::from(clip.speed_milli());
+    let duration = |milli: i64| i64::try_from(((source_length + i128::from(milli) / 2) / i128::from(milli)).max(1)).unwrap_or(i64::MAX);
+    let room = track.clips.get(key.clip + 1).map(|next| next.start.saturating_sub(clip.start).ticks());
+    let head = key.clip.checked_sub(1).and_then(|previous| track.transitions.iter().find(|transition| transition.after_clip == previous)).map_or(Time::ZERO, |transition| transition.duration.saturating_sub(transition.duration.half_floor()));
+    let shortest = clip.fade_in.saturating_add(clip.fade_out).max(head).ticks().max(1);
+    let lowest = room.map_or(100, |room| first_holding(100, 10_000, |milli| duration(milli) <= room));
+    // The speeds that still fit form the range below the first that no longer does.
+    let highest = first_holding(100, 10_000, |milli| duration(milli) < shortest) - 1;
+    let current = clip.speed_milli();
+    let scale = engine::SPEED_SCALE as f64;
+    Some((lowest.min(current) as f64 / scale, highest.max(current) as f64 / scale))
+}
+
 /// A clip of the whole default length at `start`, with no effects.
 pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
     Clip {
@@ -916,9 +956,12 @@ impl EditorState {
         self.live_edit(|project| set_gain(project, key, gain_db));
     }
 
-    /// Sets the speed of the selected clip, keeping its source range: see [`engine::set_speed`].
+    /// Sets the speed of the selected clip, keeping its source range: see [`engine::set_speed`]. A
+    /// drag that overshoots lands on the limit of [`speed_limits`] instead of being refused. The
+    /// limit comes from the project before the drag, which is what the edit starts from.
     pub fn live_speed(&mut self, speed: f64) {
         let Some(key) = self.selection else { return };
+        let speed = speed_limits(self.history.current(), key).map_or(speed, |(lowest, highest)| speed.max(lowest).min(highest));
         self.live_edit(|project| set_speed(project, key, speed));
     }
 
@@ -1758,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn a_speed_that_would_run_into_the_next_clip_is_refused_and_the_clip_stays() {
+    fn a_speed_against_a_neighbour_stays_where_it_is_with_no_refusal() {
         let mut state = EditorState::default();
         state.add_track(TrackKind::Video);
         state.add_clip_from_file(0, Path::new("a.mp4"));
@@ -1768,8 +1811,68 @@ mod tests {
         let before = state.project().tracks[0].clips[0].clone();
         state.live_speed(0.5);
         state.commit_live();
-        assert_eq!(state.project().tracks[0].clips[0], before);
-        assert!(matches!(state.status(), Status::Refused(Message::EditSpeedOverlap { .. })), "{:?}", state.status());
+        assert_eq!(state.project().tracks[0].clips[0], before, "the next clip touches it");
+        assert!(!matches!(state.status(), Status::Refused(_)), "{:?}", state.status());
+    }
+
+    /// Two clips with a gap: the first at 0, the second where the first would need less than
+    /// twice its length.
+    fn state_with_a_gap() -> (EditorState, ClipKey, Time) {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("a.mp4"));
+        let length = state.project().tracks[0].clips[0].duration;
+        let next = Time::from_ticks(length.ticks() * 3 / 2);
+        state.set_playhead(next);
+        state.add_clip_from_file(0, Path::new("b.mp4"));
+        let key = ClipKey { track: 0, clip: 0 };
+        state.select(Some(key));
+        (state, key, next)
+    }
+
+    #[test]
+    fn a_fast_drag_lands_exactly_on_the_next_clip_with_no_refusal() {
+        let (mut state, key, next) = state_with_a_gap();
+        state.live_speed(0.1);
+        assert!(!matches!(state.status(), Status::Refused(_)), "{:?}", state.status());
+        state.commit_live();
+        let clip = state.project().tracks[0].clips[0].clone();
+        assert!(clip.end().unwrap() <= next, "stays clear of the next clip");
+        assert_ne!(clip.speed, 1.0, "the clip did change");
+        // One step slower no longer fits: this is the limit, not a stop short of it.
+        assert!(matches!(set_speed(state.project(), key, clip.speed - 0.001), Err(EditError::SpeedOverlap { .. })));
+    }
+
+    #[test]
+    fn a_fast_drag_to_a_short_length_stops_where_the_fades_still_fit() {
+        let (mut state, key, _) = state_with_a_gap();
+        let length = state.project().tracks[0].clips[0].duration;
+        state.live_fades(Time::from_ticks(length.ticks() / 2), Time::from_ticks(length.ticks() / 4));
+        state.commit_live();
+        state.live_speed(10.0);
+        assert!(!matches!(state.status(), Status::Refused(_)), "{:?}", state.status());
+        state.commit_live();
+        let clip = state.project().tracks[0].clips[0].clone();
+        assert!(clip.speed < 10.0 && clip.speed > 1.0, "{}", clip.speed);
+        assert!(clip.duration >= clip.fade_in.saturating_add(clip.fade_out));
+        assert!(set_speed(state.project(), key, clip.speed + 0.001).is_err(), "one step faster does not fit");
+    }
+
+    #[test]
+    fn speed_limits_follow_the_gap_the_fades_and_the_start_transition() {
+        let (state, key, _) = state_with_a_gap();
+        let (lowest, highest) = speed_limits(state.project(), key).unwrap();
+        assert!((lowest - 2.0 / 3.0).abs() < 0.002, "{lowest}");
+        assert_eq!(highest, 10.0);
+        let second = ClipKey { track: 0, clip: 1 };
+        assert_eq!(speed_limits(state.project(), second), Some((0.1, 10.0)), "nothing after the last clip");
+        let mut joined = state.project().clone();
+        let transition = engine::Transition { after_clip: 0, package: "fade".to_owned(), duration: joined.tracks[0].clips[1].duration, params: Default::default() };
+        joined.tracks[0].transitions.push(transition);
+        assert_eq!(speed_limits(&joined, key), None, "a transition on its end");
+        let (_, highest) = speed_limits(&joined, second).unwrap();
+        assert!((highest - 2.0).abs() < 0.002, "half of the transition sits on the head of the clip: {highest}");
+        assert_eq!(speed_limits(state.project(), ClipKey { track: 5, clip: 0 }), None);
     }
 
     #[test]

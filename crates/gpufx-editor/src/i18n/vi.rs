@@ -197,5 +197,6 @@ pub(super) fn text(message: &Message) -> String {
         Message::HideTrack => "Ẩn track khỏi hình, tiếng và file xuất".to_owned(),
         Message::ShowTrack => "Hiện track".to_owned(),
         Message::TrackLockedNote => "Track này đang khoá: chỉ xem được, không sửa được".to_owned(),
+        Message::SpeedBlockedByEndTransition => "Clip này có chuyển cảnh ở cuối: gỡ chuyển cảnh thì mới đổi được tốc độ".to_owned(),
     }
 }
