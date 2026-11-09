@@ -29,6 +29,9 @@ pub struct EditorState {
     selection: Option<ClipKey>,
     playhead: Time,
     status: Status,
+    /// Counts the changes of the project; equal values mean an equal project.
+    revision: u64,
+    preview_error: Option<String>,
     pub view: TimelineView,
     pub drag: Option<ClipDrag>,
 }
@@ -74,6 +77,8 @@ impl EditorState {
             selection: None,
             playhead: Time::ZERO,
             status: Status::Idle,
+            revision: 0,
+            preview_error: None,
             view: TimelineView::default(),
             drag: None,
         }
@@ -93,6 +98,18 @@ impl EditorState {
 
     pub fn status(&self) -> &Status {
         &self.status
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn preview_error(&self) -> Option<&str> {
+        self.preview_error.as_deref()
+    }
+
+    pub fn set_preview_error(&mut self, error: Option<String>) {
+        self.preview_error = error;
     }
 
     pub fn can_undo(&self) -> bool {
@@ -133,8 +150,12 @@ impl EditorState {
         if self.drag_blocks_edits() {
             return false;
         }
+        let before = self.project().clone();
         match self.history.apply(command) {
-            Ok(_) => {
+            Ok(after) => {
+                if *after != before {
+                    self.revision += 1;
+                }
                 self.status = Status::Idle;
                 true
             }
@@ -233,6 +254,7 @@ impl EditorState {
     /// Clip keys name clips of one project, so the selection does not survive a step back or
     /// forward. There is no drag to drop here, because both steps wait for it.
     fn after_history_step(&mut self) {
+        self.revision += 1;
         self.selection = None;
         self.status = Status::Idle;
     }
@@ -495,6 +517,35 @@ mod tests {
         let mut state = EditorState::default();
         state.set_playhead(Time::from_ticks(-TICKS_PER_SECOND));
         assert_eq!(state.playhead(), Time::ZERO);
+    }
+
+    #[test]
+    fn every_project_change_advances_the_revision() {
+        let mut state = EditorState::default();
+        assert_eq!(state.revision(), 0);
+        state.add_track(TrackKind::Video);
+        assert_eq!(state.revision(), 1);
+        state.add_clip_from_file(0, Path::new("C:/media/a.mp4"));
+        assert_eq!(state.revision(), 2);
+        state.undo();
+        assert_eq!(state.revision(), 3);
+        state.redo();
+        assert_eq!(state.revision(), 4);
+    }
+
+    #[test]
+    fn nothing_changing_leaves_the_revision_alone() {
+        let mut state = state_with_clip();
+        let revision = state.revision();
+        state.set_playhead(seconds(1));
+        state.select(None);
+        state.finish_drag(EditCommand::Move { key: key(0), track: 0, desired_start: Time::ZERO });
+        assert_eq!(state.revision(), revision, "a drop on the same place changes nothing");
+        state.finish_drag(EditCommand::Move { key: key(0), track: 1, desired_start: Time::ZERO });
+        assert_eq!(state.revision(), revision, "a refused drop changes nothing");
+        let mut empty = EditorState::default();
+        empty.undo();
+        assert_eq!(empty.revision(), 0, "an empty undo changes nothing");
     }
 
     #[test]

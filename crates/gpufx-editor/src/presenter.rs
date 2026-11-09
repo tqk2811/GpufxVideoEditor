@@ -3,31 +3,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use d3d12_backend::Gpu;
 use winit::window::Window;
+
+use crate::preview::backend::PreviewImage;
 
 /// How long to wait before redrawing when no frame could be presented.
 const SURFACE_RETRY: Duration = Duration::from_millis(100);
 
-pub struct Gpu {
-    instance: wgpu::Instance,
-    adapter: wgpu::Adapter,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-}
-
-impl Gpu {
-    pub fn create() -> Result<Self, String> {
-        let descriptor = wgpu::InstanceDescriptor { backends: wgpu::Backends::DX12, ..wgpu::InstanceDescriptor::new_without_display_handle() };
-        let instance = wgpu::Instance::new(descriptor);
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        }))
-        .map_err(|e| format!("no D3D12 adapter: {e}"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-            .map_err(|e| format!("wgpu device creation failed: {e}"))?;
-        Ok(Self { instance, adapter, device, queue })
-    }
+/// The current preview frame as egui sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewTexture {
+    pub id: egui::TextureId,
+    pub width: u32,
+    pub height: u32,
 }
 
 pub struct Presenter {
@@ -37,6 +26,8 @@ pub struct Presenter {
     renderer: egui_wgpu::Renderer,
     state: egui_winit::State,
     context: egui::Context,
+    frame: Option<PreviewImage>,
+    frame_texture: Option<egui::TextureId>,
 }
 
 impl Presenter {
@@ -61,7 +52,28 @@ impl Presenter {
         let renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
         let context = egui::Context::default();
         let state = egui_winit::State::new(context.clone(), egui::ViewportId::ROOT, window.as_ref(), Some(window.scale_factor() as f32), None, None);
-        Ok(Self { window, surface, config, renderer, state, context })
+        Ok(Self { window, surface, config, renderer, state, context, frame: None, frame_texture: None })
+    }
+
+    /// Shows `frame` from the next [`Presenter::render`] on and returns the frame it replaces.
+    pub fn set_frame(&mut self, gpu: &Gpu, frame: Option<PreviewImage>) -> Option<PreviewImage> {
+        if let Some(new) = &frame {
+            match self.frame_texture {
+                Some(id) => self.renderer.update_egui_texture_from_wgpu_texture(&gpu.device, new.image.view(), wgpu::FilterMode::Linear, id),
+                None => self.frame_texture = Some(self.renderer.register_native_texture(&gpu.device, new.image.view(), wgpu::FilterMode::Linear)),
+            }
+        }
+        std::mem::replace(&mut self.frame, frame)
+    }
+
+    /// The frame shown now, for verification.
+    pub fn frame(&self) -> Option<&PreviewImage> {
+        self.frame.as_ref()
+    }
+
+    fn preview_texture(&self) -> Option<PreviewTexture> {
+        let frame = self.frame.as_ref()?;
+        Some(PreviewTexture { id: self.frame_texture?, width: frame.image.width(), height: frame.image.height() })
     }
 
     pub fn window(&self) -> &Window {
@@ -82,7 +94,7 @@ impl Presenter {
     }
 
     /// Runs the UI and presents. Returns how long egui can wait before the next frame.
-    pub fn render(&mut self, gpu: &Gpu, mut ui: impl FnMut(&mut egui::Ui)) -> Result<Duration, String> {
+    pub fn render(&mut self, gpu: &Gpu, mut ui: impl FnMut(&mut egui::Ui, Option<PreviewTexture>)) -> Result<Duration, String> {
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(SURFACE_RETRY),
@@ -94,7 +106,8 @@ impl Presenter {
         };
 
         let raw_input = self.state.take_egui_input(&self.window);
-        let mut full_output = self.context.run_ui(raw_input, |root| ui(root));
+        let preview = self.preview_texture();
+        let mut full_output = self.context.run_ui(raw_input, |root| ui(root, preview));
         let repaint_delay = full_output.viewport_output.get(&egui::ViewportId::ROOT).map_or(Duration::MAX, |viewport| viewport.repaint_delay);
         self.state.handle_platform_output(&self.window, full_output.platform_output);
         let paint_jobs = self.context.tessellate(full_output.shapes, full_output.pixels_per_point);
@@ -127,10 +140,29 @@ impl Presenter {
             self.renderer.render(&mut pass, &paint_jobs, &screen);
         }
 
-        let mut buffers: Vec<wgpu::CommandBuffer> = upload_buffers;
+        let mut buffers: Vec<wgpu::CommandBuffer> = Vec::with_capacity(upload_buffers.len() + 3);
+        if let Some(frame) = &self.frame {
+            let mut before = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("preview frame state") });
+            frame.image.record_begin_sampling(&mut before);
+            buffers.push(before.finish());
+        }
+        buffers.extend(upload_buffers);
         buffers.push(encoder.finish());
-        gpu.queue.submit(buffers);
-        gpu.queue.present(surface_texture);
+        if let Some(frame) = &self.frame {
+            let mut after = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("preview frame state back") });
+            frame.image.record_end_sampling(&mut after);
+            buffers.push(after.finish());
+        }
+        // The one submit of the UI thread. The gate keeps it away from gpufx's staged fences.
+        let submission = {
+            let _gate = gpu.lock_submits();
+            let submission = gpu.queue.submit(buffers);
+            gpu.queue.present(surface_texture);
+            submission
+        };
+        if let Some(frame) = &mut self.frame {
+            frame.last_use = Some(submission);
+        }
 
         for id in full_output.textures_delta.free.drain() {
             self.renderer.free_texture(&id);

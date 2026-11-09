@@ -1,6 +1,8 @@
 //! Draws the editor and forwards input. Decisions live in `editor` and `timeline`.
 
 use crate::editor::{clip_label, EditorState, Status};
+use crate::presenter::PreviewTexture;
+use crate::preview::plan::fit_size;
 use crate::timeline::drag::{begin_drag, clamp_trim, drag_command};
 use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
 use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
@@ -11,6 +13,8 @@ use engine::{Time, TrackKind};
 const HEADER_WIDTH: f32 = 130.0;
 const RULER_HEIGHT: f32 = 28.0;
 const LINE_SCROLL_POINTS: f32 = 50.0;
+const PREVIEW_SHARE: f32 = 0.55;
+const MIN_TIMELINE_HEIGHT: f32 = 140.0;
 
 const BACKGROUND: Color32 = Color32::from_rgb(26, 26, 30);
 const ROW_EVEN: Color32 = Color32::from_rgb(36, 36, 42);
@@ -29,11 +33,33 @@ pub enum UiRequest {
     PickClipFile { track: usize },
 }
 
-pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
+pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     handle_shortcuts(root.ctx(), state);
     egui::Panel::top("toolbar").show(root, |ui| toolbar(ui, state));
     egui::Panel::bottom("status").show(root, |ui| status_line(ui, state));
-    egui::CentralPanel::default().show(root, |ui| timeline(ui, state, requests));
+    egui::CentralPanel::default().show(root, |ui| {
+        let area = ui.available_rect_before_wrap();
+        let (preview_rect, timeline_rect) = split_area(area);
+        preview_area(ui, preview_rect, preview);
+        ui.scope_builder(UiBuilder::new().max_rect(timeline_rect), |ui| timeline(ui, state, requests));
+    });
+}
+
+/// The picture goes above the timeline, which keeps at least [`MIN_TIMELINE_HEIGHT`].
+fn split_area(area: Rect) -> (Rect, Rect) {
+    let preview_height = (area.height() * PREVIEW_SHARE).min(area.height() - MIN_TIMELINE_HEIGHT).max(0.0);
+    let middle = area.top() + preview_height;
+    (Rect::from_min_max(area.min, Pos2::new(area.right(), middle)), Rect::from_min_max(Pos2::new(area.left(), middle), area.max))
+}
+
+fn preview_area(ui: &egui::Ui, rect: Rect, preview: Option<PreviewTexture>) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
+    let Some(texture) = preview else { return };
+    let (width, height) = fit_size((texture.width, texture.height), (rect.width(), rect.height()));
+    let picture = Rect::from_center_size(rect.center(), Vec2::new(width, height));
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    painter.image(texture.id, picture, uv, Color32::WHITE);
 }
 
 /// Consumes `key` only when exactly the `wanted` modifiers are down. egui's own matching ignores
@@ -89,11 +115,17 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
 }
 
 fn status_line(ui: &mut egui::Ui, state: &EditorState) {
-    match state.status() {
-        Status::Idle => ui.label("Ready"),
-        Status::Info(message) => ui.label(message),
-        Status::Refused(message) => ui.colored_label(REFUSED, format!("Refused: {message}")),
-    };
+    ui.horizontal(|ui| {
+        match state.status() {
+            Status::Idle => ui.label("Ready"),
+            Status::Info(message) => ui.label(message),
+            Status::Refused(message) => ui.colored_label(REFUSED, format!("Refused: {message}")),
+        };
+        if let Some(message) = state.preview_error() {
+            ui.separator();
+            ui.colored_label(REFUSED, format!("Preview: {message}"));
+        }
+    });
 }
 
 fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {

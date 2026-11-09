@@ -1,44 +1,142 @@
 //! The window and its event loop.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use d3d12_backend::Gpu;
+use engine::{Project, Time, TrackKind};
+
 use crate::editor::EditorState;
-use crate::presenter::{Gpu, Presenter};
+use crate::presenter::Presenter;
+use crate::preview::backend::{D3d12Producer, PreviewRequest};
+use crate::preview::plan::{frame_index, RequestTracker};
+use crate::preview::worker::PreviewWorker;
 use crate::ui::{self, UiRequest};
 
 const MEDIA_EXTENSIONS: [&str; 10] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac"];
 
+/// Hidden check of the frame path: names a media file to open at one second, and the app reports
+/// the first frame it shows on stdout and exits a few seconds later.
+const SMOKE_VARIABLE: &str = "GPUFX_EDITOR_SMOKE";
+const SMOKE_LINGER: Duration = Duration::from_secs(4);
+
+#[derive(Default)]
+struct Smoke {
+    enabled: bool,
+    reported: bool,
+    exit_at: Option<Instant>,
+}
+
+/// Field order matters: the worker stops before the presenter and device are dropped.
 struct Session {
-    gpu: Gpu,
+    preview: PreviewWorker<D3d12Producer>,
+    gpu: Arc<Gpu>,
     presenter: Presenter,
     state: EditorState,
     next_repaint: Option<Instant>,
+    tracker: RequestTracker,
+    snapshot: Option<(u64, Arc<Project>)>,
+    smoke: Smoke,
 }
 
 impl Session {
     fn open(event_loop: &ActiveEventLoop) -> Result<Self, String> {
-        let gpu = Gpu::create()?;
+        let gpu = Arc::new(Gpu::create()?);
         let attributes = Window::default_attributes().with_title("gpufx editor").with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
         let window = Arc::new(event_loop.create_window(attributes).map_err(|e| format!("creating the window failed: {e}"))?);
-        let presenter = Presenter::new(&gpu, window)?;
-        Ok(Self { gpu, presenter, state: EditorState::default(), next_repaint: None })
+        let presenter = Presenter::new(&gpu, window.clone())?;
+        let producer_gpu = gpu.clone();
+        let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
+        let mut state = EditorState::default();
+        let mut smoke = Smoke::default();
+        if let Some(path) = std::env::var_os(SMOKE_VARIABLE) {
+            smoke.enabled = true;
+            state.add_track(TrackKind::Video);
+            state.add_clip_from_file(0, std::path::Path::new(&path));
+            state.set_playhead(Time::from_ticks(engine::TICKS_PER_SECOND));
+        }
+        Ok(Self { preview, gpu, presenter, state, next_repaint: None, tracker: RequestTracker::default(), snapshot: None, smoke })
+    }
+
+    fn collect_preview(&mut self) {
+        if let Some(outcome) = self.preview.poll() {
+            match outcome {
+                Ok(frame) => {
+                    self.state.set_preview_error(None);
+                    if let Some(old) = self.presenter.set_frame(&self.gpu, frame) {
+                        self.preview.give_back(old);
+                    }
+                    self.report_smoke_frame();
+                }
+                Err(message) => {
+                    if self.smoke.enabled {
+                        println!("smoke error: {message}");
+                    }
+                    self.state.set_preview_error(Some(message));
+                }
+            }
+        }
+        if let Some(message) = self.gpu.device_lost() {
+            self.state.set_preview_error(Some(format!("the GPU device was lost: {message}")));
+        }
+    }
+
+    fn report_smoke_frame(&mut self) {
+        if !self.smoke.enabled || self.smoke.reported {
+            return;
+        }
+        let Some(frame) = self.presenter.frame() else { return };
+        self.smoke.reported = true;
+        match frame.image.read_rgba(&self.gpu) {
+            Ok(rgba) => {
+                let pixels = rgba.len() / 4;
+                let mean = |channel: usize| rgba.iter().skip(channel).step_by(4).map(|&b| u64::from(b)).sum::<u64>() / pixels.max(1) as u64;
+                println!("smoke frame {}x{} mean rgba {} {} {} {} first pixel {:?}", frame.image.width(), frame.image.height(), mean(0), mean(1), mean(2), mean(3), &rgba[..4]);
+            }
+            Err(message) => println!("smoke read-back failed: {message}"),
+        }
+        self.smoke.exit_at = Instant::now().checked_add(SMOKE_LINGER);
+    }
+
+    /// Asks for the frame under the playhead when the wish changed since the last request.
+    fn request_preview(&mut self) {
+        let revision = self.state.revision();
+        let frame = frame_index(self.state.project(), self.state.playhead());
+        if !self.tracker.should_send(revision, frame) {
+            return;
+        }
+        let stale = self.snapshot.as_ref().is_none_or(|(known, _)| *known != revision);
+        if stale {
+            self.snapshot = Some((revision, Arc::new(self.state.project().clone())));
+        }
+        if let Some((_, project)) = &self.snapshot {
+            self.preview.request(PreviewRequest { project: project.clone(), frame });
+        }
     }
 
     fn redraw(&mut self) -> Result<(), String> {
+        self.collect_preview();
         let mut requests = Vec::new();
         let state = &mut self.state;
-        let delay = self.presenter.render(&self.gpu, |root| ui::show(root, state, &mut requests))?;
-        self.next_repaint = Instant::now().checked_add(delay);
+        let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
+        self.next_repaint = match self.smoke.exit_at {
+            Some(at) => Some(at),
+            None => Instant::now().checked_add(delay),
+        };
         for request in requests {
             self.handle(request);
         }
+        self.request_preview();
         Ok(())
+    }
+
+    fn smoke_finished(&self) -> bool {
+        self.smoke.exit_at.is_some_and(|at| at <= Instant::now())
     }
 
     /// Runs outside the frame, because the file dialog blocks this thread.
@@ -98,6 +196,8 @@ impl ApplicationHandler for EditorApp {
             WindowEvent::RedrawRequested => {
                 if let Err(message) = session.redraw() {
                     self.fail(event_loop, message);
+                } else if session.smoke_finished() {
+                    event_loop.exit();
                 }
             }
             _ => {}

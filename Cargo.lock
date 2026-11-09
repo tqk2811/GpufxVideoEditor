@@ -1203,11 +1203,11 @@ dependencies = [
 name = "gpufx-editor"
 version = "0.1.0"
 dependencies = [
+ "d3d12-backend",
  "egui",
  "egui-wgpu",
  "egui-winit",
  "engine",
- "pollster",
  "rfd",
  "wgpu",
  "winit",

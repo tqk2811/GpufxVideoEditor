@@ -1,0 +1,224 @@
+//! The preview thread: runs the newest request, publishes the newest result, wakes the UI.
+
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+
+use super::slot::LatestSlot;
+
+/// What the thread runs. Created on the thread, so it need not be `Send`.
+pub trait FrameProducer {
+    type Request: Send + 'static;
+    type Frame: Send + 'static;
+
+    /// The frame for `request`; `None` shows black.
+    fn produce(&mut self, request: &Self::Request) -> Result<Option<Self::Frame>, String>;
+
+    /// Takes back a frame the UI no longer shows.
+    fn recycle(&mut self, frame: Self::Frame);
+
+    /// Called after a panic, to drop whatever the panic may have left half done.
+    fn reset(&mut self) {}
+}
+
+pub type Outcome<F> = Result<Option<F>, String>;
+
+pub struct PreviewWorker<P: FrameProducer> {
+    requests: Arc<LatestSlot<P::Request>>,
+    results: Arc<LatestSlot<Outcome<P::Frame>>>,
+    returned: Sender<P::Frame>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl<P: FrameProducer + 'static> PreviewWorker<P> {
+    /// Starts the thread. `make` runs on it; `wake` is called after each finished request.
+    pub fn spawn(make: impl FnOnce() -> P + Send + 'static, wake: impl Fn() + Send + 'static) -> Self {
+        let requests: Arc<LatestSlot<P::Request>> = Arc::default();
+        let results: Arc<LatestSlot<Outcome<P::Frame>>> = Arc::default();
+        let (returned, returned_frames) = channel::<P::Frame>();
+        let (thread_requests, thread_results) = (requests.clone(), results.clone());
+        let handle = thread::Builder::new().name("preview".to_owned()).spawn(move || {
+            let mut producer = make();
+            while let Some(request) = thread_requests.wait() {
+                for frame in returned_frames.try_iter() {
+                    producer.recycle(frame);
+                }
+                let outcome = catch_unwind(AssertUnwindSafe(|| producer.produce(&request))).unwrap_or_else(|_| {
+                    producer.reset();
+                    Err("the preview thread hit an internal error on this frame".to_owned())
+                });
+                if let Some(Ok(Some(unread))) = thread_results.put(outcome) {
+                    producer.recycle(unread);
+                }
+                wake();
+            }
+        });
+        Self { requests, results, returned, handle: handle.ok() }
+    }
+
+    /// Asks for `request` instead of whatever has not started yet. Never blocks on the work.
+    pub fn request(&self, request: P::Request) {
+        self.requests.put(request);
+    }
+
+    /// The newest finished result, if one arrived since the last call.
+    pub fn poll(&self) -> Option<Outcome<P::Frame>> {
+        self.results.take()
+    }
+
+    /// Hands back a frame the UI has stopped showing.
+    pub fn give_back(&self, frame: P::Frame) {
+        // The receiver only goes away with the thread, and then the frame is simply dropped.
+        let _ = self.returned.send(frame);
+    }
+}
+
+impl<P: FrameProducer> Drop for PreviewWorker<P> {
+    fn drop(&mut self) {
+        self.requests.close();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    #[derive(Default)]
+    struct Log {
+        produced: Mutex<Vec<i32>>,
+        recycled: AtomicUsize,
+        hold_first: AtomicBool,
+        first_started: (Mutex<bool>, Condvar),
+        release_first: (Mutex<bool>, Condvar),
+    }
+
+    fn set(flag: &(Mutex<bool>, Condvar)) {
+        *flag.0.lock().unwrap() = true;
+        flag.1.notify_all();
+    }
+
+    fn wait_for(flag: &(Mutex<bool>, Condvar)) {
+        let guard = flag.0.lock().unwrap();
+        let (guard, timed_out) = flag.1.wait_timeout_while(guard, TIMEOUT, |set| !*set).unwrap();
+        assert!(*guard && !timed_out.timed_out(), "timed out");
+    }
+
+    struct Fake(Arc<Log>);
+
+    impl FrameProducer for Fake {
+        type Request = i32;
+        type Frame = i32;
+
+        fn produce(&mut self, request: &i32) -> Result<Option<i32>, String> {
+            if self.0.hold_first.swap(false, Ordering::SeqCst) {
+                set(&self.0.first_started);
+                wait_for(&self.0.release_first);
+            }
+            self.0.produced.lock().unwrap().push(*request);
+            match request {
+                -1 => Err("broken frame".to_owned()),
+                -2 => panic!("deliberate test panic"),
+                0 => Ok(None),
+                value => Ok(Some(*value)),
+            }
+        }
+
+        fn recycle(&mut self, _frame: i32) {
+            self.0.recycled.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn start(log: &Arc<Log>) -> (PreviewWorker<Fake>, std::sync::mpsc::Receiver<()>) {
+        let (woken, wake_rx) = channel();
+        let producer_log = log.clone();
+        let worker = PreviewWorker::spawn(move || Fake(producer_log), move || {
+            let _ = woken.send(());
+        });
+        (worker, wake_rx)
+    }
+
+    fn next(worker: &PreviewWorker<Fake>, wake: &std::sync::mpsc::Receiver<()>) -> Outcome<i32> {
+        wake.recv_timeout(TIMEOUT).expect("the worker finished a request");
+        worker.poll().expect("a result waits after a wake")
+    }
+
+    #[test]
+    fn a_stale_request_is_dropped_while_the_worker_is_busy() {
+        let log = Arc::new(Log::default());
+        log.hold_first.store(true, Ordering::SeqCst);
+        let (worker, wake) = start(&log);
+        worker.request(1);
+        wait_for(&log.first_started);
+        worker.request(2);
+        worker.request(3);
+        set(&log.release_first);
+        // Result 3 may replace an unread result 1, so wait for the newest rather than for each.
+        loop {
+            wake.recv_timeout(TIMEOUT).expect("the worker finished a request");
+            if worker.poll() == Some(Ok(Some(3))) {
+                break;
+            }
+        }
+        assert_eq!(*log.produced.lock().unwrap(), vec![1, 3], "2 was never decoded");
+    }
+
+    #[test]
+    fn requesting_does_not_wait_for_the_work() {
+        let log = Arc::new(Log::default());
+        log.hold_first.store(true, Ordering::SeqCst);
+        let (worker, _wake) = start(&log);
+        worker.request(1);
+        wait_for(&log.first_started);
+        // The worker is held inside produce, and these still return.
+        worker.request(2);
+        assert_eq!(worker.poll(), None);
+        set(&log.release_first);
+    }
+
+    #[test]
+    fn a_failed_frame_does_not_stop_later_requests() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.request(-1);
+        assert_eq!(next(&worker, &wake), Err("broken frame".to_owned()));
+        worker.request(4);
+        assert_eq!(next(&worker, &wake), Ok(Some(4)));
+    }
+
+    #[test]
+    fn a_panicking_frame_is_reported_and_the_thread_lives_on() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.request(-2);
+        assert!(next(&worker, &wake).is_err());
+        worker.request(5);
+        assert_eq!(next(&worker, &wake), Ok(Some(5)));
+    }
+
+    #[test]
+    fn an_empty_frame_is_reported_as_none() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.request(0);
+        assert_eq!(next(&worker, &wake), Ok(None));
+    }
+
+    #[test]
+    fn given_back_frames_are_recycled_before_the_next_request() {
+        let log = Arc::new(Log::default());
+        let (worker, wake) = start(&log);
+        worker.give_back(9);
+        worker.request(1);
+        next(&worker, &wake).unwrap();
+        assert_eq!(log.recycled.load(Ordering::SeqCst), 1);
+    }
+}

@@ -66,3 +66,20 @@ impl Resolver for ProjectPaths {
         crate::audio::has_audio_stream(&self.source_path(source))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_absolute_source_is_kept_as_it_is() {
+        let paths = ProjectPaths::new(Path::new("unsaved.json"), Vec::new());
+        assert_eq!(paths.source_path(r"C:\media\clip.mp4"), PathBuf::from(r"C:\media\clip.mp4"));
+    }
+
+    #[test]
+    fn a_relative_source_joins_the_project_folder() {
+        let paths = ProjectPaths::new(Path::new(r"D:\work\project.json"), Vec::new());
+        assert_eq!(paths.source_path("a.mp4"), PathBuf::from(r"D:\work\a.mp4"));
+    }
+}
