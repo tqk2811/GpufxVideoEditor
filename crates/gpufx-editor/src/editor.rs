@@ -1083,15 +1083,21 @@ mod tests {
     }
 
     #[test]
-    fn a_lock_dirties_the_project_is_saved_with_it_and_stays_out_of_the_audio() {
+    fn a_lock_dirties_the_project_survives_save_and_reopen_and_stays_out_of_the_audio() {
         let mut state = state_with_clip();
         state.mark_saved(PathBuf::from("a.json"));
         let audio = state.audio_revision();
         state.toggle_track_locked(0);
         assert!(state.is_dirty());
         assert_eq!(state.audio_revision(), audio);
-        let text = serde_json::to_string(state.project()).unwrap();
-        assert!(text.contains(r#""locked":true"#), "{text}");
+        let folder = std::env::temp_dir().join(format!("gpufx-editor-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("p.json");
+        crate::project_file::save_project_file(state.project(), &file).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        let reopened = crate::project_file::parse_project(&text, &file, &engine::AcceptAll).unwrap();
+        assert!(reopened.tracks[0].locked);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]
