@@ -21,6 +21,15 @@ use crate::ffi::{self, check, describe_error};
 const EXTRA_HW_FRAMES: i32 = 8;
 const TICKS_PER_SECOND: i128 = engine::TICKS_PER_SECOND as i128;
 
+/// The stream timestamp of `ticks` of source time, rounded to the nearest unit of the time base
+/// `num / den` (flooring would pick the frame before when the stream rounds its timestamps up, as
+/// MKV's 1/1000 does), added to `start_pts`.
+fn stream_pts(ticks: i64, num: i32, den: i32, start_pts: i64) -> i64 {
+    let k = TICKS_PER_SECOND * i128::from(num);
+    let offset = (2 * i128::from(ticks) * i128::from(den) + k).div_euclid(2 * k);
+    start_pts.saturating_add(offset as i64)
+}
+
 unsafe extern "C" fn choose_d3d12_format(_context: *mut ffi::AVCodecContext, formats: *const ffi::AVPixelFormat) -> ffi::AVPixelFormat {
     let mut current = formats;
     while *current != ffi::AV_PIX_FMT_NONE {
@@ -238,8 +247,7 @@ impl SequentialDecoder {
 
     /// The stream timestamp of the source time `time`.
     fn target_pts(&self, time: Time) -> i64 {
-        let offset = i128::from(time.ticks()) * i128::from(self.time_base.den) / (TICKS_PER_SECOND * i128::from(self.time_base.num));
-        self.start_pts.saturating_add(offset as i64)
+        stream_pts(time.ticks(), self.time_base.num, self.time_base.den, self.start_pts)
     }
 
     /// The next frame in presentation order, or `None` at the end of the stream.
@@ -271,6 +279,10 @@ impl SequentialDecoder {
                         return Err(format!("the stream decodes to pixel format {format}; only 8-bit 4:2:0 (NV12) is supported"));
                     }
                     let pts = if (*frame).best_effort_timestamp != ffi::NO_PTS { (*frame).best_effort_timestamp } else { (*frame).pts };
+                    if pts == ffi::NO_PTS {
+                        ffi::av_frame_free(&mut frame);
+                        return Err("the decoded frame has neither a best-effort timestamp nor a pts; frames cannot be placed on the timeline".to_owned());
+                    }
                     Ok(Some(DecodedFrame { frame, pts }))
                 }
                 Ok(false) => {
@@ -412,5 +424,31 @@ impl Drop for SequentialDecoder {
             ffi::avcodec_free_context(&mut self.codec_context);
             ffi::avformat_close_input(&mut self.format_context);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rounds_to_the_nearest_unit_of_a_rounded_time_base() {
+        // 29.97 fps in a 1/1000 time base: frame 2 is at 66.73 ms and stored as 67.
+        assert_eq!(stream_pts(2 * 3003, 1, 1000, 0), 67);
+        assert_eq!(stream_pts(3003, 1, 1000, 0), 33);
+        assert_eq!(stream_pts(0, 1, 1000, 0), 0);
+    }
+
+    #[test]
+    fn an_exact_time_base_keeps_its_timestamps() {
+        // 30 fps in the 1/15360 time base of MP4: one frame is 512 units.
+        assert_eq!(stream_pts(3000, 1, 15360, 0), 512);
+        assert_eq!(stream_pts(3000 * 45, 1, 15360, 0), 512 * 45);
+    }
+
+    #[test]
+    fn adds_the_start_pts_and_handles_negative_times() {
+        assert_eq!(stream_pts(3000, 1, 15360, 1024), 1536);
+        assert_eq!(stream_pts(-3000, 1, 15360, 0), -512);
     }
 }
