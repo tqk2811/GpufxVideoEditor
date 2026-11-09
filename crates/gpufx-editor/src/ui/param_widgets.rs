@@ -5,6 +5,7 @@ use super::numeric::drag_field;
 use super::theme;
 use crate::params::{bool_value, color_json, color_value, display_name, editable, enum_value, expression_value, number_json, number_value, vector_json, vector_value, widget_for, with_value, ParamWidget};
 use d3d12_backend::{expression_error, ParamInfo};
+use crate::i18n::{Language, Message};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
@@ -22,7 +23,7 @@ struct Draft {
 type Drafts = HashMap<egui::Id, Draft>;
 
 fn drafts_id() -> egui::Id {
-    egui::Id::new("expression-drafts")
+    egui::Id::unique("expression-drafts")
 }
 
 fn draft_text(ctx: &egui::Context, id: egui::Id) -> Option<String> {
@@ -47,11 +48,11 @@ pub(super) fn drop_expression_drafts(ctx: &egui::Context) -> bool {
 }
 
 /// The rows of every editable parameter in `infos`, with `params` as their values.
-pub fn rows(ui: &mut egui::Ui, id: egui::Id, infos: &[ParamInfo], params: &Map<String, Value>) -> Option<Map<String, Value>> {
+pub fn rows(ui: &mut egui::Ui, id: egui::Id, language: Language, infos: &[ParamInfo], params: &Map<String, Value>) -> Option<Map<String, Value>> {
     let mut changed = None;
     for info in editable(infos) {
         ui.push_id((id, info.name.as_str()), |ui| {
-            if let Some(next) = row(ui, info, params) {
+            if let Some(next) = row(ui, language, info, params) {
                 changed = Some(next);
             }
         });
@@ -59,7 +60,7 @@ pub fn rows(ui: &mut egui::Ui, id: egui::Id, infos: &[ParamInfo], params: &Map<S
     changed
 }
 
-fn row(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>) -> Option<Map<String, Value>> {
+fn row(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>) -> Option<Map<String, Value>> {
     let label = ui.label(display_name(info));
     if !info.description.is_empty() {
         label.on_hover_text(&info.description);
@@ -77,7 +78,7 @@ fn row(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>) -> Opti
         }
         ParamWidget::Dropdown(choices) => dropdown(ui, info, params, &choices),
         ParamWidget::Vector { components, min, max } => vector(ui, info, params, components, min, max),
-        ParamWidget::Expression => expression(ui, info, params),
+        ParamWidget::Expression => expression(ui, language, info, params),
     };
     value.map(|value| with_value(params, &info.name, value))
 }
@@ -142,7 +143,7 @@ fn vector(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>, comp
 /// A text field that keeps what is being typed and writes it to the project only when it is left
 /// and parses, so a bad expression never reaches the shaders. Escape puts the saved text back; text
 /// that does not parse stays with its error until it is fixed.
-fn expression(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>) -> Option<Value> {
+fn expression(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>) -> Option<Value> {
     let saved = expression_value(params, info);
     let id = ui.scope_id().with("expression-text");
     let draft = draft_text(ui.ctx(), id);
@@ -153,7 +154,7 @@ fn expression(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>) 
     if let Some(message) = &error {
         ui.colored_label(theme::REFUSED, message);
     } else if !info.vars.is_empty() {
-        ui.colored_label(theme::TEXT_DIM, format!("Biến: {}", info.vars.join(", ")));
+        ui.colored_label(theme::TEXT_DIM, language.t(Message::Variables(info.vars.join(", "))));
     }
     if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         remove_draft(ui.ctx(), id);
@@ -177,12 +178,12 @@ fn expression(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>) 
 
 #[cfg(test)]
 pub(super) fn store_test_draft(ctx: &egui::Context, text: &str, saved: &str) {
-    store_draft(ctx, egui::Id::new("test-draft"), text.to_owned(), saved.to_owned());
+    store_draft(ctx, egui::Id::unique("test-draft"), text.to_owned(), saved.to_owned());
 }
 
 #[cfg(test)]
 pub(super) fn has_test_draft(ctx: &egui::Context) -> bool {
-    draft_text(ctx, egui::Id::new("test-draft")).is_some()
+    draft_text(ctx, egui::Id::unique("test-draft")).is_some()
 }
 
 #[cfg(test)]
@@ -205,7 +206,7 @@ mod tests {
         let (mut result, mut id) = (None, egui::Id::NULL);
         let mut output = ctx.run_ui(RawInput { events, ..Default::default() }, |ui| {
             id = ui.scope_id().with("expression-text");
-            result = expression(ui, &expression_info(), &params);
+            result = expression(ui, Language::default(), &expression_info(), &params);
         });
         output.textures_delta.clear();
         (result, id)

@@ -10,11 +10,7 @@ use d3d12_backend::MediaProbe;
 use engine::Project;
 
 use crate::editor::{clip_label, EditorState};
-
-const DIALOG_OPEN: &str = "Close the open dialog first";
-const LOAD_RUNNING: &str = "Wait for the current load to finish";
-const LOAD_DROPPED: &str = "The load in progress was dropped";
-const OPEN_CANCELLED: &str = "The project changed while it was being read, so Open was cancelled";
+use crate::i18n::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileDialog {
@@ -40,12 +36,12 @@ pub enum Prompt {
 }
 
 impl Prompt {
-    pub fn question(self) -> String {
+    pub fn question(self) -> Message {
         match self {
-            Self::DiscardFor(Discard::NewProject) => "Dự án có thay đổi chưa lưu. Vẫn tạo dự án mới và bỏ các thay đổi đó?".to_owned(),
-            Self::DiscardFor(Discard::OpenProject) => "Dự án có thay đổi chưa lưu. Vẫn mở dự án khác và bỏ các thay đổi đó?".to_owned(),
-            Self::DiscardFor(Discard::Close) => "Dự án có thay đổi chưa lưu. Vẫn đóng và bỏ các thay đổi đó?".to_owned(),
-            Self::CancelExportForClose => "Đang xuất video. Hủy xuất và đóng?".to_owned(),
+            Self::DiscardFor(Discard::NewProject) => Message::PromptDiscardForNew,
+            Self::DiscardFor(Discard::OpenProject) => Message::PromptDiscardForOpen,
+            Self::DiscardFor(Discard::Close) => Message::PromptDiscardForClose,
+            Self::CancelExportForClose => Message::PromptCancelExport,
         }
     }
 }
@@ -193,11 +189,11 @@ impl Tasks {
             return Action::SaveTo(file.to_path_buf());
         }
         if self.modal.is_some() {
-            state.report_info(DIALOG_OPEN.to_owned());
+            state.report_info(Message::DialogOpen);
             return Action::Nothing;
         }
         if self.load.is_some() {
-            state.report_info(LOAD_RUNNING.to_owned());
+            state.report_info(Message::LoadRunning);
             return Action::Nothing;
         }
         match request {
@@ -223,7 +219,7 @@ impl Tasks {
     fn exit(&mut self, state: &mut EditorState) -> Action {
         if self.load.is_some() {
             self.drop_load(state);
-            state.report_info(LOAD_DROPPED.to_owned());
+            state.report_info(Message::LoadDropped);
         }
         Action::Exit
     }
@@ -233,7 +229,7 @@ impl Tasks {
     /// asked, because the answer may be No; it is dropped only when the app really exits.
     pub fn close_requested(&mut self, state: &mut EditorState) -> Action {
         if self.modal.is_some() {
-            state.report_info(DIALOG_OPEN.to_owned());
+            state.report_info(Message::DialogOpen);
             return Action::Nothing;
         }
         if state.is_exporting() {
@@ -250,7 +246,7 @@ impl Tasks {
         self.modal = None;
         self.open_base = None;
         self.drop_load(state);
-        state.report_error(message);
+        state.report_error(Message::TaskFailed(message));
     }
 
     pub fn on_arrival(&mut self, state: &mut EditorState, arrival: Arrival) -> Action {
@@ -314,7 +310,7 @@ impl Tasks {
                     TaskId::Load(id) if self.load.is_some_and(|running| running.id == id) => self.drop_load(state),
                     _ => return Action::Nothing,
                 }
-                state.report_error(message);
+                state.report_error(Message::TaskFailed(message));
                 Action::Nothing
             }
         }
@@ -342,20 +338,20 @@ impl Tasks {
             Finished::Clip { track, path, result } => {
                 match result {
                     Ok(probe) => state.add_probed_file(track, &path, &probe),
-                    Err(message) => state.report_refused(message),
+                    Err(message) => state.report_refused(Message::Technical(message)),
                 }
                 Action::Nothing
             }
             Finished::Media { path, result } => {
                 match result {
                     Ok(probe) => state.import_probed(&path, &probe),
-                    Err(message) => state.report_refused(message),
+                    Err(message) => state.report_refused(Message::Technical(message)),
                 }
                 Action::Nothing
             }
             Finished::Project { file, result, base_revision } => match result {
                 Ok(_) if base_revision.is_some_and(|base| base != state.revision()) => {
-                    state.report_refused(OPEN_CANCELLED.to_owned());
+                    state.report_refused(Message::OpenCancelled);
                     Action::Nothing
                 }
                 Ok(project) => {
@@ -363,7 +359,7 @@ impl Tasks {
                     Action::ProjectReplaced
                 }
                 Err(message) => {
-                    state.report_error(message);
+                    state.report_error(Message::OpenFailed(message));
                     Action::Nothing
                 }
             },
@@ -453,7 +449,7 @@ mod tests {
         for request in [Request::OpenProject, Request::NewProject, Request::SaveProjectAs, Request::Export, Request::PickClip { track: 1 }] {
             assert_eq!(tasks.begin(&mut state, request), Action::Nothing, "{request:?}");
         }
-        assert_eq!(state.status(), &Status::Info(DIALOG_OPEN.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::DialogOpen));
     }
 
     #[test]
@@ -471,7 +467,7 @@ mod tests {
         let load = start_load(&mut tasks, &mut state, "C:/media/a.mp4");
         assert_eq!(state.loading(), Some("a.mp4"));
         assert_eq!(tasks.begin(&mut state, Request::OpenProject), Action::Nothing, "one load at a time");
-        assert_eq!(state.status(), &Status::Info(LOAD_RUNNING.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::LoadRunning));
 
         assert_eq!(tasks.on_arrival(&mut state, probed(load, "C:/media/a.mp4", Ok(probe(Some(7), Some(9))))), Action::Nothing);
         assert_eq!(state.loading(), None);
@@ -487,7 +483,7 @@ mod tests {
         let (mut tasks, mut state) = (Tasks::default(), with_tracks());
         let load = start_load(&mut tasks, &mut state, "bad.mp4");
         tasks.on_arrival(&mut state, probed(load, "bad.mp4", Err("bad.mp4: it has no video or audio stream".to_owned())));
-        assert!(matches!(state.status(), Status::Refused(message) if message.contains("no video or audio")), "{:?}", state.status());
+        assert_eq!(state.status(), &Status::Refused(Message::Technical("bad.mp4: it has no video or audio stream".to_owned())));
         assert!(state.project().tracks[0].clips.is_empty());
         assert!(tasks.is_idle());
     }
@@ -560,7 +556,7 @@ mod tests {
         tasks.begin(&mut state, Request::ImportMedia { audio_only: true });
         let Action::ProbeMedia { load, path } = tasks.on_arrival(&mut state, picked(dialog, "bad.wav")) else { panic!("expected a probe") };
         tasks.on_arrival(&mut state, Arrival::MediaProbed { load, path, result: Err("unreadable".to_owned()) });
-        assert!(matches!(state.status(), Status::Refused(message) if message == "unreadable"), "{:?}", state.status());
+        assert_eq!(state.status(), &Status::Refused(Message::Technical("unreadable".to_owned())));
         assert!(tasks.is_idle());
     }
 
@@ -576,7 +572,7 @@ mod tests {
         assert_eq!(state.loading(), Some("b.json"));
         tasks.on_arrival(&mut state, read(load, "b.json", Err("broken".to_owned())));
         assert_eq!(state.project(), &before, "a failed open leaves the project");
-        assert_eq!(state.status(), &Status::Error("broken".to_owned()));
+        assert_eq!(state.status(), &Status::Error(Message::OpenFailed("broken".to_owned())));
         assert!(state.is_dirty());
 
         tasks.begin(&mut state, Request::OpenProject);
@@ -615,7 +611,7 @@ mod tests {
         let (mut tasks, mut state) = (Tasks::default(), with_tracks());
         tasks.begin(&mut state, Request::PickClip { track: 0 });
         assert_eq!(tasks.close_requested(&mut state), Action::Nothing);
-        assert_eq!(state.status(), &Status::Info(DIALOG_OPEN.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::DialogOpen));
     }
 
     #[test]
@@ -686,7 +682,7 @@ mod tests {
         let action = tasks.on_arrival(&mut state, read(load, "b.json", Ok(opened)));
         assert_eq!(action, Action::Nothing);
         assert_eq!(state.project(), &edited, "the edit made while reading is kept");
-        assert!(matches!(state.status(), Status::Refused(message) if message.contains("changed while")), "{:?}", state.status());
+        assert_eq!(state.status(), &Status::Refused(Message::OpenCancelled));
         assert!(tasks.is_idle());
         assert_eq!(state.loading(), None);
     }
@@ -704,7 +700,7 @@ mod tests {
         let opened = Project { tracks: Vec::new(), ..edited.clone() };
         tasks.on_arrival(&mut state, read(load, "b.json", Ok(opened)));
         assert_eq!(state.project(), &edited);
-        assert!(matches!(state.status(), Status::Refused(message) if message.contains("changed while")), "{:?}", state.status());
+        assert_eq!(state.status(), &Status::Refused(Message::OpenCancelled));
     }
 
     #[test]
@@ -736,7 +732,7 @@ mod tests {
         tasks.begin(&mut state, Request::PickClip { track: 0 });
         tasks.start_failed(&mut state, "no thread".to_owned());
         assert!(tasks.is_idle());
-        assert_eq!(state.status(), &Status::Error("no thread".to_owned()));
+        assert_eq!(state.status(), &Status::Error(Message::TaskFailed("no thread".to_owned())));
     }
 
     #[test]
@@ -747,7 +743,7 @@ mod tests {
         assert_eq!(tasks.on_arrival(&mut state, failed), Action::Nothing);
         assert!(tasks.is_idle());
         assert_eq!(state.loading(), None);
-        assert!(matches!(state.status(), Status::Error(message) if message.contains("boom")), "{:?}", state.status());
+        assert!(matches!(state.status(), Status::Error(Message::TaskFailed(detail)) if detail.contains("boom")), "{:?}", state.status());
         assert_eq!(tasks.begin(&mut state, Request::OpenProject), Action::ShowFileDialog(FileDialog::OpenProject), "a new request can start");
     }
 

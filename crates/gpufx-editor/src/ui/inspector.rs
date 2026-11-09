@@ -4,6 +4,7 @@ use super::numeric::drag_field;
 use super::param_widgets;
 use super::theme;
 use crate::editor::{applied_to, clip_label, transition_duration_limits, ClipField, EditorState};
+use crate::i18n::Message;
 use crate::packages::short_name;
 use crate::timecode::{aspect_label, format_fps, format_timecode, from_seconds, to_seconds};
 use crate::timeline::view::content_end;
@@ -14,14 +15,13 @@ use serde_json::{Map, Value};
 const HEADER_HEIGHT: f32 = 34.0;
 /// As far up as a project may go; validation sets no floor.
 const GAIN_RANGE: std::ops::RangeInclusive<f64> = -60.0..=60.0;
-const EXPRESSION_DROPPED: &str = "The expression being typed was dropped: the clip changed";
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let rect = ui.max_rect();
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEADER_HEIGHT.min(rect.height())));
     let key = state.selection().filter(|key| clip_of(state, *key).is_some());
     follow_clip(ui.ctx(), state, key);
-    let title = if key.is_some() { "Clip" } else { "Dự án" };
+    let title = state.language().t(if key.is_some() { Message::ClipTitle } else { Message::ProjectTitle });
     ui.painter_at(rect).text(header.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), theme::ACCENT_TEXT);
     ui.painter_at(rect).hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::BORDER));
     let body = Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max).shrink2(Vec2::new(10.0, 8.0));
@@ -44,7 +44,7 @@ fn follow_clip(ctx: &egui::Context, state: &mut EditorState, key: Option<ClipKey
     if state.ui.inspector_clip != shown {
         state.ui.inspector_clip = shown;
         if param_widgets::drop_expression_drafts(ctx) {
-            state.report_info(EXPRESSION_DROPPED.to_owned());
+            state.report_info(Message::ExpressionDropped);
         }
     }
 }
@@ -72,26 +72,28 @@ fn field(ui: &mut egui::Ui, label: &str, value: &str) {
 }
 
 fn project_summary(ui: &mut egui::Ui, state: &EditorState) {
+    let language = state.language();
     let output = &state.project().output;
-    field(ui, "Kích thước", &format!("{}\u{d7}{}", output.width, output.height));
-    field(ui, "Tốc độ khung hình", &format_fps(output.frame_duration));
-    field(ui, "Tỉ lệ", &aspect_label(output.width, output.height));
-    field(ui, "Thời lượng", &format_timecode(content_end(state.project()), output.frame_duration));
+    field(ui, &language.t(Message::FieldSize), &format!("{}\u{d7}{}", output.width, output.height));
+    field(ui, &language.t(Message::FieldFrameRate), &format_fps(output.frame_duration));
+    field(ui, &language.t(Message::FieldAspect), &aspect_label(output.width, output.height));
+    field(ui, &language.t(Message::FieldDuration), &format_timecode(content_end(state.project()), output.frame_duration));
     ui.add_space(8.0);
     ui.separator();
-    ui.colored_label(theme::TEXT_DIM, "Chọn một clip trên timeline để chỉnh.");
+    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::SelectClipHint)).color(theme::TEXT_DIM)).wrap());
 }
 
 fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
+    let language = state.language();
     let Some(clip) = clip_of(state, key).cloned() else { return };
     let track_kind = state.project().tracks[key.track].kind;
     ui.add(egui::Label::new(egui::RichText::new(clip_label(&clip.source)).strong()).truncate());
-    time_field(ui, state, "Bắt đầu", to_seconds(clip.start), ClipField::Start);
-    time_field(ui, state, "Thời lượng", to_seconds(clip.duration), ClipField::Duration);
+    time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start);
+    time_field(ui, state, &language.t(Message::FieldDuration), to_seconds(clip.duration), ClipField::Duration);
     ui.separator();
 
     let mut gain = clip.gain_db;
-    ui.colored_label(theme::TEXT_DIM, "Âm lượng");
+    ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldVolume));
     let changed = ui.horizontal(|ui| {
         ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
         let mut changed = ui.add(slider(&mut gain, GAIN_RANGE)).changed();
@@ -102,13 +104,13 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         state.live_gain(gain);
     }
     let mut muted = clip.muted;
-    if ui.checkbox(&mut muted, "Tắt tiếng").changed() {
+    if ui.checkbox(&mut muted, language.t(Message::Mute)).changed() {
         state.set_muted(muted);
     }
 
     let (has_before, has_after) = transitions_beside(state, key);
-    fade_row(ui, state, "Âm vào", clip.fade_in, clip.duration.saturating_sub(clip.fade_out), !has_before, |state, value| state.live_fades(value, clip.fade_out));
-    fade_row(ui, state, "Âm ra", clip.fade_out, clip.duration.saturating_sub(clip.fade_in), !has_after, |state, value| state.live_fades(clip.fade_in, value));
+    fade_row(ui, state, &language.t(Message::FadeIn), clip.fade_in, clip.duration.saturating_sub(clip.fade_out), !has_before, |state, value| state.live_fades(value, clip.fade_out));
+    fade_row(ui, state, &language.t(Message::FadeOut), clip.fade_out, clip.duration.saturating_sub(clip.fade_in), !has_after, |state, value| state.live_fades(clip.fade_in, value));
 
     if track_kind == TrackKind::Video {
         ui.separator();
@@ -162,30 +164,31 @@ fn fade_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, value: Time
 
 fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     let Some(clip) = clip_of(state, key).cloned() else { return };
-    ui.strong("Hiệu ứng");
+    let language = state.language();
+    ui.strong(language.t(Message::TabEffects));
     if clip.effects.is_empty() {
-        ui.colored_label(theme::TEXT_DIM, "Chưa có hiệu ứng. Thêm ở tab Hiệu ứng.");
+        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::NoEffectsYet)).color(theme::TEXT_DIM)).wrap());
     }
     let mut remove = None;
     for (index, effect) in clip.effects.iter().enumerate() {
         ui.push_id(("effect", clip_identity(key, &clip), index, &effect.package), |ui| {
             egui::CollapsingHeader::new(short_name(&effect.package)).default_open(true).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.small_button("Xóa").clicked() {
+                    if ui.small_button(language.t(Message::Remove)).clicked() {
                         remove = Some(index);
                     }
-                    if ui.small_button("Mặc định").clicked() {
+                    if ui.small_button(language.t(Message::Reset)).clicked() {
                         state.live_effect_params(index, Map::new());
                     }
                 });
                 match state.catalog.params_of(&effect.package).map(<[d3d12_backend::ParamInfo]>::to_vec) {
                     Some(infos) => {
-                        if let Some(next) = param_widgets::rows(ui, ui.scope_id(), &infos, &effect.params) {
+                        if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &effect.params) {
                             state.live_effect_params(index, next);
                         }
                     }
                     None => {
-                        ui.colored_label(theme::TEXT_DIM, "Không đọc được thông số của gói này.");
+                        ui.colored_label(theme::TEXT_DIM, language.t(Message::PackageParamsUnreadable));
                     }
                 }
             });
@@ -202,7 +205,7 @@ fn transitions(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         return;
     }
     ui.separator();
-    ui.strong("Chuyển cảnh");
+    ui.strong(state.language().t(Message::Transitions));
     let track = key.track;
     let mut remove = None;
     for (after_clip, _) in applied {
@@ -216,14 +219,15 @@ fn transitions(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
 }
 
 fn transition_section(ui: &mut egui::Ui, state: &mut EditorState, track: usize, transition: &Transition, remove: &mut Option<usize>) {
+    let language = state.language();
     egui::CollapsingHeader::new(short_name(&transition.package)).default_open(true).show(ui, |ui| {
-        if ui.small_button("Xóa").clicked() {
+        if ui.small_button(language.t(Message::Remove)).clicked() {
             *remove = Some(transition.after_clip);
         }
         if let Some((shortest, longest)) = transition_duration_limits(state.project(), track, transition.after_clip) {
             let mut seconds = to_seconds(transition.duration);
             let (low, high) = (to_seconds(shortest), to_seconds(longest));
-            ui.colored_label(theme::TEXT_DIM, "Thời lượng");
+            ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldDuration));
             ui.horizontal(|ui| {
                 ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
                 let mut changed = ui.add(slider(&mut seconds, low..=high)).changed();
@@ -236,7 +240,7 @@ fn transition_section(ui: &mut egui::Ui, state: &mut EditorState, track: usize, 
         let infos: Option<Vec<d3d12_backend::ParamInfo>> = state.catalog.params_of(&transition.package).map(<[_]>::to_vec);
         let params: Map<String, Value> = transition.params.clone();
         if let Some(infos) = infos {
-            if let Some(next) = param_widgets::rows(ui, ui.scope_id(), &infos, &params) {
+            if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &params) {
                 state.live_transition(track, transition.after_clip, next, transition.duration);
             }
         }
@@ -263,7 +267,6 @@ mod tests {
     }
 
     fn typed_draft(ctx: &egui::Context) {
-        ctx.data_mut(|_| ());
         param_widgets::store_test_draft(ctx, "1+x", "x");
     }
 
@@ -280,7 +283,7 @@ mod tests {
         state.finish_drag(crate::timeline::drag::EditCommand::Move { key, track: 0, desired_start: Time::from_ticks(90_000) });
         frame(&ctx, &mut state);
         assert!(!param_widgets::has_test_draft(&ctx), "no stale draft stays in memory");
-        assert_eq!(state.status(), &Status::Info(EXPRESSION_DROPPED.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::ExpressionDropped));
     }
 
     #[test]

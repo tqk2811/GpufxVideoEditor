@@ -12,6 +12,7 @@ mod timeline_panel;
 mod top_bar;
 
 use crate::editor::{EditorState, Status};
+use crate::i18n::{Language, Message};
 use crate::layout::{panels, Panels};
 use crate::presenter::PreviewTexture;
 use egui::{CornerRadius, Event, Key, Modifiers, PointerButton, Rect, Stroke, StrokeKind, UiBuilder};
@@ -28,6 +29,7 @@ pub enum UiRequest {
     Export,
     CancelExport,
     ToggleFullscreen,
+    SetLanguage(Language),
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
@@ -147,23 +149,25 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
 
 /// Everything the status line says, one item a line, for its tooltip.
 fn status_summary(state: &EditorState) -> String {
+    let language = state.language();
     let mut lines: Vec<String> = Vec::new();
-    lines.extend(state.loading().map(|name| format!("Đang nạp {name}\u{2026}")));
+    lines.extend(state.loading().map(|name| language.t(Message::Loading(name.to_owned()))));
     match state.status() {
         Status::Idle => {}
-        Status::Info(message) | Status::Error(message) => lines.push(message.clone()),
-        Status::Refused(message) => lines.push(format!("Từ chối: {message}")),
+        Status::Info(message) | Status::Error(message) => lines.push(language.text(message)),
+        Status::Refused(message) => lines.push(language.t(Message::RefusedLine(language.text(message)))),
     }
-    lines.extend(state.preview_error().map(|message| format!("Xem trước: {message}")));
-    lines.extend(state.playback_message().map(|message| format!("Âm thanh: {message}")));
-    lines.extend(state.no_sound().map(|reason| format!("Không có tiếng: {reason}")));
+    lines.extend(state.preview_error().map(|message| language.t(Message::PreviewLine(message.to_owned()))));
+    lines.extend(state.playback_message().map(|message| language.t(Message::AudioLine(message.to_owned()))));
+    lines.extend(state.no_sound().map(|reason| language.t(Message::NoSoundLine(reason.to_owned()))));
     if state.silence_ms() > 0 {
-        lines.push(format!("Hụt âm thanh: {} ms", state.silence_ms()));
+        lines.push(language.t(Message::AudioGapLine(state.silence_ms())));
     }
     lines.join("\n")
 }
 
 fn status_line(ui: &mut egui::Ui, state: &EditorState) {
+    let language = state.language();
     let summary = status_summary(state);
     if !summary.is_empty() {
         ui.interact(ui.max_rect(), ui.scope_id().with("status-tooltip"), egui::Sense::hover()).on_hover_text(summary);
@@ -173,7 +177,7 @@ fn status_line(ui: &mut egui::Ui, state: &EditorState) {
         // The load is shown beside the status, which may say why a request meanwhile was not taken.
         let loading = state.loading();
         if let Some(name) = loading {
-            ui.label(format!("Đang nạp {name}\u{2026}"));
+            ui.label(language.t(Message::Loading(name.to_owned())));
             if !matches!(state.status(), Status::Idle) {
                 ui.separator();
             }
@@ -181,33 +185,33 @@ fn status_line(ui: &mut egui::Ui, state: &EditorState) {
         match state.status() {
             Status::Idle if loading.is_some() => {}
             Status::Idle => {
-                ui.colored_label(theme::TEXT_DIM, "Sẵn sàng");
+                ui.colored_label(theme::TEXT_DIM, language.t(Message::Ready));
             }
             Status::Info(message) => {
-                ui.colored_label(theme::TEXT_DIM, message);
+                ui.colored_label(theme::TEXT_DIM, language.text(message));
             }
             Status::Refused(message) => {
-                ui.colored_label(theme::REFUSED, format!("Từ chối: {message}"));
+                ui.colored_label(theme::REFUSED, language.t(Message::RefusedLine(language.text(message))));
             }
             Status::Error(message) => {
-                ui.colored_label(theme::REFUSED, message);
+                ui.colored_label(theme::REFUSED, language.text(message));
             }
         }
         if let Some(message) = state.preview_error() {
             ui.separator();
-            ui.colored_label(theme::REFUSED, format!("Xem trước: {message}"));
+            ui.colored_label(theme::REFUSED, language.t(Message::PreviewLine(message.to_owned())));
         }
         if let Some(message) = state.playback_message() {
             ui.separator();
-            ui.colored_label(theme::REFUSED, format!("Âm thanh: {message}"));
+            ui.colored_label(theme::REFUSED, language.t(Message::AudioLine(message.to_owned())));
         }
         if let Some(reason) = state.no_sound() {
             ui.separator();
-            ui.colored_label(theme::REFUSED, format!("Không có tiếng: {reason}"));
+            ui.colored_label(theme::REFUSED, language.t(Message::NoSoundLine(reason.to_owned())));
         }
         if state.silence_ms() > 0 {
             ui.separator();
-            ui.colored_label(theme::TEXT_DIM, format!("Hụt âm thanh: {} ms", state.silence_ms()));
+            ui.colored_label(theme::TEXT_DIM, language.t(Message::AudioGapLine(state.silence_ms())));
         }
     });
 }
@@ -426,7 +430,8 @@ mod tests {
     #[test]
     fn the_status_tooltip_holds_every_message_in_full() {
         let mut state = state();
-        state.report_refused("too long to fit".to_owned());
+        state.set_language(Language::Vietnamese);
+        state.report_refused(Message::Technical("too long to fit".to_owned()));
         state.set_preview_error(Some("preview broke".to_owned()));
         state.set_no_sound(Some("no device".to_owned()));
         let summary = status_summary(&state);
@@ -434,6 +439,30 @@ mod tests {
             assert!(summary.contains(part), "{summary}");
         }
         assert!(status_summary(&EditorState::default()).is_empty());
+    }
+
+    #[test]
+    fn what_is_on_the_status_line_follows_a_language_change() {
+        let mut state = state();
+        state.report_refused(Message::Technical("too long".to_owned()));
+        assert!(status_summary(&state).contains("Refused: too long"), "the default language");
+        state.set_language(Language::Vietnamese);
+        assert!(status_summary(&state).contains("Từ chối: too long"));
+        state.set_language(Language::English);
+        assert!(status_summary(&state).contains("Refused: too long"));
+    }
+
+    #[test]
+    fn the_whole_ui_draws_in_every_language_at_the_narrow_size() {
+        for language in Language::ALL {
+            let mut state = state();
+            state.set_language(language);
+            let ctx = egui::Context::default();
+            let mut requests = Vec::new();
+            run_frame(&ctx, window_input(800.0, 500.0), |ui| show(ui, &mut state, &mut requests, None));
+            run_frame(&ctx, window_input(800.0, 500.0), |ui| show(ui, &mut state, &mut requests, None));
+            assert!(requests.is_empty());
+        }
     }
 
     #[test]

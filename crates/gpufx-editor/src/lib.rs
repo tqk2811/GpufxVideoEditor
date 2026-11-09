@@ -5,6 +5,7 @@
 
 pub mod editor;
 pub mod export;
+pub mod i18n;
 pub mod layout;
 pub mod media;
 pub mod packages;
@@ -13,6 +14,7 @@ pub mod playback;
 pub mod presenter;
 pub mod preview;
 pub mod project_file;
+pub mod settings;
 pub mod tasks;
 pub mod timecode;
 pub mod timeline;

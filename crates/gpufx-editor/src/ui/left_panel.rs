@@ -3,6 +3,7 @@
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
 use crate::editor::{EditorState, LeftTab};
+use crate::i18n::{Language, Message};
 use crate::layout::grid_columns;
 use crate::media::{MediaItem, MediaKind};
 use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageKind};
@@ -10,6 +11,9 @@ use crate::timecode::format_duration;
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
 
 const TAB_HEIGHT: f32 = 52.0;
+const TAB_FONT: f32 = 12.0;
+const TAB_FONT_MIN: f32 = 9.5;
+const TAB_PADDING: f32 = 6.0;
 const CELL_MIN: f32 = 118.0;
 const CELL_GAP: f32 = 8.0;
 const CELL_CAPTION: f32 = 24.0;
@@ -33,7 +37,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
 }
 
 fn tabs(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
-    let entries = [(LeftTab::Media, Icon::Film, "Phương tiện"), (LeftTab::Audio, Icon::Music, "Âm thanh"), (LeftTab::Effects, Icon::Sparkle, "Hiệu ứng")];
+    let language = state.language();
+    let entries = [(LeftTab::Media, Icon::Film, Message::TabMedia), (LeftTab::Audio, Icon::Music, Message::TabAudio), (LeftTab::Effects, Icon::Sparkle, Message::TabEffects)];
     let width = rect.width() / entries.len() as f32;
     for (index, (tab, icon, label)) in entries.into_iter().enumerate() {
         let cell = Rect::from_min_size(rect.min + Vec2::new(width * index as f32, 0.0), Vec2::new(width, rect.height()));
@@ -46,7 +51,9 @@ fn tabs(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
         let painter = ui.painter_at(cell);
         let icon_rect = Rect::from_center_size(egui::pos2(cell.center().x, cell.top() + 18.0), Vec2::splat(16.0));
         icons::paint(&painter, icon_rect, icon, color);
-        painter.text(egui::pos2(cell.center().x, cell.top() + 37.0), Align2::CENTER_CENTER, label, FontId::proportional(12.0), color);
+        let label = language.t(label);
+        let natural = painter.layout_no_wrap(label.clone(), FontId::proportional(TAB_FONT), color).size().x;
+        painter.text(egui::pos2(cell.center().x, cell.top() + 37.0), Align2::CENTER_CENTER, label, FontId::proportional(tab_font_size(natural, cell.width())), color);
         if selected {
             painter.hline(cell.shrink2(Vec2::new(14.0, 0.0)).x_range(), cell.bottom() - 2.0, Stroke::new(2.0, theme::ACCENT));
         }
@@ -56,24 +63,32 @@ fn tabs(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
     }
 }
 
+/// The size that fits a tab label `natural` wide in a cell: the longest labels of some languages
+/// would not fit at a narrow window, so they shrink, down to what is still readable.
+fn tab_font_size(natural: f32, cell_width: f32) -> f32 {
+    let room = (cell_width - TAB_PADDING).max(1.0);
+    (TAB_FONT * (room / natural.max(1.0))).clamp(TAB_FONT_MIN, TAB_FONT)
+}
+
 fn search_box(ui: &mut egui::Ui, text: &mut String, hint: &str) {
     ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(f32::INFINITY));
 }
 
 fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, kind: MediaKind) {
+    let language = state.language();
     let audio_only = kind == MediaKind::Audio;
-    if icons::label_button(ui, Icon::Upload, "Nhập từ máy tính", theme::ACCENT_SOFT, theme::ACCENT_TEXT, Some(ui.available_width())).clicked() {
+    if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportFromComputer), theme::ACCENT_SOFT, theme::ACCENT_TEXT, Some(ui.available_width())).clicked() {
         requests.push(UiRequest::ImportMedia { audio_only });
     }
-    let hint = if audio_only { "Tìm trong âm thanh" } else { "Tìm trong phương tiện" };
-    search_box(ui, if audio_only { &mut state.ui.audio_search } else { &mut state.ui.media_search }, hint);
+    let hint = language.t(if audio_only { Message::SearchAudio } else { Message::SearchMedia });
+    search_box(ui, if audio_only { &mut state.ui.audio_search } else { &mut state.ui.media_search }, &hint);
     let search = if audio_only { state.ui.audio_search.clone() } else { state.ui.media_search.clone() };
     let items: Vec<MediaItem> = state.library.visible(kind, &search).into_iter().cloned().collect();
     if items.is_empty() {
-        ui.add(egui::Label::new(egui::RichText::new(empty_message(&search)).color(theme::TEXT_DIM)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(language.t(empty_message(&search))).color(theme::TEXT_DIM)).wrap());
         return;
     }
-    ui.colored_label(theme::TEXT_DIM, "Bấm vào ô hoặc nút + để thêm vào vị trí đầu phát.");
+    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::AddHint)).color(theme::TEXT_DIM)).wrap());
     let mut chosen = None;
     egui::ScrollArea::vertical().id_salt("media-grid").auto_shrink([false, false]).show(ui, |ui| {
         let width = ui.available_width();
@@ -97,11 +112,11 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
 }
 
 /// What an empty grid says: a filter that matches nothing is not an empty library.
-fn empty_message(search: &str) -> &'static str {
+fn empty_message(search: &str) -> Message {
     if search.trim().is_empty() {
-        "Chưa có tệp nào. Nhập tệp để thêm vào đây."
+        Message::LibraryEmpty
     } else {
-        "Không có tệp nào khớp với nội dung tìm."
+        Message::NoSearchMatch
     }
 }
 
@@ -137,22 +152,23 @@ fn media_cell(ui: &mut egui::Ui, item: &MediaItem, size: Vec2, kind: MediaKind) 
 
 /// The effect and transition lists with their filter.
 fn picker(ui: &mut egui::Ui, state: &mut EditorState) {
+    let language: Language = state.language();
     ui.horizontal(|ui| {
-        for (kind, label) in [(PackageKind::Effect, "Hiệu ứng"), (PackageKind::Transition, "Chuyển cảnh")] {
-            if ui.selectable_label(state.picker.kind == kind, label).clicked() {
+        for (kind, label) in [(PackageKind::Effect, Message::TabEffects), (PackageKind::Transition, Message::Transitions)] {
+            if ui.selectable_label(state.picker.kind == kind, language.t(label)).clicked() {
                 state.picker.set_kind(kind);
             }
         }
     });
-    search_box(ui, &mut state.picker.filter, "Tìm hiệu ứng");
+    search_box(ui, &mut state.picker.filter, &language.t(Message::SearchEffects));
     if !state.catalog.loaded {
-        ui.colored_label(theme::TEXT_DIM, "Đang đọc danh sách gói...");
+        ui.colored_label(theme::TEXT_DIM, language.t(Message::ReadingPackages));
     } else if state.catalog.effects.is_empty() && state.catalog.transitions.is_empty() {
-        ui.colored_label(theme::REFUSED, format!("Không tìm thấy gói nào. Đặt biến {}.", crate::project_file::PACKAGE_ROOT_VARIABLE));
+        ui.colored_label(theme::REFUSED, language.t(Message::NoPackages(crate::project_file::PACKAGE_ROOT_VARIABLE.to_owned())));
     }
     picker_list(ui, state);
     let selected = state.picker.addable(&state.catalog);
-    if ui.add_enabled(selected.is_some(), egui::Button::new("Thêm vào clip đã chọn").min_size(Vec2::new(ui.available_width(), 28.0))).clicked() {
+    if ui.add_enabled(selected.is_some(), egui::Button::new(language.t(Message::AddToClip)).min_size(Vec2::new(ui.available_width(), 28.0))).clicked() {
         if let Some(package) = &selected {
             add_package(state, package);
         }
@@ -200,7 +216,7 @@ fn picker_problems(ui: &mut egui::Ui, state: &EditorState) {
     if state.catalog.problems.is_empty() {
         return;
     }
-    egui::CollapsingHeader::new(format!("{} gói không đọc được", state.catalog.problems.len())).id_salt("package-problems").show(ui, |ui| {
+    egui::CollapsingHeader::new(state.language().t(Message::PackageProblems(state.catalog.problems.len()))).id_salt("package-problems").show(ui, |ui| {
         for problem in &state.catalog.problems {
             ui.colored_label(theme::REFUSED, format!("{}: {}", short_name(&problem.package), problem.message));
         }
@@ -212,9 +228,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_tab_label_shrinks_only_when_it_does_not_fit() {
+        assert_eq!(tab_font_size(40.0, 100.0), TAB_FONT);
+        let fitted = tab_font_size(70.0, 60.0);
+        assert!(fitted < TAB_FONT && fitted >= TAB_FONT_MIN, "{fitted}");
+        assert_eq!(tab_font_size(500.0, 60.0), TAB_FONT_MIN);
+    }
+
+    #[test]
     fn an_empty_grid_says_whether_a_filter_hides_the_files() {
-        assert!(empty_message("  ").contains("Chưa có"));
-        assert!(empty_message("beach").contains("khớp"));
+        assert_eq!(empty_message("  "), Message::LibraryEmpty);
+        assert_eq!(empty_message("beach"), Message::NoSearchMatch);
     }
 
     #[test]

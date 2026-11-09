@@ -3,6 +3,7 @@
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
 use crate::editor::{clip_label, EditorState};
+use crate::i18n::{Language, Message};
 use crate::timeline::drag::{begin_drag, clamp_trim, drag_command};
 use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
 use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
@@ -31,30 +32,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
 }
 
 fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
+    let language = state.language();
     ui.allocate_ui_with_layout(ui.max_rect().size(), Layout::left_to_right(Align::Center), |ui| {
         ui.add_enabled_ui(state.can_undo(), |ui| {
-            if icons::button(ui, Icon::Undo, "Hoàn tác (Ctrl+Z)", false).clicked() {
+            if icons::button(ui, Icon::Undo, &language.t(Message::UndoShortcut), false).clicked() {
                 state.undo();
             }
         });
         ui.add_enabled_ui(state.can_redo(), |ui| {
-            if icons::button(ui, Icon::Redo, "Làm lại (Ctrl+Y)", false).clicked() {
+            if icons::button(ui, Icon::Redo, &language.t(Message::RedoShortcut), false).clicked() {
                 state.redo();
             }
         });
         ui.separator();
         let has_selection = state.selection().is_some();
         ui.add_enabled_ui(has_selection, |ui| {
-            if icons::button(ui, Icon::Scissors, "Cắt tại đầu phát (S)", false).clicked() {
+            if icons::button(ui, Icon::Scissors, &language.t(Message::SplitShortcut), false).clicked() {
                 state.split_selected();
             }
-            if icons::button(ui, Icon::TrimLeft, "Cắt phần trước đầu phát", false).clicked() {
+            if icons::button(ui, Icon::TrimLeft, &language.t(Message::TrimBefore), false).clicked() {
                 state.trim_start_to_playhead();
             }
-            if icons::button(ui, Icon::TrimRight, "Cắt phần sau đầu phát", false).clicked() {
+            if icons::button(ui, Icon::TrimRight, &language.t(Message::TrimAfter), false).clicked() {
                 state.trim_end_to_playhead();
             }
-            if icons::button(ui, Icon::Trash, "Xóa clip (Delete)", false).clicked() {
+            if icons::button(ui, Icon::Trash, &language.t(Message::DeleteShortcut), false).clicked() {
                 state.delete_selected();
             }
         });
@@ -67,7 +69,8 @@ fn zoom_controls(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect)
     let width = f64::from((toolbar_rect.width() - HEADER_WIDTH).max(1.0));
     let area = ViewArea { content_end: content_end(state.project()), width, track_count: state.project().tracks.len(), rows_height: 0.0 };
     let center = width / 2.0;
-    if icons::button(ui, Icon::ZoomIn, "Phóng to", false).clicked() {
+    let language = state.language();
+    if icons::button(ui, Icon::ZoomIn, &language.t(Message::ZoomIn), false).clicked() {
         state.view.zoom_at(1.25, center, &area);
     }
     let mut fraction = state.view.zoom_fraction();
@@ -75,7 +78,7 @@ fn zoom_controls(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect)
     if ui.add(egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false)).changed() {
         state.view.set_zoom_fraction(fraction, center, &area);
     }
-    if icons::button(ui, Icon::ZoomOut, "Thu nhỏ", false).clicked() {
+    if icons::button(ui, Icon::ZoomOut, &language.t(Message::ZoomOut), false).clicked() {
         state.view.zoom_at(0.8, center, &area);
     }
 }
@@ -116,13 +119,14 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
 }
 
 fn add_track_menu(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
+    let language = state.language();
     ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-        ui.menu_button("+ Track", |ui| {
-            if ui.button("Thêm track video").clicked() {
+        ui.menu_button(language.t(Message::AddTrack), |ui| {
+            if ui.button(language.t(Message::AddVideoTrack)).clicked() {
                 state.add_track(TrackKind::Video);
                 ui.close();
             }
-            if ui.button("Thêm track âm thanh").clicked() {
+            if ui.button(language.t(Message::AddAudioTrack)).clicked() {
                 state.add_track(TrackKind::Audio);
                 ui.close();
             }
@@ -328,11 +332,11 @@ fn draw_playhead(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect,
 }
 
 /// The short label and tooltip of track `t`, numbered within its kind from the first of the kind.
-fn track_label(kinds: &[TrackKind], t: usize) -> (String, String) {
+fn track_label(language: Language, kinds: &[TrackKind], t: usize) -> (String, String) {
     let number = kinds[..=t].iter().filter(|kind| **kind == kinds[t]).count();
     match kinds[t] {
-        TrackKind::Video => (format!("V{number}"), format!("Track video {number}")),
-        TrackKind::Audio => (format!("A{number}"), format!("Track âm thanh {number}")),
+        TrackKind::Video => (format!("V{number}"), language.t(Message::VideoTrackNumber(number))),
+        TrackKind::Audio => (format!("A{number}"), language.t(Message::AudioTrackNumber(number))),
     }
 }
 
@@ -348,7 +352,7 @@ fn headers(ui: &mut egui::Ui, state: &EditorState, header_rect: Rect, requests: 
                 continue;
             }
             let icon = if kind == TrackKind::Video { Icon::Film } else { Icon::Music };
-            let (label, tip) = track_label(&kinds, t);
+            let (label, tip) = track_label(state.language(), &kinds, t);
             let icon_rect = Rect::from_center_size(Pos2::new(row.left() + 18.0, row.center().y), Vec2::splat(14.0));
             icons::paint(ui.painter(), icon_rect, icon, theme::TEXT_DIM);
             let label_pos = Pos2::new(icon_rect.right() + 6.0, row.center().y);
@@ -357,7 +361,7 @@ fn headers(ui: &mut egui::Ui, state: &EditorState, header_rect: Rect, requests: 
             ui.interact(icon_rect.union(label_rect), id, Sense::hover()).on_hover_text(tip);
             let button = Rect::from_center_size(Pos2::new(row.right() - 18.0, row.center().y), Vec2::splat(22.0));
             ui.scope_builder(UiBuilder::new().max_rect(button).id_salt(("track-add", t)), |ui| {
-                if icons::button(ui, Icon::Plus, "Thêm clip từ tệp", false).clicked() {
+                if icons::button(ui, Icon::Plus, &state.language().t(Message::AddClipFromFile), false).clicked() {
                     requests.push(UiRequest::PickClipFile { track: t });
                 }
             });
@@ -372,8 +376,8 @@ mod tests {
     #[test]
     fn tracks_are_numbered_within_their_kind() {
         let kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Video];
-        assert_eq!(track_label(&kinds, 0).0, "V1");
-        assert_eq!(track_label(&kinds, 1).0, "A1");
-        assert_eq!(track_label(&kinds, 2), ("V2".to_owned(), "Track video 2".to_owned()));
+        assert_eq!(track_label(Language::Vietnamese, &kinds, 0).0, "V1");
+        assert_eq!(track_label(Language::Vietnamese, &kinds, 1).0, "A1");
+        assert_eq!(track_label(Language::Vietnamese, &kinds, 2), ("V2".to_owned(), "Track video 2".to_owned()));
     }
 }

@@ -17,6 +17,7 @@ use engine::{Time, TrackKind};
 
 use crate::editor::{EditorState, Status};
 use crate::export::{encoder_options, export_blocker, finished_message, ExportOutcome, ExportWorker};
+use crate::i18n::{Language, Message};
 use crate::packages::{scan, Catalog};
 use crate::playback::device::Playback;
 use crate::playback::plan::{frames_to_ms, TransportCommand};
@@ -48,6 +49,9 @@ const SMOKE_LINGER_VARIABLE: &str = "GPUFX_EDITOR_SMOKE_LINGER_SECONDS";
 /// With the smoke check, also play and seek once, and report the audio figures.
 #[cfg(debug_assertions)]
 const SMOKE_PLAY_VARIABLE: &str = "GPUFX_EDITOR_SMOKE_PLAY";
+/// With the smoke check, starts in this language without touching the settings file.
+#[cfg(debug_assertions)]
+const SMOKE_LANGUAGE_VARIABLE: &str = "GPUFX_EDITOR_SMOKE_LANGUAGE";
 #[cfg(debug_assertions)]
 const SMOKE_SEEK_AFTER: Duration = Duration::from_millis(1500);
 
@@ -111,12 +115,16 @@ impl Session {
         let session_window = window.clone();
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
         let mut state = EditorState::default();
+        state.set_language(crate::settings::startup_language());
         #[cfg(debug_assertions)]
         let smoke = {
             let mut smoke = Smoke::default();
             if let Some(path) = std::env::var_os(SMOKE_VARIABLE) {
                 smoke.enabled = true;
                 smoke.play = std::env::var_os(SMOKE_PLAY_VARIABLE).is_some();
+                if let Some(language) = std::env::var(SMOKE_LANGUAGE_VARIABLE).ok().as_deref().and_then(Language::from_code) {
+                    state.set_language(language);
+                }
                 state.add_track(TrackKind::Video);
                 state.add_clip_from_file(0, std::path::Path::new(&path));
                 state.set_playhead(Time::from_ticks(engine::TICKS_PER_SECOND));
@@ -323,7 +331,7 @@ impl Session {
     /// the export has the GPU and decoders to itself; the thread waits for the preview to let go.
     fn start_export(&mut self, out: PathBuf) {
         if let Some(reason) = export_blocker(self.state.project()) {
-            self.state.report_error(reason.to_owned());
+            self.state.report_error(reason);
             return;
         }
         let Some(option) = self.state.encoders.get(self.state.encoder).cloned() else { return };
@@ -339,7 +347,7 @@ impl Session {
                 self.export_out = Some(out);
             }
             Err(message) => {
-                self.state.end_export(Status::Error(message));
+                self.state.end_export(Status::Error(Message::ExportFailed(message)));
                 self.resume_preview();
             }
         }
@@ -354,8 +362,8 @@ impl Session {
         let out = self.export_out.take().unwrap_or_default();
         let status = match outcome {
             ExportOutcome::Finished(report) => Status::Info(finished_message(&report, &out, self.state.project().output.audio.is_some())),
-            ExportOutcome::Cancelled => Status::Info("Export cancelled; the partial file was removed".to_owned()),
-            ExportOutcome::Failed(message) => Status::Error(format!("Export failed: {message}")),
+            ExportOutcome::Cancelled => Status::Info(Message::ExportCancelled),
+            ExportOutcome::Failed(message) => Status::Error(Message::ExportFailed(message)),
         };
         self.state.end_export(status);
         self.resume_preview();
@@ -468,7 +476,7 @@ impl Session {
     }
 
     fn sync_title(&mut self) {
-        let name = self.state.project_file().and_then(Path::file_name).map_or_else(|| "Untitled".to_owned(), |name| name.to_string_lossy().into_owned());
+        let name = self.state.project_file().and_then(Path::file_name).map_or_else(|| self.state.language().t(Message::Untitled), |name| name.to_string_lossy().into_owned());
         let title = format!("{name}{} - gpufx editor", if self.state.is_dirty() { " *" } else { "" });
         if title != self.title {
             self.presenter.window().set_title(&title);
@@ -479,7 +487,7 @@ impl Session {
     fn save_project(&mut self, file: PathBuf) {
         match save_project_file(self.state.project(), &file) {
             Ok(()) => self.state.mark_saved(file),
-            Err(message) => self.state.report_error(message),
+            Err(message) => self.state.report_error(Message::SaveFailed(message)),
         }
     }
 
@@ -501,11 +509,12 @@ impl Session {
     fn show_file_dialog(&mut self, dialog: FileDialog) {
         let parent = self.window.clone();
         let base = || rfd::FileDialog::new().set_parent(parent.as_ref());
+        let language = self.state.language();
         let picker = match dialog {
-            FileDialog::PickClip { .. } | FileDialog::ImportMedia { audio_only: false } => base().add_filter("Media", &MEDIA_EXTENSIONS).add_filter("All files", &["*"]),
-            FileDialog::ImportMedia { audio_only: true } => base().add_filter("Audio", &AUDIO_EXTENSIONS).add_filter("All files", &["*"]),
-            FileDialog::OpenProject => base().add_filter("Project", &["json"]),
-            FileDialog::SaveProject => base().add_filter("Project", &["json"]).set_file_name("project.json"),
+            FileDialog::PickClip { .. } | FileDialog::ImportMedia { audio_only: false } => base().add_filter(language.t(Message::FilterMedia), &MEDIA_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
+            FileDialog::ImportMedia { audio_only: true } => base().add_filter(language.t(Message::FilterAudio), &AUDIO_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
+            FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
+            FileDialog::SaveProject => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
         };
         self.spawn_task("file-dialog", TaskId::Modal, move || {
@@ -521,7 +530,7 @@ impl Session {
         let dialog = rfd::MessageDialog::new()
             .set_parent(self.window.as_ref())
             .set_title("gpufx editor")
-            .set_description(prompt.question())
+            .set_description(self.state.language().t(prompt.question()))
             .set_buttons(rfd::MessageButtons::YesNo);
         self.spawn_task("prompt", TaskId::Modal, move || Arrival::PromptAnswered { prompt, accepted: dialog.show() == rfd::MessageDialogResult::Yes });
     }
@@ -573,6 +582,13 @@ impl Session {
         self.perform(action);
     }
 
+    fn set_language(&mut self, language: Language) {
+        self.state.set_language(language);
+        if let Err(message) = crate::settings::save_language(language) {
+            self.state.report_error(Message::LanguageSaveFailed(message));
+        }
+    }
+
     /// Runs outside the frame, so what it starts cannot disturb the UI pass.
     fn handle(&mut self, request: UiRequest) {
         if self.state.is_exporting() && !matches!(request, UiRequest::CancelExport | UiRequest::ToggleFullscreen) {
@@ -581,7 +597,7 @@ impl Session {
         match request {
             UiRequest::Export => {
                 if let Some(reason) = export_blocker(self.state.project()) {
-                    self.state.report_error(reason.to_owned());
+                    self.state.report_error(reason);
                     return;
                 }
                 self.begin_task(Request::Export);
@@ -597,6 +613,7 @@ impl Session {
             UiRequest::SaveProjectAs => self.begin_task(Request::SaveProjectAs),
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
+            UiRequest::SetLanguage(language) => self.set_language(language),
             UiRequest::ToggleFullscreen => {
                 let window = self.presenter.window();
                 let next = if window.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) };

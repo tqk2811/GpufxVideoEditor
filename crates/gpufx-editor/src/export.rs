@@ -12,7 +12,7 @@ use std::thread::{self, JoinHandle};
 use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu, AUTO_ENCODERS};
 use engine::{frame_count, Project};
 
-const NOTHING_TO_EXPORT: &str = "Nothing to export: the timeline has no video frames";
+use crate::i18n::Message;
 
 /// Frames written so far, of the frames in the project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,26 +31,26 @@ impl ExportProgress {
 }
 
 /// Why the project cannot be exported as it is, if so.
-pub fn export_blocker(project: &Project) -> Option<&'static str> {
-    (frame_count(project) <= 0).then_some(NOTHING_TO_EXPORT)
+pub fn export_blocker(project: &Project) -> Option<Message> {
+    (frame_count(project) <= 0).then_some(Message::NothingToExport)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderOption {
-    pub label: String,
+    pub label: Message,
     pub choice: EncoderChoice,
     pub available: bool,
 }
 
 /// Auto and every encoder the CLI offers, each marked with whether this FFmpeg build has it.
 pub fn encoder_options(exists: impl Fn(&str) -> bool, gpl: bool) -> Vec<EncoderOption> {
-    let mut options = vec![EncoderOption { label: "Auto".to_owned(), choice: EncoderChoice::Auto, available: true }];
+    let mut options = vec![EncoderOption { label: Message::EncoderAuto, choice: EncoderChoice::Auto, available: true }];
     for name in AUTO_ENCODERS {
         let available = exists(name);
         let label = match (available, name == "libx264" && !gpl) {
-            (true, _) => name.to_owned(),
-            (false, true) => format!("{name} (needs the GPL build)"),
-            (false, false) => format!("{name} (not in this build)"),
+            (true, _) => Message::Technical(name.to_owned()),
+            (false, true) => Message::EncoderNeedsGpl(name.to_owned()),
+            (false, false) => Message::EncoderMissing(name.to_owned()),
         };
         options.push(EncoderOption { label, choice: EncoderChoice::Named(name.to_owned()), available });
     }
@@ -59,9 +59,13 @@ pub fn encoder_options(exists: impl Fn(&str) -> bool, gpl: bool) -> Vec<EncoderO
 
 /// The status line after a finished export. A project without an audio output has no audio stream,
 /// exactly as the CLI writes it.
-pub fn finished_message(report: &ExportReport, out: &Path, has_audio: bool) -> String {
-    let audio = if has_audio { "" } else { " The project has no audio output, so the file has no sound." };
-    format!("Exported {} frames to {} with {}.{audio}", report.frames, out.display(), report.encoder)
+pub fn finished_message(report: &ExportReport, out: &Path, has_audio: bool) -> Message {
+    let (frames, path, encoder) = (report.frames, out.display().to_string(), report.encoder.clone());
+    if has_audio {
+        Message::ExportFinished { frames, path, encoder }
+    } else {
+        Message::ExportFinishedSilent { frames, path, encoder }
+    }
 }
 
 /// How an export thread ended.
@@ -163,7 +167,7 @@ mod tests {
 
     #[test]
     fn a_timeline_without_frames_cannot_be_exported() {
-        assert_eq!(export_blocker(&project(false)), Some(NOTHING_TO_EXPORT));
+        assert_eq!(export_blocker(&project(false)), Some(Message::NothingToExport));
         assert_eq!(export_blocker(&project(true)), None);
     }
 
@@ -171,7 +175,8 @@ mod tests {
     fn the_lgpl_build_says_libx264_needs_gpl() {
         let options = encoder_options(|name| name != "libx264", false);
         let x264 = options.iter().find(|o| o.choice == EncoderChoice::Named("libx264".into())).unwrap();
-        assert!(!x264.available && x264.label.contains("GPL"));
+        assert!(!x264.available);
+        assert_eq!(x264.label, Message::EncoderNeedsGpl("libx264".to_owned()));
         assert!(options[0].available, "Auto is always offered");
     }
 
@@ -179,13 +184,13 @@ mod tests {
     fn a_missing_encoder_in_the_gpl_build_is_not_blamed_on_the_license() {
         let options = encoder_options(|_| false, true);
         let x264 = options.iter().find(|o| o.choice == EncoderChoice::Named("libx264".into())).unwrap();
-        assert!(!x264.label.contains("GPL"));
+        assert_eq!(x264.label, Message::EncoderMissing("libx264".to_owned()));
     }
 
     #[test]
     fn a_project_without_audio_output_says_so_after_export() {
         let report = ExportReport { encoder: "h264_nvenc".into(), frames: 3, audio_samples: 0, clamped_samples: 0, pcm_sha256: None };
-        assert!(finished_message(&report, Path::new("a.mp4"), false).contains("no sound"));
-        assert!(!finished_message(&report, Path::new("a.mp4"), true).contains("no sound"));
+        assert!(matches!(finished_message(&report, Path::new("a.mp4"), false), Message::ExportFinishedSilent { .. }));
+        assert!(matches!(finished_message(&report, Path::new("a.mp4"), true), Message::ExportFinished { .. }));
     }
 }

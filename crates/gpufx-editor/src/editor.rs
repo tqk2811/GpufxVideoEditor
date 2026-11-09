@@ -2,6 +2,7 @@
 //! calls these methods and draws the result; every timeline change goes through an engine command.
 
 use crate::export::{EncoderOption, ExportProgress};
+use crate::i18n::{ClipAction, Language, Message, StreamKind};
 use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, TrackChoice};
 use crate::packages::{Catalog, PickerState};
 use crate::playback::plan::{start_time, TransportCommand};
@@ -16,11 +17,6 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 const UNDO_DEPTH: usize = 200;
-const DRAG_FIRST: &str = "Finish the drag first";
-const EXPORT_RUNNING: &str = "Editing is off while an export runs";
-const NO_NEIGHBOUR: &str = "A transition needs a selected clip that touches another clip on its track";
-const NOTHING_AT_PLAYHEAD: &str = "Move the playhead inside the selected clip first";
-const NOTHING_TO_PLAY: &str = "Nothing to play: playback length follows the video frames, and audio alone has none yet";
 
 /// Length given to a clip whose file states none, and to a clip added without a probe.
 pub const DEFAULT_CLIP_DURATION: Time = Time::from_ticks(900_000);
@@ -31,9 +27,9 @@ pub const DEFAULT_TRANSITION_DURATION: Time = Time::from_ticks(90_000);
 pub enum Status {
     #[default]
     Idle,
-    Info(String),
-    Refused(String),
-    Error(String),
+    Info(Message),
+    Refused(Message),
+    Error(Message),
 }
 
 pub struct EditorState {
@@ -76,6 +72,7 @@ pub struct EditorState {
     /// What this session imported and what the open project uses.
     pub library: MediaLibrary,
     pub ui: UiState,
+    language: Language,
 }
 
 /// One held control: the project shows `shown` while `history` stays where it was, and the release
@@ -180,6 +177,7 @@ impl EditorState {
             hold_cancelled: false,
             library: MediaLibrary::default(),
             ui: UiState::default(),
+            language: Language::default(),
         }
     }
 
@@ -194,6 +192,14 @@ impl EditorState {
 
     pub fn playhead(&self) -> Time {
         self.playhead
+    }
+
+    pub fn language(&self) -> Language {
+        self.language
+    }
+
+    pub fn set_language(&mut self, language: Language) {
+        self.language = language;
     }
 
     pub fn status(&self) -> &Status {
@@ -219,20 +225,20 @@ impl EditorState {
 
     /// Records a successful save to `file`.
     pub fn mark_saved(&mut self, file: PathBuf) {
-        self.status = Status::Info(format!("Saved {}", file.display()));
+        self.status = Status::Info(Message::Saved(file.display().to_string()));
         self.project_file = Some(file);
         self.saved_revision = self.revision;
     }
 
-    pub fn report_error(&mut self, message: String) {
+    pub fn report_error(&mut self, message: Message) {
         self.status = Status::Error(message);
     }
 
-    pub fn report_info(&mut self, message: String) {
+    pub fn report_info(&mut self, message: Message) {
         self.status = Status::Info(message);
     }
 
-    pub fn report_refused(&mut self, message: String) {
+    pub fn report_refused(&mut self, message: Message) {
         self.status = Status::Refused(message);
     }
 
@@ -258,7 +264,7 @@ impl EditorState {
         self.audio_revision = self.revision;
         self.saved_revision = self.revision;
         self.status = match &file {
-            Some(file) => Status::Info(format!("Opened {}", file.display())),
+            Some(file) => Status::Info(Message::Opened(file.display().to_string())),
             None => Status::Idle,
         };
         self.project_file = file;
@@ -298,7 +304,7 @@ impl EditorState {
         self.cancel_live();
         self.ui.clip_field = None;
         self.export = Some(ExportProgress { done: 0, total });
-        self.status = Status::Info("Exporting".to_owned());
+        self.status = Status::Info(Message::Exporting);
     }
 
     pub fn set_export_progress(&mut self, progress: ExportProgress) {
@@ -351,7 +357,7 @@ impl EditorState {
     /// Space: starts from the playhead or stops where it is. A timeline with no samples cannot play.
     pub fn toggle_playback(&mut self) {
         if self.is_exporting() {
-            self.status = Status::Info(EXPORT_RUNNING.to_owned());
+            self.status = Status::Info(Message::ExportRunning);
             return;
         }
         if self.playing {
@@ -361,7 +367,7 @@ impl EditorState {
         }
         let end = audio_sample_count(self.project());
         if end <= 0 {
-            self.status = Status::Info(NOTHING_TO_PLAY.to_owned());
+            self.status = Status::Info(Message::NothingToPlay);
             return;
         }
         let from = start_time(self.playhead, end);
@@ -426,7 +432,7 @@ impl EditorState {
     }
 
     fn refuse(&mut self, error: &EditError) {
-        self.status = Status::Refused(error.to_string());
+        self.status = Status::Refused(Message::Technical(error.to_string()));
     }
 
     /// An export renders the project it started with, so edits wait for it. A drag holds a clip key,
@@ -434,13 +440,13 @@ impl EditorState {
     /// goes for a held inspector control. True, with a status, while any is in progress.
     fn edits_blocked(&mut self) -> bool {
         if self.export.is_some() {
-            self.status = Status::Info(EXPORT_RUNNING.to_owned());
+            self.status = Status::Info(Message::ExportRunning);
             return true;
         }
         if !self.is_holding() {
             return false;
         }
-        self.status = Status::Info(DRAG_FIRST.to_owned());
+        self.status = Status::Info(Message::FinishDragFirst);
         true
     }
 
@@ -499,7 +505,7 @@ impl EditorState {
     /// Adds a clip of [`DEFAULT_CLIP_DURATION`] for `path` to `track`.
     pub fn add_clip_from_file(&mut self, track: usize, path: &Path) {
         if self.place_clip(track, path, DEFAULT_CLIP_DURATION) {
-            self.status = Status::Info(format!("Added {}", clip_label(&path.to_string_lossy())));
+            self.status = Status::Info(Message::Added(clip_label(&path.to_string_lossy()).to_owned()));
         }
     }
 
@@ -514,13 +520,13 @@ impl EditorState {
             return;
         };
         let (present, stated, needed, problem) = match kind {
-            TrackKind::Video => (probe.has_video, probe.video_duration, "video", probe.video_problem.as_deref()),
-            TrackKind::Audio => (probe.has_audio, probe.audio_duration, "audio", probe.audio_problem.as_deref()),
+            TrackKind::Video => (probe.has_video, probe.video_duration, StreamKind::Video, probe.video_problem.as_deref()),
+            TrackKind::Audio => (probe.has_audio, probe.audio_duration, StreamKind::Audio, probe.audio_problem.as_deref()),
         };
         if !present {
             self.status = Status::Refused(match problem {
-                Some(reason) => format!("{name} has a {needed} stream it cannot use: {reason}"),
-                None => format!("{name} has no {needed} stream"),
+                Some(reason) => Message::StreamUnusable { name, stream: needed, reason: reason.to_owned() },
+                None => Message::StreamMissing { name, stream: needed },
             });
             return;
         }
@@ -530,8 +536,8 @@ impl EditorState {
         let length = stated.filter(|length| *length > Time::ZERO);
         if self.place_clip(track, path, length.unwrap_or(DEFAULT_CLIP_DURATION)) {
             self.status = Status::Info(match length {
-                Some(length) => format!("Added {name}, {:.2} s", length.ticks() as f64 / engine::TICKS_PER_SECOND as f64),
-                None => format!("Added {name}: it states no length, so it got {} s", DEFAULT_CLIP_DURATION.ticks() / engine::TICKS_PER_SECOND),
+                Some(length) => Message::AddedWithLength { name, seconds: format!("{:.2}", length.ticks() as f64 / engine::TICKS_PER_SECOND as f64) },
+                None => Message::AddedNoLength { name, seconds: DEFAULT_CLIP_DURATION.ticks() / engine::TICKS_PER_SECOND },
             });
         }
     }
@@ -552,7 +558,7 @@ impl EditorState {
         if self.live.is_none() {
             return false;
         }
-        self.status = Status::Info(DRAG_FIRST.to_owned());
+        self.status = Status::Info(Message::FinishDragFirst);
         true
     }
 
@@ -573,7 +579,7 @@ impl EditorState {
 
     /// Whether the status says a request has to wait for the hold, which only the release ends.
     fn shows_hold_refusal(&self) -> bool {
-        matches!(&self.status, Status::Info(message) if message == DRAG_FIRST)
+        self.status == Status::Info(Message::FinishDragFirst)
     }
 
     /// The revision audio has to follow: live previews do not count, the release does.
@@ -646,7 +652,7 @@ impl EditorState {
 
     /// The Start or Duration field of the selected clip, once its value is final.
     pub fn apply_clip_field(&mut self, field: ClipField) {
-        let Some(key) = self.selected_for("change") else { return };
+        let Some(key) = self.selected_for(ClipAction::Change) else { return };
         let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
         let command = match field {
             ClipField::Start(seconds) => EditCommand::Move { key, track: key.track, desired_start: crate::timecode::from_seconds(seconds) },
@@ -657,7 +663,7 @@ impl EditorState {
     }
 
     pub fn set_muted(&mut self, muted: bool) {
-        let Some(key) = self.selected_for("mute") else { return };
+        let Some(key) = self.selected_for(ClipAction::Mute) else { return };
         self.run(|project| set_muted(project, key, muted));
     }
 
@@ -682,10 +688,10 @@ impl EditorState {
 
     /// Trims the selected clip so it starts at the playhead.
     pub fn trim_start_to_playhead(&mut self) {
-        let Some(key) = self.selected_for("trim") else { return };
+        let Some(key) = self.selected_for(ClipAction::Trim) else { return };
         let at = self.playhead;
         if !self.playhead_inside(key) {
-            self.status = Status::Info(NOTHING_AT_PLAYHEAD.to_owned());
+            self.status = Status::Info(Message::NothingAtPlayhead);
             return;
         }
         if self.run(|project| trim_start(project, key, at)) {
@@ -695,10 +701,10 @@ impl EditorState {
 
     /// Trims the selected clip so it ends at the playhead.
     pub fn trim_end_to_playhead(&mut self) {
-        let Some(key) = self.selected_for("trim") else { return };
+        let Some(key) = self.selected_for(ClipAction::Trim) else { return };
         let at = self.playhead;
         if !self.playhead_inside(key) {
-            self.status = Status::Info(NOTHING_AT_PLAYHEAD.to_owned());
+            self.status = Status::Info(Message::NothingAtPlayhead);
             return;
         }
         self.run(|project| trim_end(project, key, at));
@@ -729,7 +735,7 @@ impl EditorState {
         });
         if added {
             self.selection = clip_at(self.project(), track, start);
-            self.status = Status::Info(format!("Added {}", item.name));
+            self.status = Status::Info(Message::Added(item.name.clone()));
         }
     }
 
@@ -737,17 +743,17 @@ impl EditorState {
     pub fn import_probed(&mut self, path: &Path, probe: &MediaProbe) {
         match item_from_probe(&path.to_string_lossy(), probe) {
             Some(item) => {
-                self.status = Status::Info(format!("Imported {}", item.name));
+                self.status = Status::Info(Message::Imported(item.name.clone()));
                 self.library.add(item);
             }
-            None => self.status = Status::Refused(format!("{} has no usable video or audio", clip_label(&path.to_string_lossy()))),
+            None => self.status = Status::Refused(Message::NoUsableStream(clip_label(&path.to_string_lossy()).to_owned())),
         }
     }
 
     /// Splits the selected clip at the playhead and selects the right half.
     pub fn split_selected(&mut self) {
         let Some(key) = self.selection else {
-            self.status = Status::Info("Select a clip to split".to_owned());
+            self.status = Status::Info(Message::SelectClip(ClipAction::Split));
             return;
         };
         let at = self.playhead;
@@ -757,30 +763,30 @@ impl EditorState {
     }
 
     /// The selected clip, or a status asking for one.
-    fn selected_for(&mut self, action: &str) -> Option<ClipKey> {
+    fn selected_for(&mut self, action: ClipAction) -> Option<ClipKey> {
         if self.selection.is_none() {
-            self.status = Status::Info(format!("Select a clip to {action}"));
+            self.status = Status::Info(Message::SelectClip(action));
         }
         self.selection
     }
 
     /// Adds effect `package` to the selected clip with its default parameters.
     pub fn add_effect_package(&mut self, package: &str) {
-        let Some(key) = self.selected_for("add an effect") else { return };
+        let Some(key) = self.selected_for(ClipAction::AddEffect) else { return };
         let effect = Effect { package: package.to_owned(), params: Map::new() };
         self.run(|project| add_effect(project, key, effect));
     }
 
     pub fn remove_effect_at(&mut self, effect: usize) {
-        let Some(key) = self.selected_for("remove an effect") else { return };
+        let Some(key) = self.selected_for(ClipAction::RemoveEffect) else { return };
         self.run(|project| remove_effect(project, key, effect));
     }
 
     /// Adds transition `package` where the selected clip touches a neighbour on its track.
     pub fn add_transition_package(&mut self, package: &str) {
-        let Some(key) = self.selected_for("add a transition") else { return };
+        let Some(key) = self.selected_for(ClipAction::AddTransition) else { return };
         let Some(after_clip) = touching_pair(self.project(), key) else {
-            self.status = Status::Refused(NO_NEIGHBOUR.to_owned());
+            self.status = Status::Refused(Message::NoNeighbour);
             return;
         };
         let transition = Transition { after_clip, package: package.to_owned(), duration: DEFAULT_TRANSITION_DURATION, params: Map::new() };
@@ -793,7 +799,7 @@ impl EditorState {
 
     pub fn delete_selected(&mut self) {
         let Some(key) = self.selection else {
-            self.status = Status::Info("Select a clip to delete".to_owned());
+            self.status = Status::Info(Message::SelectClip(ClipAction::Delete));
             return;
         };
         if self.run(|project| delete_clip(project, key)) {
@@ -818,7 +824,7 @@ impl EditorState {
         if self.history.undo() {
             self.after_history_step();
         } else {
-            self.status = Status::Info("Nothing to undo".to_owned());
+            self.status = Status::Info(Message::NothingToUndo);
         }
     }
 
@@ -829,7 +835,7 @@ impl EditorState {
         if self.history.redo() {
             self.after_history_step();
         } else {
-            self.status = Status::Info("Nothing to redo".to_owned());
+            self.status = Status::Info(Message::NothingToRedo);
         }
     }
 
@@ -911,7 +917,7 @@ mod tests {
         let state = state_with_clip();
         assert_eq!(state.selection(), Some(key(0)));
         assert_eq!(clips(state.project(), 0), vec![(Time::ZERO, DEFAULT_CLIP_DURATION)]);
-        assert_eq!(state.status(), &Status::Info("Added a.mp4".to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::Added("a.mp4".to_owned())));
     }
 
     #[test]
@@ -939,7 +945,7 @@ mod tests {
         let before = state.project().clone();
         state.add_probed_file(1, Path::new("silent.mp4"), &video_probe(Some(3), None));
         assert_eq!(state.project(), &before);
-        assert!(matches!(state.status(), Status::Refused(message) if message.contains("silent.mp4") && message.contains("audio")), "{:?}", state.status());
+        assert_eq!(state.status(), &Status::Refused(Message::StreamMissing { name: "silent.mp4".to_owned(), stream: StreamKind::Audio }));
         state.add_probed_file(1, Path::new("sound.wav"), &video_probe(None, Some(3)));
         assert_eq!(state.project().tracks[1].clips.len(), 1);
         state.add_probed_file(0, Path::new("silent.mp4"), &video_probe(Some(3), None));
@@ -952,7 +958,7 @@ mod tests {
         let before = state.project().clone();
         state.add_probed_file(0, Path::new("music.mp3"), &video_probe(None, Some(4)));
         assert_eq!(state.project(), &before);
-        assert!(matches!(state.status(), Status::Refused(message) if message.contains("video")), "{:?}", state.status());
+        assert_eq!(state.status(), &Status::Refused(Message::StreamMissing { name: "music.mp3".to_owned(), stream: StreamKind::Video }));
     }
 
     #[test]
@@ -960,7 +966,7 @@ mod tests {
         let mut state = state_with_clip();
         let probe = MediaProbe { video_problem: Some("no decoder for its video codec hevc".to_owned()), ..video_probe(None, Some(4)) };
         state.add_probed_file(0, Path::new("movie.mkv"), &probe);
-        assert!(matches!(state.status(), Status::Refused(message) if message.contains("no decoder for its video codec hevc")), "{:?}", state.status());
+        assert_eq!(state.status(), &Status::Refused(Message::StreamUnusable { name: "movie.mkv".to_owned(), stream: StreamKind::Video, reason: "no decoder for its video codec hevc".to_owned() }));
     }
 
     #[test]
@@ -970,7 +976,7 @@ mod tests {
         state.add_track(TrackKind::Audio);
         state.add_probed_file(0, Path::new("a.mp4"), &video_probe(Some(5), Some(8)));
         assert_eq!(state.project().tracks[0].clips[0].duration, seconds(5));
-        assert_eq!(state.status(), &Status::Info("Added a.mp4, 5.00 s".to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::AddedWithLength { name: "a.mp4".to_owned(), seconds: "5.00".to_owned() }));
         state.add_probed_file(1, Path::new("a.mp4"), &video_probe(Some(5), Some(8)));
         assert_eq!(state.project().tracks[1].clips[0].duration, seconds(8));
     }
@@ -982,7 +988,7 @@ mod tests {
         let unknown = MediaProbe { has_video: true, has_audio: false, video_duration: None, audio_duration: None, video_problem: None, audio_problem: None };
         state.add_probed_file(0, Path::new("raw.h264"), &unknown);
         assert_eq!(state.project().tracks[0].clips[0].duration, DEFAULT_CLIP_DURATION);
-        assert!(matches!(state.status(), Status::Info(message) if message.contains("states no length")), "{:?}", state.status());
+        assert!(matches!(state.status(), Status::Info(Message::AddedNoLength { .. })), "{:?}", state.status());
     }
 
     #[test]
@@ -1068,9 +1074,9 @@ mod tests {
     fn undo_with_an_empty_history_reports_it() {
         let mut state = EditorState::default();
         state.undo();
-        assert_eq!(state.status(), &Status::Info("Nothing to undo".to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::NothingToUndo));
         state.redo();
-        assert_eq!(state.status(), &Status::Info("Nothing to redo".to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::NothingToRedo));
     }
 
     #[test]
@@ -1122,7 +1128,7 @@ mod tests {
         let before = state.project().clone();
         let drag = state.drag;
         state.delete_selected();
-        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::FinishDragFirst));
         state.set_playhead(seconds(5));
         state.split_selected();
         state.add_track(TrackKind::Video);
@@ -1132,7 +1138,7 @@ mod tests {
         assert_eq!(state.project(), &before);
         assert_eq!(state.drag, drag);
         assert_eq!(state.selection(), Some(key(0)));
-        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::FinishDragFirst));
     }
 
     #[test]
@@ -1176,7 +1182,7 @@ mod tests {
         state.live_gain(-3.0);
         assert!(state.refuse_while_live());
         state.live_gain(-4.0);
-        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()), "the next step of the drag must not wipe it");
+        assert_eq!(state.status(), &Status::Info(Message::FinishDragFirst), "the next step of the drag must not wipe it");
         state.pointer_released();
         assert_eq!(state.status(), &Status::Idle, "the release ends what it was waiting for");
     }
@@ -1190,7 +1196,7 @@ mod tests {
         state.split_selected();
         state.undo();
         assert_eq!(state.project(), &before, "every edit waits for the release");
-        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::FinishDragFirst));
         state.cancel_drag();
         assert_eq!(state.ui.clip_field, None);
         assert!(state.hold_cancelled(), "the field keeps reporting the pointer until the release");
@@ -1317,7 +1323,7 @@ mod tests {
         state.toggle_playback();
         assert!(!state.is_playing());
         assert!(state.take_transport().is_empty());
-        assert_eq!(state.status(), &Status::Info(NOTHING_TO_PLAY.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::NothingToPlay));
     }
 
     #[test]
@@ -1456,7 +1462,7 @@ mod tests {
     fn a_clip_with_no_neighbour_refuses_a_transition() {
         let mut state = state_with_clip();
         state.add_transition_package("mix");
-        assert_eq!(state.status(), &Status::Refused(NO_NEIGHBOUR.to_owned()));
+        assert_eq!(state.status(), &Status::Refused(Message::NoNeighbour));
         assert!(state.project().tracks[0].transitions.is_empty());
     }
 
@@ -1550,7 +1556,7 @@ mod tests {
         state.undo();
         state.redo();
         assert_eq!(state.project(), &before);
-        assert_eq!(state.status(), &Status::Info(EXPORT_RUNNING.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::ExportRunning));
         state.toggle_playback();
         assert!(!state.is_playing());
         state.scrub_to(seconds(4));
@@ -1567,9 +1573,9 @@ mod tests {
         state.begin_export(10);
         state.set_export_progress(ExportProgress { done: 3, total: 10 });
         assert_eq!(state.export_progress().unwrap().fraction(), 0.3);
-        state.end_export(Status::Error("disk full".to_owned()));
+        state.end_export(Status::Error(Message::ExportFailed("disk full".to_owned())));
         assert_eq!(state.export_progress(), None);
-        assert_eq!(state.status(), &Status::Error("disk full".to_owned()));
+        assert_eq!(state.status(), &Status::Error(Message::ExportFailed("disk full".to_owned())));
     }
 
     fn with_effect() -> EditorState {
@@ -1613,7 +1619,7 @@ mod tests {
         state.undo();
         state.split_selected();
         state.add_track(TrackKind::Video);
-        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::FinishDragFirst));
         assert_eq!(state.project(), &shown);
         assert!(state.is_live());
     }
@@ -1625,7 +1631,7 @@ mod tests {
         state.live_gain(-6.0);
         assert!(!state.is_live());
         assert_eq!(state.project(), &before);
-        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::FinishDragFirst));
     }
 
     #[test]
@@ -1757,7 +1763,7 @@ mod tests {
         state.trim_start_to_playhead();
         state.trim_end_to_playhead();
         assert_eq!(state.project(), &before);
-        assert_eq!(state.status(), &Status::Info(NOTHING_AT_PLAYHEAD.to_owned()));
+        assert_eq!(state.status(), &Status::Info(Message::NothingAtPlayhead));
     }
 
     fn media(source: &str, kind: crate::media::MediaKind, length: Option<i64>) -> MediaItem {

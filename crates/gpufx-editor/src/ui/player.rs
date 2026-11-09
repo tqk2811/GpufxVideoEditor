@@ -3,6 +3,7 @@
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
 use crate::editor::EditorState;
+use crate::i18n::Message;
 use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
 use crate::timecode::{aspect_label, format_timecode};
@@ -22,7 +23,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let picture = Rect::from_min_max(Pos2::new(rect.left(), header.bottom()), Pos2::new(rect.right(), controls.top()));
 
     let painter = ui.painter_at(rect);
-    painter.text(header.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, "Trình phát", FontId::proportional(14.0), theme::TEXT);
+    painter.text(header.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, state.language().t(Message::Player), FontId::proportional(14.0), theme::TEXT);
     painter.hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::BORDER));
     draw_picture(ui, picture, preview);
     painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::BORDER));
@@ -61,8 +62,8 @@ fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
             ui.colored_label(theme::TEXT_DIM, egui::RichText::new(total).monospace());
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let (icon, tip) = if state.ui.fullscreen { (Icon::Exit, "Thoát toàn màn hình") } else { (Icon::Fullscreen, "Toàn màn hình") };
-            if icons::button(ui, icon, tip, state.ui.fullscreen).clicked() {
+            let (icon, tip) = if state.ui.fullscreen { (Icon::Exit, Message::ExitFullscreen) } else { (Icon::Fullscreen, Message::Fullscreen) };
+            if icons::button(ui, icon, &state.language().t(tip), state.ui.fullscreen).clicked() {
                 requests.push(UiRequest::ToggleFullscreen);
             }
             if show_aspect {
@@ -79,7 +80,7 @@ fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
     let icon = if state.is_playing() { Icon::Stop } else { Icon::Play };
     let tint = if enabled { theme::TEXT } else { theme::TICK };
     icons::paint(ui.painter(), button.shrink(7.0), icon, tint);
-    if response.on_hover_text(if state.is_playing() { "Dừng (Space)" } else { "Phát (Space)" }).clicked() {
+    if response.on_hover_text(state.language().t(if state.is_playing() { Message::StopShortcut } else { Message::PlayShortcut })).clicked() {
         state.toggle_playback();
     }
 }
