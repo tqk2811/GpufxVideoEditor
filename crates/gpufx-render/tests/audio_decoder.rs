@@ -261,3 +261,72 @@ fn a_mix_of_cuts_reads_the_right_seconds_of_the_source() {
         assert_eq!(dominant_second(&signal[38_000..47_000]), 2, "{name}: the second cut crosses into source second 2");
     }
 }
+
+/// The whole clip decoded by the ffmpeg tool without seeking, as interleaved stereo at 48 kHz.
+fn ffmpeg_reference(path: &Path) -> Vec<f32> {
+    let output = Command::new(ffmpeg_tool()).args(["-hide_banner", "-v", "error", "-i"]).arg(path).args(["-f", "f32le", "-ac", "2", "-ar", "48000", "-"]).output().expect("run ffmpeg");
+    assert!(output.status.success(), "ffmpeg failed on {}: {}", path.display(), String::from_utf8_lossy(&output.stderr));
+    output.stdout.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect()
+}
+
+/// The largest difference in stereo samples between `path` read at `position` with our decoder
+/// and the ffmpeg tool's decode of the whole file without a seek.
+fn error_against_ffmpeg(path: &Path, reference: &[f32], position: i64) -> f32 {
+    let got = read(path, position, 4096);
+    got.iter().zip(&reference[position as usize * 2..]).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max)
+}
+
+#[test]
+fn reads_near_the_start_match_a_decode_without_a_seek() {
+    // At 48 kHz nothing resamples, so the decoders agree to rounding. A resampled source only gets
+    // close, because a seek cannot reproduce the resampler's state exactly.
+    let cases = [("wav 48k", stepped_tone_clip("tone-48k-stereo.wav", 48_000, 2, "pcm_s16le"), 1e-5), ("aac 48k", stepped_tone_clip("tone-48k-stereo.m4a", 48_000, 2, "aac"), 1e-5), ("wav 44.1k", stepped_tone_clip("tone-44k-mono.wav", 44_100, 1, "pcm_s16le"), 2e-3), ("aac 44.1k", stepped_tone_clip("tone-44k-mono.m4a", 44_100, 1, "aac"), 2e-3)];
+    for (name, path, limit) in cases {
+        let reference = ffmpeg_reference(&path);
+        for position in [0, 1, 64, 512, 1024, 2048, 9600, 48_000] {
+            let error = error_against_ffmpeg(&path, &reference, position);
+            assert!(error <= limit, "{name} at {position}: {error} from the ffmpeg decode");
+        }
+    }
+}
+
+#[test]
+fn a_seek_to_the_start_works_on_other_containers() {
+    let cases = [("adts", stepped_tone_clip("tone.aac", 48_000, 2, "aac")), ("flac", stepped_tone_clip("tone.flac", 48_000, 2, "flac")), ("mpeg-ts", stepped_tone_clip("tone-aac.ts", 48_000, 2, "aac"))];
+    for (name, path) in cases {
+        let reference = ffmpeg_reference(&path);
+        for position in [0, 512, 48_000] {
+            let error = error_against_ffmpeg(&path, &reference, position);
+            assert!(error <= 1e-5, "{name} at {position}: {error} from the ffmpeg decode");
+        }
+    }
+}
+
+#[test]
+fn an_audio_stream_without_a_decoder_is_reported_by_name_and_still_counts() {
+    // A WAV with a format tag FFmpeg does not know: the stream exists, nothing can decode it.
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36u32 + 480).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&0xDEADu16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&48_000u32.to_le_bytes());
+    wav.extend_from_slice(&192_000u32.to_le_bytes());
+    wav.extend_from_slice(&4u16.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&480u32.to_le_bytes());
+    wav.extend_from_slice(&[0u8; 480]);
+    let dir = clips_dir();
+    std::fs::create_dir_all(&dir).expect("create the clips directory");
+    let path = dir.join("unknown-codec.wav");
+    std::fs::write(&path, wav).expect("write");
+
+    let paths = ProjectPaths::new(&dir.join("project.json"), Vec::new());
+    assert!(paths.source_has_audio("unknown-codec.wav"), "the stream exists even though it cannot be decoded");
+    let error = AudioFileDecoder::open(&path).err().expect("no decoder");
+    assert!(error.contains("unknown-codec.wav"), "{error}");
+    assert!(error.contains("no decoder for its audio codec"), "{error}");
+}

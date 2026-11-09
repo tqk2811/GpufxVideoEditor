@@ -36,10 +36,19 @@ const MAX_SEEK_PREROLL: i64 = 2_400_000;
 const FORWARD_LIMIT: i64 = 48_000;
 /// A hole in the timestamps larger than this (10 ms) is filled with silence.
 const GAP_TOLERANCE: i64 = 480;
+/// The largest hole in the timestamps that is filled with silence: 60 seconds of samples.
+const MAX_TIMESTAMP_GAP: i64 = 60 * MIX_SAMPLE_RATE as i64;
+/// How far before the first audio sample a seek to the start of the stream asks for. The packets
+/// that prime the codec are timestamped before that sample, and a frame decoded without its
+/// predecessor comes out aliased: AAC needs one packet, 200 ms is ample for any codec.
+const START_SEEK_LEAD: i64 = 9_600;
 /// Output samples per channel fetched at once when the resampler is drained.
 const DRAIN_BLOCK: usize = 4096;
-/// Files kept open at once; the least recently used is closed first.
-const MAX_OPEN_FILES: usize = 16;
+/// Files kept open at once; the least recently used is closed first. Each clip sounding in a mix
+/// holds one, and closing one that the same mix needs again forces a reopen and a seek on every
+/// block, so this is far above any realistic number of simultaneous clips. One decoder costs a
+/// file handle and its small buffers, which is cheap at this size.
+const MAX_OPEN_FILES: usize = 256;
 
 /// The mix sample of `pts`, rounded to nearest.
 fn to_mix_samples(pts: i64, time_base: ffi::AVRational) -> i64 {
@@ -61,6 +70,25 @@ const fn stereo_layout() -> ffi::AVChannelLayout {
         u: ffi::AVChannelLayout__bindgen_ty_1 { mask: 3 },
         opaque: ptr::null_mut(),
     }
+}
+
+/// Where the audio decoded after a seek starts on the media timeline, when `frame_start` is the
+/// timestamp of its first frame. A first frame without one can only be placed by assuming it is the
+/// first frame of the stream, which is wrong after a seek into the middle of the file.
+fn first_frame_position(frame_start: Option<i64>, seeked_to_start: bool, first_sample: i64) -> Result<i64, String> {
+    match frame_start {
+        Some(start) => Ok(start),
+        None if seeked_to_start => Ok(first_sample),
+        None => Err("the first frame after a seek has no timestamp, so its position is unknown".to_owned()),
+    }
+}
+
+/// The frames of silence for a hole of `hole` frames in the timestamps; refuses a hole too large to fill.
+fn silence_frames(hole: i64) -> Result<usize, String> {
+    if hole > MAX_TIMESTAMP_GAP {
+        return Err(format!("a timestamp gap of {hole} samples exceeds the limit of {MAX_TIMESTAMP_GAP}"));
+    }
+    Ok(hole.max(0) as usize)
 }
 
 /// The audio of one file, read at arbitrary positions.
@@ -87,6 +115,8 @@ pub struct AudioFileDecoder {
     pending_start: i64,
     /// Whether `pending_start` has been set since the last seek.
     positioned: bool,
+    /// Whether the last seek aimed at the start of the stream rather than into the file.
+    seeked_to_start: bool,
     /// Set when a seek found nothing earlier than `pending_start`, so reads before it are silence.
     floor: Option<i64>,
     draining: bool,
@@ -98,9 +128,17 @@ pub struct AudioFileDecoder {
 impl AudioFileDecoder {
     /// Opens `path`. A file without an audio stream opens fine and reads as silence.
     pub fn open(path: &Path) -> Result<Self, String> {
+        let (mut decoder, c_path) = Self::unopened(path)?;
+        // SAFETY: on error, Drop releases whatever has been created so far.
+        unsafe { decoder.initialize(&c_path) }.map_err(|e| format!("{}: {e}", decoder.path))?;
+        Ok(decoder)
+    }
+
+    /// A decoder with nothing opened yet, and `path` as FFmpeg takes it.
+    fn unopened(path: &Path) -> Result<(Self, CString), String> {
         let path_text = path.to_str().ok_or_else(|| format!("{}: the path is not valid UTF-8", path.display()))?;
         let c_path = CString::new(path_text).map_err(|_| format!("{path_text}: the path contains NUL"))?;
-        let mut decoder = Self {
+        let decoder = Self {
             format_context: ptr::null_mut(),
             codec_context: ptr::null_mut(),
             packet: ptr::null_mut(),
@@ -116,25 +154,37 @@ impl AudioFileDecoder {
             pending: Vec::new(),
             pending_start: 0,
             positioned: false,
+            seeked_to_start: false,
             floor: None,
             draining: false,
             end_of_stream: false,
             converted: Vec::new(),
             path: path_text.to_owned(),
         };
-        // SAFETY: on error, Drop releases whatever has been created so far.
-        unsafe { decoder.initialize(&c_path) }.map_err(|e| format!("{path_text}: {e}"))?;
-        Ok(decoder)
+        Ok((decoder, c_path))
+    }
+
+    unsafe fn open_input(&mut self, path: &CStr) -> Result<(), String> {
+        check(ffi::avformat_open_input(&mut self.format_context, path.as_ptr(), ptr::null(), ptr::null_mut()), "avformat_open_input")?;
+        check(ffi::avformat_find_stream_info(self.format_context, ptr::null_mut()), "avformat_find_stream_info")?;
+        Ok(())
+    }
+
+    /// The best audio stream of the opened input, whether or not it can be decoded.
+    unsafe fn best_audio_stream(&self) -> i32 {
+        ffi::av_find_best_stream(self.format_context, ffi::AVMEDIA_TYPE_AUDIO, -1, -1, ptr::null_mut(), 0)
     }
 
     unsafe fn initialize(&mut self, path: &CStr) -> Result<(), String> {
-        check(ffi::avformat_open_input(&mut self.format_context, path.as_ptr(), ptr::null(), ptr::null_mut()), "avformat_open_input")?;
-        check(ffi::avformat_find_stream_info(self.format_context, ptr::null_mut()), "avformat_find_stream_info")?;
+        self.open_input(path)?;
 
         let mut codec: *const ffi::AVCodec = ptr::null();
         let index = ffi::av_find_best_stream(self.format_context, ffi::AVMEDIA_TYPE_AUDIO, -1, -1, &mut codec, 0);
         if index == ffi::AVERROR_STREAM_NOT_FOUND {
             return Ok(());
+        }
+        if index == ffi::AVERROR_DECODER_NOT_FOUND {
+            return Err(self.missing_decoder_message());
         }
         check(index, "av_find_best_stream")?;
         let stream = *(*self.format_context).streams.add(index as usize);
@@ -142,6 +192,10 @@ impl AudioFileDecoder {
         self.time_base = (*stream).time_base;
         self.first_sample = if (*stream).start_time == ffi::NO_PTS { 0 } else { to_mix_samples((*stream).start_time, self.time_base) };
         self.origin = self.video_origin().unwrap_or(self.first_sample);
+        // Packets of the other streams would only be read to be thrown away.
+        for other in (0..(*self.format_context).nb_streams as usize).filter(|other| *other != index as usize) {
+            (**(*self.format_context).streams.add(other)).discard = ffi::AVDISCARD_ALL;
+        }
 
         self.codec_context = ffi::avcodec_alloc_context3(codec);
         if self.codec_context.is_null() {
@@ -158,6 +212,17 @@ impl AudioFileDecoder {
             return Err("allocating the packet or frame failed".to_owned());
         }
         Ok(())
+    }
+
+    /// Explains that the audio stream exists but this FFmpeg cannot decode it.
+    unsafe fn missing_decoder_message(&self) -> String {
+        let index = self.best_audio_stream();
+        if index < 0 {
+            return "no decoder for its audio stream".to_owned();
+        }
+        let stream = *(*self.format_context).streams.add(index as usize);
+        let name = CStr::from_ptr(ffi::avcodec_get_name((*(*stream).codecpar).codec_id)).to_string_lossy();
+        format!("no decoder for its audio codec {name}")
     }
 
     /// The media-timeline sample where the video starts, the origin of the video decoder.
@@ -226,12 +291,11 @@ impl AudioFileDecoder {
     /// Restarts decoding so that the decoded audio covers `target`, or starts at the first audio
     /// of the stream when `target` is earlier than that.
     unsafe fn seek_to(&mut self, target: i64) -> Result<(), String> {
-        let stream_index = self.stream_index.expect("checked by the caller");
         let mut preroll = SEEK_PREROLL;
         loop {
             let wanted = target.saturating_sub(preroll).max(self.first_sample);
-            let timestamp = from_mix_samples(wanted, self.time_base);
-            check(ffi::av_seek_frame(self.format_context, stream_index, timestamp, ffi::AVSEEK_FLAG_BACKWARD as i32), "av_seek_frame")?;
+            self.seeked_to_start = wanted == self.first_sample;
+            self.seek_demuxer(wanted)?;
             ffi::avcodec_flush_buffers(self.codec_context);
             ffi::swr_free(&mut self.resampler);
             self.pending.clear();
@@ -253,12 +317,28 @@ impl AudioFileDecoder {
             }
             // The stream landed after the target. Unless it is already at its beginning, the
             // container's index was too coarse for this preroll.
-            if wanted == self.first_sample || preroll >= MAX_SEEK_PREROLL {
+            if self.seeked_to_start || preroll >= MAX_SEEK_PREROLL {
                 self.floor = Some(self.pending_start);
                 return Ok(());
             }
             preroll = preroll.saturating_mul(4);
         }
+    }
+
+    /// Seeks the demuxer to `sample`. At the start of the stream it first asks for a position before
+    /// the first sample, to include the packets that prime the codec; a demuxer that refuses a
+    /// position before its first index entry gets the plain one.
+    unsafe fn seek_demuxer(&mut self, sample: i64) -> Result<(), String> {
+        let stream_index = self.stream_index.expect("checked by the caller");
+        let flags = ffi::AVSEEK_FLAG_BACKWARD as i32;
+        if self.seeked_to_start {
+            let early = from_mix_samples(sample.saturating_sub(START_SEEK_LEAD), self.time_base);
+            if ffi::av_seek_frame(self.format_context, stream_index, early, flags) >= 0 {
+                return Ok(());
+            }
+        }
+        check(ffi::av_seek_frame(self.format_context, stream_index, from_mix_samples(sample, self.time_base), flags), "av_seek_frame")?;
+        Ok(())
     }
 
     /// Decodes one more frame into `pending`, or marks the end of the stream.
@@ -317,13 +397,13 @@ impl AudioFileDecoder {
         }
 
         if !self.positioned {
-            self.pending_start = frame_start.unwrap_or(self.first_sample);
+            self.pending_start = first_frame_position(frame_start, self.seeked_to_start, self.first_sample)?;
             self.positioned = true;
         } else if let Some(frame_start) = frame_start {
             let expected = self.produced_end().saturating_add(ffi::swr_get_delay(self.resampler, i64::from(MIX_SAMPLE_RATE)));
             if frame_start.saturating_sub(expected) > GAP_TOLERANCE {
                 self.drain_resampler()?;
-                let hole = frame_start.saturating_sub(self.produced_end()).max(0) as usize;
+                let hole = silence_frames(frame_start.saturating_sub(self.produced_end()))?;
                 self.pending.resize(self.pending.len() + hole * CHANNELS, 0.0);
                 self.open_resampler()?;
             }
@@ -391,9 +471,14 @@ impl Drop for AudioFileDecoder {
     }
 }
 
-/// Whether FFmpeg can open `path` and finds an audio stream in it.
+/// Whether FFmpeg can open `path` and finds an audio stream in it. The stream need not be
+/// decodable: that is reported when it is read, by a message naming the codec.
 pub(crate) fn has_audio_stream(path: &Path) -> bool {
-    AudioFileDecoder::open(path).is_ok_and(|decoder| decoder.stream_index.is_some())
+    let Ok((mut decoder, c_path)) = AudioFileDecoder::unopened(path) else {
+        return false;
+    };
+    // SAFETY: the format context is valid once open_input succeeds; Drop releases it either way.
+    unsafe { decoder.open_input(&c_path).is_ok() && decoder.best_audio_stream() >= 0 }
 }
 
 /// The [`AudioSource`] of a project: one decoder per clip, because a clip reads forward and two
@@ -449,5 +534,65 @@ mod tests {
             assert!(to_mix_samples(timestamp, AUDIO_BASE) <= sample + 1, "{sample}");
             assert!(i128::from(timestamp) * MIX_RATE <= i128::from(sample) * 44_100, "{sample}");
         }
+    }
+
+    #[test]
+    fn a_hole_up_to_the_limit_is_filled_and_a_larger_one_is_an_error() {
+        assert_eq!(silence_frames(-5), Ok(0), "audio that overlaps needs no silence");
+        assert_eq!(silence_frames(GAP_TOLERANCE + 1), Ok(GAP_TOLERANCE as usize + 1));
+        assert_eq!(silence_frames(MAX_TIMESTAMP_GAP), Ok(MAX_TIMESTAMP_GAP as usize));
+        let error = silence_frames(MAX_TIMESTAMP_GAP + 1).expect_err("one sample over the limit");
+        assert!(error.contains("timestamp gap"), "{error}");
+        assert!(silence_frames(i64::MAX).is_err(), "a corrupt timestamp must not allocate");
+    }
+
+    #[test]
+    fn a_first_frame_without_a_timestamp_is_placed_only_at_the_start_of_the_stream() {
+        assert_eq!(first_frame_position(None, true, 123), Ok(123));
+        assert_eq!(first_frame_position(Some(500), true, 123), Ok(500));
+        assert_eq!(first_frame_position(Some(500), false, 123), Ok(500));
+        let error = first_frame_position(None, false, 123).expect_err("position unknown after a mid-file seek");
+        assert!(error.contains("no timestamp"), "{error}");
+    }
+
+    /// A scratch file generated once by the ffmpeg of third_party.
+    fn generated_clip(name: &str, arguments: &[&str]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gpufx-audio-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the scratch directory");
+        let path = dir.join(name);
+        let tool = concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/ffmpeg/bin/ffmpeg.exe");
+        let status = std::process::Command::new(tool).args(["-hide_banner", "-y", "-v", "error"]).args(arguments).arg(&path).status().expect("ffmpeg runs");
+        assert!(status.success(), "generating {name} failed");
+        path
+    }
+
+    #[test]
+    fn the_decoder_discards_every_stream_but_its_audio() {
+        let path = generated_clip("with-video.mp4", &["-f", "lavfi", "-i", "color=c=gray:s=64x64:r=30:d=1", "-f", "lavfi", "-i", "sine=f=440:d=1", "-c:v", "mpeg4", "-c:a", "aac"]);
+        let decoder = AudioFileDecoder::open(&path).expect("open the clip");
+        let audio = decoder.stream_index.expect("the clip has audio") as usize;
+        // SAFETY: the format context stays valid while the decoder lives.
+        unsafe {
+            let context = &*decoder.format_context;
+            assert_eq!(context.nb_streams, 2);
+            for index in 0..context.nb_streams as usize {
+                let discard = (**context.streams.add(index)).discard;
+                assert_eq!(discard == ffi::AVDISCARD_ALL, index != audio, "stream {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn clips_sounding_together_stay_open() {
+        let path = generated_clip("short.wav", &["-f", "lavfi", "-i", "sine=f=440:d=0.1", "-c:a", "pcm_s16le"]);
+        let dir = path.parent().expect("scratch directory");
+        let source = path.file_name().and_then(|n| n.to_str()).expect("name");
+        let mut files = AudioFiles::new(Arc::new(ProjectPaths::new(&dir.join("project.json"), Vec::new())));
+        let clips = 64;
+        let mut out = [0.0f32; 64];
+        for clip in 0..clips {
+            files.read(ClipKey { track: 0, clip }, source, 0, &mut out).expect("read");
+        }
+        assert_eq!(files.open.len(), clips, "a clip of the same mix was closed");
     }
 }

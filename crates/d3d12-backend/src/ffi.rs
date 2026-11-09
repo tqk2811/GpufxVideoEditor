@@ -22,6 +22,8 @@ pub const AVIO_FLAG_WRITE: i32 = 2;
 pub const AV_DISPOSITION_ATTACHED_PIC: i32 = 0x0400;
 /// `AVERROR_STREAM_NOT_FOUND`, that is `FFERRTAG(0xF8, 'S', 'T', 'R')`.
 pub const AVERROR_STREAM_NOT_FOUND: i32 = -(0xF8 | (0x53 << 8) | (0x54 << 16) | (0x52 << 24));
+/// `AVERROR_DECODER_NOT_FOUND`, that is `FFERRTAG(0xF8, 'D', 'E', 'C')`.
+pub const AVERROR_DECODER_NOT_FOUND: i32 = -(0xF8 | (0x44 << 8) | (0x45 << 16) | (0x43 << 24));
 
 /// libswresample's opaque context.
 #[repr(C)]
@@ -30,6 +32,7 @@ pub struct SwrContext {
 }
 
 unsafe extern "C" {
+    pub fn avcodec_get_name(id: AVCodecID) -> *const core::ffi::c_char;
     pub fn swr_alloc_set_opts2(
         context: *mut *mut SwrContext,
         out_layout: *const AVChannelLayout,
