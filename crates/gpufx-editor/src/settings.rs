@@ -9,27 +9,6 @@ use crate::i18n::Language;
 const FOLDER: &str = "gpufx-editor";
 const FILE: &str = "settings.json";
 const LANGUAGE_KEY: &str = "language";
-/// The primary language id of Vietnamese in a Windows LANGID.
-const LANG_VIETNAMESE: u16 = 0x2A;
-const PRIMARY_LANGUAGE_MASK: u16 = 0x3FF;
-
-#[link(name = "kernel32")]
-extern "system" {
-    fn GetUserDefaultUILanguage() -> u16;
-}
-
-/// The editor language for a Windows LANGID; anything it does not have falls back to English.
-fn language_of_langid(langid: u16) -> Language {
-    match langid & PRIMARY_LANGUAGE_MASK {
-        LANG_VIETNAMESE => Language::Vietnamese,
-        _ => Language::English,
-    }
-}
-
-fn system_language() -> Language {
-    // SAFETY: the function takes nothing and only returns a value.
-    language_of_langid(unsafe { GetUserDefaultUILanguage() })
-}
 
 /// `%APPDATA%\gpufx-editor\settings.json`, when the variable is set.
 pub fn settings_file() -> Option<PathBuf> {
@@ -46,9 +25,14 @@ fn saved_language(file: &Path) -> Option<Language> {
     read_settings(file).get(LANGUAGE_KEY).and_then(Value::as_str).and_then(Language::from_code)
 }
 
-/// The language to start in: the saved choice, else the system's, else English.
+/// The language saved in `file`, or English when the user has not chosen one.
+fn language_or_default(file: Option<&Path>) -> Language {
+    file.and_then(saved_language).unwrap_or_default()
+}
+
+/// The language to start in: the saved choice, else English.
 pub fn startup_language() -> Language {
-    settings_file().and_then(|file| saved_language(&file)).unwrap_or_else(system_language)
+    language_or_default(settings_file().as_deref())
 }
 
 /// The temporary file of this process, so that another editor saving at the same moment has its
@@ -89,10 +73,12 @@ mod tests {
     }
 
     #[test]
-    fn a_system_language_the_editor_lacks_falls_back_to_english() {
-        assert_eq!(language_of_langid(0x042A), Language::Vietnamese, "vi-VN");
-        assert_eq!(language_of_langid(0x0409), Language::English, "en-US");
-        assert_eq!(language_of_langid(0x040C), Language::English, "fr-FR");
+    fn the_first_run_is_english_and_a_saved_choice_wins() {
+        let file = temp_file("first-run");
+        assert_eq!(language_or_default(Some(&file)), Language::English);
+        assert_eq!(language_or_default(None), Language::English);
+        write_language(&file, Language::Vietnamese).unwrap();
+        assert_eq!(language_or_default(Some(&file)), Language::Vietnamese);
     }
 
     #[test]
