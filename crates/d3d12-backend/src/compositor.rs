@@ -316,6 +316,13 @@ fn update_graph_params(graph: &mut EffectGraph, prefix: &str, package: &str, app
     Ok(())
 }
 
+/// Whether a graph whose numbers were just updated can no longer run: gpufx fixes the sizes its
+/// size functions compute, and refuses to go on when a parameter they read has changed. Costs no
+/// GPU work when the sizes are already known, and tells before any fence is staged.
+fn needs_rebuild(graph: &EffectGraph, pads: &[(u32, u32)]) -> bool {
+    graph.output_size(0, pads).is_err()
+}
+
 /// A built clip graph and the parameters it has now.
 struct ClipGraph {
     graph: EffectGraph,
@@ -514,13 +521,23 @@ impl Compositor for D3d12Compositor {
         let (gpu, paths) = (&self.gpu, &self.paths);
         let shape: Vec<String> = effects.iter().map(|effect| graph_shape(&effect.package, &effect.params)).collect();
         let build = || build_clip_graph(&gpu.context, paths, width, height, effects).map(|graph| ClipGraph { graph, applied: effects.iter().map(|effect| effect.params.clone()).collect() });
-        let result = self.clip_graphs.get_or_build(key, shape.as_slice(), build).and_then(|built| {
+        let pads = [(inputs[0].width, inputs[0].height)];
+        let (clip_graphs, images) = (&mut self.clip_graphs, &mut self.images);
+        let mut render = || -> Result<(), String> {
+            let built = clip_graphs.get_or_build(key, shape.as_slice(), &build)?;
+            let mut changed = false;
             for (index, effect) in effects.iter().enumerate() {
+                changed |= built.applied[index] != effect.params;
                 update_graph_params(&mut built.graph, &format!("fx{index}."), &effect.package, &built.applied[index], &effect.params)?;
                 built.applied[index].clone_from(&effect.params);
             }
-            Self::run_graph(gpu, &mut built.graph, &mut inputs, &mut self.images, output, width, height, &info)
-        });
+            if changed && needs_rebuild(&built.graph, &pads) {
+                clip_graphs.retain(|entry| entry != key);
+            }
+            let built = clip_graphs.get_or_build(key, shape.as_slice(), &build)?;
+            Self::run_graph(gpu, &mut built.graph, &mut inputs, images, output, width, height, &info)
+        };
+        let result = render();
         if let Err(e) = result {
             self.release_image(output);
             return Err(RenderError(e));
@@ -531,26 +548,35 @@ impl Compositor for D3d12Compositor {
 
     fn transition(&mut self, package: &str, params: &Map<String, Value>, from: ImageId, to: ImageId, progress: Progress, at: FrameContext) -> Result<ImageId, RenderError> {
         let graph_key = graph_shape(package, params);
-        if !self.transition_graphs.contains_key(&graph_key) {
-            let graph = build_transition_graph(&self.gpu.context, &self.paths, package, params)?;
-            self.transition_graphs.insert(graph_key.clone(), TransitionGraph { graph, applied: params.clone() });
-        }
         let info = Self::info(at);
         let value = progress.elapsed.ticks() as f64 / progress.total.ticks() as f64;
-        let output = self.acquire()?;
         let (width, height) = (self.width, self.height);
-        let mut inputs = [self.images[from.0].frame(width, height), self.images[to.0].frame(width, height)];
-        let result = {
-            let images = &mut self.images;
-            let built = self.transition_graphs.get_mut(&graph_key).expect("graph exists");
+        let pads = [(width, height), (width, height)];
+        // Takes the graph out of the map, so a failed update never leaves a half-updated one.
+        let usable = self.transition_graphs.remove(&graph_key).and_then(|mut built| {
+            let changed = built.applied != *params;
             let updated = update_graph_params(&mut built.graph, "", package, &built.applied, params);
-            if updated.is_ok() {
-                built.applied.clone_from(params);
+            match updated {
+                Ok(()) if changed && needs_rebuild(&built.graph, &pads) => None,
+                Ok(()) => {
+                    built.applied.clone_from(params);
+                    Some(Ok(built))
+                }
+                Err(message) => Some(Err(message)),
             }
-            updated
-                .and_then(|()| built.graph.set_param("progress", &[value]).map_err(|e| format!("package {package}: setting progress failed: {e}")))
-                .and_then(|()| Self::run_graph(&self.gpu, &mut built.graph, &mut inputs, images, output, width, height, &info))
+        });
+        let mut built = match usable {
+            Some(result) => result?,
+            None => TransitionGraph { graph: build_transition_graph(&self.gpu.context, &self.paths, package, params)?, applied: params.clone() },
         };
+        let output = self.acquire()?;
+        let mut inputs = [self.images[from.0].frame(width, height), self.images[to.0].frame(width, height)];
+        let result = built
+            .graph
+            .set_param("progress", &[value])
+            .map_err(|e| format!("package {package}: setting progress failed: {e}"))
+            .and_then(|()| Self::run_graph(&self.gpu, &mut built.graph, &mut inputs, &mut self.images, output, width, height, &info));
+        self.transition_graphs.insert(graph_key, built);
         if let Err(e) = result {
             self.release_image(output);
             return Err(RenderError(e));

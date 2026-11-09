@@ -181,6 +181,65 @@ fn frames_errors_edits_and_blanks_through_one_producer() {
     assert!(producer.produce(&request(&empty, 0)).expect("an empty timeline is not an error").is_none());
 }
 
+fn scale_effect(width: i64, height: i64) -> engine::Effect {
+    let params = serde_json::json!({ "w": width, "h": height });
+    engine::Effect { package: "packages/gpufx/ffmpeg/scale".to_owned(), params: params.as_object().expect("an object").clone() }
+}
+
+/// A size parameter fixes the sizes gpufx computed, so changing one must rebuild the graph and not
+/// leave the preview stuck on the refusal.
+#[test]
+fn changing_a_size_parameter_of_a_clip_effect_keeps_the_preview_working() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let mut producer = D3d12Producer::new(gpu.clone());
+    let seconds = Time::from_seconds(3).unwrap();
+    let with_scale = |width, height| {
+        let mut scaled = clip("clip-a.mp4", seconds);
+        scaled.effects.push(scale_effect(width, height));
+        project(vec![scaled])
+    };
+    // The rule gpufx applies changes while the size written stays that of the project image.
+    for (width, height) in [(320, 180), (-1, 180), (320, -1), (320, 180)] {
+        let frame = producer.produce(&request(&with_scale(width, height), 30)).unwrap_or_else(|e| panic!("{width}x{height}: {}", describe(&e))).expect("a picture");
+        producer.recycle(frame);
+    }
+}
+
+/// A transition number changing between frames is updated in place and still shows a picture.
+#[test]
+fn changing_a_transition_number_keeps_the_preview_working() {
+    let _lock = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let mut producer = D3d12Producer::new(gpu.clone());
+    let seconds = Time::from_seconds(3).unwrap();
+    let with_size = |max_size: f64| {
+        let mut second = clip("clip-b.mp4", seconds);
+        second.start = seconds;
+        let mut timeline = (*project(vec![clip("clip-a.mp4", seconds), second])).clone();
+        let params = serde_json::json!({ "max_size": max_size });
+        timeline.tracks[0].transitions.push(engine::Transition {
+            after_clip: 0,
+            package: "packages/gpufx/ffmpeg/pixelize-transition".to_owned(),
+            duration: Time::from_seconds(1).unwrap(),
+            params: params.as_object().expect("an object").clone(),
+        });
+        Arc::new(timeline)
+    };
+    let frame_inside = seconds.ticks() / 3000;
+    for max_size in [8.0, 32.0, 8.0] {
+        let frame = producer.produce(&request(&with_size(max_size), frame_inside)).unwrap_or_else(|e| panic!("max_size {max_size}: {}", describe(&e))).expect("a picture");
+        producer.recycle(frame);
+    }
+}
+
+fn describe(error: &ProduceError) -> String {
+    match error {
+        ProduceError::Failed(message) => message.clone(),
+        ProduceError::Cancelled => "cancelled".to_owned(),
+    }
+}
+
 #[test]
 fn a_relative_source_follows_the_paths_of_the_request() {
     let _lock = gpu_lock();
