@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::*;
-use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, Gpu};
+use d3d12_backend::{probe_media, EncoderChoice, ExportControl, ExportError, ExportJob, Gpu};
 use engine::{AudioOutput, Clip, Output, Project, Time, Track, TrackKind, Transition, SUPPORTED_VERSION};
 use gpufx_editor::editor::{EditorState, Status};
 use gpufx_editor::export::{ExportOutcome, ExportWorker};
@@ -175,13 +175,13 @@ fn a_real_file_without_sound_cannot_be_added_to_an_audio_track() {
     let (video_only, _) = test_clips();
     let dir = scratch("audio-track-refusal");
     let file = dir.join("project.json");
-    let paths = project_paths(Some(&file), &package_roots());
     let mut state = EditorState::default();
     state.add_track(TrackKind::Audio);
-    state.add_picked_file(0, &video_only, &paths);
+    state.add_probed_file(0, &video_only, &probe_media(&video_only).expect("probe the clip"));
     assert!(state.project().tracks[0].clips.is_empty(), "{:?}", state.status());
     assert!(matches!(state.status(), Status::Refused(_)));
-    state.add_picked_file(0, &tone_clip_with_video(), &paths);
+    let with_sound = tone_clip_with_video();
+    state.add_probed_file(0, &with_sound, &probe_media(&with_sound).expect("probe the clip"));
     assert_eq!(state.project().tracks[0].clips.len(), 1, "{:?}", state.status());
     save_project_file(state.project(), &file).expect("save the project");
     load_project_file(&file, &package_roots()).expect("what the UI let through opens again");
