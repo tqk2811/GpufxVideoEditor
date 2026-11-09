@@ -10,6 +10,8 @@ use crate::preview::backend::PreviewImage;
 
 /// How long to wait before redrawing when no frame could be presented.
 const SURFACE_RETRY: Duration = Duration::from_millis(100);
+/// How soon a frame is tried again when the preview holds the GPU's submit gate.
+const SUBMIT_BUSY_RETRY: Duration = Duration::from_millis(8);
 
 /// The current preview frame as egui sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,10 +104,18 @@ impl Presenter {
         self.apply_wanted_size(gpu)
     }
 
+    /// Whether a resize still waits, for a busy GPU or after a failure.
+    pub fn resize_pending(&self) -> bool {
+        self.wanted_size.is_some()
+    }
+
+    /// `None` when there is no wanted size or the preview holds the submit gate; the size stays
+    /// wanted, and the next redraw tries it.
     fn apply_wanted_size(&mut self, gpu: &Gpu) -> Option<Result<(), String>> {
         let (width, height) = self.wanted_size?;
+        let gate = gpu.try_lock_submits()?;
         let surface = &self.surface;
-        let result = apply_resize(&mut self.config, width, height, |config| gpu.configure_surface(surface, config));
+        let result = apply_resize(&mut self.config, width, height, |config| gpu.configure_surface(gate, surface, config));
         if result.is_ok() {
             self.wanted_size = None;
         }
@@ -114,15 +124,20 @@ impl Presenter {
 
     /// Runs the UI and presents. Returns how long egui can wait before the next frame.
     pub fn render(&mut self, gpu: &Gpu, mut ui: impl FnMut(&mut egui::Ui, Option<PreviewTexture>)) -> Result<Duration, String> {
+        // Taken before anything that could not be undone: input stays with egui for the next try.
+        let Some(gate) = gpu.try_lock_submits() else { return Ok(SUBMIT_BUSY_RETRY) };
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(SURFACE_RETRY),
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface_loss_error(gpu.device_lost())?;
+                drop(gate);
                 // On failure the status repeats and this runs again on the retry. A wanted size
                 // that is still pending is the one to configure.
                 if self.apply_wanted_size(gpu).is_none() {
-                    let _ = gpu.configure_surface(&self.surface, &self.config);
+                    if let Some(gate) = gpu.try_lock_submits() {
+                        let _ = gpu.configure_surface(gate, &self.surface, &self.config);
+                    }
                 }
                 return Ok(SURFACE_RETRY);
             }
@@ -177,7 +192,7 @@ impl Presenter {
             frame.image.record_end_sampling(&mut after);
             buffers.push(after.finish());
         }
-        let submission = gpu.submit_and_present(buffers, surface_texture);
+        let submission = gpu.submit_and_present(gate, buffers, surface_texture);
         if let Some(frame) = &mut self.frame {
             frame.last_use = Some(submission);
         }

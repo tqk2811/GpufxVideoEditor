@@ -1,7 +1,7 @@
 //! The one wgpu Direct3D 12 device shared by the compositor and gpufx.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::{self, ThreadId};
 
 use gpufx_core::GpuContext;
@@ -108,10 +108,20 @@ impl Gpu {
         self.submit_gate.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The submit gate if it is free right now. A frame of the UI asks with this instead of
+    /// [`Self::lock_submits`], because the first `process_d3d12` of a graph holds the gate for about
+    /// a second and the window must keep answering meanwhile.
+    pub fn try_lock_submits(&self) -> Option<MutexGuard<'_, ()>> {
+        match self.submit_gate.try_lock() {
+            Ok(gate) => Some(gate),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        }
+    }
+
     /// Configures `surface` under the submit gate, because wgpu waits for the queue to be idle here
     /// and fails if another thread submits meanwhile. The error comes back to the caller.
-    pub fn configure_surface(&self, surface: &wgpu::Surface<'_>, config: &wgpu::SurfaceConfiguration) -> Result<(), String> {
-        let _gate = self.lock_submits();
+    pub fn configure_surface(&self, _gate: MutexGuard<'_, ()>, surface: &wgpu::Surface<'_>, config: &wgpu::SurfaceConfiguration) -> Result<(), String> {
         let scopes = [wgpu::ErrorFilter::Validation, wgpu::ErrorFilter::OutOfMemory, wgpu::ErrorFilter::Internal].map(|filter| self.device.push_error_scope(filter));
         surface.configure(&self.device, config);
         let mut failure = None;
@@ -125,8 +135,7 @@ impl Gpu {
     }
 
     /// Submits `buffers` and presents `frame` as one step under the submit gate.
-    pub fn submit_and_present(&self, buffers: Vec<wgpu::CommandBuffer>, frame: wgpu::SurfaceTexture) -> wgpu::SubmissionIndex {
-        let _gate = self.lock_submits();
+    pub fn submit_and_present(&self, _gate: MutexGuard<'_, ()>, buffers: Vec<wgpu::CommandBuffer>, frame: wgpu::SurfaceTexture) -> wgpu::SubmissionIndex {
         let submission = self.queue.submit(buffers);
         self.queue.present(frame);
         submission

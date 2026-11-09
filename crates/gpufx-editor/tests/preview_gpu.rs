@@ -200,3 +200,14 @@ fn a_relative_source_follows_the_paths_of_the_request() {
     let missing = PreviewRequest { revision: 1, project, paths: elsewhere, frame: 3 };
     assert!(matches!(producer.produce(&missing), Err(ProduceError::Failed(_))), "the old decoder must not serve the moved project");
 }
+
+#[test]
+fn the_submit_gate_can_be_refused_instead_of_waited_for() {
+    let _exclusive = gpu_lock();
+    let Some(gpu) = hardware_gpu() else { return };
+    let held = gpu.lock_submits();
+    let refused = std::thread::scope(|scope| scope.spawn(|| gpu.try_lock_submits().is_none()).join().expect("the thread ends"));
+    assert!(refused, "a held gate must be refused");
+    drop(held);
+    assert!(gpu.try_lock_submits().is_some(), "a free gate must be taken");
+}

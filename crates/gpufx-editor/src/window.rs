@@ -411,7 +411,7 @@ impl Session {
         let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
         let delay = if self.state.is_exporting() {
             delay.min(EXPORT_REPAINT)
-        } else if self.state.is_playing() || self.tasks.has_waiting_load() {
+        } else if self.state.is_playing() || self.tasks.has_waiting_load() || self.presenter.resize_pending() {
             delay.min(PLAYING_REPAINT)
         } else {
             delay
