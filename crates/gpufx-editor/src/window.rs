@@ -54,6 +54,8 @@ const SMOKE_PLAY_VARIABLE: &str = "GPUFX_EDITOR_SMOKE_PLAY";
 const SMOKE_LANGUAGE_VARIABLE: &str = "GPUFX_EDITOR_SMOKE_LANGUAGE";
 #[cfg(debug_assertions)]
 const SMOKE_SEEK_AFTER: Duration = Duration::from_millis(1500);
+#[cfg(debug_assertions)]
+const SMOKE_UI_FRAMES_IGNORED: u64 = 3;
 
 #[cfg(debug_assertions)]
 #[derive(Default)]
@@ -65,6 +67,34 @@ struct Smoke {
     /// When the one seek of the check is due.
     seek_due: Option<Instant>,
     underrun_before_seek: u64,
+    /// UI pass times while pictures were being made, and after.
+    ui_frames: u64,
+    ui_generating: UiTimes,
+    ui_idle: UiTimes,
+}
+
+/// How long the UI passes of the smoke check took.
+#[cfg(debug_assertions)]
+#[derive(Default)]
+struct UiTimes {
+    frames: u64,
+    total: Duration,
+    longest: Duration,
+}
+
+#[cfg(debug_assertions)]
+impl UiTimes {
+    fn add(&mut self, time: Duration) {
+        self.frames += 1;
+        self.total += time;
+        self.longest = self.longest.max(time);
+    }
+
+    fn report(&self, label: &str) {
+        if self.frames > 0 {
+            println!("smoke ui {label}: {} frames, mean {:?}, longest {:?}", self.frames, self.total / self.frames as u32, self.longest);
+        }
+    }
 }
 
 /// Field order matters: the export, then the worker, stop before the presenter and device are dropped.
@@ -133,6 +163,9 @@ impl Session {
         };
         let package_roots = package_roots();
         let paths = Arc::new(project_paths(None, &package_roots));
+        state.visuals.get_mut().set_paths(paths.clone());
+        let visuals_window = session_window.clone();
+        state.visuals.get_mut().set_waker(Arc::new(move || visuals_window.request_redraw()));
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
         let (arrival_sender, arrivals) = channel();
@@ -422,7 +455,16 @@ impl Session {
         self.state.ui.fullscreen = self.presenter.window().fullscreen().is_some();
         let mut requests = Vec::new();
         let state = &mut self.state;
-        let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
+        let mut ui_time = Duration::ZERO;
+        let delay = self.presenter.render(&self.gpu, |root, preview| {
+            let started = Instant::now();
+            ui::show(root, state, &mut requests, preview);
+            ui_time = started.elapsed();
+        })?;
+        #[cfg(debug_assertions)]
+        self.record_smoke_ui(ui_time);
+        #[cfg(not(debug_assertions))]
+        let _ = ui_time;
         let delay = if self.state.is_exporting() {
             delay.min(EXPORT_REPAINT)
         } else if self.state.is_playing() || self.tasks.has_waiting_load() || self.presenter.resize_pending() {
@@ -444,6 +486,16 @@ impl Session {
         self.apply_transport();
         self.request_preview();
         Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    fn record_smoke_ui(&mut self, time: Duration) {
+        // The first frames measure font and panel setup, not the visuals.
+        self.smoke.ui_frames += 1;
+        if self.smoke.enabled && self.smoke.ui_frames > SMOKE_UI_FRAMES_IGNORED {
+            let times = if self.state.visuals.get_mut().generating() { &mut self.smoke.ui_generating } else { &mut self.smoke.ui_idle };
+            times.add(time);
+        }
     }
 
     /// When a running smoke check will end the app.
@@ -469,6 +521,7 @@ impl Session {
         }
         self.paths_file = self.state.project_file().map(Path::to_path_buf);
         self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.state.visuals.get_mut().set_paths(self.paths.clone());
         // The audio played on since this frame polled it, so catch up first.
         self.poll_playback();
         self.playback = None;
@@ -695,7 +748,11 @@ impl ApplicationHandler for EditorApp {
                     event_loop.exit();
                 } else if session.smoke_finished() {
                     #[cfg(debug_assertions)]
-                    session.report_smoke_audio();
+                    {
+                        session.smoke.ui_generating.report("while generating");
+                        session.smoke.ui_idle.report("idle");
+                        session.report_smoke_audio();
+                    }
                     event_loop.exit();
                 }
             }

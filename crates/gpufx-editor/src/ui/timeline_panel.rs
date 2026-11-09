@@ -8,7 +8,11 @@ use crate::timeline::drag::{begin_drag, clamp_trim, drag_command};
 use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
 use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
 use crate::timeline::view::{content_end, ViewArea, Wheel, TRACK_HEIGHT};
-use egui::{Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Layout, MouseWheelUnit, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, UiBuilder, Vec2};
+use crate::visuals::levels::{bar_fraction, peak_bucket};
+use crate::visuals::plan::{bar_span, bucket_step, bucket_time, split_body, tile_source_ticks, tile_ticks, visible_cells, BAR_GAP, BAR_WIDTH};
+use crate::visuals::{ClipVisuals, SourceView};
+use egui::{Align, Align2, Color32, CornerRadius, CursorIcon, Event, FontId, Layout, Mesh, MouseWheelUnit, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, UiBuilder, Vec2};
+use std::cell::RefCell;
 use engine::{Clip, ClipKey, Time, TrackKind};
 
 const TOOLBAR_HEIGHT: f32 = 36.0;
@@ -19,6 +23,10 @@ const CLIP_HEADER_HEIGHT: f32 = 14.0;
 const CLIP_RADIUS: u8 = 4;
 const ZOOM_SLIDER_WIDTH: f32 = 130.0;
 const PLAYHEAD_MARKER: f32 = 6.0;
+/// The picture shape used until a source says its own.
+const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
+const BARS_COLOR: Color32 = Color32::from_rgb(96, 208, 158);
+const BARS_MUTED: Color32 = Color32::from_rgb(120, 120, 130);
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let rect = ui.max_rect();
@@ -235,7 +243,7 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
             let rect = span_rect(state, tracks_rect, row, clip.start, clip.start.saturating_add(clip.duration));
             if rect.intersects(tracks_rect) {
                 let dragged = state.drag.is_some_and(|drag| drag.key == key);
-                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged });
+                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second() });
             }
         }
         draw_transitions(&painter, state, tracks_rect, row, track);
@@ -243,7 +251,7 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
     draw_drag_preview(ui, state, tracks_rect);
 }
 
-/// One clip to draw. Thumbnails, a waveform and lock or hide marks belong in [`draw_clip`].
+/// One clip to draw. Lock or hide marks belong in [`draw_clip`].
 pub struct ClipPaint<'a> {
     pub clip: &'a Clip,
     pub kind: TrackKind,
@@ -252,10 +260,12 @@ pub struct ClipPaint<'a> {
     pub clip_area: Rect,
     pub selected: bool,
     pub dragged: bool,
+    /// The thumbnails and levels to draw, when there are any to draw from.
+    pub visuals: Option<&'a RefCell<ClipVisuals>>,
+    pub pixels_per_second: f64,
 }
 
-/// Paints a clip's body, name strip and selection. The rest of `paint.rect` under the strip is free
-/// for the picture and the waveform.
+/// Paints a clip's body, name strip, pictures, level bars and selection.
 pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     let (body, header) = match paint.kind {
         TrackKind::Video => (theme::VIDEO_CLIP, theme::VIDEO_CLIP_HEADER),
@@ -268,9 +278,85 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     painter.rect_filled(strip, CornerRadius { nw: CLIP_RADIUS, ne: CLIP_RADIUS, sw: 0, se: 0 }, dim(header));
     let text = painter.with_clip_rect(paint.rect.intersect(paint.clip_area));
     text.text(strip.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_label(&paint.clip.source), FontId::proportional(11.0), theme::TEXT);
+    if let Some(visuals) = paint.visuals {
+        draw_clip_media(painter, paint, &mut visuals.borrow_mut(), paint.rect.with_min_y(strip.bottom()));
+    }
     if paint.selected {
         painter.rect_stroke(paint.rect, radius, Stroke::new(2.0, theme::SELECTED), StrokeKind::Inside);
     }
+}
+
+/// The pictures and level bars under the name strip. Only what is on screen is asked for.
+fn draw_clip_media(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut ClipVisuals, body: Rect) {
+    let clipped = painter.with_clip_rect(paint.rect.intersect(paint.clip_area));
+    let slot = visuals.slot(&paint.clip.source);
+    let view = visuals.view(slot);
+    let (has_picture, has_sound, aspect, length) = match view {
+        SourceView::Known(facts) => (facts.has_video, facts.has_audio, facts.aspect, facts.length),
+        SourceView::Failed => (false, false, DEFAULT_ASPECT, None),
+        SourceView::Pending => (paint.kind == TrackKind::Video, false, DEFAULT_ASPECT, None),
+    };
+    // An audio track has only sound, whatever else the file holds.
+    let film = has_picture && paint.kind == TrackKind::Video;
+    // A source nothing can be drawn from keeps the placeholder over the whole body.
+    let placeholder = view == SourceView::Failed && paint.kind == TrackKind::Video;
+    let (film_height, bars_height) = split_body(body.height(), film || placeholder, has_sound);
+    if film_height > 0.0 {
+        let strip = body.with_max_y(body.top() + film_height);
+        draw_film_strip(&clipped, paint, visuals, slot, strip, aspect, length, film);
+    }
+    if bars_height > 0.0 {
+        draw_level_bars(&clipped, paint, visuals, slot, body.with_min_y(body.bottom() - bars_height));
+    } else if film_height == 0.0 {
+        clipped.rect_filled(body, CornerRadius::ZERO, Color32::from_black_alpha(70));
+    }
+}
+
+/// Contiguous pictures along the clip, anchored to its left edge so scrolling does not shift them.
+#[allow(clippy::too_many_arguments)]
+fn draw_film_strip(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut ClipVisuals, slot: usize, strip: Rect, aspect: f32, length: Option<Time>, show_pictures: bool) {
+    let tile_width = (strip.height() * aspect).max(8.0);
+    let visible = paint.clip_area.x_range();
+    let tint = if paint.dragged { Color32::from_white_alpha(128) } else { Color32::WHITE };
+    let cells = visible_cells(f64::from(strip.left()), f64::from(tile_width), f64::from(strip.width()), f64::from(visible.min)..f64::from(visible.max));
+    let step = bucket_step(tile_ticks(f64::from(tile_width), paint.pixels_per_second));
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    for index in cells {
+        let left = strip.left() + index as f32 * tile_width;
+        let tile = Rect::from_min_size(Pos2::new(left, strip.top()), Vec2::new(tile_width, strip.height()));
+        let source = tile_source_ticks(paint.clip, f64::from(tile_width), paint.pixels_per_second, index);
+        let texture = if show_pictures { visuals.tile(slot, bucket_time(source, step, length), step) } else { None };
+        match texture {
+            Some(texture) => painter.image(texture, tile, uv, tint),
+            None => painter.rect_filled(tile, CornerRadius::ZERO, Color32::from_black_alpha(if index % 2 == 0 { 70 } else { 55 })),
+        };
+    }
+}
+
+/// One bar per few pixels, its height the loudest peak of that part of the source in dBFS.
+fn draw_level_bars(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut ClipVisuals, slot: usize, strip: Rect) {
+    let pitch = BAR_WIDTH + BAR_GAP;
+    let visible = paint.clip_area.x_range();
+    let cells = visible_cells(f64::from(strip.left()), pitch, f64::from(strip.width()), f64::from(visible.min)..f64::from(visible.max));
+    let Some(peaks) = visuals.peaks(slot) else {
+        painter.rect_filled(strip, CornerRadius::ZERO, Color32::from_black_alpha(90));
+        return;
+    };
+    let color = if paint.clip.muted { BARS_MUTED } else { BARS_COLOR };
+    let color = if paint.dragged { color.gamma_multiply(0.5) } else { color };
+    let mut mesh = Mesh::default();
+    for index in cells {
+        let span = bar_span(paint.clip, paint.pixels_per_second, index);
+        let peak = peaks.max_between(peak_bucket(span.start), peak_bucket(span.end - 1) + 1);
+        let height = bar_fraction(peak, paint.clip.gain_db) * strip.height();
+        if height <= 0.0 {
+            continue;
+        }
+        let left = strip.left() + index as f32 * pitch as f32;
+        let bar = Rect::from_min_max(Pos2::new(left, strip.bottom() - height), Pos2::new(left + BAR_WIDTH as f32, strip.bottom()));
+        mesh.add_colored_rect(bar, color);
+    }
+    painter.add(Shape::mesh(mesh));
 }
 
 fn draw_transitions(painter: &egui::Painter, state: &EditorState, tracks_rect: Rect, row: Rect, track: &engine::Track) {

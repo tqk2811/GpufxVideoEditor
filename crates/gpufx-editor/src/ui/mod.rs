@@ -34,6 +34,11 @@ pub enum UiRequest {
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     theme::apply(root.ctx());
+    state.visuals.borrow_mut().begin_frame(root.ctx());
+    {
+        let mut visuals = state.visuals.borrow_mut();
+        visuals.sync_project(state.revision(), state.project());
+    }
     handle_shortcuts(root.ctx(), state, requests);
     let screen = root.max_rect();
     let Panels { top_bar, left, center, right, timeline, status } = panels(screen.size());
@@ -56,6 +61,7 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     if !root.ctx().input(|input| input.pointer.any_down()) {
         state.pointer_released();
     }
+    state.visuals.borrow_mut().end_frame();
 }
 
 /// The window lost the focus: a hold is cancelled, as Escape cancels it, because switching windows

@@ -7,7 +7,7 @@ use engine::{Project, Time, TICKS_PER_SECOND};
 pub const MIN_PIXELS_PER_SECOND: f64 = 1.0;
 pub const MAX_PIXELS_PER_SECOND: f64 = 2000.0;
 pub const DEFAULT_PIXELS_PER_SECOND: f64 = 80.0;
-pub const TRACK_HEIGHT: f64 = 52.0;
+pub const TRACK_HEIGHT: f64 = 76.0;
 /// Empty space after the last clip, so a clip can be dragged past the end.
 pub const END_PADDING: f64 = 200.0;
 const ZOOM_SPEED: f64 = 0.0025;

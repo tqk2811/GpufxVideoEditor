@@ -99,7 +99,7 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = CELL_GAP;
                 for item in row {
-                    if media_cell(ui, item, Vec2::new(cell_width, cell_height), kind) {
+                    if media_cell(ui, state, item, Vec2::new(cell_width, cell_height), kind) {
                         chosen = Some(item.clone());
                     }
                 }
@@ -120,9 +120,9 @@ fn empty_message(search: &str) -> Message {
     }
 }
 
-/// One tile of the grid. The picture slot is for a thumbnail later. True on a first click: the
+/// One tile of the grid, with a thumbnail of the file once it is made. True on a first click: the
 /// later clicks of a double click do not add the file again.
-fn media_cell(ui: &mut egui::Ui, item: &MediaItem, size: Vec2, kind: MediaKind) -> bool {
+fn media_cell(ui: &mut egui::Ui, state: &EditorState, item: &MediaItem, size: Vec2, kind: MediaKind) -> bool {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter_at(rect);
     let radius = CornerRadius::same(theme::CONTROL_RADIUS);
@@ -131,7 +131,15 @@ fn media_cell(ui: &mut egui::Ui, item: &MediaItem, size: Vec2, kind: MediaKind) 
     painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
     let thumb = Rect::from_min_size(rect.min, Vec2::new(rect.width(), rect.height() - CELL_CAPTION)).shrink(4.0);
     painter.rect_filled(thumb, CornerRadius::same(4), Color32::from_rgb(16, 16, 24));
-    icons::paint(&painter, Rect::from_center_size(thumb.center(), Vec2::splat(22.0)), if kind == MediaKind::Audio { Icon::Music } else { Icon::Film }, theme::TEXT_DIM);
+    // Only a tile scrolled into view asks for its picture.
+    let poster = (kind == MediaKind::Video && ui.is_rect_visible(thumb)).then(|| state.visuals.borrow_mut().poster(&item.source, item.duration)).flatten();
+    match poster {
+        Some((texture, aspect)) => {
+            let picture = Rect::from_center_size(thumb.center(), fit_size(thumb.size(), aspect));
+            painter.image(texture, picture, Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        None => icons::paint(&painter, Rect::from_center_size(thumb.center(), Vec2::splat(22.0)), if kind == MediaKind::Audio { Icon::Music } else { Icon::Film }, theme::TEXT_DIM),
+    }
     let duration = match (item.duration, item.estimated) {
         (Some(duration), false) => format_duration(duration),
         (Some(duration), true) => format!("~{}", format_duration(duration)),
@@ -148,6 +156,12 @@ fn media_cell(ui: &mut egui::Ui, item: &MediaItem, size: Vec2, kind: MediaKind) 
     painter.with_clip_rect(caption).text(caption.left_center(), Align2::LEFT_CENTER, &item.name, FontId::proportional(12.0), theme::TEXT);
     let response = response.on_hover_text(&item.source);
     response.clicked() && !response.double_clicked() && !response.triple_clicked()
+}
+
+/// The largest size of shape `aspect` inside `room`.
+fn fit_size(room: Vec2, aspect: f32) -> Vec2 {
+    let width = room.x.min(room.y * aspect);
+    Vec2::new(width, width / aspect.max(0.01))
 }
 
 /// The effect and transition lists with their filter.
@@ -226,6 +240,13 @@ fn picker_problems(ui: &mut egui::Ui, state: &EditorState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_poster_fits_its_tile_keeping_its_shape() {
+        assert_eq!(fit_size(Vec2::new(160.0, 90.0), 16.0 / 9.0), Vec2::new(160.0, 90.0));
+        assert_eq!(fit_size(Vec2::new(160.0, 90.0), 1.0), Vec2::new(90.0, 90.0));
+        assert_eq!(fit_size(Vec2::new(90.0, 90.0), 2.0), Vec2::new(90.0, 45.0));
+    }
 
     #[test]
     fn a_tab_label_shrinks_only_when_it_does_not_fit() {
