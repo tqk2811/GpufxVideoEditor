@@ -2,15 +2,21 @@
 //! open window does it away from its UI thread; [`execute`] is quick and runs where the state lives.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
+use std::sync::Arc;
+
+use base64::Engine as _;
 
 use d3d12_backend::{probe_media, read_package_info, MediaProbe, ProjectPaths};
-use engine::{clip_at, frame_count, nearest_free_start, Clip, ClipKey, Effect, Project, Time, TrackKind, Transition};
+use engine::{clip_at, frame_count, frame_time, nearest_free_start, Clip, ClipKey, Effect, Project, Time, TrackKind, Transition};
 use serde_json::{json, Map, Value};
 
-use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, ClipRef};
+use super::image::encode_png;
+use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
 use crate::editor::{new_clip, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
 use crate::project_file::{load_project_file_for_agent, save_project_file};
+use crate::preview::plan::frame_index;
 use crate::project_lock;
 
 /// A request with what had to be read from disk for it.
@@ -27,6 +33,30 @@ pub struct Prepared {
 #[derive(Debug)]
 pub enum Step {
     Done(AgentResult),
+    /// A frame being rendered; [`PendingFrame::finish`] may block, so it runs off the UI thread.
+    Frame(PendingFrame),
+}
+
+/// A capture on its way: the picture arrives on `rgba`.
+#[derive(Debug)]
+pub struct PendingFrame {
+    rgba: Receiver<Result<Vec<u8>, AgentError>>,
+    width: u32,
+    height: u32,
+    frame: i64,
+    time: Time,
+    revision: u64,
+    max_width: u32,
+}
+
+impl PendingFrame {
+    /// Waits for the picture and encodes it.
+    pub fn finish(self) -> AgentResult {
+        let rgba = self.rgba.recv().map_err(|_| AgentError::new("capture_failed", "the frame was never rendered"))??;
+        let (png, width, height) = encode_png(&rgba, self.width, self.height, self.max_width).map_err(|message| AgentError::new("capture_failed", message))?;
+        let png = base64::engine::general_purpose::STANDARD.encode(png);
+        Ok(json!({"png": png, "width": width, "height": height, "frame": self.frame, "time": self.time, "revision": self.revision}))
+    }
 }
 
 /// The side of a session that differs between a window and no window.
@@ -34,6 +64,8 @@ pub trait AgentHost {
     /// `file` or `live`.
     fn mode(&self) -> &'static str;
     fn state(&mut self) -> &mut EditorState;
+    /// Renders output frame `frame` of `project` as RGBA of its output size, without changing anything shown.
+    fn capture(&mut self, project: Arc<Project>, frame: i64) -> Receiver<Result<Vec<u8>, AgentError>>;
     /// Whether a dialog or a load of the window is in the way of replacing the project.
     fn tasks_busy(&self) -> bool {
         false
@@ -251,6 +283,28 @@ fn undo_or_redo<H: AgentHost>(host: &mut H, expected: u64, undo: bool) -> Result
     }
 }
 
+fn frame_capture<H: AgentHost>(host: &mut H, target: CaptureTarget, max_width: u32) -> Result<PendingFrame, AgentError> {
+    let state = host.state();
+    if state.is_exporting() {
+        return Err(busy("an export is running"));
+    }
+    let revision = state.revision();
+    let project = Arc::new(state.project().clone());
+    let frame = match target {
+        CaptureTarget::Time(time) if time >= Time::ZERO => frame_index(&project, time),
+        CaptureTarget::Time(_) => -1,
+        CaptureTarget::Frame(frame) => frame,
+    };
+    let frames = frame_count(&project);
+    if frame < 0 || frame >= frames {
+        return Err(AgentError { code: "out_of_range".to_owned(), message: format!("the timeline has {frames} frames: nothing at {target:?}"), data: json!({"frames": frames}) });
+    }
+    let time = frame_time(&project, frame).ok_or_else(|| AgentError::new("out_of_range", "the time of the frame overflows"))?;
+    let (width, height) = (project.output.width, project.output.height);
+    let rgba = host.capture(project, frame);
+    Ok(PendingFrame { rgba, width, height, frame, time, revision, max_width })
+}
+
 /// Runs a prepared request against the host's state. `revision` is added to every object it answers.
 pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
     let Prepared { request, loaded, probe, packages_problem, package_list } = prepared;
@@ -273,7 +327,11 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         },
         AgentRequest::Undo { expected_revision } => undo_or_redo(host, expected_revision, true),
         AgentRequest::Redo { expected_revision } => undo_or_redo(host, expected_revision, false),
-        AgentRequest::FrameCapture { .. } | AgentRequest::ExportStart { .. } | AgentRequest::ExportStatus { .. } | AgentRequest::ExportCancel { .. } => Err(AgentError::new("internal", "not available yet")),
+        AgentRequest::FrameCapture { target, max_width } => match frame_capture(host, target, max_width) {
+            Ok(frame) => return Step::Frame(frame),
+            Err(error) => Err(error),
+        },
+        AgentRequest::ExportStart { .. } | AgentRequest::ExportStatus { .. } | AgentRequest::ExportCancel { .. } => Err(AgentError::new("internal", "not available yet")),
     };
     Step::Done(with_revision(result, host.state().revision()))
 }

@@ -19,3 +19,4 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-st
 
 [dev-dependencies]
 png = "0.18"
+base64 = "0.22"

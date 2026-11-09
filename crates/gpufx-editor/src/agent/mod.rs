@@ -3,8 +3,9 @@
 //! come from the `gpufx-mcp` process, either directly (no window) or through the local pipe of an
 //! open window. See `docs/plans/spec-mcp-server-vi.md`.
 
+pub mod image;
 pub mod protocol;
 pub mod run;
 
 pub use protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget};
-pub use run::{execute, prepare, AgentHost, Prepared, Step};
+pub use run::{execute, prepare, AgentHost, PendingFrame, Prepared, Step};

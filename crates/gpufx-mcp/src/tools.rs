@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use engine::Time;
 use gpufx_editor::agent::protocol::ClipRef;
-use gpufx_editor::agent::{AgentEdit, AgentError, AgentRequest};
+use gpufx_editor::agent::{AgentEdit, AgentError, AgentRequest, CaptureTarget};
 use rmcp::model::{JsonObject, Tool};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -76,6 +76,7 @@ params!(GainParams { expected_revision: u64, clip: ClipParam, gain_db: f64 });
 params!(MutedParams { expected_revision: u64, clip: ClipParam, muted: bool });
 params!(FadesParams { expected_revision: u64, clip: ClipParam, fade_in: i64, fade_out: i64 });
 params!(RevisionParams { expected_revision: u64 });
+params!(FrameCaptureParams { time: Option<i64>, frame: Option<i64>, max_width: Option<u32> });
 
 /// One tool of the server.
 pub struct ToolDef {
@@ -126,6 +127,22 @@ fn edit(expected_revision: u64, edit: AgentEdit) -> Result<AgentRequest, AgentEr
     Ok(AgentRequest::Edit { expected_revision, edit })
 }
 
+/// Width a capture is limited to unless the call says otherwise.
+const DEFAULT_MAX_WIDTH: u32 = 1280;
+
+fn frame_capture(p: FrameCaptureParams) -> Result<AgentRequest, AgentError> {
+    let target = match (p.time, p.frame) {
+        (Some(time), None) => CaptureTarget::Time(ticks(time)),
+        (None, Some(frame)) => CaptureTarget::Frame(frame),
+        _ => return Err(AgentError::new("invalid_params", "give exactly one of time and frame")),
+    };
+    let max_width = p.max_width.unwrap_or(DEFAULT_MAX_WIDTH);
+    if max_width == 0 {
+        return Err(AgentError::new("invalid_params", "max_width must be positive"));
+    }
+    Ok(AgentRequest::FrameCapture { target, max_width })
+}
+
 /// Every tool. Times are integer ticks of 1/90000 s.
 pub fn all_tools() -> Vec<ToolDef> {
     vec![
@@ -153,5 +170,6 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("clip_set_fades", "Sets the audio fades of a clip, in ticks.", FadesParams, |p| edit(p.expected_revision, AgentEdit::ClipSetFades { clip: p.clip.into(), fade_in: ticks(p.fade_in), fade_out: ticks(p.fade_out) })),
         tool!("undo", "Undoes the last edit.", RevisionParams, |p| Ok(AgentRequest::Undo { expected_revision: p.expected_revision })),
         tool!("redo", "Redoes an undone edit.", RevisionParams, |p| Ok(AgentRequest::Redo { expected_revision: p.expected_revision })),
+        tool!("frame_capture", "The composited frame at a time (ticks) or frame index, exactly one of them, as a PNG no wider than max_width (default 1280). A position outside the timeline is an error.", FrameCaptureParams, frame_capture),
     ]
 }
