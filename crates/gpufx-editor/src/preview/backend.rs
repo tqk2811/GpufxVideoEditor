@@ -25,7 +25,8 @@ pub fn editor_paths() -> ProjectPaths {
 
 const RECYCLE_WAIT: Duration = Duration::from_secs(1);
 /// How long a decode runs before a newer request can stop it. Short decodes finish, so a continuous
-/// scrub keeps showing frames; a long catch-up is still stopped soon after it is no longer wanted.
+/// scrub keeps showing frames; a long catch-up is stopped soon after it is no longer wanted, unless
+/// no frame was published lately (the decoder checks), so a slow source still shows pictures.
 const ABORT_GRACE: Duration = Duration::from_millis(150);
 
 pub struct PreviewRequest {
@@ -52,6 +53,7 @@ pub struct D3d12Producer {
     compositor: Option<Sized>,
     renderer: FrameRenderer<D3d12Compositor>,
     abort: Option<Arc<AtomicBool>>,
+    closing: Option<Arc<AtomicBool>>,
 }
 
 /// Sorts a failed frame's message into a real failure or a cancelled decode.
@@ -66,7 +68,7 @@ fn classify(message: String) -> ProduceError {
 impl D3d12Producer {
     pub fn new(gpu: Arc<Gpu>) -> Self {
         let paths = Arc::new(editor_paths());
-        Self { gpu, paths, compositor: None, renderer: FrameRenderer::default(), abort: None }
+        Self { gpu, paths, compositor: None, renderer: FrameRenderer::default(), abort: None, closing: None }
     }
 
     fn compositor_for(&mut self, width: u32, height: u32) -> Result<&mut D3d12Compositor, String> {
@@ -78,6 +80,9 @@ impl D3d12Producer {
             let mut compositor = D3d12Compositor::new(self.gpu.clone(), self.paths.clone(), width, height)?;
             if let Some(abort) = &self.abort {
                 compositor.set_abort(abort.clone(), ABORT_GRACE);
+            }
+            if let Some(closing) = &self.closing {
+                compositor.set_closing(closing.clone());
             }
             self.compositor = Some(Sized { width, height, compositor });
         }
@@ -114,7 +119,11 @@ impl FrameProducer for D3d12Producer {
         match result {
             Ok(image) => Ok(image.map(|image| PreviewImage { image, last_use: None })),
             Err(message) => match classify(message) {
-                ProduceError::Cancelled => Err(ProduceError::Cancelled),
+                ProduceError::Cancelled => {
+                    // A layer that ran before the cancel may have left a wgpu error; it must not be blamed on the next frame.
+                    self.gpu.take_error();
+                    Err(ProduceError::Cancelled)
+                }
                 failed => {
                     self.gpu.take_error();
                     Err(failed)
@@ -142,6 +151,10 @@ impl FrameProducer for D3d12Producer {
 
     fn set_abort(&mut self, abort: Arc<AtomicBool>) {
         self.abort = Some(abort);
+    }
+
+    fn set_closing(&mut self, closing: Arc<AtomicBool>) {
+        self.closing = Some(closing);
     }
 }
 

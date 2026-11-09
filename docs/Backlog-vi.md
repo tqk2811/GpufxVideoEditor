@@ -106,7 +106,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Thấp] Package root và `ProjectPaths` của preview đang cố định
 
-`crates/gpufx-editor/src/preview/backend.rs:17` lấy package root từ `CARGO_MANIFEST_DIR`, hỏng khi chạy ở máy khác; `crates/gpufx-editor/src/preview/backend.rs:20` và `:63` cố định `ProjectPaths` vào `unsaved.json`. Bước 6 phải giải quyết. Ghi ngày 2026-11-09.
+`crates/gpufx-editor/src/preview/backend.rs:17` lấy package root từ `CARGO_MANIFEST_DIR`, hỏng khi chạy ở máy khác; `crates/gpufx-editor/src/preview/backend.rs:20` và `:23` cố định `ProjectPaths` vào `unsaved.json`. Bước 6 phải giải quyết. Ghi ngày 2026-11-09.
 
 ### [Thấp] `clip_graphs` và `transition_graphs` không bao giờ được dọn
 

@@ -63,6 +63,8 @@ struct Session {
     /// The request behind the frame on screen.
     shown: Option<RequestId>,
     snapshot: Option<(u64, Arc<Project>)>,
+    /// A surface or resize failure that still applies; a following preview frame must not clear it.
+    surface_error: Option<String>,
     /// The revision the audio thread has.
     audio_revision: u64,
     #[cfg(debug_assertions)]
@@ -101,6 +103,7 @@ impl Session {
             tracker: RequestTracker::default(),
             shown: None,
             snapshot: None,
+            surface_error: None,
             audio_revision: 0,
             #[cfg(debug_assertions)]
             smoke,
@@ -118,7 +121,7 @@ impl Session {
         match result {
             Ok(frame) => {
                 self.shown = Some(id);
-                self.state.set_preview_error(None);
+                self.state.set_preview_error(self.surface_error.clone());
                 if let Some(old) = self.presenter.set_frame(&self.gpu, frame) {
                     self.preview.give_back(old);
                 }
@@ -271,11 +274,26 @@ impl Session {
         }
     }
 
+    /// Records the outcome of a resize. A failure is shown; once it is gone, so is its message.
+    fn set_surface_error(&mut self, error: Option<String>) {
+        let shown = self.state.preview_error().map(str::to_owned);
+        if error.is_none() && shown == self.surface_error {
+            self.state.set_preview_error(None);
+        }
+        if let Some(message) = &error {
+            self.state.set_preview_error(Some(message.clone()));
+        }
+        self.surface_error = error;
+    }
+
     fn redraw(&mut self) -> Result<(), String> {
         self.collect_preview();
         self.poll_playback();
         #[cfg(debug_assertions)]
         self.drive_smoke();
+        if let Some(retried) = self.presenter.retry_resize(&self.gpu) {
+            self.set_surface_error(retried.err());
+        }
         let mut requests = Vec::new();
         let state = &mut self.state;
         let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
@@ -359,8 +377,10 @@ impl ApplicationHandler for EditorApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Err(message) = session.presenter.resize(&session.gpu, size.width, size.height) {
-                    session.state.set_preview_error(Some(message));
+                let resized = session.presenter.resize(&session.gpu, size.width, size.height);
+                // A minimised window asks for nothing, so it says nothing about an earlier failure.
+                if size.width != 0 && size.height != 0 {
+                    session.set_surface_error(resized.err());
                 }
             }
             WindowEvent::RedrawRequested => {

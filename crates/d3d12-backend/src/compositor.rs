@@ -27,7 +27,7 @@ use windows::Win32::Graphics::Direct3D12::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
 
-use crate::decoder::{DecodedFrame, SequentialDecoder};
+use crate::decoder::{DecodedFrame, PublishClock, SequentialDecoder};
 use crate::gpu::Gpu;
 use crate::paths::ProjectPaths;
 
@@ -287,13 +287,23 @@ pub struct D3d12Compositor {
     readback: Option<wgpu::Buffer>,
     /// Passed to every decoder this compositor opens; see [`SequentialDecoder::set_abort`].
     abort: Option<(Arc<AtomicBool>, Duration)>,
+    /// Passed to every decoder with the clock: closing cancels a decode at once.
+    closing: Option<Arc<AtomicBool>>,
+    /// Marked by [`D3d12Compositor::publish`]; a decode is cancelled by a newer request only while it is fresh.
+    publish_clock: Arc<PublishClock>,
 }
 
 impl D3d12Compositor {
     /// A compositor writing images of `width` x `height`.
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, readback: None, abort: None })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, readback: None, abort: None, closing: None, publish_clock: Arc::default() })
+    }
+
+    /// Makes `closing` stop the decoders opened from now on at once, and lets a newer request stop
+    /// them only while a frame was published lately. Call after [`Self::set_abort`].
+    pub fn set_closing(&mut self, closing: Arc<AtomicBool>) {
+        self.closing = Some(closing);
     }
 
     /// Lets `flag` stop the decoders opened from now on; see [`SequentialDecoder::set_abort`].
@@ -321,6 +331,7 @@ impl D3d12Compositor {
             return Ok(None);
         }
         self.images[image.0].wait()?;
+        self.publish_clock.mark();
         let replacement = match self.spares.pop() {
             Some(spare) => spare,
             None => Image::create(&self.gpu, self.width, self.height)?,
@@ -434,6 +445,7 @@ impl Compositor for D3d12Compositor {
         let mut decoder = SequentialDecoder::open(&self.paths.source_path(source), self.gpu.raw_device())?;
         if let Some((flag, grace)) = &self.abort {
             decoder.set_abort(flag.clone(), *grace);
+            decoder.set_abort_policy(self.closing.clone(), Some(self.publish_clock.clone()));
         }
         Ok(decoder)
     }

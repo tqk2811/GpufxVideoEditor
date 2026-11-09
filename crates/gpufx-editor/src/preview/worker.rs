@@ -29,6 +29,10 @@ pub trait FrameProducer {
     /// Receives, once, the flag that is set when the request in progress is no longer wanted: a
     /// newer one waits or the app is closing. A long `produce` should watch it.
     fn set_abort(&mut self, _abort: Arc<AtomicBool>) {}
+
+    /// Receives, once, the flag that is set when the app is closing: unlike the abort flag it is not
+    /// set by a newer request, so `produce` can stop at once for it and weigh the other.
+    fn set_closing(&mut self, _closing: Arc<AtomicBool>) {}
 }
 
 /// Why `produce` returned no frame.
@@ -77,9 +81,11 @@ impl<P: FrameProducer + 'static> PreviewWorker<P> {
         let (returned, returned_frames) = channel::<P::Frame>();
         let (thread_requests, thread_results) = (requests.clone(), results.clone());
         let abort = requests.pending();
+        let closing = requests.closing();
         let handle = thread::Builder::new().name("preview".to_owned()).spawn(move || {
             let mut producer = make();
             producer.set_abort(abort);
+            producer.set_closing(closing);
             while let Some(request) = thread_requests.wait() {
                 for frame in returned_frames.try_iter() {
                     recycle_guarded(&mut producer, frame);

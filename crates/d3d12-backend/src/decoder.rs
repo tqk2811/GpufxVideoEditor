@@ -36,9 +36,57 @@ pub fn is_cancelled(message: &str) -> bool {
     message.ends_with(DECODE_CANCELLED)
 }
 
-/// Whether a decode that has run for `elapsed` should stop.
-fn should_abort(flag: bool, elapsed: Duration, grace: Duration) -> bool {
-    flag && elapsed >= grace
+/// How long ago a frame may have been published for a newer request to still cancel the decode in
+/// progress. Older than this, the screen is stale, so the decode runs on until it shows something:
+/// a drag over a slow source then gets a picture about every this long, instead of none.
+const PUBLISH_FRESH_WITHIN: Duration = Duration::from_millis(500);
+
+/// When the last frame was published, shared between the compositor that publishes and the decoders
+/// that decide whether a newer request may cancel them.
+#[derive(Debug)]
+pub struct PublishClock {
+    origin: Instant,
+    /// Milliseconds after `origin` of the last publish, or `u64::MAX` before the first.
+    last: std::sync::atomic::AtomicU64,
+}
+
+impl Default for PublishClock {
+    fn default() -> Self {
+        Self { origin: Instant::now(), last: std::sync::atomic::AtomicU64::new(u64::MAX) }
+    }
+}
+
+impl PublishClock {
+    /// Records that a frame was published now.
+    pub fn mark(&self) {
+        self.last.store(self.origin.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Whether a frame was published within [`PUBLISH_FRESH_WITHIN`].
+    fn is_fresh(&self) -> bool {
+        match self.last.load(Ordering::Relaxed) {
+            u64::MAX => false,
+            at => (self.origin.elapsed().as_millis() as u64).saturating_sub(at) <= PUBLISH_FRESH_WITHIN.as_millis() as u64,
+        }
+    }
+}
+
+/// Whether a decode that has run for `elapsed` should stop. Closing always stops it. A newer request
+/// stops it once the grace has passed, but only while a frame was published recently: otherwise
+/// every request of a slow drag would be cancelled in turn and nothing would ever be shown.
+fn should_abort(newer_waits: bool, closing: bool, elapsed: Duration, grace: Duration, recently_published: bool) -> bool {
+    closing || (newer_waits && elapsed >= grace && recently_published)
+}
+
+/// What `seek_target` should be after a request ended with `held` empty or not. A seek that
+/// decoded no frame must not leave its target behind: the next request would take it for a landing
+/// to continue from and report that no frame could be decoded.
+fn seek_target_after_attempt(held_is_none: bool, seek_target: Option<i64>) -> Option<i64> {
+    if held_is_none {
+        None
+    } else {
+        seek_target
+    }
 }
 
 /// The stream timestamp of `ticks` of source time, rounded to the nearest unit of the time base
@@ -56,10 +104,14 @@ fn stream_pts(ticks: i64, num: i32, den: i32, start_pts: i64) -> i64 {
 /// distance below which a seek has already been seen to land behind the position.
 fn forward_seek_pays(position: i64, target: i64, threshold: i64, min_distance: Option<i64>, keyframe: impl FnOnce() -> Option<i64>) -> bool {
     let distance = target.saturating_sub(position);
-    if distance <= threshold || min_distance.is_some_and(|min| distance <= min) {
+    if distance <= threshold {
         return false;
     }
-    keyframe().is_none_or(|keyframe| keyframe > position)
+    // The index is exact, so it comes first; the learned distance only stands in for a missing one.
+    match keyframe() {
+        Some(keyframe) => keyframe > position,
+        None => !min_distance.is_some_and(|min| distance <= min),
+    }
 }
 
 /// Decides what follows a forward seek to `point` for `target`, given the first decoded frame:
@@ -219,6 +271,10 @@ pub struct SequentialDecoder {
     min_forward_seek: Option<i64>,
     /// Set by the owner to stop the decode in progress. Absent for the export path.
     abort: Option<Arc<AtomicBool>>,
+    /// Set when the owner is closing: stops the decode at once.
+    closing: Option<Arc<AtomicBool>>,
+    /// Without it, a newer request cancels whatever the clock would say.
+    publish_clock: Option<Arc<PublishClock>>,
     /// How long a request runs before the flag can stop it.
     abort_grace: Duration,
     request_started: Instant,
@@ -246,6 +302,8 @@ impl SequentialDecoder {
             landing_pts: None,
             min_forward_seek: None,
             abort: None,
+            closing: None,
+            publish_clock: None,
             abort_grace: Duration::ZERO,
             request_started: Instant::now(),
             path: path_text.to_owned(),
@@ -309,9 +367,18 @@ impl SequentialDecoder {
         self.abort_grace = grace;
     }
 
+    /// Makes a request stop at once while `closing` is set, and lets a newer request (the flag of
+    /// [`Self::set_abort`]) stop it only while `clock` says a frame was published lately.
+    pub fn set_abort_policy(&mut self, closing: Option<Arc<AtomicBool>>, clock: Option<Arc<PublishClock>>) {
+        self.closing = closing;
+        self.publish_clock = clock;
+    }
+
     fn check_abort(&self) -> Result<(), String> {
         let flag = self.abort.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed));
-        if should_abort(flag, self.request_started.elapsed(), self.abort_grace) {
+        let closing = self.closing.as_ref().is_some_and(|closing| closing.load(Ordering::Relaxed));
+        let recently_published = self.publish_clock.as_ref().is_none_or(|clock| clock.is_fresh());
+        if should_abort(flag, closing, self.request_started.elapsed(), self.abort_grace, recently_published) {
             return Err(DECODE_CANCELLED.to_owned());
         }
         Ok(())
@@ -510,11 +577,9 @@ impl SequentialDecoder {
         };
         let moved = if cannot_continue { self.seek(target) } else { self.skip_ahead(target) };
         let moved = moved.and_then(|()| self.advance_to(target));
-        if moved.is_err() && self.held.is_none() {
-            // Interrupted right after a seek: the next request must seek again, not continue from
-            // a landing that was meant for another target.
-            self.seek_target = None;
-        }
+        // Nothing held after a seek, interrupted or not: the next request must seek again, not
+        // continue from a landing that was meant for another target.
+        self.seek_target = seek_target_after_attempt(self.held.is_none(), self.seek_target);
         moved?;
         let held = self.held.as_ref().ok_or("no frame could be decoded")?;
         held.reference()
@@ -569,11 +634,50 @@ mod tests {
     const THRESHOLD: i64 = 2000;
 
     #[test]
-    fn the_abort_flag_stops_a_decode_only_after_the_grace() {
+    fn a_newer_request_stops_a_decode_only_after_the_grace() {
         let grace = Duration::from_millis(100);
-        assert!(!should_abort(false, Duration::from_secs(9), grace));
-        assert!(!should_abort(true, Duration::from_millis(99), grace));
-        assert!(should_abort(true, Duration::from_millis(100), grace));
+        assert!(!should_abort(false, false, Duration::from_secs(9), grace, true));
+        assert!(!should_abort(true, false, Duration::from_millis(99), grace, true));
+        assert!(should_abort(true, false, Duration::from_millis(100), grace, true));
+    }
+
+    #[test]
+    fn a_newer_request_does_not_stop_a_decode_while_nothing_was_published_lately() {
+        let grace = Duration::from_millis(100);
+        // Dragging back on a long-GOP clip: every request is cancelled at the grace and the screen
+        // never changes, unless a request that has run past the grace is left to finish.
+        assert!(!should_abort(true, false, Duration::from_secs(9), grace, false));
+        assert!(should_abort(true, false, Duration::from_secs(9), grace, true));
+    }
+
+    #[test]
+    fn closing_stops_a_decode_at_once_whatever_was_published() {
+        let grace = Duration::from_millis(100);
+        assert!(should_abort(false, true, Duration::ZERO, grace, false));
+        assert!(should_abort(true, true, Duration::from_millis(1), grace, false));
+        assert!(should_abort(false, true, Duration::ZERO, grace, true));
+    }
+
+    #[test]
+    fn a_request_with_nothing_newer_and_not_closing_is_never_stopped() {
+        assert!(!should_abort(false, false, Duration::from_secs(60), Duration::ZERO, true));
+        assert!(!should_abort(false, false, Duration::from_secs(60), Duration::ZERO, false));
+    }
+
+    #[test]
+    fn a_seek_that_decoded_nothing_forgets_its_target() {
+        assert_eq!(seek_target_after_attempt(true, Some(5000)), None, "the next request must seek again");
+        assert_eq!(seek_target_after_attempt(true, None), None);
+        assert_eq!(seek_target_after_attempt(false, Some(5000)), Some(5000), "a held frame keeps decoding forward");
+        assert_eq!(seek_target_after_attempt(false, None), None);
+    }
+
+    #[test]
+    fn a_far_target_seeks_when_the_index_says_it_lands_ahead_even_after_a_landing_behind() {
+        // An earlier far landing set min_distance; a later keyframe the index knows to be ahead wins.
+        assert!(pays(5000, 8000, Some(5001), Some(3000)));
+        assert!(!pays(5000, 8000, Some(5000), Some(1)), "the index says behind: no seek");
+        assert!(!pays(5000, 8000, None, Some(3000)), "no index, so the learned distance decides");
     }
 
     #[test]

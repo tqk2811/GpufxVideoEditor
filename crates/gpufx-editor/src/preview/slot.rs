@@ -13,11 +13,13 @@ pub struct LatestSlot<T> {
     ready: Condvar,
     /// True while a value waits and once the slot is closed.
     pending: Arc<AtomicBool>,
+    /// True once the slot is closed.
+    closing: Arc<AtomicBool>,
 }
 
 impl<T> Default for LatestSlot<T> {
     fn default() -> Self {
-        Self { state: Mutex::new(State { value: None, closed: false }), ready: Condvar::new(), pending: Arc::default() }
+        Self { state: Mutex::new(State { value: None, closed: false }), ready: Condvar::new(), pending: Arc::default(), closing: Arc::default() }
     }
 }
 
@@ -64,6 +66,7 @@ impl<T> LatestSlot<T> {
         let mut state = self.lock();
         state.closed = true;
         self.pending.store(true, Ordering::SeqCst);
+        self.closing.store(true, Ordering::SeqCst);
         drop(state);
         self.ready.notify_all();
     }
@@ -72,6 +75,11 @@ impl<T> LatestSlot<T> {
     /// being worked on can see that its work is no longer wanted.
     pub fn pending(&self) -> Arc<AtomicBool> {
         self.pending.clone()
+    }
+
+    /// A flag true once the slot is closed, unlike [`Self::pending`] which a waiting value also sets.
+    pub fn closing(&self) -> Arc<AtomicBool> {
+        self.closing.clone()
     }
 }
 
@@ -112,6 +120,16 @@ mod tests {
         assert!(pending.load(Ordering::SeqCst));
         assert_eq!(slot.wait(), None);
         assert!(pending.load(Ordering::SeqCst), "close is permanent");
+    }
+
+    #[test]
+    fn the_closing_flag_is_set_by_close_only() {
+        let slot = LatestSlot::default();
+        let closing = slot.closing();
+        slot.put(1);
+        assert!(!closing.load(Ordering::SeqCst), "a waiting value is not a close");
+        slot.close();
+        assert!(closing.load(Ordering::SeqCst));
     }
 
     #[test]

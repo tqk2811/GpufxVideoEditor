@@ -28,6 +28,8 @@ pub struct Presenter {
     context: egui::Context,
     frame: Option<PreviewImage>,
     frame_texture: Option<egui::TextureId>,
+    /// A window size that could not be applied yet; retried on the next resize, Outdated status or redraw.
+    wanted_size: Option<(u32, u32)>,
 }
 
 impl Presenter {
@@ -52,7 +54,7 @@ impl Presenter {
         let renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
         let context = egui::Context::default();
         let state = egui_winit::State::new(context.clone(), egui::ViewportId::ROOT, window.as_ref(), Some(window.scale_factor() as f32), None, None);
-        Ok(Self { window, surface, config, renderer, state, context, frame: None, frame_texture: None })
+        Ok(Self { window, surface, config, renderer, state, context, frame: None, frame_texture: None, wanted_size: None })
     }
 
     /// Shows `frame` from the next [`Presenter::render`] on and returns the frame it replaces.
@@ -85,14 +87,29 @@ impl Presenter {
         self.state.on_window_event(&self.window, event).repaint
     }
 
-    /// Reconfigures the surface for a new window size. On failure the old size stays recorded, so
-    /// the next resize or Outdated status tries again.
+    /// Reconfigures the surface for a new window size. On failure the old size stays configured but
+    /// the new one is kept as wanted, so the next resize, Outdated status or redraw tries it again.
     pub fn resize(&mut self, gpu: &Gpu, width: u32, height: u32) -> Result<(), String> {
         if width == 0 || height == 0 {
             return Ok(());
         }
+        self.wanted_size = Some((width, height));
+        self.apply_wanted_size(gpu).unwrap_or(Ok(()))
+    }
+
+    /// Tries the size a failed resize left wanted. `None` when there is none.
+    pub fn retry_resize(&mut self, gpu: &Gpu) -> Option<Result<(), String>> {
+        self.apply_wanted_size(gpu)
+    }
+
+    fn apply_wanted_size(&mut self, gpu: &Gpu) -> Option<Result<(), String>> {
+        let (width, height) = self.wanted_size?;
         let surface = &self.surface;
-        apply_resize(&mut self.config, width, height, |config| gpu.configure_surface(surface, config))
+        let result = apply_resize(&mut self.config, width, height, |config| gpu.configure_surface(surface, config));
+        if result.is_ok() {
+            self.wanted_size = None;
+        }
+        Some(result)
     }
 
     /// Runs the UI and presents. Returns how long egui can wait before the next frame.
@@ -102,8 +119,11 @@ impl Presenter {
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return Ok(SURFACE_RETRY),
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 surface_loss_error(gpu.device_lost())?;
-                // On failure the status repeats and this runs again on the retry.
-                let _ = gpu.configure_surface(&self.surface, &self.config);
+                // On failure the status repeats and this runs again on the retry. A wanted size
+                // that is still pending is the one to configure.
+                if self.apply_wanted_size(gpu).is_none() {
+                    let _ = gpu.configure_surface(&self.surface, &self.config);
+                }
                 return Ok(SURFACE_RETRY);
             }
             wgpu::CurrentSurfaceTexture::Validation => return Err("acquiring the surface texture failed validation".to_owned()),
