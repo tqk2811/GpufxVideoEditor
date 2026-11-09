@@ -8,19 +8,29 @@
 //! * [`validate`] checks a project and reports every problem with its location.
 //! * [`schedule`] turns a project and a frame index into the layers to composite.
 //! * [`render`] drives a project through decoder, compositor and sink traits a backend implements.
+//! * [`audio_schedule`] turns a project and a sample range into the source segments to mix.
+//! * [`audio_mix`] sums those segments, reading sources through a trait a backend implements.
 //!
-//! Floating point is never used on timeline paths.
+//! Floating point is never used on timeline paths. Audio uses it only for gains and sample values.
 
+pub mod audio_mix;
+pub mod audio_schedule;
 pub mod project;
 pub mod render;
 pub mod schedule;
 pub mod time;
 pub mod validate;
 
+pub use audio_mix::{mix_audio, AudioSource, MixReport};
+pub use audio_schedule::{
+    audio_sample_count, audio_segments, sample_position, AudioSegment, GainEnvelope, MIX_CHANNELS,
+    MIX_SAMPLE_RATE,
+};
 pub use project::{
     AudioOutput, Clip, Effect, LoadError, Output, Project, Track, TrackKind, Transition,
     MIN_SUPPORTED_VERSION, SUPPORTED_VERSION,
 };
+pub use render::{ClipKey, RenderError};
 pub use schedule::{
     frame_count, frame_time, layers_at_frame, Layer, LayerContent, Progress, SourceSample,
     PROGRESS_PPM_SCALE,
