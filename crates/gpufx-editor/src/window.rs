@@ -25,7 +25,7 @@ use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::project_file::{load_project_file, package_roots, project_paths, save_project_file};
-use crate::tasks::{Action, Arrival, FileDialog, Prompt, Request, Tasks};
+use crate::tasks::{run_guarded, Action, Arrival, FileDialog, Prompt, Request, TaskId, Tasks};
 use crate::ui::{self, UiRequest};
 
 /// How often the playhead moves while playing.
@@ -478,12 +478,13 @@ impl Session {
     }
 
     /// Runs `work` on its own thread and wakes the loop when its result is in. The threads are
-    /// never joined, so a dialog still up or a file still being read cannot hold up the exit.
-    fn spawn_task(&mut self, name: &str, work: impl FnOnce() -> Arrival + Send + 'static) {
+    /// never joined, so a dialog still up or a file still being read cannot hold up the exit. A
+    /// panic in `work` is delivered as a failure of `task`, so its slot does not stay taken.
+    fn spawn_task(&mut self, name: &'static str, task: TaskId, work: impl FnOnce() -> Arrival + Send + 'static) {
         let sender = self.arrival_sender.clone();
         let window = self.window.clone();
         let spawned = std::thread::Builder::new().name(name.to_owned()).spawn(move || {
-            let _ = sender.send(work());
+            let _ = sender.send(run_guarded(name, task, work));
             window.request_redraw();
         });
         if let Err(e) = spawned {
@@ -500,7 +501,7 @@ impl Session {
             FileDialog::SaveProject => base().add_filter("Project", &["json"]).set_file_name("project.json"),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
         };
-        self.spawn_task("file-dialog", move || {
+        self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
                 FileDialog::PickClip { .. } | FileDialog::OpenProject => picker.pick_file(),
                 FileDialog::SaveProject | FileDialog::Export => picker.save_file(),
@@ -515,7 +516,7 @@ impl Session {
             .set_title("gpufx editor")
             .set_description(prompt.question())
             .set_buttons(rfd::MessageButtons::YesNo);
-        self.spawn_task("prompt", move || Arrival::PromptAnswered { prompt, accepted: dialog.show() == rfd::MessageDialogResult::Yes });
+        self.spawn_task("prompt", TaskId::Modal, move || Arrival::PromptAnswered { prompt, accepted: dialog.show() == rfd::MessageDialogResult::Yes });
     }
 
     fn perform(&mut self, action: Action) {
@@ -523,15 +524,15 @@ impl Session {
             Action::Nothing => {}
             Action::ShowFileDialog(dialog) => self.show_file_dialog(dialog),
             Action::ShowPrompt(prompt) => self.show_prompt(prompt),
-            Action::ProbeClip { track, path } => self.spawn_task("clip-probe", move || {
+            Action::ProbeClip { load, track, path } => self.spawn_task("clip-probe", TaskId::Load(load), move || {
                 let result = probe_media(&path);
-                Arrival::ClipProbed { track, path, result }
+                Arrival::ClipProbed { load, track, path, result }
             }),
-            Action::ReadProject { file } => {
+            Action::ReadProject { load, file } => {
                 let roots = self.package_roots.clone();
-                self.spawn_task("project-read", move || {
+                self.spawn_task("project-read", TaskId::Load(load), move || {
                     let result = load_project_file(&file, &roots);
-                    Arrival::ProjectRead { file, result }
+                    Arrival::ProjectRead { load, file, result }
                 });
             }
             Action::SaveTo(path) => self.save_project(path),
