@@ -70,7 +70,7 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
     let search = if audio_only { state.ui.audio_search.clone() } else { state.ui.media_search.clone() };
     let items: Vec<MediaItem> = state.library.visible(kind, &search).into_iter().cloned().collect();
     if items.is_empty() {
-        ui.add(egui::Label::new(egui::RichText::new("Chưa có tệp nào. Nhập tệp để thêm vào đây.").color(theme::TEXT_DIM)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(empty_message(&search)).color(theme::TEXT_DIM)).wrap());
         return;
     }
     ui.colored_label(theme::TEXT_DIM, "Bấm vào ô hoặc nút + để thêm vào vị trí đầu phát.");
@@ -96,7 +96,17 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
     }
 }
 
-/// One tile of the grid. The picture slot is for a thumbnail later. True when it was clicked.
+/// What an empty grid says: a filter that matches nothing is not an empty library.
+fn empty_message(search: &str) -> &'static str {
+    if search.trim().is_empty() {
+        "Chưa có tệp nào. Nhập tệp để thêm vào đây."
+    } else {
+        "Không có tệp nào khớp với nội dung tìm."
+    }
+}
+
+/// One tile of the grid. The picture slot is for a thumbnail later. True on a first click: the
+/// later clicks of a double click do not add the file again.
 fn media_cell(ui: &mut egui::Ui, item: &MediaItem, size: Vec2, kind: MediaKind) -> bool {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter_at(rect);
@@ -121,7 +131,8 @@ fn media_cell(ui: &mut egui::Ui, item: &MediaItem, size: Vec2, kind: MediaKind) 
     icons::paint(&painter, plus.shrink(4.0), Icon::Plus, Color32::WHITE);
     let caption = rect.with_min_y(rect.bottom() - CELL_CAPTION).shrink2(Vec2::new(8.0, 0.0));
     painter.with_clip_rect(caption).text(caption.left_center(), Align2::LEFT_CENTER, &item.name, FontId::proportional(12.0), theme::TEXT);
-    response.on_hover_text(&item.source).clicked()
+    let response = response.on_hover_text(&item.source);
+    response.clicked() && !response.double_clicked() && !response.triple_clicked()
 }
 
 /// The effect and transition lists with their filter.
@@ -199,6 +210,12 @@ fn picker_problems(ui: &mut egui::Ui, state: &EditorState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_grid_says_whether_a_filter_hides_the_files() {
+        assert!(empty_message("  ").contains("Chưa có"));
+        assert!(empty_message("beach").contains("khớp"));
+    }
 
     #[test]
     fn the_picker_row_height_is_the_height_of_a_selectable_label() {

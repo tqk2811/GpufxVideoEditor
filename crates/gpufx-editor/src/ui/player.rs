@@ -11,6 +11,9 @@ use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, Sen
 
 const HEADER_HEIGHT: f32 = 34.0;
 const CONTROLS_HEIGHT: f32 = 40.0;
+const PLAY_HALF_WIDTH: f32 = 16.0;
+/// The fullscreen button, with what keeps the row from touching the panel edge.
+const FULLSCREEN_WIDTH: f32 = 40.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     let rect = ui.max_rect();
@@ -36,24 +39,38 @@ fn draw_picture(ui: &egui::Ui, rect: Rect, preview: Option<PreviewTexture>) {
     painter.image(texture.id, picture, uv, Color32::WHITE);
 }
 
+/// Which optional parts of the transport fit beside the centred play button: the total time on the
+/// left, the aspect ratio on the right. `beside_play` is the room on each side of it.
+fn transport_fit(beside_play: f32, current: f32, total: f32, aspect: f32, gap: f32) -> (bool, bool) {
+    (current + gap + total <= beside_play, FULLSCREEN_WIDTH + gap + aspect <= beside_play)
+}
+
 fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, controls: Rect) {
     let output = &state.project().output;
     let frame_duration = output.frame_duration;
     let aspect = aspect_label(output.width, output.height);
     let current = format_timecode(state.playhead(), frame_duration);
     let total = format_timecode(content_end(state.project()), frame_duration);
+    let total = format!("/ {total}");
+    let width_of = |text: &str, style: egui::TextStyle| ui.painter().layout_no_wrap(text.to_owned(), style.resolve(ui.style()), theme::TEXT).size().x;
+    let beside_play = controls.width() / 2.0 - PLAY_HALF_WIDTH - ui.spacing().item_spacing.x;
+    let (show_total, show_aspect) = transport_fit(beside_play, width_of(&current, egui::TextStyle::Monospace), width_of(&total, egui::TextStyle::Monospace), width_of(&aspect, egui::TextStyle::Body), ui.spacing().item_spacing.x);
     ui.allocate_ui_with_layout(ui.max_rect().size(), Layout::left_to_right(Align::Center), |ui| {
         ui.colored_label(theme::ACCENT_TEXT, egui::RichText::new(current).monospace());
-        ui.colored_label(theme::TEXT_DIM, egui::RichText::new(format!("/ {total}")).monospace());
+        if show_total {
+            ui.colored_label(theme::TEXT_DIM, egui::RichText::new(total).monospace());
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let (icon, tip) = if state.ui.fullscreen { (Icon::Exit, "Thoát toàn màn hình") } else { (Icon::Fullscreen, "Toàn màn hình") };
             if icons::button(ui, icon, tip, state.ui.fullscreen).clicked() {
                 requests.push(UiRequest::ToggleFullscreen);
             }
-            ui.colored_label(theme::TEXT_DIM, aspect);
+            if show_aspect {
+                ui.colored_label(theme::TEXT_DIM, aspect);
+            }
         });
     });
-    let button = Rect::from_center_size(controls.center(), Vec2::splat(32.0));
+    let button = Rect::from_center_size(controls.center(), Vec2::splat(PLAY_HALF_WIDTH * 2.0));
     let enabled = !state.is_exporting();
     let response = ui.interact(button, ui.scope_id().with("play"), if enabled { Sense::click() } else { Sense::hover() });
     if response.hovered() && enabled {
@@ -64,5 +81,17 @@ fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
     icons::paint(ui.painter(), button.shrink(7.0), icon, tint);
     if response.on_hover_text(if state.is_playing() { "Dừng (Space)" } else { "Phát (Space)" }).clicked() {
         state.toggle_playback();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_optional_parts_of_the_transport_go_when_they_would_reach_the_play_button() {
+        assert_eq!(transport_fit(300.0, 90.0, 110.0, 40.0, 6.0), (true, true));
+        assert_eq!(transport_fit(150.0, 90.0, 110.0, 40.0, 6.0), (false, true));
+        assert_eq!(transport_fit(60.0, 90.0, 110.0, 40.0, 6.0), (false, false));
     }
 }

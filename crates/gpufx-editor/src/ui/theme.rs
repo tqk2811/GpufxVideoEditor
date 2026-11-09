@@ -1,6 +1,8 @@
 //! Colours and widget style of the editor.
 
 use egui::{Color32, CornerRadius, Margin, Stroke, Visuals};
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 pub const BACKGROUND: Color32 = Color32::from_rgb(12, 12, 17);
 pub const PANEL: Color32 = Color32::from_rgb(20, 20, 27);
@@ -28,12 +30,39 @@ pub const TRANSITION: Color32 = Color32::from_rgba_premultiplied(84, 62, 170, 19
 pub const PANEL_RADIUS: u8 = 10;
 pub const CONTROL_RADIUS: u8 = 6;
 
-/// A system font with the Vietnamese letters egui's bundled fonts lack. A Windows install has it;
-/// without it the default fonts are kept.
-const UI_FONT_FILE: &str = "C:\\Windows\\Fonts\\segoeui.ttf";
+/// Fonts of Linux and macOS with the Vietnamese letters egui's bundled fonts lack, best first.
+const UNIX_FONT_FILES: [&str; 9] = [
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/Library/Fonts/Arial.ttf",
+];
 
+/// Where a font with Vietnamese letters may be, best first: the Windows fonts when `windows_dir`
+/// is known, then the fonts of other systems.
+fn font_candidates(windows_dir: Option<&OsStr>) -> Vec<PathBuf> {
+    let windows = windows_dir.into_iter().flat_map(|dir| ["segoeui.ttf", "arial.ttf"].map(|file| Path::new(dir).join("Fonts").join(file)));
+    windows.chain(UNIX_FONT_FILES.iter().map(PathBuf::from)).collect()
+}
+
+/// The contents of the first candidate that can be read.
+fn first_readable(candidates: &[PathBuf], read: impl Fn(&Path) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+    candidates.iter().find_map(|path| read(path))
+}
+
+/// Without a font the bundled ones stay, and Vietnamese letters show as boxes. Apply runs before
+/// any text is laid out, so egui takes the font in this very pass and no repaint is needed.
 fn install_fonts(ctx: &egui::Context) {
-    let Ok(bytes) = std::fs::read(UI_FONT_FILE) else { return };
+    let candidates = font_candidates(std::env::var_os("WINDIR").as_deref());
+    let Some(bytes) = first_readable(&candidates, |path| std::fs::read(path).ok()) else {
+        eprintln!("gpufx-editor: no font with Vietnamese letters was found; tried {candidates:?}");
+        return;
+    };
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert("ui".to_owned(), std::sync::Arc::new(egui::FontData::from_owned(bytes)));
     if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
@@ -87,4 +116,25 @@ pub fn apply(ctx: &egui::Context) {
         style.spacing.window_margin = Margin::same(8);
         style.spacing.interact_size.y = 24.0;
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_windows_fonts_come_first_from_the_system_folder() {
+        let candidates = font_candidates(Some(OsStr::new("D:\\Win")));
+        assert_eq!(candidates[0], Path::new("D:\\Win").join("Fonts").join("segoeui.ttf"));
+        assert!(candidates.iter().any(|path| path.to_string_lossy().contains("NotoSans")));
+        assert!(!font_candidates(None).iter().any(|path| path.to_string_lossy().contains("segoeui")));
+    }
+
+    #[test]
+    fn the_first_font_that_can_be_read_is_taken() {
+        let candidates = [PathBuf::from("a"), PathBuf::from("b"), PathBuf::from("c")];
+        let found = first_readable(&candidates, |path| (path != Path::new("a")).then(|| path.to_string_lossy().into_owned().into_bytes()));
+        assert_eq!(found, Some(b"b".to_vec()));
+        assert_eq!(first_readable(&candidates, |_| None), None);
+    }
 }

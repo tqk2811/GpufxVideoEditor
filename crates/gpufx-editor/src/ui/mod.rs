@@ -125,7 +125,29 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
     });
 }
 
+/// Everything the status line says, one item a line, for its tooltip.
+fn status_summary(state: &EditorState) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.extend(state.loading().map(|name| format!("Đang nạp {name}\u{2026}")));
+    match state.status() {
+        Status::Idle => {}
+        Status::Info(message) | Status::Error(message) => lines.push(message.clone()),
+        Status::Refused(message) => lines.push(format!("Từ chối: {message}")),
+    }
+    lines.extend(state.preview_error().map(|message| format!("Xem trước: {message}")));
+    lines.extend(state.playback_message().map(|message| format!("Âm thanh: {message}")));
+    lines.extend(state.no_sound().map(|reason| format!("Không có tiếng: {reason}")));
+    if state.silence_ms() > 0 {
+        lines.push(format!("Hụt âm thanh: {} ms", state.silence_ms()));
+    }
+    lines.join("\n")
+}
+
 fn status_line(ui: &mut egui::Ui, state: &EditorState) {
+    let summary = status_summary(state);
+    if !summary.is_empty() {
+        ui.interact(ui.max_rect(), ui.scope_id().with("status-tooltip"), egui::Sense::hover()).on_hover_text(summary);
+    }
     ui.horizontal(|ui| {
         ui.add_space(12.0);
         // The load is shown beside the status, which may say why a request meanwhile was not taken.
@@ -379,6 +401,34 @@ mod tests {
         assert!(!state.is_dirty());
         assert!(!state.can_undo());
         assert_eq!(state.project().tracks[0].clips[0].gain_db, -80.0);
+    }
+
+    #[test]
+    fn the_status_tooltip_holds_every_message_in_full() {
+        let mut state = state();
+        state.report_refused("too long to fit".to_owned());
+        state.set_preview_error(Some("preview broke".to_owned()));
+        state.set_no_sound(Some("no device".to_owned()));
+        let summary = status_summary(&state);
+        for part in ["Từ chối: too long to fit", "Xem trước: preview broke", "Không có tiếng: no device"] {
+            assert!(summary.contains(part), "{summary}");
+        }
+        assert!(status_summary(&EditorState::default()).is_empty());
+    }
+
+    #[test]
+    fn double_clicking_a_media_tile_adds_one_clip() {
+        let mut state = state();
+        state.library.add(crate::media::MediaItem { source: "b.mp4".to_owned(), name: "b.mp4".to_owned(), kind: crate::media::MediaKind::Video, duration: Some(seconds(2)), estimated: false });
+        let left = panels(egui::vec2(1280.0, 720.0)).left;
+        let at = egui::pos2(left.left() + 40.0, left.top() + 200.0);
+        let ctx = egui::Context::default();
+        click(&ctx, &mut state, at);
+        assert_eq!(state.project().tracks.iter().map(|track| track.clips.len()).sum::<usize>(), 2, "the first click adds the file");
+        let tracks = state.project().tracks.len();
+        click(&ctx, &mut state, at);
+        assert_eq!(state.project().tracks.iter().map(|track| track.clips.len()).sum::<usize>(), 2, "the second click of the double click adds nothing");
+        assert_eq!(state.project().tracks.len(), tracks, "and no spare track");
     }
 
     #[test]

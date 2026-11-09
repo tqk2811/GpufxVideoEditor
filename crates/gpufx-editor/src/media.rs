@@ -4,6 +4,7 @@ use d3d12_backend::MediaProbe;
 use engine::{nearest_free_start, Project, Time, TrackKind};
 
 use crate::editor::clip_label;
+use crate::project_file::same_source;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -52,7 +53,7 @@ pub struct MediaLibrary {
 impl MediaLibrary {
     /// Adds `item`; the same source is replaced by a probed entry, never listed twice.
     pub fn add(&mut self, item: MediaItem) {
-        match self.items.iter_mut().find(|known| known.source == item.source) {
+        match self.items.iter_mut().find(|known| same_source(&known.source, &item.source)) {
             Some(known) if known.estimated || !item.estimated => *known = item,
             Some(_) => {}
             None => self.items.push(item),
@@ -65,7 +66,7 @@ impl MediaLibrary {
             let kind = if track.is_audio() { MediaKind::Audio } else { MediaKind::Video };
             for clip in &track.clips {
                 let used_to = clip.source_in.saturating_add(clip.duration);
-                let known = self.items.iter_mut().find(|item| item.source == clip.source);
+                let known = self.items.iter_mut().find(|item| same_source(&item.source, &clip.source));
                 match known {
                     Some(item) if item.estimated => item.duration = item.duration.map_or(Some(used_to), |seen| Some(seen.max(used_to))),
                     Some(_) => {}
@@ -169,6 +170,19 @@ mod tests {
         let listed = library.visible(MediaKind::Video, "");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].duration, Some(seconds(9)), "an estimate does not replace a probe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_source_differing_only_by_case_or_slash_is_the_same_item() {
+        let mut library = MediaLibrary::default();
+        library.add(item("C:/v/A.mp4", MediaKind::Video, Some(3), false));
+        library.add(item("c:\\V\\a.mp4", MediaKind::Video, Some(9), false));
+        assert_eq!(library.visible(MediaKind::Video, "").len(), 1);
+        let mut timeline = project(vec![track(TrackKind::Video, &[(0, 2)])]);
+        timeline.tracks[0].clips[0].source = "C:\\v\\a.MP4".to_owned();
+        library.adopt_project_media(&timeline);
+        assert_eq!(library.visible(MediaKind::Video, "").len(), 1, "the clip uses the item already there");
     }
 
     #[test]

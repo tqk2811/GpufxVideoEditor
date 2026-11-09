@@ -49,6 +49,12 @@ fn comparable(path: &Path) -> Vec<String> {
     path.components().map(|part| part.as_os_str().to_string_lossy().to_lowercase()).collect()
 }
 
+/// Whether two clip sources name one file as the system compares them: on Windows case and the
+/// kind of slash do not matter.
+pub(crate) fn same_source(first: &str, second: &str) -> bool {
+    first == second || (cfg!(windows) && comparable(Path::new(first)) == comparable(Path::new(second)))
+}
+
 /// `source` relative to `folder` with forward slashes, when it is under `folder`.
 pub fn relative_under(folder: &Path, source: &Path) -> Option<String> {
     let folder_parts = comparable(&std::path::absolute(folder).ok()?);

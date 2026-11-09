@@ -327,23 +327,34 @@ fn draw_playhead(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect,
     painter.add(Shape::convex_polygon(marker, theme::PLAYHEAD, Stroke::NONE));
 }
 
+/// The short label and tooltip of track `t`, numbered within its kind from the first of the kind.
+fn track_label(kinds: &[TrackKind], t: usize) -> (String, String) {
+    let number = kinds[..=t].iter().filter(|kind| **kind == kinds[t]).count();
+    match kinds[t] {
+        TrackKind::Video => (format!("V{number}"), format!("Track video {number}")),
+        TrackKind::Audio => (format!("A{number}"), format!("Track âm thanh {number}")),
+    }
+}
+
 fn headers(ui: &mut egui::Ui, state: &EditorState, header_rect: Rect, requests: &mut Vec<UiRequest>) {
     let track_count = state.project().tracks.len();
     let kinds: Vec<TrackKind> = state.project().tracks.iter().map(|track| track.kind).collect();
     ui.scope_builder(UiBuilder::new().max_rect(header_rect), |ui| {
         ui.set_clip_rect(header_rect);
-        for (t, kind) in kinds.into_iter().enumerate() {
+        for (t, &kind) in kinds.iter().enumerate() {
             let top = header_rect.top() + state.view.track_top(t, track_count) as f32;
             let row = Rect::from_min_size(Pos2::new(header_rect.left(), top), Vec2::new(header_rect.width(), TRACK_HEIGHT as f32));
             if !row.intersects(header_rect) {
                 continue;
             }
             let icon = if kind == TrackKind::Video { Icon::Film } else { Icon::Music };
-            let tip = if kind == TrackKind::Video { "Track video" } else { "Track âm thanh" };
+            let (label, tip) = track_label(&kinds, t);
             let icon_rect = Rect::from_center_size(Pos2::new(row.left() + 18.0, row.center().y), Vec2::splat(14.0));
             icons::paint(ui.painter(), icon_rect, icon, theme::TEXT_DIM);
+            let label_pos = Pos2::new(icon_rect.right() + 6.0, row.center().y);
+            let label_rect = ui.painter().text(label_pos, Align2::LEFT_CENTER, label, FontId::proportional(12.0), theme::TEXT_DIM);
             let id = ui.scope_id().with(("track-icon", t));
-            ui.interact(icon_rect, id, Sense::hover()).on_hover_text(tip);
+            ui.interact(icon_rect.union(label_rect), id, Sense::hover()).on_hover_text(tip);
             let button = Rect::from_center_size(Pos2::new(row.right() - 18.0, row.center().y), Vec2::splat(22.0));
             ui.scope_builder(UiBuilder::new().max_rect(button).id_salt(("track-add", t)), |ui| {
                 if icons::button(ui, Icon::Plus, "Thêm clip từ tệp", false).clicked() {
@@ -352,4 +363,17 @@ fn headers(ui: &mut egui::Ui, state: &EditorState, header_rect: Rect, requests: 
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracks_are_numbered_within_their_kind() {
+        let kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Video];
+        assert_eq!(track_label(&kinds, 0).0, "V1");
+        assert_eq!(track_label(&kinds, 1).0, "A1");
+        assert_eq!(track_label(&kinds, 2), ("V2".to_owned(), "Track video 2".to_owned()));
+    }
 }
