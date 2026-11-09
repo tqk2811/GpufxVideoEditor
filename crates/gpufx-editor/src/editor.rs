@@ -146,6 +146,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::SplitInsideFade { key, at } => Message::EditSplitInsideFade { track: label(key.track), at: seconds_text(*at) },
         EditError::SplitInsideTransition { key, at } => Message::EditSplitInsideTransition { track: label(key.track), at: seconds_text(*at) },
         EditError::TrackLocked { track } => Message::EditTrackLocked(label(*track)),
+        EditError::SpeedOverlap { key, end, next_start } => Message::EditSpeedOverlap { track: label(key.track), end: seconds_text(*end), next: seconds_text(*next_start) },
         EditError::Invalid(errors) => Message::EditInvalid(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
     }
 }
@@ -206,6 +207,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         muted: false,
         fade_in: Time::ZERO,
         fade_out: Time::ZERO,
+        speed: 1.0,
     }
 }
 
@@ -1408,6 +1410,7 @@ mod tests {
             EditError::SplitOutsideClip { key, at },
             EditError::SplitInsideFade { key, at },
             EditError::SplitInsideTransition { key, at },
+            EditError::SpeedOverlap { key, end: at, next_start: at },
         ];
         for error in &errors {
             let message = refusal_message(&project, error);

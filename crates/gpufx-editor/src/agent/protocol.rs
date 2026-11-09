@@ -118,6 +118,7 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::SplitInsideFade { .. } => "split_inside_fade",
         EditError::SplitInsideTransition { .. } => "split_inside_transition",
         EditError::TrackLocked { .. } => "track_locked",
+        EditError::SpeedOverlap { .. } => "speed_overlap",
         EditError::Invalid(_) => "invalid_project",
     }
 }

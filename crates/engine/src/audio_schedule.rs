@@ -13,6 +13,10 @@
 //!   Both ends round the same way, so touching clips neither leave a gap nor share a sample.
 //! * **Source position.** Timeline sample `s` of a clip reads source sample
 //!   `position(source_in) + (s - position(start))`, so a clip reads consecutive source samples.
+//! * **Speed.** A clip at another speed reads around source sample
+//!   `position(source_in) + floor((s - position(start)) * speed)`, through the time stretcher of
+//!   [`crate::stretch`], which keeps the pitch. Its grains stay within 11 ms of that position, so
+//!   the sound follows the picture; at speed 1 nothing here changes.
 //! * **Transition window.** The same window the video uses (see [`crate::schedule`]), converted to
 //!   samples: from `position(cut - duration / 2)` to `position(cut - duration / 2 + duration)`.
 //!   Inside it both clips sound, each extended past its own end with the formula above. A source
@@ -29,6 +33,7 @@
 use crate::project::{Clip, Project, Track, Transition};
 use crate::render::ClipKey;
 use crate::schedule::{frame_count, frame_time, transition_window};
+use crate::stretch::Stretch;
 use crate::time::Time;
 use std::f64::consts::FRAC_PI_2;
 
@@ -126,6 +131,9 @@ pub struct AudioSegment<'a> {
     pub source_start: i64,
     /// Gain of the segment.
     pub gain: GainEnvelope,
+    /// Set for a clip at another speed: its samples come from the time stretcher, not from
+    /// consecutive source samples starting at `source_start`.
+    pub stretch: Option<Stretch>,
 }
 
 /// The segments sounding in the `len` samples from `start`, in track then clip order. Muted clips,
@@ -156,14 +164,23 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
             if first >= last {
                 continue;
             }
+            let source_base = sample_position(clip.source_in);
+            let stretch = clip.has_speed().then_some(Stretch {
+                clip_start,
+                source_base,
+                speed_milli: clip.speed_milli(),
+            });
             segments.push(AudioSegment {
                 key: ClipKey { track: t, clip: c },
                 source: &clip.source,
                 start: first,
                 len: last - first,
-                source_start: sample_position(clip.source_in)
-                    .saturating_add(first.saturating_sub(clip_start)),
+                source_start: stretch.map_or_else(
+                    || source_base.saturating_add(first.saturating_sub(clip_start)),
+                    |stretch| stretch.nominal(first.saturating_sub(clip_start)),
+                ),
                 gain: envelope(clip, clip_start, clip_end, crossfade_in, crossfade_out),
+                stretch,
             });
         }
     }

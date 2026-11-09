@@ -8,7 +8,8 @@
 //! [`Decoder::wait_idle`] on every decoder involved, composites, and reads the result. Decoders are
 //! opened per clip the first time the clip is needed and dropped once the clip is no longer in use.
 
-use crate::audio_mix::{mix_audio, AudioSource, MixReport};
+use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
+use crate::stretch::StretchStates;
 use crate::audio_schedule::{sample_position, MIX_CHANNELS};
 use crate::project::{Effect, Project};
 use crate::schedule::{
@@ -373,6 +374,7 @@ pub fn render_with_audio<C: Compositor, S: FrameSink>(
     let mut mixed = 0i64;
     let mut clamped_samples = 0u64;
     let mut samples: Vec<f32> = Vec::new();
+    let mut stretch = StretchStates::default();
     let mut renderer = FrameRenderer::default();
     let mut rgba = Vec::new();
     let frames = frame_count(project);
@@ -386,7 +388,7 @@ pub fn render_with_audio<C: Compositor, S: FrameSink>(
                 .ok_or_else(|| RenderError(format!("frame {index}: time overflows")))?;
             samples.resize((end - mixed) as usize * MIX_CHANNELS, 0.0);
             let MixReport { clamped_samples: clamped } =
-                mix_audio(project, &mut **source, mixed, &mut samples)
+                mix_audio_with(project, &mut **source, &mut stretch, mixed, &mut samples)
                     .map_err(|e| RenderError(format!("frame {index}, audio: {e}")))?;
             clamped_samples += clamped;
             sink.write_audio(&samples)

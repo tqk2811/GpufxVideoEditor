@@ -86,6 +86,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditSplitInsideFade { track, at } => format!("{}: {at} giây nằm trong đoạn tăng hoặc giảm dần âm lượng", track_label(*track)),
         Message::EditSplitInsideTransition { track, at } => format!("{}: {at} giây nằm trong chuyển cảnh", track_label(*track)),
         Message::EditTrackLocked(track) => format!("{}: track đang khoá", track_label(*track)),
+        Message::EditSpeedOverlap { track, end, next } => format!("{}: ở tốc độ này clip sẽ kết thúc ở {end} giây, chồng lên clip tiếp theo ở {next} giây", track_label(*track)),
         Message::EditInvalid(detail) => format!("Kết quả không hợp lệ: {detail}"),
 
         Message::DialogOpen => "Hãy đóng hộp thoại đang mở trước".to_owned(),

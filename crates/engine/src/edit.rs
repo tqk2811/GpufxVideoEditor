@@ -19,13 +19,18 @@
 //!   not (at most 14 ticks away, under 0.2 ms; the picture does not depend on the cut). A fade
 //!   cannot be divided between two clips, so a cut inside a fade is refused, as is a cut inside a
 //!   transition window.
+//! * **Speed.** A clip at another speed keeps every source position exactly across a split or a
+//!   start trim: both land on a multiple of [`Clip::speed_grid`] (at most 11 ms away, and never
+//!   before the requested position on a trim). [`set_speed`] keeps the source range constant and
+//!   refuses what cannot follow it. Sound positions at a cut can differ by a sample at another
+//!   speed; the time stretcher starts a new grain chain there.
 //! * **Locked tracks.** Every command that changes the clips, effects or transitions of a locked
 //!   track is refused with [`EditError::TrackLocked`], so that every caller gets the same rule.
 //!   A move is refused when either its source track or its target track is locked. Locking and
 //!   hiding themselves stay possible, as does adding a track.
 
 use crate::audio_schedule::sample_position;
-use crate::project::{Clip, Effect, Project, Track, TrackKind, Transition};
+use crate::project::{speed_in_range, speed_milli, Clip, Effect, Project, Track, TrackKind, Transition, SPEED_SCALE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -64,6 +69,8 @@ pub enum EditError {
     SplitInsideTransition { key: ClipKey, at: Time },
     /// The track is locked: nothing on it can be changed.
     TrackLocked { track: usize },
+    /// At this speed the clip would need to last past the start of the next clip.
+    SpeedOverlap { key: ClipKey, end: Time, next_start: Time },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -112,6 +119,11 @@ impl fmt::Display for EditError {
                 key.track, key.clip
             ),
             TrackLocked { track } => write!(f, "track {track} is locked"),
+            SpeedOverlap { key, end, next_start } => write!(
+                f,
+                "track {}, clip {}: at this speed the clip ends at {end}, past the next clip at {next_start}",
+                key.track, key.clip
+            ),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
                 for error in errors {
@@ -354,8 +366,15 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     }
     let overflow = EditError::TimeOverflow { key };
     let end = clip.end().ok_or(overflow.clone())?;
+    // The edge lands on the grid of the speed, toward the end of the clip, so the frames under the
+    // end edge stay exactly where they are.
     let delta = new_start.checked_sub(clip.start).ok_or(overflow.clone())?;
-    let source_in = clip.source_in.checked_add(delta).ok_or(overflow.clone())?;
+    let delta = Time::from_ticks(delta.ticks().div_euclid(clip.speed_grid()).saturating_add(i64::from(delta.ticks().rem_euclid(clip.speed_grid()) != 0)).saturating_mul(clip.speed_grid()));
+    let new_start = clip.start.checked_add(delta).ok_or(overflow.clone())?;
+    if new_start == clip.start {
+        return finish(project.clone());
+    }
+    let source_in = clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())?;
     if source_in < Time::ZERO {
         return Err(EditError::BeforeSourceStart { key, source_in });
     }
@@ -404,8 +423,12 @@ pub fn trim_end(project: &Project, key: ClipKey, new_end: Time) -> Result<Projec
     finish(next)
 }
 
-/// Whether a cut `offset` ticks into `clip` keeps the second half on the source samples it had.
+/// Whether a cut `offset` ticks into `clip` keeps the second half on the source positions it had.
+/// At another speed the source position of the cut must be a whole tick, see [`Clip::speed_grid`].
 fn cut_keeps_samples(clip: &Clip, offset: i64) -> bool {
+    if clip.has_speed() {
+        return offset.rem_euclid(clip.speed_grid()) == 0;
+    }
     let offset = Time::from_ticks(offset);
     let in_source = sample_position(clip.source_in.saturating_add(offset)) - sample_position(clip.source_in);
     let on_timeline = sample_position(clip.start.saturating_add(offset)) - sample_position(clip.start);
@@ -413,13 +436,13 @@ fn cut_keeps_samples(clip: &Clip, offset: i64) -> bool {
 }
 
 /// The offset of the cut nearest `wanted` within `earliest..=latest` that is inside the clip and
-/// keeps the audio aligned, the earlier one on a tie. The rounding repeats every 15 ticks, so
-/// looking 14 away is enough.
+/// keeps the source positions, the earlier one on a tie. The sample rounding repeats every 15
+/// ticks, so looking 14 away is enough at normal speed; at another speed a grid step is.
 fn aligned_cut(clip: &Clip, wanted: i64, earliest: i64, latest: i64) -> Option<i64> {
     let allowed = |offset: i64| {
         offset > 0 && offset < clip.duration.ticks() && offset >= earliest && offset <= latest
     };
-    (0..15).find_map(|distance| {
+    (0..15.max(clip.speed_grid())).find_map(|distance| {
         [wanted.saturating_sub(distance), wanted.saturating_add(distance)]
             .into_iter()
             .find(|&offset| allowed(offset) && cut_keeps_samples(clip, offset))
@@ -464,7 +487,7 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
 
     let mut second = clip.clone();
     second.start = clip.start.saturating_add(offset);
-    second.source_in = clip.source_in.saturating_add(offset);
+    second.source_in = clip.source_in.saturating_add(clip.source_offset(offset));
     second.duration = rest;
     second.fade_in = Time::ZERO;
 
@@ -574,6 +597,39 @@ pub fn set_fades(
     let clip = clip_mut(&mut next, key)?;
     clip.fade_in = fade_in;
     clip.fade_out = fade_out;
+    finish(next)
+}
+
+/// Sets the playback speed of a clip, keeping the part of the source it plays: the timeline length
+/// becomes `source range / speed`, from the same start. Refused with [`EditError::SpeedOverlap`]
+/// when the clip would run into the next one, because nothing else moves; with
+/// [`EditError::TransitionOnEdge`] when its end holds a transition, because the end would leave the
+/// next clip; and as invalid when the fades or the transition at its start no longer fit.
+pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let clip = clip_of(project, key)?;
+    let mut next = project.clone();
+    if !speed_in_range(speed) {
+        clip_mut(&mut next, key)?.speed = speed;
+        return finish(next);
+    }
+    let milli = speed_milli(speed);
+    let track = &project.tracks[key.track];
+    let scaled = i128::from(clip.duration.ticks()) * i128::from(clip.speed_milli());
+    let rounded = (scaled + i128::from(milli) / 2) / i128::from(milli);
+    let duration = Time::from_ticks(i64::try_from(rounded.max(1)).map_err(|_| EditError::TimeOverflow { key })?);
+    if duration != clip.duration && has_transition_after(track, key.clip) {
+        return Err(EditError::TransitionOnEdge { key, edge: "end" });
+    }
+    let end = clip.start.checked_add(duration).ok_or(EditError::TimeOverflow { key })?;
+    if overlaps_other(track, Some(key.clip), clip.start, end) {
+        let next_start = track.clips.iter().enumerate().filter(|(i, other)| *i != key.clip && other.start >= clip.start).map(|(_, other)| other.start).min().unwrap_or(end);
+        return Err(EditError::SpeedOverlap { key, end, next_start });
+    }
+    let changed = clip_mut(&mut next, key)?;
+    changed.speed = milli as f64 / SPEED_SCALE as f64;
+    changed.duration = duration;
+    sort_track(&mut next.tracks[key.track]);
     finish(next)
 }
 

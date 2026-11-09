@@ -5,6 +5,7 @@
 use crate::audio_schedule::{audio_segments, MIX_CHANNELS};
 use crate::project::Project;
 use crate::render::{ClipKey, RenderError};
+use crate::stretch::StretchStates;
 
 /// Decoded audio of the sources, as interleaved stereo `f32` at 48 kHz.
 pub trait AudioSource {
@@ -37,22 +38,41 @@ pub fn mix_audio<S: AudioSource + ?Sized>(
     start: i64,
     out: &mut [f32],
 ) -> Result<MixReport, RenderError> {
+    mix_audio_with(project, source, &mut StretchStates::default(), start, out)
+}
+
+/// Like [`mix_audio`], for a caller that mixes more blocks: `stretch` carries the work of the time
+/// stretcher over to the next block, so sequential mixing stays cheap. The result does not depend
+/// on it.
+pub fn mix_audio_with<S: AudioSource + ?Sized>(
+    project: &Project,
+    source: &mut S,
+    stretch: &mut StretchStates,
+    start: i64,
+    out: &mut [f32],
+) -> Result<MixReport, RenderError> {
     out.fill(0.0);
     let frames = out.len() / MIX_CHANNELS;
     let mut scratch: Vec<f32> = Vec::new();
-    for segment in audio_segments(project, start, frames as i64) {
+    let segments = audio_segments(project, start, frames as i64);
+    stretch.retain(&segments.iter().filter(|segment| segment.stretch.is_some()).map(|segment| segment.key).collect::<Vec<_>>());
+    for segment in segments {
         let len = segment.len as usize;
         scratch.clear();
         scratch.resize(len * MIX_CHANNELS, 0.0);
-        // Samples before the beginning of the source stay silent.
-        let skip = segment.source_start.saturating_neg().clamp(0, segment.len) as usize;
-        if skip < len {
-            source.read(
-                segment.key,
-                segment.source,
-                segment.source_start.max(0),
-                &mut scratch[skip * MIX_CHANNELS..],
-            )?;
+        if let Some(spec) = segment.stretch {
+            stretch.render(source, &segment, spec, &mut scratch)?;
+        } else {
+            // Samples before the beginning of the source stay silent.
+            let skip = segment.source_start.saturating_neg().clamp(0, segment.len) as usize;
+            if skip < len {
+                source.read(
+                    segment.key,
+                    segment.source,
+                    segment.source_start.max(0),
+                    &mut scratch[skip * MIX_CHANNELS..],
+                )?;
+            }
         }
         let offset = (segment.start - start) as usize * MIX_CHANNELS;
         let target = &mut out[offset..offset + len * MIX_CHANNELS];

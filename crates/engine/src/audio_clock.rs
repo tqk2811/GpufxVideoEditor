@@ -40,7 +40,8 @@
 //! ring is full, so a device that is not playing must keep calling the latter. Generations wrap at
 //! 2^20: a stale block could only be taken for current if it survived that many seeks unconsumed.
 
-use crate::audio_mix::{mix_audio, AudioSource, MixReport};
+use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
+use crate::stretch::StretchStates;
 use crate::audio_schedule::{audio_sample_count, sample_position, MIX_CHANNELS};
 use crate::project::Project;
 use crate::render::RenderError;
@@ -193,6 +194,7 @@ pub fn audio_channel(
         next: 0,
         tail: 0,
         scratch: Vec::new(),
+        stretch: StretchStates::default(),
     };
     let consumer = AudioConsumer {
         shared: Arc::clone(&shared),
@@ -242,6 +244,7 @@ pub struct AudioProducer {
     next: i64,
     tail: usize,
     scratch: Vec<f32>,
+    stretch: StretchStates,
 }
 
 impl AudioProducer {
@@ -286,7 +289,7 @@ impl AudioProducer {
             }
             self.scratch.clear();
             self.scratch.resize(count * MIX_CHANNELS, 0.0);
-            let mix = mix_audio(&self.project, source, self.next, &mut self.scratch)?;
+            let mix = mix_audio_with(&self.project, source, &mut self.stretch, self.next, &mut self.scratch)?;
             report.mix.clamped_samples += mix.clamped_samples;
 
             // A seek that arrives during the mix makes this block stale, and the consumer drops it.

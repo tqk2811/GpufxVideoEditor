@@ -104,6 +104,56 @@ pub struct Clip {
     /// Length of the audio fade to the end of the clip.
     #[serde(default, skip_serializing_if = "is_zero_time")]
     pub fade_out: Time,
+    /// Playback speed: a timeline tick reads `speed` source ticks, so `duration` is the length on
+    /// the timeline and `duration * speed` is the source consumed. 1 when absent, and left out of
+    /// the file when 1, so older projects load and save unchanged.
+    #[serde(default = "default_speed", skip_serializing_if = "is_unit_speed")]
+    pub speed: f64,
+}
+
+/// The slowest playback speed of a clip.
+pub const MIN_SPEED: f64 = 0.1;
+/// The fastest playback speed of a clip.
+pub const MAX_SPEED: f64 = 10.0;
+/// A speed is used as a whole number of these parts: the mapping is exact in integers and never
+/// accumulates rounding, however long the clip. See [`Clip::source_offset`].
+pub const SPEED_SCALE: i64 = 1000;
+
+fn default_speed() -> f64 {
+    1.0
+}
+
+fn is_unit_speed(speed: &f64) -> bool {
+    *speed == 1.0
+}
+
+/// Whether a clip may use this `speed`.
+pub fn speed_in_range(speed: f64) -> bool {
+    speed.is_finite() && (MIN_SPEED..=MAX_SPEED).contains(&speed)
+}
+
+/// `speed` rounded to the nearest whole part of [`SPEED_SCALE`], limited to the allowed range.
+pub fn speed_milli(speed: f64) -> i64 {
+    if speed.is_finite() {
+        ((speed * SPEED_SCALE as f64).round() as i64).clamp(100, 10_000)
+    } else {
+        SPEED_SCALE
+    }
+}
+
+/// Greatest common divisor of two positive numbers.
+fn gcd(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+/// `value * numerator / denominator` rounded toward negative infinity, limited to the `Time` range.
+fn scale_floor(value: i64, numerator: i64, denominator: i64) -> i64 {
+    let product = i128::from(value) * i128::from(numerator);
+    i64::try_from(product.div_euclid(i128::from(denominator))).unwrap_or(if product < 0 { i64::MIN } else { i64::MAX })
 }
 
 fn is_video(kind: &TrackKind) -> bool {
@@ -238,6 +288,7 @@ impl From<ProjectV1> for Project {
                             muted: false,
                             fade_in: Time::ZERO,
                             fade_out: Time::ZERO,
+                            speed: 1.0,
                         })
                         .collect(),
                     transitions: track.transitions,
@@ -266,6 +317,40 @@ impl Clip {
     /// Timeline end (exclusive), or `None` on overflow.
     pub fn end(&self) -> Option<Time> {
         self.start.checked_add(self.duration)
+    }
+
+    /// The speed as a whole number of [`SPEED_SCALE`] parts.
+    pub fn speed_milli(&self) -> i64 {
+        speed_milli(self.speed)
+    }
+
+    /// Whether the clip plays at anything but its original speed.
+    pub fn has_speed(&self) -> bool {
+        self.speed_milli() != SPEED_SCALE
+    }
+
+    /// The source ticks played in `offset` timeline ticks from the start of the clip:
+    /// `floor(offset * speed)`, exact in integers, so picture and sound never drift. `offset` may be
+    /// negative, inside a transition window.
+    pub fn source_offset(&self, offset: Time) -> Time {
+        Time::from_ticks(scale_floor(offset.ticks(), self.speed_milli(), SPEED_SCALE))
+    }
+
+    /// The first source position past what the clip plays.
+    pub fn source_end(&self) -> Time {
+        self.source_in.saturating_add(self.source_offset(self.duration))
+    }
+
+    /// The timeline ticks that play `source` source ticks, rounded down.
+    pub fn timeline_ticks(&self, source: Time) -> Time {
+        Time::from_ticks(scale_floor(source.ticks(), SPEED_SCALE, self.speed_milli()))
+    }
+
+    /// The step, in timeline ticks, of the edit positions whose source position is a whole tick,
+    /// so that an edit at a multiple of it keeps every source position exactly. 1 at normal speed
+    /// and at most [`SPEED_SCALE`] ticks (11 ms) otherwise.
+    pub fn speed_grid(&self) -> i64 {
+        SPEED_SCALE / gcd(self.speed_milli(), SPEED_SCALE)
     }
 }
 

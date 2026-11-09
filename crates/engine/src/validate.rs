@@ -1,6 +1,6 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
-use crate::project::Project;
+use crate::project::{speed_in_range, Project, MAX_SPEED, MIN_SPEED};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;
@@ -106,6 +106,8 @@ pub enum ValidationError {
         transition: usize,
         after_clip: usize,
     },
+    /// A clip `speed` is not a number between [`MIN_SPEED`] and [`MAX_SPEED`].
+    InvalidSpeed { track: usize, clip: usize, speed: f64 },
     /// A clip `gain_db` is infinite or not a number.
     NonFiniteGain { track: usize, clip: usize },
     /// A clip `fade_in` or `fade_out` is negative.
@@ -218,6 +220,9 @@ impl fmt::Display for ValidationError {
                 "track {track}, transition {transition}: clips {after_clip} and {} are not adjacent",
                 after_clip + 1
             ),
+            InvalidSpeed { track, clip, speed } => {
+                write!(f, "track {track}, clip {clip}: speed {speed} must be between {MIN_SPEED} and {MAX_SPEED}")
+            }
             NonFiniteGain { track, clip } => {
                 write!(f, "track {track}, clip {clip}: gain_db must be finite")
             }
@@ -340,6 +345,13 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                     track: t,
                     clip: c,
                     source: clip.source.clone(),
+                });
+            }
+            if !speed_in_range(clip.speed) {
+                errors.push(InvalidSpeed {
+                    track: t,
+                    clip: c,
+                    speed: clip.speed,
                 });
             }
             if !clip.gain_db.is_finite() {

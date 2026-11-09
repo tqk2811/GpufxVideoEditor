@@ -22,13 +22,15 @@ pub mod edit;
 pub mod project;
 pub mod render;
 pub mod schedule;
+pub mod stretch;
 pub mod time;
 pub mod validate;
 
 pub use audio_clock::{
     audio_channel, sample_time, AudioClock, AudioConsumer, AudioProducer, PrepareReport, PullReport,
 };
-pub use audio_mix::{mix_audio, AudioSource, MixReport};
+pub use audio_mix::{mix_audio, mix_audio_with, AudioSource, MixReport};
+pub use stretch::StretchStates;
 pub use audio_schedule::{
     audio_sample_count, audio_segments, sample_position, AudioSegment, GainEnvelope, MIX_CHANNELS,
     MIX_SAMPLE_RATE,
@@ -36,11 +38,11 @@ pub use audio_schedule::{
 pub use edit::{
     add_clip, add_effect, add_track, add_transition, clip_at, delete_clip, move_clip,
     nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain,
-    set_muted, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_start, EditError, EditHistory,
+    set_muted, set_speed, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_start, EditError, EditHistory,
 };
 pub use project::{
     AudioOutput, Clip, Effect, LoadError, Output, Project, Track, TrackKind, Transition,
-    MIN_SUPPORTED_VERSION, SUPPORTED_VERSION,
+    MAX_SPEED, MIN_SPEED, MIN_SUPPORTED_VERSION, SPEED_SCALE, SUPPORTED_VERSION,
 };
 pub use render::{ClipKey, RenderError};
 pub use schedule::{
