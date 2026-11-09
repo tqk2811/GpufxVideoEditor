@@ -19,8 +19,8 @@ Không dựng editor bằng cách sinh lệnh FFmpeg cho preview: filter graph c
 | Nền tảng | Windows và Linux; web nếu làm được | Đã chốt |
 | UI | Rust + egui, dùng chung wgpu device nên preview không qua interop | Đã chốt |
 | Đối tượng | Kiểu CapCut (nhanh, nhiều hiệu ứng) | Đã chốt |
-| Giấy phép code | MIT | Đã chốt |
-| FFmpeg | LGPL dạng DLL; encoder phần cứng | Đề xuất, chờ chốt |
+| Giấy phép code | Mã nguồn của repo MIT | Đã chốt |
+| FFmpeg | Bản GPL, có x264/x265. Bản phát hành kèm FFmpeg GPL phải phân phối theo GPL, gồm cả mã nguồn | Đã chốt |
 
 ## Các editor open-source đang làm gì
 
