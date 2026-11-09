@@ -17,6 +17,8 @@ const VECTOR_FIELD_WIDTH: f32 = 54.0;
 struct Draft {
     text: String,
     saved: String,
+    /// The frame that last stored it, which every frame drawing its field does.
+    seen: u64,
 }
 
 /// Every draft of the open inspector, kept in one place so that they can all be dropped together.
@@ -31,7 +33,8 @@ fn draft_text(ctx: &egui::Context, id: egui::Id) -> Option<String> {
 }
 
 fn store_draft(ctx: &egui::Context, id: egui::Id, text: String, saved: String) {
-    ctx.data_mut(|data| data.get_temp_mut_or_default::<Drafts>(drafts_id()).insert(id, Draft { text, saved }));
+    let seen = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| data.get_temp_mut_or_default::<Drafts>(drafts_id()).insert(id, Draft { text, saved, seen }));
 }
 
 fn remove_draft(ctx: &egui::Context, id: egui::Id) {
@@ -40,11 +43,13 @@ fn remove_draft(ctx: &egui::Context, id: egui::Id) {
 
 /// Forgets every draft and takes the focus from its field. The widget ids of the inspector name a
 /// clip by its position, so a draft cannot follow the clip to another one. True when text the
-/// project did not have was lost.
+/// project did not have was lost from a field still on screen: the field of a deleted effect has
+/// stopped drawing, and its draft was gone for the user long before.
 pub(super) fn drop_expression_drafts(ctx: &egui::Context) -> bool {
     let drafts = ctx.data_mut(|data| data.remove_temp::<Drafts>(drafts_id())).unwrap_or_default();
     ctx.memory_mut(|memory| drafts.keys().for_each(|id| memory.surrender_focus(id.with("edit"))));
-    drafts.values().any(|draft| draft.text != draft.saved)
+    let frame = ctx.cumulative_frame_nr();
+    drafts.values().any(|draft| draft.text != draft.saved && draft.seen + 1 >= frame)
 }
 
 /// The rows of every editable parameter in `infos`, with `params` as their values.
@@ -240,6 +245,21 @@ mod tests {
         assert_eq!(draft_text(&ctx, id), None);
         assert!(!ctx.memory(|memory| memory.has_focus(id.with("edit"))));
         assert!(!drop_expression_drafts(&ctx), "nothing is left to lose");
+    }
+
+    #[test]
+    fn a_draft_whose_field_stopped_drawing_is_not_reported_as_lost() {
+        let ctx = egui::Context::default();
+        let id = focus_and_type(&ctx, "", "(");
+        ctx.memory_mut(|memory| memory.surrender_focus(id.with("edit")));
+        frame(&ctx, "", vec![]);
+        assert!(draft_text(&ctx, id).is_some(), "the invalid text is kept");
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(RawInput::default(), |_| {});
+            output.textures_delta.clear();
+        }
+        assert!(!drop_expression_drafts(&ctx));
+        assert_eq!(draft_text(&ctx, id), None, "and it is purged all the same");
     }
 
     #[test]

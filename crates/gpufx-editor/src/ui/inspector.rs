@@ -281,6 +281,7 @@ mod tests {
 
         let key = ClipKey { track: 0, clip: 0 };
         state.finish_drag(crate::timeline::drag::EditCommand::Move { key, track: 0, desired_start: Time::from_ticks(90_000) });
+        typed_draft(&ctx);
         frame(&ctx, &mut state);
         assert!(!param_widgets::has_test_draft(&ctx), "no stale draft stays in memory");
         assert_eq!(state.status(), &Status::Info(Message::ExpressionDropped));
