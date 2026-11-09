@@ -15,6 +15,10 @@ const CONTROLS_HEIGHT: f32 = 40.0;
 const PLAY_HALF_WIDTH: f32 = 16.0;
 /// The fullscreen button, with what keeps the row from touching the panel edge.
 const FULLSCREEN_WIDTH: f32 = 40.0;
+const FULLSCREEN_BAR_WIDTH: f32 = 560.0;
+const FULLSCREEN_BAR_MARGIN: f32 = 24.0;
+/// How long the fullscreen controls stay with no pointer movement and no key press.
+const FULLSCREEN_CONTROLS_SECONDS: f64 = 3.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     let rect = ui.max_rect();
@@ -28,6 +32,35 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     draw_picture(ui, picture, preview);
     painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::BORDER));
     ui.scope_builder(UiBuilder::new().max_rect(controls.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, controls));
+}
+
+/// Where the controls float over the picture in fullscreen.
+pub(super) fn fullscreen_bar(screen: Rect) -> Rect {
+    let width = FULLSCREEN_BAR_WIDTH.min(screen.width() - 2.0 * FULLSCREEN_BAR_MARGIN).max(0.0);
+    let bottom = (screen.bottom() - FULLSCREEN_BAR_MARGIN).max(screen.top() + CONTROLS_HEIGHT);
+    Rect::from_center_size(Pos2::new(screen.center().x, bottom - CONTROLS_HEIGHT / 2.0), Vec2::new(width, CONTROLS_HEIGHT))
+}
+
+fn controls_visible(idle_seconds: f64, over_bar: bool) -> bool {
+    over_bar || idle_seconds < FULLSCREEN_CONTROLS_SECONDS
+}
+
+/// The picture on the whole screen, letterboxed, with the transport floating over it until the
+/// pointer has been still for a while.
+pub fn show_fullscreen(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
+    let screen = ui.max_rect();
+    draw_picture(ui, screen, preview);
+    let bar = fullscreen_bar(screen);
+    let (now, pointer) = ui.ctx().input(|input| (input.time, input.pointer.latest_pos()));
+    let idle = state.ui.fullscreen_activity.map_or(0.0, |at| now - at);
+    if !controls_visible(idle, pointer.is_some_and(|at| bar.contains(at))) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        return;
+    }
+    // Nothing else may be due when the controls should go.
+    ui.ctx().request_repaint_after_secs((FULLSCREEN_CONTROLS_SECONDS - idle).max(0.05) as f32);
+    ui.painter().rect_filled(bar, CornerRadius::same(theme::PANEL_RADIUS), theme::PANEL.gamma_multiply(0.9));
+    ui.scope_builder(UiBuilder::new().id_salt("fullscreen-transport").max_rect(bar.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, bar));
 }
 
 fn draw_picture(ui: &egui::Ui, rect: Rect, preview: Option<PreviewTexture>) {
@@ -88,6 +121,21 @@ fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fullscreen_controls_go_after_a_while_unless_the_pointer_is_on_them() {
+        assert!(controls_visible(0.0, false));
+        assert!(controls_visible(2.9, false));
+        assert!(!controls_visible(3.0, false));
+        assert!(controls_visible(100.0, true));
+    }
+
+    #[test]
+    fn the_fullscreen_bar_stays_on_a_tiny_screen() {
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 60.0));
+        let bar = fullscreen_bar(screen);
+        assert!(bar.width() <= 100.0 && bar.height() == CONTROLS_HEIGHT && bar.top() >= 0.0, "{bar:?}");
+    }
 
     #[test]
     fn the_optional_parts_of_the_transport_go_when_they_would_reach_the_play_button() {

@@ -149,6 +149,8 @@ pub struct UiState {
     pub media_search: String,
     pub audio_search: String,
     pub fullscreen: bool,
+    /// When the pointer or a key last did something in fullscreen; the controls hide after a while.
+    pub fullscreen_activity: Option<f64>,
     /// A time field being dragged; the clip changes on release.
     pub clip_field: Option<ClipField>,
     /// The clip the inspector showed last, to notice when that changes.

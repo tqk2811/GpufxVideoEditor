@@ -37,7 +37,43 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     theme::apply(root.ctx());
     state.visuals.borrow_mut().begin_frame(root.ctx());
     state.visuals.borrow_mut().sync_project(state.revision(), state.project());
+    track_fullscreen_activity(root.ctx(), state);
     handle_shortcuts(root.ctx(), state, requests);
+    if state.ui.fullscreen {
+        let screen = root.max_rect();
+        in_rect(root, "fullscreen-player", screen, |ui| player::show_fullscreen(ui, state, requests, preview));
+    } else {
+        editing_panels(root, state, requests, preview);
+    }
+    // A release ends a held control wherever the pointer went, and a click or key press is
+    // finished in the frame that made it.
+    if !root.ctx().input(|input| input.pointer.any_down()) {
+        state.pointer_released();
+        if state.ui.splitter.take().is_some_and(|drag| drag.before != state.ui.panel_sizes) {
+            requests.push(UiRequest::SavePanelSizes);
+        }
+    }
+    // After the panels and the shortcuts: Stop in this frame must release the pool in this frame,
+    // because nothing may ask for another one.
+    let mut visuals = state.visuals.borrow_mut();
+    visuals.set_paused(state.is_playing() || state.is_exporting());
+    visuals.end_frame();
+}
+
+/// Starts or restarts the time the fullscreen controls stay up. Before the shortcuts, which consume
+/// the keys.
+fn track_fullscreen_activity(ctx: &egui::Context, state: &mut EditorState) {
+    if !state.ui.fullscreen {
+        state.ui.fullscreen_activity = None;
+        return;
+    }
+    let (now, active) = ctx.input(|input| (input.time, input.pointer.delta() != egui::Vec2::ZERO || input.pointer.any_pressed() || input.events.iter().any(|event| matches!(event, Event::Key { pressed: true, .. }))));
+    if active || state.ui.fullscreen_activity.is_none() {
+        state.ui.fullscreen_activity = Some(now);
+    }
+}
+
+fn editing_panels(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     let screen = root.max_rect();
     let layout = panels(screen.size(), &state.ui.panel_sizes);
     let Panels { top_bar, left, center, right, timeline, status } = layout;
@@ -56,19 +92,6 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     });
     in_rect(root, "status-line", status, |ui| status_line(ui, state));
     splitters(root, state, requests, &layout);
-    // A release ends a held control wherever the pointer went, and a click or key press is
-    // finished in the frame that made it.
-    if !root.ctx().input(|input| input.pointer.any_down()) {
-        state.pointer_released();
-        if state.ui.splitter.take().is_some_and(|drag| drag.before != state.ui.panel_sizes) {
-            requests.push(UiRequest::SavePanelSizes);
-        }
-    }
-    // After the panels and the shortcuts: Stop in this frame must release the pool in this frame,
-    // because nothing may ask for another one.
-    let mut visuals = state.visuals.borrow_mut();
-    visuals.set_paused(state.is_playing() || state.is_exporting());
-    visuals.end_frame();
 }
 
 /// The window lost the focus: a hold is cancelled, as Escape cancels it, because switching windows
@@ -179,6 +202,15 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
         if consume_exact(input, Modifiers::NONE, Key::F11) && !repeat && !state.is_holding() && state.ui.splitter.is_none() {
             requests.push(UiRequest::ToggleFullscreen);
         }
+        // Holding the key must not toggle again on each repeat.
+        let repeat = is_repeat(input, Key::Space);
+        if consume_exact(input, Modifiers::NONE, Key::Space) && !repeat {
+            state.toggle_playback();
+        }
+        // Fullscreen is only for watching: nothing below may edit the project out of sight.
+        if state.ui.fullscreen {
+            return;
+        }
         if consume_exact(input, Modifiers::COMMAND, Key::Z) {
             state.undo();
         }
@@ -199,11 +231,6 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
         }
         if consume_exact(input, Modifiers::NONE, Key::Delete) {
             state.delete_selected();
-        }
-        // Holding the key must not toggle again on each repeat.
-        let repeat = is_repeat(input, Key::Space);
-        if consume_exact(input, Modifiers::NONE, Key::Space) && !repeat {
-            state.toggle_playback();
         }
     });
 }
@@ -463,6 +490,113 @@ mod tests {
             let mut output = ctx.run_ui(egui::RawInput { events: vec![Event::PointerMoved(at)], ..window_input(1280.0, 720.0) }, |ui| show(ui, &mut state, &mut requests, None));
             output.textures_delta.clear();
             assert_eq!(output.platform_output.cursor_icon, cursor, "{splitter:?}");
+        }
+    }
+
+    fn screen() -> Rect {
+        Rect::from_min_size(egui::Pos2::ZERO, window())
+    }
+
+    fn show_frame_at(ctx: &egui::Context, state: &mut EditorState, time: f64, events: Vec<Event>) -> (Vec<UiRequest>, CursorIcon) {
+        let mut requests = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput { events, time: Some(time), ..window_input(1280.0, 720.0) }, |ui| show(ui, state, &mut requests, None));
+        output.textures_delta.clear();
+        (requests, output.platform_output.cursor_icon)
+    }
+
+    fn fullscreen_state() -> EditorState {
+        let mut state = state();
+        state.ui.fullscreen = true;
+        state
+    }
+
+    #[test]
+    fn fullscreen_draws_only_the_player_so_clicks_do_not_reach_the_panels() {
+        let mut state = fullscreen_state();
+        let left = panels(window()).left;
+        click(&egui::Context::default(), &mut state, egui::pos2(left.left() + left.width() * 5.0 / 6.0, left.top() + 20.0));
+        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Media, "the tab is not there");
+    }
+
+    #[test]
+    fn the_fullscreen_bar_plays_and_exits() {
+        let mut state = fullscreen_state();
+        let bar = player::fullscreen_bar(screen());
+        let ctx = egui::Context::default();
+        assert!(click(&ctx, &mut state, bar.center()).is_empty());
+        assert!(state.is_playing());
+        let exit = click(&ctx, &mut state, egui::pos2(bar.right() - 25.0, bar.center().y));
+        assert_eq!(exit, vec![UiRequest::ToggleFullscreen]);
+    }
+
+    #[test]
+    fn fullscreen_keeps_space_escape_and_f11_and_refuses_edits() {
+        let mut state = fullscreen_state();
+        let before = state.project().clone();
+        press(&mut state, Key::S, Modifiers::NONE);
+        press(&mut state, Key::Delete, Modifiers::NONE);
+        press(&mut state, Key::Z, Modifiers::COMMAND);
+        assert_eq!(state.project(), &before, "no edit out of sight");
+        assert!(press(&mut state, Key::S, Modifiers::COMMAND).is_empty(), "no dialogs either");
+        press(&mut state, Key::Space, Modifiers::NONE);
+        assert!(state.is_playing());
+        assert_eq!(press(&mut state, Key::Escape, Modifiers::NONE), vec![UiRequest::ToggleFullscreen]);
+        assert_eq!(press(&mut state, Key::F11, Modifiers::NONE), vec![UiRequest::ToggleFullscreen]);
+    }
+
+    #[test]
+    fn the_fullscreen_controls_hide_when_idle_and_come_back_on_movement() {
+        let mut state = fullscreen_state();
+        let bar = player::fullscreen_bar(screen());
+        let ctx = egui::Context::default();
+        let picture = egui::pos2(100.0, 100.0);
+        show_frame_at(&ctx, &mut state, 0.0, vec![Event::PointerMoved(picture)]);
+        let (_, cursor) = show_frame_at(&ctx, &mut state, 1.0, vec![]);
+        assert_ne!(cursor, CursorIcon::None);
+        let (_, cursor) = show_frame_at(&ctx, &mut state, 5.0, vec![]);
+        assert_eq!(cursor, CursorIcon::None, "the pointer goes with the controls");
+        // A move brings them back.
+        let (_, cursor) = show_frame_at(&ctx, &mut state, 5.1, vec![Event::PointerMoved(picture + egui::vec2(3.0, 0.0))]);
+        assert_ne!(cursor, CursorIcon::None);
+        show_frame_at(&ctx, &mut state, 5.2, vec![Event::PointerMoved(bar.center())]);
+        let (_, cursor) = show_frame_at(&ctx, &mut state, 20.0, vec![]);
+        assert_ne!(cursor, CursorIcon::None, "the pointer rests on the controls");
+    }
+
+    #[test]
+    fn a_click_on_the_picture_in_fullscreen_does_nothing() {
+        let mut state = fullscreen_state();
+        let ctx = egui::Context::default();
+        let away = egui::pos2(100.0, 100.0);
+        show_frame_at(&ctx, &mut state, 0.0, vec![Event::PointerMoved(away)]);
+        show_frame_at(&ctx, &mut state, 5.0, vec![]);
+        assert!(!state.is_playing());
+        let button = |pressed| Event::PointerButton { pos: away, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        show_frame_at(&ctx, &mut state, 5.1, vec![button(true)]);
+        show_frame_at(&ctx, &mut state, 5.2, vec![button(false)]);
+        assert!(!state.is_playing());
+    }
+
+    #[test]
+    fn the_fullscreen_activity_is_forgotten_after_leaving() {
+        let mut state = fullscreen_state();
+        let ctx = egui::Context::default();
+        show_frame_at(&ctx, &mut state, 0.0, vec![]);
+        assert!(state.ui.fullscreen_activity.is_some());
+        state.ui.fullscreen = false;
+        show_frame_at(&ctx, &mut state, 1.0, vec![]);
+        assert_eq!(state.ui.fullscreen_activity, None);
+    }
+
+    #[test]
+    fn the_whole_ui_draws_in_fullscreen_at_every_size() {
+        for (width, height) in [(1920.0, 1080.0), (800.0, 500.0), (100.0, 60.0)] {
+            let mut state = fullscreen_state();
+            let ctx = egui::Context::default();
+            let mut requests = Vec::new();
+            run_frame(&ctx, window_input(width, height), |ui| show(ui, &mut state, &mut requests, None));
+            run_frame(&ctx, window_input(width, height), |ui| show(ui, &mut state, &mut requests, None));
+            assert!(requests.is_empty());
         }
     }
 

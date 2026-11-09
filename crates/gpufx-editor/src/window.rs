@@ -673,10 +673,15 @@ impl Session {
                     self.state.report_error(Message::PanelSizesSaveFailed(message));
                 }
             }
+            // winit restores the placement it saved on entry, maximised or not, on leaving.
             UiRequest::ToggleFullscreen => {
-                let window = self.presenter.window();
-                let next = if window.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) };
-                window.set_fullscreen(next);
+                let leaving = self.presenter.window().fullscreen().is_some();
+                // The export bar and its Cancel are not in the fullscreen player.
+                if !leaving && self.state.is_exporting() {
+                    self.state.report_refused(Message::ExportRunning);
+                    return;
+                }
+                self.presenter.window().set_fullscreen(if leaving { None } else { Some(Fullscreen::Borderless(None)) });
             }
         }
     }
