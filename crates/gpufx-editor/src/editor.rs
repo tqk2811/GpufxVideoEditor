@@ -8,7 +8,7 @@ use crate::timeline::drag::{ClipDrag, EditCommand};
 use crate::timeline::view::TimelineView;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, split_clip, AudioOutput, Clip, ClipKey,
-    EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
+    EditError, EditHistory, Effect, Output, Project, Resolver, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use serde_json::Map;
 use std::path::{Path, PathBuf};
@@ -410,6 +410,17 @@ impl EditorState {
         }
     }
 
+    /// Adds a file the user picked for `track`. A file with no audio stream on an audio track is
+    /// refused here, because a project holding one would not open again.
+    pub fn add_picked_file(&mut self, track: usize, path: &Path, resolver: &dyn Resolver) {
+        let source = path.to_string_lossy();
+        if self.project().tracks.get(track).is_some_and(|target| target.kind == TrackKind::Audio) && !resolver.source_has_audio(&source) {
+            self.status = Status::Refused(format!("{source} has no audio stream"));
+            return;
+        }
+        self.add_clip_from_file(track, path);
+    }
+
     /// Issues the command of a finished drag and selects the clip where it landed.
     pub fn finish_drag(&mut self, command: EditCommand) {
         self.drag = None;
@@ -577,6 +588,34 @@ mod tests {
         state.add_clip_from_file(0, Path::new("b.mp4"));
         assert_eq!(clips(state.project(), 0)[1].0, DEFAULT_CLIP_DURATION);
         assert_eq!(state.selection(), Some(key(1)));
+    }
+
+    /// Only `sound.wav` has an audio stream.
+    struct SoundOnlyInWav;
+
+    impl Resolver for SoundOnlyInWav {
+        fn source_exists(&self, _source: &str) -> bool {
+            true
+        }
+        fn package_exists(&self, _package: &str) -> bool {
+            true
+        }
+        fn source_has_audio(&self, source: &str) -> bool {
+            source.ends_with("sound.wav")
+        }
+    }
+
+    #[test]
+    fn a_file_without_sound_is_refused_on_an_audio_track_only() {
+        let mut state = state_with_clip();
+        let before = state.project().clone();
+        state.add_picked_file(1, Path::new("silent.mp4"), &SoundOnlyInWav);
+        assert_eq!(state.project(), &before);
+        assert!(matches!(state.status(), Status::Refused(message) if message.contains("silent.mp4")), "{:?}", state.status());
+        state.add_picked_file(1, Path::new("sound.wav"), &SoundOnlyInWav);
+        assert_eq!(state.project().tracks[1].clips.len(), 1);
+        state.add_picked_file(0, Path::new("silent.mp4"), &SoundOnlyInWav);
+        assert_eq!(state.project().tracks[0].clips.len(), 2, "a video track does not need sound");
     }
 
     #[test]

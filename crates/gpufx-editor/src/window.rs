@@ -513,7 +513,7 @@ impl Session {
                     .set_parent(self.presenter.window())
                     .pick_file();
                 if let Some(path) = picked {
-                    self.state.add_clip_from_file(track, &path);
+                    self.state.add_picked_file(track, &path, self.paths.as_ref());
                 }
                 self.presenter.window().request_redraw();
             }
