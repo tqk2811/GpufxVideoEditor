@@ -22,6 +22,21 @@ pub enum EncoderChoice {
     Named(String),
 }
 
+/// Why an encoder this FFmpeg lacks is not there. Only the GPL FFmpeg has libx264.
+fn missing_encoder_reason(name: &str, gpl: bool) -> String {
+    if name == "libx264" && !gpl {
+        return "this build links the LGPL FFmpeg, which has no libx264 (use Auto, a hardware encoder or the GPL build)".to_owned();
+    }
+    "this FFmpeg does not have it".to_owned()
+}
+
+/// Whether this FFmpeg build has an encoder called `name`. A hardware encoder can still fail to open.
+pub fn encoder_exists(name: &str) -> bool {
+    let Ok(name) = CString::new(name) else { return false };
+    // SAFETY: `name` is a valid C string for the duration of the call.
+    !unsafe { ffi::avcodec_find_encoder_by_name(name.as_ptr()) }.is_null()
+}
+
 /// Encodes frames as they arrive; [`Mp4Encoder::finish`] writes the trailer.
 pub struct Mp4Encoder {
     format_context: *mut ffi::AVFormatContext,
@@ -124,7 +139,7 @@ impl Mp4Encoder {
     unsafe fn initialize(&mut self, path: &std::ffi::CStr, name: &std::ffi::CStr, output: &Output) -> Result<(), String> {
         let codec = ffi::avcodec_find_encoder_by_name(name.as_ptr());
         if codec.is_null() {
-            return Err("this FFmpeg does not have it".to_owned());
+            return Err(missing_encoder_reason(&name.to_string_lossy(), cfg!(feature = "ffmpeg-gpl")));
         }
         check(ffi::avformat_alloc_output_context2(&mut self.format_context, ptr::null(), ptr::null(), path.as_ptr()), "avformat_alloc_output_context2")?;
         self.codec_context = ffi::avcodec_alloc_context3(codec);
@@ -396,6 +411,13 @@ impl Drop for Mp4Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_libx264_explains_the_lgpl_build() {
+        assert!(missing_encoder_reason("libx264", false).contains("LGPL"));
+        assert!(!missing_encoder_reason("libx264", true).contains("LGPL"));
+        assert!(!missing_encoder_reason("h264_nvenc", false).contains("LGPL"));
+    }
 
     #[test]
     fn converts_primaries_to_bt709_limited() {
