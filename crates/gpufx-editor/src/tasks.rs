@@ -53,6 +53,8 @@ impl Prompt {
 /// What the user asked for that may need a dialog or a load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
+    /// To the file it came from, or through the Save dialog when it has none.
+    SaveProject,
     NewProject,
     OpenProject,
     SaveProjectAs,
@@ -183,6 +185,13 @@ impl Tasks {
 
     /// Starts `request`, or says on the status line why it has to wait.
     pub fn begin(&mut self, state: &mut EditorState, request: Request) -> Action {
+        // The project being held is only a preview, with a revision the release will change.
+        if state.refuse_while_live() {
+            return Action::Nothing;
+        }
+        if let (Request::SaveProject, Some(file)) = (request, state.project_file()) {
+            return Action::SaveTo(file.to_path_buf());
+        }
         if self.modal.is_some() {
             state.report_info(DIALOG_OPEN.to_owned());
             return Action::Nothing;
@@ -202,7 +211,7 @@ impl Tasks {
                 self.open_base = Some(state.revision());
                 self.start_dialog(FileDialog::OpenProject)
             }
-            Request::SaveProjectAs => self.start_dialog(FileDialog::SaveProject),
+            Request::SaveProject | Request::SaveProjectAs => self.start_dialog(FileDialog::SaveProject),
             Request::PickClip { track } => self.start_dialog(FileDialog::PickClip { track }),
             Request::ImportMedia { audio_only } => self.start_dialog(FileDialog::ImportMedia { audio_only }),
             Request::Export => self.start_dialog(FileDialog::Export),
@@ -266,6 +275,7 @@ impl Tasks {
                         let load = self.start_load(state, &path, base);
                         Action::ReadProject { load, file: path }
                     }
+                    FileDialog::SaveProject if state.refuse_while_live() => Action::Nothing,
                     FileDialog::SaveProject => Action::SaveTo(path),
                     FileDialog::Export => Action::StartExport(path),
                 }
@@ -322,7 +332,7 @@ impl Tasks {
     /// Applies a finished load once nothing is in the way: an export, a drag, or a prompt whose
     /// answer decides whether the app goes on.
     pub fn poll(&mut self, state: &mut EditorState) -> Action {
-        if state.is_exporting() || state.drag.is_some() || state.is_live() || self.modal.is_some() {
+        if state.is_exporting() || state.is_holding() || self.modal.is_some() {
             return Action::Nothing;
         }
         let Some(finished) = self.finished.take() else { return Action::Nothing };
@@ -413,6 +423,27 @@ mod tests {
 
     fn read(load: u64, path: &str, result: Result<Project, String>) -> Arrival {
         Arrival::ProjectRead { load, file: PathBuf::from(path), result }
+    }
+
+    #[test]
+    fn saving_goes_to_the_file_or_the_dialog() {
+        let (mut tasks, mut state) = (Tasks::default(), with_tracks());
+        assert_eq!(tasks.begin(&mut state, Request::SaveProject), Action::SaveTo(PathBuf::from("p.json")));
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        assert_eq!(tasks.begin(&mut state, Request::SaveProject), Action::ShowFileDialog(FileDialog::SaveProject));
+    }
+
+    #[test]
+    fn nothing_starts_from_the_preview_of_a_held_control() {
+        let (mut tasks, mut state) = (Tasks::default(), with_tracks());
+        state.add_clip_from_file(0, Path::new("a.mp4"));
+        state.live_gain(-6.0);
+        for request in [Request::SaveProject, Request::SaveProjectAs, Request::OpenProject, Request::NewProject, Request::Export] {
+            assert_eq!(tasks.begin(&mut state, request), Action::Nothing, "{request:?}");
+        }
+        assert!(tasks.is_idle(), "no dialog or prompt came up");
+        assert_eq!(tasks.open_base, None, "no revision of the preview was remembered");
+        assert!(state.is_live(), "the hold goes on");
     }
 
     #[test]

@@ -593,10 +593,7 @@ impl Session {
             }
             UiRequest::NewProject => self.begin_task(Request::NewProject),
             UiRequest::OpenProject => self.begin_task(Request::OpenProject),
-            UiRequest::SaveProject => match self.state.project_file().map(Path::to_path_buf) {
-                Some(file) => self.save_project(file),
-                None => self.begin_task(Request::SaveProjectAs),
-            },
+            UiRequest::SaveProject => self.begin_task(Request::SaveProject),
             UiRequest::SaveProjectAs => self.begin_task(Request::SaveProjectAs),
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),

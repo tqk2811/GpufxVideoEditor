@@ -50,8 +50,8 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     in_rect(root, "status-line", status, |ui| status_line(ui, state));
     // A release ends a held control wherever the pointer went, and a click or key press is
     // finished in the frame that made it.
-    if state.is_live() && !root.ctx().input(|input| input.pointer.any_down()) {
-        state.commit_live();
+    if !root.ctx().input(|input| input.pointer.any_down()) {
+        state.pointer_released();
     }
 }
 
@@ -86,7 +86,14 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
     }
     ctx.input_mut(|input| {
         if consume_exact(input, Modifiers::NONE, Key::Escape) {
-            state.cancel_drag();
+            if state.is_holding() {
+                state.cancel_drag();
+            } else if state.ui.fullscreen {
+                requests.push(UiRequest::ToggleFullscreen);
+            }
+        }
+        if consume_exact(input, Modifiers::NONE, Key::F11) && !state.is_holding() {
+            requests.push(UiRequest::ToggleFullscreen);
         }
         if consume_exact(input, Modifiers::COMMAND, Key::Z) {
             state.undo();
@@ -354,6 +361,36 @@ mod tests {
         press(&mut state, Key::Escape, Modifiers::NONE);
         assert_eq!(state.drag, None);
         assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn escape_leaves_fullscreen_only_when_nothing_is_held() {
+        let mut state = state();
+        assert!(press(&mut state, Key::Escape, Modifiers::NONE).is_empty(), "not fullscreen");
+        state.ui.fullscreen = true;
+        assert_eq!(press(&mut state, Key::Escape, Modifiers::NONE), vec![UiRequest::ToggleFullscreen]);
+        state.drag = Some(ClipDrag { key: ClipKey { track: 0, clip: 0 }, kind: DragKind::Move, grab_offset: Time::ZERO });
+        assert!(press(&mut state, Key::Escape, Modifiers::NONE).is_empty(), "Escape cancels the drag first");
+        assert_eq!(state.drag, None);
+    }
+
+    #[test]
+    fn f11_toggles_fullscreen_unless_something_is_held() {
+        let mut state = state();
+        assert_eq!(press(&mut state, Key::F11, Modifiers::NONE), vec![UiRequest::ToggleFullscreen]);
+        state.live_gain(-6.0);
+        assert!(press(&mut state, Key::F11, Modifiers::NONE).is_empty());
+    }
+
+    #[test]
+    fn a_release_ends_a_cancelled_hold() {
+        let mut state = state();
+        state.live_gain(-6.0);
+        press(&mut state, Key::Escape, Modifiers::NONE);
+        assert!(state.hold_cancelled());
+        let mut requests = Vec::new();
+        run_frame(&egui::Context::default(), window_input(1280.0, 720.0), |ui| show(ui, &mut state, &mut requests, None));
+        assert!(!state.hold_cancelled());
     }
 
     #[test]

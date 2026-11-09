@@ -70,6 +70,9 @@ pub struct EditorState {
     export: Option<ExportProgress>,
     /// A control being dragged; see [`LiveEdit`].
     live: Option<LiveEdit>,
+    /// Escape dropped a held control: it keeps reporting the pointer, so its changes are ignored
+    /// until the button is released.
+    hold_cancelled: bool,
     /// What this session imported and what the open project uses.
     pub library: MediaLibrary,
     pub ui: UiState,
@@ -172,6 +175,7 @@ impl EditorState {
             encoder: 0,
             export: None,
             live: None,
+            hold_cancelled: false,
             library: MediaLibrary::default(),
             ui: UiState::default(),
         }
@@ -245,6 +249,7 @@ impl EditorState {
             self.transport.push(TransportCommand::Stop);
         }
         self.live = None;
+        self.ui.clip_field = None;
         self.library.adopt_project_media(&project);
         self.history = EditHistory::new(project, UNDO_DEPTH);
         self.revision += 1;
@@ -289,6 +294,7 @@ impl EditorState {
         self.scrub_target = None;
         self.drag = None;
         self.cancel_live();
+        self.ui.clip_field = None;
         self.export = Some(ExportProgress { done: 0, total });
         self.status = Status::Info("Exporting".to_owned());
     }
@@ -429,7 +435,7 @@ impl EditorState {
             self.status = Status::Info(EXPORT_RUNNING.to_owned());
             return true;
         }
-        if self.drag.is_none() && self.live.is_none() {
+        if !self.is_holding() {
             return false;
         }
         self.status = Status::Info(DRAG_FIRST.to_owned());
@@ -533,6 +539,33 @@ impl EditorState {
         self.live.is_some()
     }
 
+    /// Whether a timeline drag, a live edit or a time field drag is in progress.
+    pub fn is_holding(&self) -> bool {
+        self.drag.is_some() || self.live.is_some() || self.ui.clip_field.is_some()
+    }
+
+    /// Refuses, with a status, what must not see the preview of a live edit as the project: saving
+    /// it or starting from its revision. True while one is shown.
+    pub fn refuse_while_live(&mut self) -> bool {
+        if self.live.is_none() {
+            return false;
+        }
+        self.status = Status::Info(DRAG_FIRST.to_owned());
+        true
+    }
+
+    /// Whether a held control was cancelled and the button is still down.
+    pub fn hold_cancelled(&self) -> bool {
+        self.hold_cancelled
+    }
+
+    /// No pointer button is down any more: ends what a hold left behind.
+    pub fn pointer_released(&mut self) {
+        self.commit_live();
+        self.ui.clip_field = None;
+        self.hold_cancelled = false;
+    }
+
     /// The revision audio has to follow: live previews do not count, the release does.
     pub fn audio_revision(&self) -> u64 {
         self.audio_revision
@@ -544,6 +577,9 @@ impl EditorState {
     where
         F: FnOnce(&Project) -> Result<Project, EditError>,
     {
+        if self.hold_cancelled {
+            return;
+        }
         if self.live.is_none() && (self.export.is_some() || self.drag.is_some()) {
             self.edits_blocked();
             return;
@@ -580,6 +616,8 @@ impl EditorState {
     pub fn cancel_live(&mut self) {
         let Some(live) = self.live.take() else { return };
         self.revision += 1;
+        // Playback opened during the drag holds the preview, so audio has to follow this too.
+        self.audio_revision = self.revision;
         if live.was_clean {
             self.saved_revision = self.revision;
         }
@@ -753,7 +791,9 @@ impl EditorState {
 
     /// Drops the drag in progress without any edit.
     pub fn cancel_drag(&mut self) {
+        self.hold_cancelled |= self.live.is_some() || self.ui.clip_field.is_some();
         self.cancel_live();
+        self.ui.clip_field = None;
         if self.drag.take().is_some() {
             self.status = Status::Idle;
         }
@@ -805,10 +845,10 @@ pub fn touching_pair(project: &Project, key: ClipKey) -> Option<usize> {
 pub fn transition_duration_limits(project: &Project, track: usize, after_clip: usize) -> Option<(Time, Time)> {
     let target = project.tracks.get(track)?;
     let (first, second) = (target.clips.get(after_clip)?, target.clips.get(after_clip + 1)?);
-    let tail_used = |clip_index: usize| target.transitions.iter().find(|tr| tr.after_clip + 1 == clip_index).map_or(Time::ZERO, |tr| tr.duration.saturating_sub(tr.duration.half_floor()));
-    let head_used = |clip_index: usize| target.transitions.iter().find(|tr| tr.after_clip == clip_index).map_or(Time::ZERO, |tr| tr.duration.half_floor());
-    let usable_first = first.duration.saturating_sub(tail_used(after_clip));
-    let usable_second = second.duration.saturating_sub(head_used(after_clip + 1));
+    let head_used = |clip_index: usize| target.transitions.iter().find(|tr| tr.after_clip + 1 == clip_index).map_or(Time::ZERO, |tr| tr.duration.saturating_sub(tr.duration.half_floor()));
+    let tail_used = |clip_index: usize| target.transitions.iter().find(|tr| tr.after_clip == clip_index).map_or(Time::ZERO, |tr| tr.duration.half_floor());
+    let usable_first = first.duration.saturating_sub(head_used(after_clip));
+    let usable_second = second.duration.saturating_sub(tail_used(after_clip + 1));
     let longest = Time::from_ticks(usable_first.min(usable_second).ticks().saturating_mul(2));
     let shortest = project.output.frame_duration;
     (longest >= shortest).then_some((shortest, longest))
@@ -1102,6 +1142,48 @@ mod tests {
         state.finish_drag(EditCommand::Move { key: key(0), track: 0, desired_start: seconds(60) });
         let placed: Vec<(String, Time)> = state.project().tracks[0].clips.iter().map(|clip| (clip.source.clone(), clip.start)).collect();
         assert_eq!(placed, vec![("b.mp4".to_owned(), seconds(30)), ("C:/media/a.mp4".to_owned(), seconds(60))]);
+    }
+
+    #[test]
+    fn a_control_held_after_escape_is_ignored_until_the_release() {
+        let mut state = state_with_clip();
+        let before = state.project().clone();
+        state.live_gain(-6.0);
+        state.cancel_drag();
+        state.live_gain(-3.0);
+        assert!(!state.is_live(), "the slider still reports the pointer, which must not restart the edit");
+        assert_eq!(state.project(), &before);
+        state.pointer_released();
+        state.live_gain(-3.0);
+        assert!(state.is_live(), "after the release a new hold works");
+    }
+
+    #[test]
+    fn a_held_time_field_blocks_edits_and_escape_clears_it() {
+        let mut state = state_with_clip();
+        state.ui.clip_field = Some(ClipField::Start(1.0));
+        let before = state.project().clone();
+        state.delete_selected();
+        state.split_selected();
+        state.undo();
+        assert_eq!(state.project(), &before, "every edit waits for the release");
+        assert_eq!(state.status(), &Status::Info(DRAG_FIRST.to_owned()));
+        state.cancel_drag();
+        assert_eq!(state.ui.clip_field, None);
+        assert!(state.hold_cancelled(), "the field keeps reporting the pointer until the release");
+        state.pointer_released();
+        assert!(!state.hold_cancelled());
+        state.delete_selected();
+        assert!(state.project().tracks[0].clips.is_empty());
+    }
+
+    #[test]
+    fn escape_tells_audio_to_drop_a_preview_it_may_hold() {
+        let mut state = state_with_clip();
+        state.live_gain(-6.0);
+        let audio = state.audio_revision();
+        state.cancel_drag();
+        assert!(state.audio_revision() > audio, "playback opened during the hold plays the preview");
     }
 
     #[test]

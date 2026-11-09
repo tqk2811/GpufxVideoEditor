@@ -104,7 +104,7 @@ fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f
         ui.colored_label(theme::TEXT_DIM, label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let response = ui.add(egui::DragValue::new(&mut value).range(0.0..=f64::MAX).speed(0.02).max_decimals(3).suffix(" s").update_while_editing(false));
-            if response.changed() {
+            if response.changed() && !state.hold_cancelled() {
                 state.ui.clip_field = Some(make(value));
             }
             if response.drag_stopped() || (response.changed() && !response.dragged()) {
