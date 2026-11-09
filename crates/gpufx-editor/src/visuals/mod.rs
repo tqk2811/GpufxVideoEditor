@@ -150,6 +150,11 @@ impl ClipVisuals {
         }
     }
 
+    /// Whether new work is held back.
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
     /// How sources resolve from now on.
     pub fn set_paths(&mut self, paths: Arc<ProjectPaths>) {
         self.paths = Some(paths);

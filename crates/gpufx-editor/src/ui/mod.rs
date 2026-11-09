@@ -35,11 +35,7 @@ pub enum UiRequest {
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     theme::apply(root.ctx());
     state.visuals.borrow_mut().begin_frame(root.ctx());
-    {
-        let mut visuals = state.visuals.borrow_mut();
-        visuals.set_paused(state.is_playing() || state.is_exporting());
-        visuals.sync_project(state.revision(), state.project());
-    }
+    state.visuals.borrow_mut().sync_project(state.revision(), state.project());
     handle_shortcuts(root.ctx(), state, requests);
     let screen = root.max_rect();
     let Panels { top_bar, left, center, right, timeline, status } = panels(screen.size());
@@ -62,7 +58,11 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     if !root.ctx().input(|input| input.pointer.any_down()) {
         state.pointer_released();
     }
-    state.visuals.borrow_mut().end_frame();
+    // After the panels and the shortcuts: Stop in this frame must release the pool in this frame,
+    // because nothing may ask for another one.
+    let mut visuals = state.visuals.borrow_mut();
+    visuals.set_paused(state.is_playing() || state.is_exporting());
+    visuals.end_frame();
 }
 
 /// The window lost the focus: a hold is cancelled, as Escape cancels it, because switching windows
@@ -313,6 +313,20 @@ mod tests {
         assert!(state.is_playing());
         click(&ctx, &mut state, at);
         assert!(!state.is_playing());
+    }
+
+    #[test]
+    fn stopping_in_a_frame_releases_the_visuals_in_that_same_frame() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        let space = |pressed| vec![Event::Key { key: Key::Space, physical_key: Some(Key::Space), pressed, repeat: false, modifiers: Modifiers::NONE }];
+        input_frame(&ctx, &mut state, space(true));
+        input_frame(&ctx, &mut state, space(false));
+        assert!(state.is_playing());
+        assert!(state.visuals.borrow().is_paused(), "playing holds the visuals back");
+        input_frame(&ctx, &mut state, space(true));
+        assert!(!state.is_playing());
+        assert!(!state.visuals.borrow().is_paused(), "no later frame may be needed to let them go");
     }
 
     #[test]
