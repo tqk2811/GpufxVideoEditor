@@ -156,6 +156,34 @@ fn trims_clips_exactly_and_cuts_between_them() {
     assert!((sample(capture.frame(30), W, W / 2, H / 2) - GREY_B).abs() <= 4);
 }
 
+/// `json` rendered by a compositor that already holds the graphs from `first`.
+fn render_after(gpu: &Arc<Gpu>, first: &str, json: &str, frames: &[i64]) -> Capture {
+    let earlier = Project::from_json(first).expect("project parses");
+    let project = Project::from_json(json).expect("project parses");
+    let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
+    let mut compositor = D3d12Compositor::new(gpu.clone(), paths, project.output.width, project.output.height).expect("compositor");
+    render(&earlier, &mut compositor, &mut Capture::new(&[])).expect("first render");
+    let mut capture = Capture::new(frames);
+    render(&project, &mut compositor, &mut capture).expect("second render");
+    capture
+}
+
+#[test]
+fn a_changed_effect_parameter_reaches_a_graph_already_built() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = |brightness: f64| format!(r#"{{"clips":[{{"source":"{}","start":0,"source_in":0,"duration":{},"effects":[{{"package":"packages/gpufx/ffmpeg/color-adjust","params":{{"brightness":{brightness}}}}}]}}]}}"#, json_path(&a), 3 * FRAME);
+    let (dark, bright) = (project_json(W, H, &tracks(-0.2)), project_json(W, H, &tracks(0.3)));
+    let mut direct = Capture::new(&[1]);
+    render_project(&gpu, &bright, &mut direct).expect("render");
+    let reused = render_after(&gpu, &dark, &bright, &[1]);
+    assert_eq!(reused.hashes, direct.hashes, "a built graph must show the new value");
+    let mut unchanged = Capture::new(&[1]);
+    render_project(&gpu, &dark, &mut unchanged).expect("render");
+    assert_ne!(unchanged.hashes, direct.hashes, "the parameter must change the picture");
+}
+
 #[test]
 fn holds_the_last_frame_when_the_source_runs_out() {
     let _lock = gpu_lock();

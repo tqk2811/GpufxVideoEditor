@@ -250,25 +250,81 @@ fn decoded_input(frame: &DecodedFrame) -> Result<D3d12Frame, String> {
     })
 }
 
+/// The numbers of a parameter value, or `None` for text, which is set through its own call.
+fn param_numbers(value: &Value) -> Result<Option<Vec<f64>>, String> {
+    match value {
+        Value::Number(n) => n.as_f64().map(|v| Some(vec![v])).ok_or_else(|| format!("not a number: {n}")),
+        Value::Bool(b) => Ok(Some(vec![f64::from(u8::from(*b))])),
+        Value::String(_) => Ok(None),
+        Value::Array(items) => items.iter().map(Value::as_f64).collect::<Option<Vec<f64>>>().map(Some).ok_or_else(|| "array items must be numbers".to_owned()),
+        other => Err(format!("unsupported value {other}")),
+    }
+}
+
 /// Sets the static `params` of a project entry on `effect`. `skip` names parameters set later.
 fn apply_params(effect: &mut Effect, package: &str, params: &Map<String, Value>, skip: &[&str]) -> Result<(), String> {
     for (name, value) in params {
         if skip.contains(&name.as_str()) {
             continue;
         }
-        let result = match value {
-            Value::Number(n) => n.as_f64().map_or_else(|| Err(format!("not a number: {n}")), |v| effect.params_mut().set(name, &[v]).map_err(|e| e.to_string())),
-            Value::Bool(b) => effect.params_mut().set(name, &[f64::from(u8::from(*b))]).map_err(|e| e.to_string()),
-            Value::String(s) => effect.params_mut().set_str(name, s).map_err(|e| e.to_string()),
-            Value::Array(items) => {
-                let values: Option<Vec<f64>> = items.iter().map(Value::as_f64).collect();
-                values.map_or_else(|| Err("array items must be numbers".to_owned()), |v| effect.params_mut().set(name, &v).map_err(|e| e.to_string()))
-            }
-            other => Err(format!("unsupported value {other}")),
+        let result = match (param_numbers(value), value) {
+            (Ok(Some(numbers)), _) => effect.params_mut().set(name, &numbers).map_err(|e| e.to_string()),
+            (Ok(None), Value::String(text)) => effect.params_mut().set_str(name, text).map_err(|e| e.to_string()),
+            (Ok(None), _) => Ok(()),
+            (Err(message), _) => Err(message),
         };
         result.map_err(|e| format!("package {package}, parameter {name}: {e}"))?;
     }
     Ok(())
+}
+
+/// What a built graph is tied to: the package, which parameters were set (one left out must go
+/// back to its default) and every text value, since an expression needs new shaders. Numbers are
+/// not part of it, so dragging a slider only updates the uniforms.
+fn graph_shape(package: &str, params: &Map<String, Value>) -> String {
+    let mut shape = package.to_owned();
+    for (name, value) in params {
+        shape.push('\0');
+        shape.push_str(name);
+        if let Value::String(text) = value {
+            shape.push('=');
+            shape.push_str(text);
+        }
+    }
+    shape
+}
+
+/// The numbers of `wanted` that differ from what the graph was last given, as (name, numbers).
+fn changed_numbers<'a>(applied: &Map<String, Value>, wanted: &'a Map<String, Value>) -> Vec<(&'a str, Result<Vec<f64>, String>)> {
+    wanted
+        .iter()
+        .filter(|(name, value)| applied.get(name.as_str()) != Some(*value))
+        .filter_map(|(name, value)| match param_numbers(value) {
+            Ok(Some(numbers)) => Some((name.as_str(), Ok(numbers))),
+            Ok(None) => None,
+            Err(message) => Some((name.as_str(), Err(message))),
+        })
+        .collect()
+}
+
+/// Brings a built graph from `applied` to `wanted`. `prefix` selects the effect inside the graph.
+fn update_graph_params(graph: &mut EffectGraph, prefix: &str, package: &str, applied: &Map<String, Value>, wanted: &Map<String, Value>) -> Result<(), String> {
+    for (name, numbers) in changed_numbers(applied, wanted) {
+        let set = numbers.and_then(|numbers| graph.set_param(&format!("{prefix}{name}"), &numbers).map_err(|e| e.to_string()));
+        set.map_err(|e| format!("package {package}, parameter {name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// A built clip graph and the parameters it has now.
+struct ClipGraph {
+    graph: EffectGraph,
+    applied: Vec<Map<String, Value>>,
+}
+
+struct TransitionGraph {
+    graph: EffectGraph,
+    applied: Map<String, Value>,
 }
 
 /// Implements [`Compositor`] on a [`Gpu`]. Single threaded, one per [`Gpu`] (see the crate docs).
@@ -281,8 +337,8 @@ pub struct D3d12Compositor {
     free: Vec<usize>,
     /// Images handed back through [`D3d12Compositor::recycle`], ready to be reused.
     spares: Vec<Image>,
-    clip_graphs: ClipCache<[ProjectEffect], EffectGraph>,
-    transition_graphs: HashMap<String, EffectGraph>,
+    clip_graphs: ClipCache<[String], ClipGraph>,
+    transition_graphs: HashMap<String, TransitionGraph>,
     overlay: EffectGraph,
     readback: Option<wgpu::Buffer>,
     /// Passed to every decoder this compositor opens; see [`SequentialDecoder::set_abort`].
@@ -456,10 +512,15 @@ impl Compositor for D3d12Compositor {
         let (width, height) = (self.width, self.height);
         let mut inputs = [input];
         let (gpu, paths) = (&self.gpu, &self.paths);
-        let result = self
-            .clip_graphs
-            .get_or_build(key, effects, || build_clip_graph(&gpu.context, paths, width, height, effects))
-            .and_then(|graph| Self::run_graph(gpu, graph, &mut inputs, &mut self.images, output, width, height, &info));
+        let shape: Vec<String> = effects.iter().map(|effect| graph_shape(&effect.package, &effect.params)).collect();
+        let build = || build_clip_graph(&gpu.context, paths, width, height, effects).map(|graph| ClipGraph { graph, applied: effects.iter().map(|effect| effect.params.clone()).collect() });
+        let result = self.clip_graphs.get_or_build(key, shape.as_slice(), build).and_then(|built| {
+            for (index, effect) in effects.iter().enumerate() {
+                update_graph_params(&mut built.graph, &format!("fx{index}."), &effect.package, &built.applied[index], &effect.params)?;
+                built.applied[index].clone_from(&effect.params);
+            }
+            Self::run_graph(gpu, &mut built.graph, &mut inputs, &mut self.images, output, width, height, &info)
+        });
         if let Err(e) = result {
             self.release_image(output);
             return Err(RenderError(e));
@@ -469,10 +530,10 @@ impl Compositor for D3d12Compositor {
     }
 
     fn transition(&mut self, package: &str, params: &Map<String, Value>, from: ImageId, to: ImageId, progress: Progress, at: FrameContext) -> Result<ImageId, RenderError> {
-        let graph_key = format!("{package}\0{}", serde_json::to_string(params).map_err(|e| RenderError(e.to_string()))?);
+        let graph_key = graph_shape(package, params);
         if !self.transition_graphs.contains_key(&graph_key) {
             let graph = build_transition_graph(&self.gpu.context, &self.paths, package, params)?;
-            self.transition_graphs.insert(graph_key.clone(), graph);
+            self.transition_graphs.insert(graph_key.clone(), TransitionGraph { graph, applied: params.clone() });
         }
         let info = Self::info(at);
         let value = progress.elapsed.ticks() as f64 / progress.total.ticks() as f64;
@@ -481,11 +542,14 @@ impl Compositor for D3d12Compositor {
         let mut inputs = [self.images[from.0].frame(width, height), self.images[to.0].frame(width, height)];
         let result = {
             let images = &mut self.images;
-            let graph = self.transition_graphs.get_mut(&graph_key).expect("graph exists");
-            match graph.set_param("progress", &[value]) {
-                Ok(()) => Self::run_graph(&self.gpu, graph, &mut inputs, images, output, width, height, &info),
-                Err(e) => Err(format!("package {package}: setting progress failed: {e}")),
+            let built = self.transition_graphs.get_mut(&graph_key).expect("graph exists");
+            let updated = update_graph_params(&mut built.graph, "", package, &built.applied, params);
+            if updated.is_ok() {
+                built.applied.clone_from(params);
             }
+            updated
+                .and_then(|()| built.graph.set_param("progress", &[value]).map_err(|e| format!("package {package}: setting progress failed: {e}")))
+                .and_then(|()| Self::run_graph(&self.gpu, &mut built.graph, &mut inputs, images, output, width, height, &info))
         };
         if let Err(e) = result {
             self.release_image(output);
@@ -540,7 +604,41 @@ impl Compositor for D3d12Compositor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::cell::Cell;
+
+    fn params(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn a_number_change_keeps_the_graph_shape() {
+        assert_eq!(graph_shape("blur", &params(json!({ "radius": 2 }))), graph_shape("blur", &params(json!({ "radius": 40.5 }))));
+        assert_eq!(graph_shape("c", &params(json!({ "tint": [1, 0, 0, 1] }))), graph_shape("c", &params(json!({ "tint": [0, 1, 0, 1] }))));
+    }
+
+    #[test]
+    fn a_new_package_name_set_or_text_rebuilds_the_graph() {
+        let base = graph_shape("blur", &params(json!({ "radius": 2 })));
+        assert_ne!(base, graph_shape("sharpen", &params(json!({ "radius": 2 }))));
+        assert_ne!(base, graph_shape("blur", &params(json!({}))), "a parameter left out goes back to its default");
+        assert_ne!(graph_shape("g", &params(json!({ "expr": "x" }))), graph_shape("g", &params(json!({ "expr": "y" }))), "an expression needs new shaders");
+    }
+
+    #[test]
+    fn only_changed_numbers_are_sent_to_the_graph() {
+        let applied = params(json!({ "a": 1, "b": true, "c": [1, 2], "text": "x" }));
+        let wanted = params(json!({ "a": 1, "b": false, "c": [1, 3], "text": "x" }));
+        let changed: Vec<(&str, Vec<f64>)> = changed_numbers(&applied, &wanted).into_iter().map(|(name, numbers)| (name, numbers.unwrap())).collect();
+        assert_eq!(changed, vec![("b", vec![0.0]), ("c", vec![1.0, 3.0])]);
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_number_is_reported() {
+        let wanted = params(json!({ "a": { "nested": 1 } }));
+        let changed = changed_numbers(&Map::new(), &wanted);
+        assert!(changed[0].1.is_err());
+    }
 
     #[test]
     fn a_failed_check_releases_the_output() {
