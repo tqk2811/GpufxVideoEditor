@@ -2,7 +2,7 @@
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
-use crate::editor::EditorState;
+use crate::editor::{EditorState, Status};
 use crate::i18n::Message;
 use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
@@ -19,6 +19,8 @@ const FULLSCREEN_BAR_WIDTH: f32 = 560.0;
 const FULLSCREEN_BAR_MARGIN: f32 = 24.0;
 /// How long the fullscreen controls stay with no pointer movement and no key press.
 const FULLSCREEN_CONTROLS_SECONDS: f64 = 3.0;
+const FULLSCREEN_ERROR_GAP: f32 = 8.0;
+const FULLSCREEN_ERROR_PADDING: f32 = 8.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     let rect = ui.max_rect();
@@ -41,24 +43,57 @@ pub(super) fn fullscreen_bar(screen: Rect) -> Rect {
     Rect::from_center_size(Pos2::new(screen.center().x, bottom - CONTROLS_HEIGHT / 2.0), Vec2::new(width, CONTROLS_HEIGHT))
 }
 
-fn controls_visible(idle_seconds: f64, over_bar: bool) -> bool {
-    over_bar || idle_seconds < FULLSCREEN_CONTROLS_SECONDS
+fn controls_visible(idle_seconds: f64, over_bar: bool, has_error: bool) -> bool {
+    has_error || over_bar || idle_seconds < FULLSCREEN_CONTROLS_SECONDS
+}
+
+/// When to look again so the controls can go. Nothing is due once they have stayed past their time.
+fn hide_repaint_after(idle_seconds: f64, has_error: bool) -> Option<f32> {
+    (!has_error && idle_seconds < FULLSCREEN_CONTROLS_SECONDS).then(|| (FULLSCREEN_CONTROLS_SECONDS - idle_seconds).max(0.05) as f32)
+}
+
+/// The failures that stand now, one a line, for the fullscreen player, which has no status line.
+fn fullscreen_errors(state: &EditorState) -> Option<String> {
+    let language = state.language();
+    let mut lines = Vec::new();
+    if let Status::Error(message) = state.status() {
+        lines.push(language.text(message));
+    }
+    lines.extend(state.preview_error().map(|message| language.t(Message::PreviewLine(message.to_owned()))));
+    lines.extend(state.playback_message().map(|message| language.t(Message::AudioLine(message.to_owned()))));
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Paints `errors` just above the fullscreen bar.
+fn draw_fullscreen_errors(ui: &egui::Ui, bar: Rect, screen: Rect, errors: String) {
+    let galley = ui.painter().layout(errors, FontId::proportional(14.0), theme::REFUSED, (bar.width() - 2.0 * FULLSCREEN_ERROR_PADDING).max(1.0));
+    let size = galley.size() + Vec2::splat(2.0 * FULLSCREEN_ERROR_PADDING);
+    let top = (bar.top() - FULLSCREEN_ERROR_GAP - size.y).max(screen.top());
+    let panel = Rect::from_min_size(Pos2::new(bar.center().x - size.x / 2.0, top), size);
+    ui.painter().rect_filled(panel, CornerRadius::same(theme::PANEL_RADIUS), theme::PANEL.gamma_multiply(0.9));
+    ui.painter().galley(panel.min + Vec2::splat(FULLSCREEN_ERROR_PADDING), galley, theme::REFUSED);
 }
 
 /// The picture on the whole screen, letterboxed, with the transport floating over it until the
-/// pointer has been still for a while.
+/// pointer has been still for a while. A failure stays on screen with the controls until it is over.
 pub fn show_fullscreen(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     let screen = ui.max_rect();
     draw_picture(ui, screen, preview);
     let bar = fullscreen_bar(screen);
     let (now, pointer) = ui.ctx().input(|input| (input.time, input.pointer.latest_pos()));
     let idle = state.ui.fullscreen_activity.map_or(0.0, |at| now - at);
-    if !controls_visible(idle, pointer.is_some_and(|at| bar.contains(at))) {
+    let errors = fullscreen_errors(state);
+    if !controls_visible(idle, pointer.is_some_and(|at| bar.contains(at)), errors.is_some()) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::None);
         return;
     }
     // Nothing else may be due when the controls should go.
-    ui.ctx().request_repaint_after_secs((FULLSCREEN_CONTROLS_SECONDS - idle).max(0.05) as f32);
+    if let Some(seconds) = hide_repaint_after(idle, errors.is_some()) {
+        ui.ctx().request_repaint_after_secs(seconds);
+    }
+    if let Some(errors) = errors {
+        draw_fullscreen_errors(ui, bar, screen, errors);
+    }
     ui.painter().rect_filled(bar, CornerRadius::same(theme::PANEL_RADIUS), theme::PANEL.gamma_multiply(0.9));
     ui.scope_builder(UiBuilder::new().id_salt("fullscreen-transport").max_rect(bar.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, bar));
 }
@@ -124,10 +159,24 @@ mod tests {
 
     #[test]
     fn the_fullscreen_controls_go_after_a_while_unless_the_pointer_is_on_them() {
-        assert!(controls_visible(0.0, false));
-        assert!(controls_visible(2.9, false));
-        assert!(!controls_visible(3.0, false));
-        assert!(controls_visible(100.0, true));
+        assert!(controls_visible(0.0, false, false));
+        assert!(controls_visible(2.9, false, false));
+        assert!(!controls_visible(3.0, false, false));
+        assert!(controls_visible(100.0, true, false));
+    }
+
+    #[test]
+    fn a_standing_error_keeps_the_fullscreen_controls() {
+        assert!(controls_visible(100.0, false, true));
+    }
+
+    #[test]
+    fn a_repaint_is_due_only_until_the_controls_have_had_their_time() {
+        assert_eq!(hide_repaint_after(1.0, false), Some(2.0));
+        assert_eq!(hide_repaint_after(2.99, false), Some(0.05));
+        assert_eq!(hide_repaint_after(3.0, false), None);
+        assert_eq!(hide_repaint_after(100.0, false), None);
+        assert_eq!(hide_repaint_after(1.0, true), None, "an error keeps them, so nothing is due");
     }
 
     #[test]

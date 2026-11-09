@@ -563,6 +563,50 @@ mod tests {
         assert_ne!(cursor, CursorIcon::None, "the pointer rests on the controls");
     }
 
+    fn drawn_text(output: &egui::FullOutput) -> String {
+        output.shapes.iter().filter_map(|clipped| if let egui::Shape::Text(text) = &clipped.shape { Some(text.galley.job.text.clone()) } else { None }).collect::<Vec<_>>().join("\n")
+    }
+
+    fn fullscreen_output(ctx: &egui::Context, state: &mut EditorState, time: f64, events: Vec<Event>) -> egui::FullOutput {
+        let mut requests = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput { events, time: Some(time), ..window_input(1280.0, 720.0) }, |ui| show(ui, state, &mut requests, None));
+        output.textures_delta.clear();
+        output
+    }
+
+    #[test]
+    fn a_failure_stays_on_the_fullscreen_player_with_the_controls() {
+        let mut state = fullscreen_state();
+        let ctx = egui::Context::default();
+        let picture = egui::pos2(100.0, 100.0);
+        show_frame_at(&ctx, &mut state, 0.0, vec![Event::PointerMoved(picture)]);
+        state.set_preview_error(Some("preview broke".to_owned()));
+        state.report_error(Message::Technical("the file is gone".to_owned()));
+        let output = fullscreen_output(&ctx, &mut state, 20.0, vec![]);
+        assert_ne!(output.platform_output.cursor_icon, CursorIcon::None, "the controls stay");
+        let text = drawn_text(&output);
+        assert!(text.contains("Preview: preview broke") && text.contains("the file is gone"), "{text}");
+        state.set_preview_error(None);
+        state.end_export(Status::Idle);
+        let (_, cursor) = show_frame_at(&ctx, &mut state, 21.0, vec![]);
+        assert_eq!(cursor, CursorIcon::None, "they go once no failure stands");
+    }
+
+    #[test]
+    fn a_pointer_resting_on_the_fullscreen_bar_asks_for_no_more_frames() {
+        let mut state = fullscreen_state();
+        let bar = player::fullscreen_bar(screen());
+        let ctx = egui::Context::default();
+        show_frame_at(&ctx, &mut state, 0.0, vec![Event::PointerMoved(bar.left_center() + egui::vec2(120.0, 0.0))]);
+        // egui asks for a frame or two after a change of its own; what counts is that it stops.
+        for time in [20.0, 20.1, 20.2, 20.3] {
+            fullscreen_output(&ctx, &mut state, time, vec![]);
+        }
+        let output = fullscreen_output(&ctx, &mut state, 20.4, vec![]);
+        let delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+        assert!(delay > std::time::Duration::from_secs(60), "another frame is due in {delay:?}");
+    }
+
     #[test]
     fn a_click_on_the_picture_in_fullscreen_does_nothing() {
         let mut state = fullscreen_state();
@@ -589,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn the_whole_ui_draws_in_fullscreen_at_every_size() {
+    fn the_fullscreen_ui_does_not_panic_or_ask_for_anything_at_any_size() {
         for (width, height) in [(1920.0, 1080.0), (800.0, 500.0), (100.0, 60.0)] {
             let mut state = fullscreen_state();
             let ctx = egui::Context::default();
