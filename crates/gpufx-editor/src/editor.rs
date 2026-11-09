@@ -417,7 +417,7 @@ impl EditorState {
     pub fn add_picked_file(&mut self, track: usize, path: &Path, resolver: &dyn Resolver) {
         let source = path.to_string_lossy();
         if self.project().tracks.get(track).is_some_and(|target| target.kind == TrackKind::Audio) && !resolver.source_has_audio(&source) {
-            self.status = Status::Refused(format!("{source} has no audio stream"));
+            self.status = Status::Refused(format!("{source} has no audio stream or could not be read"));
             return;
         }
         self.add_clip_from_file(track, path);

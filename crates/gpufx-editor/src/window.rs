@@ -441,6 +441,8 @@ impl Session {
         }
         self.paths_file = self.state.project_file().map(Path::to_path_buf);
         self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        // The file dialog blocked this thread while the audio played on, so catch up first.
+        self.poll_playback();
         self.playback = None;
         self.state.reopen_playback();
     }

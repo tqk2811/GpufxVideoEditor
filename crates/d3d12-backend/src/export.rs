@@ -273,7 +273,13 @@ impl ExportJob {
         // Closes the output and hash files, which the renames need.
         drop(sink);
         gpu.check_errors()?;
-        out_file.commit()?;
+        if let Err(error) = out_file.commit() {
+            // The hashes describe the render that was just kept.
+            if let Some(file) = &mut hashes_file {
+                file.keep = true;
+            }
+            return Err(error.into());
+        }
         if let Some(file) = &mut hashes_file {
             file.commit()?;
         }

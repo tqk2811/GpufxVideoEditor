@@ -147,3 +147,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Chế độ timer không có thiết bị âm thanh không bao giờ thử lại
 
 `crates/gpufx-editor/src/playback/device.rs:37`: khi không mở được thiết bị thì clock chạy theo timer, và thiết bị không được thử lại cho tới lần mở lại `Playback`. Sửa kèm chú thích "stays until a device opens" ở `crates/gpufx-editor/src/editor.rs` cho đúng hành vi. Nên làm vì cắm tai nghe vào giữa chừng vẫn không có tiếng. Ghi ngày 2026-11-09.
+
+### [Thấp] Bản render giữ lại khi đổi tên thất bại không được dọn
+
+`crates/d3d12-backend/src/export.rs:125`: file đích bị khoá thì mỗi lần xuất lại để thêm một file `*.tmp.*` đầy đủ, không có gì dọn. Nếu `out` đổi tên xong mà file hash lỗi thì báo thất bại dù đích đã bị thay. Nên thử lại hoặc kiểm quyền ghi trước khi render. Ghi ngày 2026-11-09.

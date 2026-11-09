@@ -109,8 +109,7 @@ impl Gpu {
     }
 
     /// Configures `surface` under the submit gate, because wgpu waits for the queue to be idle here
-    /// and fails if another thread submits meanwhile. The error comes back to the caller instead of
-    /// going to the error shared with the worker's frames.
+    /// and fails if another thread submits meanwhile. The error comes back to the caller.
     pub fn configure_surface(&self, surface: &wgpu::Surface<'_>, config: &wgpu::SurfaceConfiguration) -> Result<(), String> {
         let _gate = self.lock_submits();
         let scopes = [wgpu::ErrorFilter::Validation, wgpu::ErrorFilter::OutOfMemory, wgpu::ErrorFilter::Internal].map(|filter| self.device.push_error_scope(filter));
