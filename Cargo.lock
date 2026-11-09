@@ -716,6 +716,7 @@ dependencies = [
  "engine",
  "gpufx-core",
  "pollster",
+ "serde",
  "serde_json",
  "sha2",
  "wgpu",

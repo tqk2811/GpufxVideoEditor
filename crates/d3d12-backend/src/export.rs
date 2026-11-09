@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use engine::render::{render_with_audio, FrameSink, RenderError};
 use engine::{frame_count, validate, AudioSource, Project};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::audio::AudioFiles;
@@ -60,10 +61,12 @@ pub struct ExportControl<'a> {
     pub progress: Option<&'a dyn Fn(i64, i64)>,
     /// Called with the encoder's name once it is open, before the first frame.
     pub encoder_opened: Option<&'a dyn Fn(&str)>,
+    /// Called with each temporary file as soon as it exists, so a process that may be killed can name it.
+    pub reserved: Option<&'a dyn Fn(&Path)>,
 }
 
 /// What a finished export produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportReport {
     pub encoder: String,
     pub frames: i64,
@@ -239,6 +242,12 @@ impl ExportJob {
         // Declared before the sink, so they drop after it has closed its files.
         let mut out_file = PendingFile::new(&self.out)?;
         let mut hashes_file = self.hashes.as_deref().map(PendingFile::new).transpose()?;
+        if let Some(reserved) = control.reserved {
+            reserved(&out_file.temporary);
+            if let Some(hashes) = &hashes_file {
+                reserved(&hashes.temporary);
+            }
+        }
         if let Some(hashes) = &hashes_file {
             if identity(&hashes.target) == identity(&out_file.target) {
                 return Err("the output and the hash file name the same file".to_owned().into());

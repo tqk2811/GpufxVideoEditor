@@ -70,6 +70,28 @@ Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế đ�
 
 `export_start` trả ngay một mã công việc, `export_status` trả tiến độ, `export_cancel` huỷ. Ghi đè file có sẵn phải có `overwrite: true`. Mỗi lúc chỉ một lần xuất. Ở chế độ live, preview tạm dừng và không sửa được trong lúc xuất, giống thao tác từ giao diện.
 
+`export_start`, `export_status` và `export_cancel` chạy `gpufx-render --progress json` thành tiến trình con, giống hệt cách editor đang làm, và dùng lại giao thức dưới đây.
+
+### Giao thức tiến độ
+
+`gpufx-render <project.json> --out <file> --progress json` ghi mỗi sự kiện thành một dòng JSON trên stdout. Mặc định (`--progress text`) vẫn in văn bản cho người đọc như cũ. Kiểu dữ liệu nằm ở `crates/d3d12-backend/src/progress.rs`.
+
+| `event` | Trường khác | Ý nghĩa |
+|---|---|---|
+| `started` | `protocol` (hiện là 1), `adapter`, `total`, `out` | Đã mở GPU, sắp render |
+| `output_reserved` | `path` | Đã tạo file tạm này, cạnh file đích |
+| `encoder` | `name` | Encoder đã mở |
+| `progress` | `frame`, `total`, `elapsed_ms` | Xong `frame` khung trên `total`, sau mỗi khung |
+| `finished` | `report`: `encoder`, `frames`, `audio_samples`, `clamped_samples`, `pcm_sha256` | File đã nằm ở đích |
+| `cancelled` | | Đã dừng và đã xoá file tạm |
+| `error` | `message` | Thất bại, kèm lý do bằng tiếng Anh |
+
+- Mỗi lượt chạy kết thúc bằng đúng một trong `finished`, `cancelled`, `error`. Lỗi đọc tham số và đọc project cũng thành `error`. Mã thoát là 0 chỉ khi `finished`.
+- Bên đọc phải bỏ qua dòng không phải JSON hợp lệ và `event` chưa biết, vì thư viện có thể ghi vào stdout và sự kiện có thể được bổ sung về sau. `protocol` chỉ tăng khi một sự kiện có sẵn mất hoặc đổi trường.
+- Gửi dòng `cancel` vào stdin để dừng sạch. Stdin đóng không có ý nghĩa gì.
+- Tiến trình chết mà không có sự kiện kết thúc (crash, bị kill) thì bên gọi tự xoá các file đã báo qua `output_reserved`. Đã có sự kiện kết thúc thì không được xoá: `error` có thể đang giữ lại file đã render xong khi đổi tên thất bại.
+- stderr chỉ để con người đọc. Bên gọi phải đọc liên tục để pipe không đầy, và chỉ giữ một đoạn cuối có giới hạn.
+
 ## Lỗi
 
 Kết quả lỗi có `code`, `message` và dữ liệu kèm theo. `EditError` đổi sang code ổn định, ví dụ `overlap`, `clip_not_found`, `no_room`, `invalid_project`. Thêm `stale_revision`, `busy` (đang kéo hoặc đang xuất), `no_app` (chế độ live không tìm thấy app), `gpu_unavailable`. Lỗi không làm chết server. GPU hỏng thì báo lỗi rõ và phải khởi động lại phiên.

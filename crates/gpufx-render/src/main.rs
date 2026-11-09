@@ -1,17 +1,28 @@
 //! `gpufx-render`: renders a project JSON to a video file.
 
-use std::path::PathBuf;
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
-use d3d12_backend::{EncoderChoice, ExportControl, ExportJob, Gpu, ProjectPaths};
-use engine::Project;
+use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, Gpu, ProgressEvent, ProjectPaths, CANCEL_LINE, PROGRESS_PROTOCOL};
+use engine::{frame_count, Project};
 
-const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]...\n\
+const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]... [--progress <text|json>]\n\
     \n\
     --encoder   H.264 encoder: auto (default), libx264, h264_nvenc, h264_amf, h264_qsv, h264_mf or any encoder name FFmpeg accepts\n\
     --hashes    write 'frame sha256-of-RGBA' lines to a file\n\
-    --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>";
+    --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>\n\
+    --progress  text (default), or json: one JSON event per stdout line, and a 'cancel' line on stdin stops the render\n\
+    \x20           (see docs/plans/spec-mcp-server-vi.md)";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProgressMode {
+    Text,
+    Json,
+}
 
 struct Arguments {
     project: PathBuf,
@@ -19,6 +30,7 @@ struct Arguments {
     encoder: EncoderChoice,
     hashes: Option<PathBuf>,
     package_roots: Vec<PathBuf>,
+    progress: ProgressMode,
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
@@ -27,6 +39,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut encoder = EncoderChoice::Auto;
     let mut hashes = None;
     let mut package_roots = Vec::new();
+    let mut progress = ProgressMode::Text;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         let mut value = |name: &str| arguments.next().ok_or_else(|| format!("{name} needs a value"));
@@ -38,6 +51,13 @@ fn parse_arguments() -> Result<Arguments, String> {
             }
             "--hashes" => hashes = Some(PathBuf::from(value("--hashes")?)),
             "--packages" => package_roots.push(PathBuf::from(value("--packages")?)),
+            "--progress" => {
+                progress = match value("--progress")?.as_str() {
+                    "text" => ProgressMode::Text,
+                    "json" => ProgressMode::Json,
+                    other => return Err(format!("--progress must be text or json, not {other}")),
+                }
+            }
             "-h" | "--help" => return Err(USAGE.to_owned()),
             other if project.is_none() && !other.starts_with("--") => project = Some(PathBuf::from(other)),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
@@ -47,20 +67,78 @@ fn parse_arguments() -> Result<Arguments, String> {
         // Running from a checkout: the packages of the submodule.
         package_roots.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/FFmpegGpuFilter")));
     }
-    Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, package_roots })
+    Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, package_roots, progress })
 }
 
-fn run() -> Result<(), String> {
+/// Why a run wrote no file.
+enum Failure {
+    Cancelled,
+    Message(String),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure::Message(message)
+    }
+}
+
+/// Writes one event. A reader that went away cannot be told anything, so its error is dropped.
+fn emit(event: &ProgressEvent) {
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{}", event.to_line());
+    let _ = stdout.flush();
+}
+
+/// Sets `cancel` when a cancel line arrives. The end of stdin means nothing: a caller may simply
+/// have no use for it.
+fn watch_stdin(cancel: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            match line {
+                Ok(line) if line.trim() == CANCEL_LINE => cancel.store(true, Ordering::SeqCst),
+                Ok(_) => {}
+                Err(_) => return,
+            }
+        }
+    });
+}
+
+fn path_text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn run() -> Result<(), Failure> {
     let arguments = parse_arguments()?;
     let text = std::fs::read_to_string(&arguments.project).map_err(|e| format!("reading {}: {e}", arguments.project.display()))?;
     let project = Project::from_json(&text).map_err(|e| e.to_string())?;
+    let json = arguments.progress == ProgressMode::Json;
+    let cancel: Arc<AtomicBool> = Arc::default();
+    if json {
+        watch_stdin(cancel.clone());
+    }
 
     let paths = Arc::new(ProjectPaths::new(&arguments.project, arguments.package_roots.clone()));
     let has_audio = project.output.audio.is_some();
+    let total = frame_count(&project);
     let job = ExportJob { project, project_file: Some(arguments.project.clone()), paths, out: arguments.out.clone(), encoder: arguments.encoder, hashes: arguments.hashes };
     job.check_named("--out", "--hashes")?;
 
     let gpu = Arc::new(Gpu::create()?);
+    if json {
+        emit(&ProgressEvent::Started { protocol: PROGRESS_PROTOCOL, adapter: gpu.adapter_name.clone(), total, out: path_text(&arguments.out) });
+        let started = Instant::now();
+        let progress = |frame: i64, total: i64| emit(&ProgressEvent::Progress { frame, total, elapsed_ms: started.elapsed().as_millis() as u64 });
+        let encoder_opened = |name: &str| emit(&ProgressEvent::Encoder { name: name.to_owned() });
+        let reserved = |path: &Path| emit(&ProgressEvent::OutputReserved { path: path_text(path) });
+        let control = ExportControl { cancel: Some(cancel), progress: Some(&progress), encoder_opened: Some(&encoder_opened), reserved: Some(&reserved) };
+        match job.run(gpu, control) {
+            Ok(report) => emit(&ProgressEvent::Finished { report }),
+            Err(ExportError::Cancelled) => return Err(Failure::Cancelled),
+            Err(ExportError::Failed(message)) => return Err(Failure::Message(message)),
+        }
+        return Ok(());
+    }
+
     println!("gpu: {}", gpu.adapter_name);
     let report = job.run(gpu, ExportControl { encoder_opened: Some(&|name| println!("encoder: {name}")), ..ExportControl::default() }).map_err(|e| e.to_string())?;
     if has_audio {
@@ -71,10 +149,27 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the command line asks for JSON, known even when the rest of it is wrong.
+fn json_requested() -> bool {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    arguments.windows(2).any(|pair| pair[0] == "--progress" && pair[1] == "json")
+}
+
 fn main() -> ExitCode {
+    let json = json_requested();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
+        Err(Failure::Cancelled) => {
+            if json {
+                emit(&ProgressEvent::Cancelled);
+            }
+            eprintln!("cancelled");
+            ExitCode::FAILURE
+        }
+        Err(Failure::Message(message)) => {
+            if json {
+                emit(&ProgressEvent::Error { message: message.clone() });
+            }
             eprintln!("error: {message}");
             ExitCode::FAILURE
         }

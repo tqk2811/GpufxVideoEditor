@@ -3,11 +3,12 @@
 
 mod common;
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use common::*;
-use d3d12_backend::Gpu;
+use d3d12_backend::{Gpu, ProgressEvent, PROGRESS_PROTOCOL};
 
 const CLIP_DURATION: i64 = 45 * FRAME;
 
@@ -433,4 +434,91 @@ fn a_failed_render_leaves_existing_outputs_untouched() {
     assert_eq!(std::fs::read(&hashes).expect("read the hashes"), b"previous hashes");
     let leftovers: Vec<_> = std::fs::read_dir(&dir).expect("list the directory").flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".tmp")).collect();
     assert!(leftovers.is_empty(), "temporary files left behind: {leftovers:?}");
+}
+
+fn events(stdout: &[u8]) -> Vec<ProgressEvent> {
+    String::from_utf8_lossy(stdout).lines().map(|line| ProgressEvent::parse(line).unwrap_or_else(|| panic!("not an event: {line}"))).collect()
+}
+
+fn temporary_files(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir).expect("list the directory").flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains(".tmp")).collect()
+}
+
+#[test]
+fn json_progress_reports_every_frame_and_the_report() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("cli-json");
+    let project = write_project(&dir, &two_clip_project());
+    let (out, hashes) = (dir.join("json.mp4"), dir.join("json.txt"));
+    let run = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).arg(&project).arg("--out").arg(&out).arg("--hashes").arg(&hashes).args(["--progress", "json"]).output().expect("run gpufx-render");
+    assert!(run.status.success(), "render failed: {}", String::from_utf8_lossy(&run.stderr));
+
+    let events = events(&run.stdout);
+    assert!(matches!(&events[0], ProgressEvent::Started { protocol: PROGRESS_PROTOCOL, total: 90, .. }), "{:?}", events[0]);
+    let reserved: Vec<&String> = events.iter().filter_map(|e| if let ProgressEvent::OutputReserved { path } = e { Some(path) } else { None }).collect();
+    assert_eq!(reserved.len(), 2, "the video and the hash file");
+    assert!(reserved.iter().all(|path| !std::path::Path::new(path).exists()), "both were renamed");
+    let frames: Vec<i64> = events.iter().filter_map(|e| if let ProgressEvent::Progress { frame, .. } = e { Some(*frame) } else { None }).collect();
+    assert_eq!(frames, (1..=90).collect::<Vec<_>>());
+    let ProgressEvent::Finished { report } = events.last().expect("events") else { panic!("the last event is {:?}", events.last()) };
+    assert_eq!(report.frames, 90);
+    assert_eq!(events.iter().filter(|e| e.is_terminal()).count(), 1);
+    assert!(out.is_file() && hashes.is_file());
+
+    let text = render(&project, &dir.join("text.mp4"), &dir.join("text.txt"));
+    let printed = String::from_utf8_lossy(&text.stdout).into_owned();
+    let starts: Vec<&str> = printed.lines().map(|line| line.split(' ').next().unwrap_or_default()).collect();
+    assert_eq!(starts, ["gpu:", "encoder:", "wrote"], "humans keep the same output: {printed}");
+}
+
+#[test]
+fn a_cancel_line_stops_a_json_run_and_removes_the_partial_files() {
+    let _lock = gpu_lock();
+    if !hardware_available() {
+        return;
+    }
+    let dir = scratch_dir("cli-json-cancel");
+    let project = write_project(&dir, &two_clip_project());
+    let out = dir.join("cancel.mp4");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).arg(&project).arg("--out").arg(&out).args(["--progress", "json"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().expect("run gpufx-render");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    let mut seen = Vec::new();
+    for line in lines.by_ref() {
+        let event = ProgressEvent::parse(&line.expect("read a line")).expect("an event");
+        let frame = if let ProgressEvent::Progress { frame, .. } = &event { *frame } else { 0 };
+        seen.push(event);
+        if frame == 3 {
+            stdin.write_all(b"cancel\n").expect("send the cancel line");
+            stdin.flush().expect("flush");
+            break;
+        }
+    }
+    let rest: Vec<ProgressEvent> = lines.map(|line| ProgressEvent::parse(&line.expect("read a line")).expect("an event")).collect();
+    assert!(!child.wait().expect("wait").success(), "a cancelled run is not a success");
+    assert_eq!(rest.last(), Some(&ProgressEvent::Cancelled), "{rest:?}");
+    assert!(!out.exists());
+    assert_eq!(temporary_files(&dir), Vec::<String>::new());
+}
+
+#[test]
+fn a_json_run_reports_a_project_that_cannot_be_read() {
+    let dir = scratch_dir("cli-json-missing");
+    let run = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).arg(dir.join("none.json")).arg("--out").arg(dir.join("o.mp4")).args(["--progress", "json"]).output().expect("run gpufx-render");
+    assert!(!run.status.success());
+    let events = events(&run.stdout);
+    assert!(matches!(&events[..], [ProgressEvent::Error { message }] if message.contains("none.json")), "{events:?}");
+    assert!(String::from_utf8_lossy(&run.stderr).contains("none.json"), "stderr still says it");
+}
+
+#[test]
+fn a_bad_argument_is_an_error_event_too() {
+    let run = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).args(["--progress", "json", "--nonsense"]).output().expect("run gpufx-render");
+    assert!(matches!(&events(&run.stdout)[..], [ProgressEvent::Error { .. }]));
+    let wrong = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).args(["a.json", "--out", "b.mp4", "--progress", "xml"]).output().expect("run gpufx-render");
+    assert!(!wrong.status.success());
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("--progress"));
 }
