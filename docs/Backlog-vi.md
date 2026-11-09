@@ -208,3 +208,23 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Nguồn đang đọc mức âm chặn nguồn hiện trên màn hình
 
 `crates/gpufx-editor/src/visuals/worker.rs:255` (`run_worker`, nhánh `Lane::Audio`): chỉ có một worker audio và job đã chạy không nhường chỗ, nên file dài đã cuộn khỏi màn hình làm chậm bars của file đang nhìn. Muốn nhường phải huỷ rồi đọc lại từ đầu và theo dõi nguồn nào đang được vẽ, không đơn giản nên chưa làm. Ghi ngày 2026-11-09.
+
+### [Thấp] Hiện lại track ẩn có file thiếu rồi lưu thì project mở lên bị SourceNotFound
+
+`crates/engine/src/edit.rs:128-129` (`AcceptAll`) và `crates/gpufx-editor/src/project_file.rs:99,119`: track ẩn được bỏ qua khi kiểm file nguồn, nên bật hiện lại track có file đã mất vẫn được chấp nhận. Lưu xong, lần mở sau project bị từ chối với SourceNotFound. Cần quyết định: cảnh báo khi bật hiện, hoặc cho mở project và tự ẩn track có file thiếu. Ghi ngày 2026-11-09.
+
+### [Thấp] Mất ổ dưới 5 giây hoặc trong lúc phát để lại Tile::Failed
+
+`crates/gpufx-editor/src/visuals/mod.rs:38,377-383`: ổ bị rút ngắn (dưới 5 giây) hoặc mất đúng lúc đang phát thì ô thumbnail/mức âm chuyển sang `Tile::Failed` và không được thử lại. Nên thử lại như trường hợp mất ổ lâu hơn. Ghi ngày 2026-11-09.
+
+### [Thấp] Đọc peaks ở chế độ tạm dừng giữ file mở trong lúc phát hoặc xuất
+
+`crates/gpufx-editor/src/visuals/worker.rs:338-348`: lượt đọc peaks đã bắt đầu lúc tạm dừng vẫn giữ file nguồn mở khi người dùng bấm phát hoặc xuất, nên có thể tranh chấp tài nguyên với decoder. Nên huỷ hoặc nhả file khi phát hoặc xuất bắt đầu. Ghi ngày 2026-11-09.
+
+### [Thấp] Bản dựng cũ âm thầm bỏ `hidden`/`locked` và xuất cả track bị ẩn
+
+`crates/engine/src/project.rs:74,78` (`locked`, `hidden`): phiên bản project vẫn là 2 và `Track` không có `deny_unknown_fields`, nên bản dựng cũ mở project mới sẽ bỏ qua hai trường này không báo gì, rồi xuất luôn track đã ẩn. Nên tăng phiên bản project hoặc cho bản cũ từ chối trường lạ. Ghi ngày 2026-11-09.
+
+### [Thấp] Khoá track là một bước undo nên khoá xong thì mất redo và Ctrl+Z lặng lẽ mở khoá
+
+`crates/engine/src/edit.rs:663`: `set_track_locked` đi qua lịch sử như mọi sửa đổi, nên khoá track xoá ngăn xếp redo và Ctrl+Z kế tiếp mở khoá thay vì hoàn tác việc sửa trước đó. Cân nhắc coi khoá là trạng thái không undo được; người dùng chưa quyết định. Ghi ngày 2026-11-09.

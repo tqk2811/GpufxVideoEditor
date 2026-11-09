@@ -50,6 +50,7 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `project_get` | Trả project JSON, thời lượng và số khung |
 | `packages_list` | Danh sách effect và transition, lọc theo chuỗi |
 | `track_add` | Thêm track |
+| `track_set_locked`, `track_set_hidden` | Khoá hoặc ẩn track. Sửa track đang khoá bị từ chối với lỗi `track_locked` |
 | `clip_add`, `clip_move`, `clip_trim_start`, `clip_trim_end`, `clip_split`, `clip_delete` | Sửa clip |
 | `effect_add`, `effect_remove`, `transition_add`, `transition_remove` | Hiệu ứng và transition |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
