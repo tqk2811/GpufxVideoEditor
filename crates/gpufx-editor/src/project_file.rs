@@ -129,6 +129,12 @@ pub fn load_project_file(file: &Path, package_roots: &[PathBuf]) -> Result<Proje
     parse_project(&text, file, &project_paths(Some(file), package_roots))
 }
 
+/// [`load_project_file`] for what an agent opens: packages come only from `package_roots`.
+pub fn load_project_file_for_agent(file: &Path, package_roots: &[PathBuf]) -> Result<Project, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("reading {}: {e}", file.display()))?;
+    parse_project(&text, file, &ProjectPaths::roots_only(file, package_roots.to_vec()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,6 +5,7 @@ use crate::export::{EncoderOption, ExportProgress};
 use crate::i18n::{ClipAction, ClipEdge, Language, Message, StreamKind, TrackLabel};
 use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, TrackChoice};
 use crate::packages::{Catalog, PickerState};
+use crate::project_lock::ProjectLock;
 use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{begin_drag, clamp_trim, ClipDrag, EditCommand};
 use crate::timeline::hit::ClipHit;
@@ -76,6 +77,8 @@ pub struct EditorState {
     hold_cancelled: bool,
     /// What this session imported and what the open project uses.
     pub library: MediaLibrary,
+    /// Keeps other processes off the project file while it is open here.
+    project_lock: Option<ProjectLock>,
     pub ui: UiState,
     /// Thumbnails and level bars; drawn from `&self`, so behind a cell.
     pub visuals: RefCell<ClipVisuals>,
@@ -240,6 +243,7 @@ impl EditorState {
             live: None,
             hold_cancelled: false,
             library: MediaLibrary::default(),
+            project_lock: None,
             ui: UiState::default(),
             visuals: RefCell::new(ClipVisuals::default()),
             language: Language::default(),
@@ -515,6 +519,21 @@ impl EditorState {
         true
     }
 
+    /// Runs a command on an unblocked state. The revisions follow only a real change.
+    fn apply_command<F>(&mut self, command: F) -> Result<(), EditError>
+    where
+        F: FnOnce(&Project) -> Result<Project, EditError>,
+    {
+        let before = self.project().clone();
+        let after = self.history.apply(command)?;
+        if *after != before {
+            self.revision += 1;
+            self.audio_revision = self.revision;
+        }
+        self.status = Status::Idle;
+        Ok(())
+    }
+
     /// Runs a command. A refusal goes to the status line and the result is false.
     fn run<F>(&mut self, command: F) -> bool
     where
@@ -523,21 +542,93 @@ impl EditorState {
         if self.edits_blocked() {
             return false;
         }
-        let before = self.project().clone();
-        match self.history.apply(command) {
-            Ok(after) => {
-                if *after != before {
-                    self.revision += 1;
-                    self.audio_revision = self.revision;
-                }
-                self.status = Status::Idle;
-                true
-            }
+        match self.apply_command(command) {
+            Ok(()) => true,
             Err(error) => {
                 self.refuse(&error);
                 false
             }
         }
+    }
+
+    /// Whether an edit from an agent has to wait, the same rule as [`Self::edits_blocked`] for a
+    /// person, and why.
+    pub fn agent_busy_reason(&self) -> Option<&'static str> {
+        if self.export.is_some() {
+            Some("an export is running")
+        } else if self.is_holding() {
+            Some("the user is dragging a control")
+        } else {
+            None
+        }
+    }
+
+    /// Runs a command of an agent through the path a person's edit takes. The selection is dropped
+    /// after a real change, because clip keys name clips of one project.
+    pub fn apply_agent_command<F>(&mut self, command: F) -> Result<(), EditError>
+    where
+        F: FnOnce(&Project) -> Result<Project, EditError>,
+    {
+        let revision = self.revision;
+        self.apply_command(command)?;
+        if self.revision != revision {
+            self.selection = None;
+            self.library.adopt_project_media(self.history.current());
+        }
+        Ok(())
+    }
+
+    /// Sets a track's lock. Like the button, not an undo step and not heard by the audio.
+    pub fn set_track_locked(&mut self, track: usize, locked: bool) -> Result<(), EditError> {
+        if self.is_track_locked(track) == locked && track < self.project().tracks.len() {
+            return Ok(());
+        }
+        self.history.set_track_locked(track, locked)?;
+        self.revision += 1;
+        self.status = Status::Idle;
+        Ok(())
+    }
+
+    /// Goes back one step for an agent; false when there is none.
+    pub fn agent_undo(&mut self) -> bool {
+        let stepped = self.history.undo();
+        if stepped {
+            self.after_history_step();
+        }
+        stepped
+    }
+
+    /// Goes forward one step for an agent; false when there is none.
+    pub fn agent_redo(&mut self) -> bool {
+        let stepped = self.history.redo();
+        if stepped {
+            self.after_history_step();
+        }
+        stepped
+    }
+
+    /// Takes the lock of `file`, keeping one already held for it. False when another process has it.
+    pub fn claim_project_lock(&mut self, file: &Path) -> bool {
+        if self.project_lock.as_ref().is_some_and(|lock| lock.file() == file) {
+            return true;
+        }
+        match ProjectLock::acquire(file) {
+            Ok(Some(lock)) => {
+                self.project_lock = Some(lock);
+                true
+            }
+            Ok(None) => false,
+            // A folder that takes no lock file is no reason to refuse the project.
+            Err(_) => {
+                self.project_lock = None;
+                true
+            }
+        }
+    }
+
+    /// Lets go of the project lock, for a project with no file.
+    pub fn release_project_lock(&mut self) {
+        self.project_lock = None;
     }
 
     pub fn add_track(&mut self, kind: TrackKind) {

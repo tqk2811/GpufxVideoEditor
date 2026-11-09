@@ -3,6 +3,7 @@
 
 #![cfg(windows)]
 
+pub mod agent;
 pub mod editor;
 pub mod export;
 pub mod i18n;
@@ -14,6 +15,7 @@ pub mod playback;
 pub mod presenter;
 pub mod preview;
 pub mod project_file;
+pub mod project_lock;
 pub mod settings;
 pub mod tasks;
 pub mod timecode;
