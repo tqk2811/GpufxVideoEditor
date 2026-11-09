@@ -25,21 +25,32 @@ fn project(clips: Vec<Clip>) -> Arc<Project> {
     })
 }
 
+/// Reports why a test cannot run. Fails instead when the environment says the GPU must be there.
+fn skip(reason: &str) {
+    assert!(std::env::var_os("GPUFX_REQUIRE_GPU").is_none(), "GPUFX_REQUIRE_GPU is set, but {reason}");
+    eprintln!("preview_gpu: skipped: {reason}");
+}
+
+/// The hardware device, or `None` after reporting a skip.
+fn hardware_gpu() -> Option<Arc<Gpu>> {
+    let gpu = Gpu::create_hardware().expect("device");
+    if gpu.is_none() {
+        skip("no hardware adapter");
+    }
+    if !Path::new(&clip("clip-a.mp4", Time::ZERO).source).is_file() {
+        skip("test-clips is missing (scripts/setup-poc.ps1 makes it)");
+        return None;
+    }
+    gpu.map(Arc::new)
+}
+
 fn request(project: &Arc<Project>, frame: i64) -> PreviewRequest {
     PreviewRequest { revision: 0, project: project.clone(), frame }
 }
 
 #[test]
 fn frames_errors_edits_and_blanks_through_one_producer() {
-    let Some(gpu) = Gpu::create_hardware().expect("device") else {
-        eprintln!("no hardware adapter: skipped");
-        return;
-    };
-    if !Path::new(&clip("clip-a.mp4", Time::ZERO).source).is_file() {
-        eprintln!("test-clips is missing (scripts/setup-poc.ps1 makes it): skipped");
-        return;
-    }
-    let gpu = Arc::new(gpu);
+    let Some(gpu) = hardware_gpu() else { return };
     let mut producer = D3d12Producer::new(gpu.clone());
     let seconds = Time::from_seconds(3).unwrap();
 
