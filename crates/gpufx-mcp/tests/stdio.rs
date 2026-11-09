@@ -81,12 +81,19 @@ fn decode_png(block: &Value) -> (u32, u32, Vec<u8>) {
     (info.width, info.height, pixels)
 }
 
+fn gpu_available() -> bool {
+    if matches!(Gpu::create_hardware(), Ok(Some(_))) {
+        return true;
+    }
+    assert!(std::env::var_os("GPUFX_REQUIRE_GPU").is_none(), "no GPU");
+    eprintln!("skipping: no D3D12 hardware adapter is available");
+    false
+}
+
 #[test]
 fn opens_a_project_edits_it_and_captures_by_time_and_by_frame() {
     let _gpu = gpu_lock();
-    if !matches!(Gpu::create_hardware(), Ok(Some(_))) {
-        assert!(std::env::var_os("GPUFX_REQUIRE_GPU").is_none(), "no GPU");
-        eprintln!("skipping: no D3D12 hardware adapter is available");
+    if !gpu_available() {
         return;
     }
     let (a, b) = clip_paths();
@@ -131,4 +138,111 @@ fn opens_a_project_edits_it_and_captures_by_time_and_by_frame() {
     let (content, error) = client.tool("clip_delete", json!({"expected_revision": 0, "clip": {"track": 0, "clip": 0}}));
     assert!(error && content[0]["text"].as_str().unwrap().contains("stale_revision"), "the server lives on after a refusal");
     client.ok("session_status", json!({}));
+}
+
+fn render_tool() -> std::path::PathBuf {
+    let tool = std::path::Path::new(env!("CARGO_BIN_EXE_gpufx-mcp")).with_file_name("gpufx-render.exe");
+    assert!(tool.is_file(), "build gpufx-render too: {}", tool.display());
+    tool
+}
+
+/// A long project, so an export is still running when the test acts on it.
+fn long_project(file: &std::path::Path, clips: i64) {
+    let (a, _) = clip_paths();
+    let clips: Vec<Value> = (0..clips).map(|i| json!({"source": a, "start": i * 150 * FRAME, "source_in": 0, "duration": 150 * FRAME})).collect();
+    let project = json!({"version": 2, "output": {"width": 640, "height": 360, "frame_duration": FRAME}, "tracks": [{"clips": clips}]});
+    std::fs::write(file, project.to_string()).unwrap();
+}
+
+fn wait_for(limit: u64, mut done: impl FnMut() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed().as_secs() < limit {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn exports_refuses_to_overwrite_and_its_frames_hash_like_the_cli() {
+    let _gpu = gpu_lock();
+    if !gpu_available() {
+        return;
+    }
+    let dir = scratch("export");
+    let file = dir.join("project.json");
+    long_project(&file, 1);
+    let out = dir.join("out.mp4");
+    let mut client = Client::start();
+    let (opened, _) = client.ok("project_open", json!({"path": file}));
+    let (started, _) = client.ok("export_start", json!({"out": out}));
+    let job = started["job"].clone();
+    let (content, error) = client.tool("clip_delete", json!({"expected_revision": opened["revision"], "clip": {"track": 0, "clip": 0}}));
+    assert!(error && content[0]["text"].as_str().unwrap().contains("busy"), "no edits during an export");
+    let mut last = Value::Null;
+    assert!(wait_for(120, || {
+        last = client.ok("export_status", json!({"job": job})).0;
+        last["state"] != "running"
+    }), "{last}");
+    assert_eq!(last["state"], "finished", "{last}");
+    assert_eq!(last["report"]["frames"], json!(150));
+    assert!(out.is_file());
+    let (content, error) = client.tool("export_start", json!({"out": out}));
+    assert!(error && content[0]["text"].as_str().unwrap().contains("file_exists"));
+
+    // The picture an agent sees is the picture the renderer writes.
+    let hashes = dir.join("hashes.txt");
+    let cli = Command::new(render_tool()).arg(&file).arg("--out").arg(dir.join("cli.mp4")).arg("--hashes").arg(&hashes).arg("--packages").arg(packages_root()).output().expect("run gpufx-render");
+    assert!(cli.status.success(), "{}", String::from_utf8_lossy(&cli.stderr));
+    let expected = std::fs::read_to_string(&hashes).unwrap().lines().nth(42).unwrap().split_whitespace().nth(1).unwrap().to_owned();
+    use sha2::Digest;
+    let (_, content) = client.ok("frame_capture", json!({"frame": 42}));
+    let digest = sha2::Sha256::digest(decode_png(&content[1]).2);
+    let actual: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(actual, expected, "frame 42");
+}
+
+#[test]
+fn cancelling_an_export_leaves_no_files() {
+    let _gpu = gpu_lock();
+    if !gpu_available() {
+        return;
+    }
+    let dir = scratch("cancel");
+    let file = dir.join("project.json");
+    long_project(&file, 20);
+    let mut client = Client::start();
+    client.ok("project_open", json!({"path": file}));
+    client.ok("export_start", json!({"out": dir.join("out.mp4")}));
+    assert!(wait_for(60, || client.ok("export_status", json!({})).0["done"].as_i64().unwrap_or(0) > 0), "the export got going");
+    client.ok("export_cancel", json!({}));
+    assert!(wait_for(60, || client.ok("export_status", json!({})).0["state"] == "cancelled"));
+    assert_eq!(names_in(&dir), ["project.json", "project.json.lock"], "only the project and the lock of the open session");
+}
+
+#[test]
+fn a_server_that_dies_stops_its_export_cleanly() {
+    let _gpu = gpu_lock();
+    if !gpu_available() {
+        return;
+    }
+    let dir = scratch("dies");
+    let file = dir.join("project.json");
+    long_project(&file, 20);
+    let mut client = Client::start();
+    client.ok("project_open", json!({"path": file}));
+    client.ok("export_start", json!({"out": dir.join("out.mp4")}));
+    assert!(wait_for(60, || client.ok("export_status", json!({})).0["done"].as_i64().unwrap_or(0) > 0));
+    assert!(names_in(&dir).iter().any(|name| name.contains(".tmp")), "the render is writing");
+    client.child.kill().unwrap();
+    client.child.wait().unwrap();
+    assert!(wait_for(30, || names_in(&dir) == ["project.json"]), "{:?}", names_in(&dir));
 }

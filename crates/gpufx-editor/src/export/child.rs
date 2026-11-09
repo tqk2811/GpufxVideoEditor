@@ -287,7 +287,7 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
 }
 
 /// The arguments of `gpufx-render` for this job.
-fn render_arguments(project_file: &Path, job: &ExportJob, package_roots: &[PathBuf]) -> Vec<std::ffi::OsString> {
+fn render_arguments(project_file: &Path, job: &ExportJob, package_roots: &[PathBuf], headless: bool) -> Vec<std::ffi::OsString> {
     let mut arguments: Vec<std::ffi::OsString> = vec![project_file.into(), "--out".into(), job.out.clone().into(), "--encoder".into()];
     arguments.push(match &job.encoder {
         EncoderChoice::Auto => "auto".into(),
@@ -300,16 +300,26 @@ fn render_arguments(project_file: &Path, job: &ExportJob, package_roots: &[PathB
         arguments.extend(["--packages".into(), root.clone().into()]);
     }
     arguments.extend(["--progress".into(), "json".into()]);
+    if headless {
+        arguments.push("--cancel-on-stdin-eof".into());
+    }
     arguments
 }
 
 /// Exports `job` through the renderer at `tool`.
 pub fn run_child(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cancel: &AtomicBool, done: &AtomicI64, grace: Duration) -> ExportOutcome {
-    run_child_with(job, package_roots, tool, cancel, done, grace, PIPE_GRACE)
+    run_child_with(job, package_roots, tool, cancel, done, grace, PIPE_GRACE, false)
+}
+
+/// [`run_child`] for a server with no window. The child stops itself cleanly when stdin closes, which
+/// is what happens if the server dies, so it is not put in a job that would kill it first and leave
+/// its partial file behind.
+pub fn run_child_headless(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cancel: &AtomicBool, done: &AtomicI64, grace: Duration) -> ExportOutcome {
+    run_child_with(job, package_roots, tool, cancel, done, grace, PIPE_GRACE, true)
 }
 
 /// [`run_child`] with the time a gone child's stdout may stay open before it is no longer read.
-fn run_child_with(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cancel: &AtomicBool, done: &AtomicI64, grace: Duration, pipe_grace: Duration) -> ExportOutcome {
+fn run_child_with(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cancel: &AtomicBool, done: &AtomicI64, grace: Duration, pipe_grace: Duration, headless: bool) -> ExportOutcome {
     let failed = |message: String| ExportOutcome::Failed(Message::ExportFailed(message));
     // The project file the child gets is a temporary one, so this check against the real one is here.
     if let Err(message) = job.check() {
@@ -325,16 +335,16 @@ fn run_child_with(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cance
         Ok(project) => project,
         Err(message) => return failed(message),
     };
-    let job_object = match KillOnClose::new() {
+    let job_object = match (!headless).then(KillOnClose::new).transpose() {
         Ok(job_object) => job_object,
         Err(message) => return failed(message),
     };
-    let spawned = Command::new(tool).args(render_arguments(&project.0, job, package_roots)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(CREATE_NO_WINDOW).spawn();
+    let spawned = Command::new(tool).args(render_arguments(&project.0, job, package_roots, headless)).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).creation_flags(CREATE_NO_WINDOW).spawn();
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return failed(format!("starting {} failed: {error}", tool.display())),
     };
-    if let Err(message) = job_object.assign(&child) {
+    if let Some(Err(message)) = job_object.as_ref().map(|job_object| job_object.assign(&child)) {
         let _ = child.kill();
         let _ = child.wait();
         return failed(message);
@@ -428,6 +438,15 @@ mod tests {
     }
 
     #[test]
+    fn a_headless_child_is_told_to_stop_when_stdin_closes() {
+        let dir = scratch("headless");
+        let job = job(&dir, "ok");
+        assert!(matches!(run_child_headless(&job, &[], &fake_tool(), &AtomicBool::new(false), &AtomicI64::new(0), SHORT_GRACE), ExportOutcome::Finished(_)));
+        let arguments = std::fs::read_to_string(dir.join("ok.args.txt")).expect("the fake wrote its arguments");
+        assert!(arguments.lines().any(|line| line == "--cancel-on-stdin-eof"), "{arguments}");
+    }
+
+    #[test]
     fn a_package_beside_the_project_keeps_resolving() {
         let dir = scratch("package");
         std::fs::create_dir_all(dir.join("fx")).expect("create");
@@ -493,7 +512,7 @@ mod tests {
         let job = job(&dir, "backlog");
         // No wait for the pipe, and a long run of lines ahead of the error: the loop ends with the
         // error still in the channel.
-        let outcome = run_child_with(&job, &[], &fake_tool(), &AtomicBool::new(false), &AtomicI64::new(0), SHORT_GRACE, Duration::ZERO);
+        let outcome = run_child_with(&job, &[], &fake_tool(), &AtomicBool::new(false), &AtomicI64::new(0), SHORT_GRACE, Duration::ZERO, false);
         assert_eq!(outcome, ExportOutcome::Failed(Message::ExportFailed("kept as backlog.1-0.tmp.mp4".into())));
         assert!(dir.join("backlog.1-0.tmp.mp4").is_file(), "that file may be the only copy");
     }

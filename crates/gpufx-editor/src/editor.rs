@@ -1,7 +1,7 @@
 //! Editor state without a window: the project history, the selection and the status line. The UI
 //! calls these methods and draws the result; every timeline change goes through an engine command.
 
-use crate::export::{EncoderOption, ExportProgress};
+use crate::export::{EncoderOption, ExportOutcome, ExportProgress};
 use crate::i18n::{ClipAction, ClipEdge, Language, Message, StreamKind, TrackLabel};
 use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, TrackChoice};
 use crate::packages::{Catalog, PickerState};
@@ -77,12 +77,23 @@ pub struct EditorState {
     hold_cancelled: bool,
     /// What this session imported and what the open project uses.
     pub library: MediaLibrary,
+    /// The last export an agent started, which it can ask about later.
+    agent_export: Option<AgentExport>,
+    agent_job_count: u64,
     /// Keeps other processes off the project file while it is open here.
     project_lock: Option<ProjectLock>,
     pub ui: UiState,
     /// Thumbnails and level bars; drawn from `&self`, so behind a cell.
     pub visuals: RefCell<ClipVisuals>,
     language: Language,
+}
+
+/// An export started by an agent. `outcome` stays `None` while it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExport {
+    pub job: u64,
+    pub out: PathBuf,
+    pub outcome: Option<ExportOutcome>,
 }
 
 /// One held control: the project shows `shown` while `history` stays where it was, and the release
@@ -243,6 +254,8 @@ impl EditorState {
             live: None,
             hold_cancelled: false,
             library: MediaLibrary::default(),
+            agent_export: None,
+            agent_job_count: 0,
             project_lock: None,
             ui: UiState::default(),
             visuals: RefCell::new(ClipVisuals::default()),
@@ -624,6 +637,24 @@ impl EditorState {
                 true
             }
         }
+    }
+
+    /// Records an export an agent has just started and returns its job number.
+    pub fn begin_agent_export(&mut self, out: PathBuf) -> u64 {
+        self.agent_job_count += 1;
+        self.agent_export = Some(AgentExport { job: self.agent_job_count, out, outcome: None });
+        self.agent_job_count
+    }
+
+    /// Records how the running export ended, for the agent that started it.
+    pub fn finish_agent_export(&mut self, outcome: &ExportOutcome) {
+        if let Some(record) = self.agent_export.as_mut().filter(|record| record.outcome.is_none()) {
+            record.outcome = Some(outcome.clone());
+        }
+    }
+
+    pub fn agent_export(&self) -> Option<&AgentExport> {
+        self.agent_export.as_ref()
     }
 
     /// Lets go of the project lock, for a project with no file.

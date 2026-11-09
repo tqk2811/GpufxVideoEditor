@@ -12,6 +12,7 @@ use serde_json::Value;
 #[path = "../../../gpufx-render/tests/common/mod.rs"]
 mod render;
 
+#[allow(unused_imports)]
 pub use render::FRAME;
 
 pub fn packages_root() -> PathBuf {

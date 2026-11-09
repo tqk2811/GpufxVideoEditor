@@ -94,6 +94,15 @@ impl ExportWorker {
     /// Runs `job` through the renderer at `tool` once `preview_released` has fired, so the child
     /// and the preview do not hold GPU memory at the same time. `wake` is called when it ends.
     pub fn start(job: ExportJob, package_roots: Vec<PathBuf>, tool: PathBuf, preview_released: Receiver<()>, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
+        Self::spawn(job, package_roots, tool, preview_released, wake, child::run_child)
+    }
+
+    /// Like [`Self::start`] for a server with no window: see [`child::run_child_headless`].
+    pub fn start_headless(job: ExportJob, package_roots: Vec<PathBuf>, tool: PathBuf, preview_released: Receiver<()>, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
+        Self::spawn(job, package_roots, tool, preview_released, wake, child::run_child_headless)
+    }
+
+    fn spawn(job: ExportJob, package_roots: Vec<PathBuf>, tool: PathBuf, preview_released: Receiver<()>, wake: impl Fn() + Send + 'static, run: fn(&ExportJob, &[PathBuf], &Path, &AtomicBool, &AtomicI64, Duration) -> ExportOutcome) -> Result<Self, String> {
         let total = frame_count(&job.project);
         let done: Arc<AtomicI64> = Arc::default();
         let cancel: Arc<AtomicBool> = Arc::default();
@@ -102,8 +111,8 @@ impl ExportWorker {
         let handle = thread::Builder::new().name("export".to_owned()).spawn(move || {
             // Waits for the preview to drop its decoders and images; an error only means it is gone.
             let _ = preview_released.recv();
-            let run = catch_unwind(AssertUnwindSafe(|| child::run_child(&job, &package_roots, &tool, &thread_cancel, &thread_done, child::CANCEL_GRACE)));
-            let result = run.unwrap_or_else(|_| ExportOutcome::Failed(Message::ExportFailed("the export thread hit an internal error".to_owned())));
+            let outcome_of = catch_unwind(AssertUnwindSafe(|| run(&job, &package_roots, &tool, &thread_cancel, &thread_done, child::CANCEL_GRACE)));
+            let result = outcome_of.unwrap_or_else(|_| ExportOutcome::Failed(Message::ExportFailed("the export thread hit an internal error".to_owned())));
             *thread_outcome.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
             wake();
         });

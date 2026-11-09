@@ -76,6 +76,8 @@ params!(GainParams { expected_revision: u64, clip: ClipParam, gain_db: f64 });
 params!(MutedParams { expected_revision: u64, clip: ClipParam, muted: bool });
 params!(FadesParams { expected_revision: u64, clip: ClipParam, fade_in: i64, fade_out: i64 });
 params!(RevisionParams { expected_revision: u64 });
+params!(ExportStartParams { out: PathBuf, #[serde(default)] overwrite: bool, encoder: Option<String> });
+params!(ExportJobParams { job: Option<u64> });
 params!(FrameCaptureParams { time: Option<i64>, frame: Option<i64>, max_width: Option<u32> });
 
 /// One tool of the server.
@@ -171,5 +173,8 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("undo", "Undoes the last edit.", RevisionParams, |p| Ok(AgentRequest::Undo { expected_revision: p.expected_revision })),
         tool!("redo", "Redoes an undone edit.", RevisionParams, |p| Ok(AgentRequest::Redo { expected_revision: p.expected_revision })),
         tool!("frame_capture", "The composited frame at a time (ticks) or frame index, exactly one of them, as a PNG no wider than max_width (default 1280). A position outside the timeline is an error.", FrameCaptureParams, frame_capture),
+        tool!("export_start", "Exports the project to an MP4 in the background; returns a job. Refused with file_exists unless overwrite is true. One export at a time; edits wait for it.", ExportStartParams, |p| Ok(AgentRequest::ExportStart { out: p.out, overwrite: p.overwrite, encoder: p.encoder })),
+        tool!("export_status", "The state of an export (the last one when job is absent): running with done and total, finished with its report, cancelled, or failed with a message.", ExportJobParams, |p| Ok(AgentRequest::ExportStatus { job: p.job })),
+        tool!("export_cancel", "Asks the running export to stop; export_status tells when it has.", ExportJobParams, |p| Ok(AgentRequest::ExportCancel { job: p.job })),
     ]
 }

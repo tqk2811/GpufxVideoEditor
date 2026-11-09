@@ -7,13 +7,15 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 
-use d3d12_backend::{probe_media, read_package_info, MediaProbe, ProjectPaths};
+use d3d12_backend::{probe_media, read_package_info, EncoderChoice, MediaProbe, ProjectPaths};
 use engine::{clip_at, frame_count, frame_time, nearest_free_start, Clip, ClipKey, Effect, Project, Time, TrackKind, Transition};
 use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
-use crate::editor::{new_clip, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_TRANSITION_DURATION};
+use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_TRANSITION_DURATION};
+use crate::export::{export_blocker, ExportOutcome};
+use crate::i18n::Language;
 use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
 use crate::project_file::{load_project_file_for_agent, save_project_file};
 use crate::preview::plan::frame_index;
@@ -66,6 +68,10 @@ pub trait AgentHost {
     fn state(&mut self) -> &mut EditorState;
     /// Renders output frame `frame` of `project` as RGBA of its output size, without changing anything shown.
     fn capture(&mut self, project: Arc<Project>, frame: i64) -> Receiver<Result<Vec<u8>, AgentError>>;
+    /// Starts exporting the project to `out`. `Err` when the job is refused before it starts.
+    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError>;
+    /// Asks the running export to stop.
+    fn cancel_export(&mut self);
     /// Whether a dialog or a load of the window is in the way of replacing the project.
     fn tasks_busy(&self) -> bool {
         false
@@ -283,6 +289,47 @@ fn undo_or_redo<H: AgentHost>(host: &mut H, expected: u64, undo: bool) -> Result
     }
 }
 
+fn export_json(state: &EditorState, record: &AgentExport) -> Value {
+    let mut value = json!({"job": record.job, "out": record.out});
+    let progress = state.export_progress();
+    let fields = match &record.outcome {
+        None => json!({"state": "running", "done": progress.map_or(0, |p| p.done), "total": progress.map_or(0, |p| p.total)}),
+        Some(ExportOutcome::Finished(report)) => json!({"state": "finished", "report": report}),
+        Some(ExportOutcome::Cancelled) => json!({"state": "cancelled"}),
+        Some(ExportOutcome::Failed(message)) => json!({"state": "failed", "message": Language::English.text(message)}),
+    };
+    if let (Value::Object(target), Value::Object(fields)) = (&mut value, fields) {
+        target.extend(fields);
+    }
+    value
+}
+
+fn export_start<H: AgentHost>(host: &mut H, out: &Path, overwrite: bool, encoder: Option<String>) -> Result<Value, AgentError> {
+    let state = host.state();
+    if let Some(reason) = state.agent_busy_reason() {
+        return Err(busy(reason));
+    }
+    if let Some(reason) = export_blocker(state.project()) {
+        return Err(AgentError::new("nothing_to_export", Language::English.text(&reason)));
+    }
+    let out = std::path::absolute(out).map_err(|e| AgentError::new("invalid_path", e.to_string()))?;
+    if out.exists() && !overwrite {
+        return Err(AgentError::new("file_exists", format!("{} exists: pass overwrite to replace it", out.display())));
+    }
+    let encoder = match encoder.as_deref() {
+        None | Some("auto") => EncoderChoice::Auto,
+        Some(name) => EncoderChoice::Named(name.to_owned()),
+    };
+    host.start_export(out.clone(), encoder)?;
+    let job = host.state().begin_agent_export(out.clone());
+    Ok(json!({"job": job, "out": out}))
+}
+
+/// The export `job` names, or the last one.
+fn export_record(state: &EditorState, job: Option<u64>) -> Result<AgentExport, AgentError> {
+    state.agent_export().filter(|record| job.is_none_or(|job| job == record.job)).cloned().ok_or_else(|| AgentError::new("job_not_found", "no such export"))
+}
+
 fn frame_capture<H: AgentHost>(host: &mut H, target: CaptureTarget, max_width: u32) -> Result<PendingFrame, AgentError> {
     let state = host.state();
     if state.is_exporting() {
@@ -331,7 +378,20 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
             Ok(frame) => return Step::Frame(frame),
             Err(error) => Err(error),
         },
-        AgentRequest::ExportStart { .. } | AgentRequest::ExportStatus { .. } | AgentRequest::ExportCancel { .. } => Err(AgentError::new("internal", "not available yet")),
+        AgentRequest::ExportStart { out, overwrite, encoder } => export_start(host, &out, overwrite, encoder),
+        AgentRequest::ExportStatus { job } => {
+            let state = host.state();
+            export_record(state, job).map(|record| export_json(state, &record))
+        }
+        AgentRequest::ExportCancel { job } => match export_record(host.state(), job) {
+            Ok(record) => {
+                if record.outcome.is_none() {
+                    host.cancel_export();
+                }
+                Ok(export_json(host.state(), &record))
+            }
+            Err(error) => Err(error),
+        },
     };
     Step::Done(with_revision(result, host.state().revision()))
 }
