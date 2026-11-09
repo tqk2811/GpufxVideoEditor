@@ -325,8 +325,8 @@ impl Session {
                 self.export_out = Some(out);
             }
             Err(message) => {
-                self.preview.resume();
                 self.state.end_export(Status::Error(message));
+                self.resume_preview();
             }
         }
     }
@@ -344,8 +344,13 @@ impl Session {
             ExportOutcome::Failed(message) => Status::Error(format!("Export failed: {message}")),
         };
         self.state.end_export(status);
+        self.resume_preview();
+    }
+
+    /// Brings the preview back after an export. The last wish was dropped with the suspension, so
+    /// it is sent again.
+    fn resume_preview(&mut self) {
         self.preview.resume();
-        // The last wish was dropped with the suspension, so it is sent again.
         self.tracker = RequestTracker::default();
         self.shown = None;
     }
