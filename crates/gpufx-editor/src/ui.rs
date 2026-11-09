@@ -208,8 +208,13 @@ fn add_package(state: &mut EditorState, package: &str) {
     }
 }
 
+/// The height of a selectable label, without the spacing `show_rows` adds itself.
+fn selectable_row_height(ui: &egui::Ui) -> f32 {
+    (ui.text_style_height(&egui::TextStyle::Body) + 2.0 * ui.spacing().button_padding.y).max(ui.spacing().interact_size.y)
+}
+
 fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
-    let row_height = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+    let row_height = selectable_row_height(ui);
     let entries: Vec<_> = filter_entries(state.catalog.entries(state.picker.kind), &state.picker.filter).into_iter().cloned().collect();
     let list_height = (ui.available_height() - PICKER_FOOTER_HEIGHT).max(row_height * 3.0);
     let mut double_clicked = None;
@@ -584,6 +589,16 @@ mod tests {
 
     fn press(state: &mut EditorState, key: Key, modifiers: Modifiers) -> Vec<UiRequest> {
         press_in(&egui::Context::default(), state, key, modifiers, |_| {})
+    }
+
+    #[test]
+    fn the_picker_row_height_is_the_height_of_a_selectable_label() {
+        let (mut label, mut computed) = (0.0, 0.0);
+        run_frame(&egui::Context::default(), egui::RawInput::default(), |ui| {
+            label = ui.selectable_label(false, "Package").rect.height();
+            computed = selectable_row_height(ui);
+        });
+        assert_eq!(computed, label);
     }
 
     #[test]
