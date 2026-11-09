@@ -38,7 +38,7 @@ pub use audio_schedule::{
 pub use edit::{
     add_clip, add_effect, add_track, add_transition, clip_at, delete_clip, move_clip,
     nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain,
-    set_muted, set_output_size, set_speed, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, EditError, EditHistory,
+    set_frame_duration, set_muted, set_output_size, set_speed, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, EditError, EditHistory,
 };
 pub use project::{
     AudioOutput, Clip, Effect, LoadError, Output, Project, Track, TrackKind, Transition,

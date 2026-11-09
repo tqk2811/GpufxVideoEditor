@@ -2,11 +2,11 @@
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
-use crate::editor::{EditorState, Status, OUTPUT_PRESETS};
+use crate::editor::{EditorState, Status, OUTPUT_FRAME_DURATIONS, OUTPUT_PRESETS};
 use crate::i18n::Message;
 use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
-use crate::timecode::{aspect_label, format_timecode};
+use crate::timecode::{aspect_label, format_fps, format_timecode};
 use crate::timeline::view::content_end;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
 
@@ -117,7 +117,7 @@ fn transport_fit(beside_play: f32, current: f32, total: f32, aspect: f32, gap: f
 fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, controls: Rect) {
     let output = &state.project().output;
     let frame_duration = output.frame_duration;
-    let size = size_label(output.width, output.height);
+    let size = format!("{}  {}", size_label(output.width, output.height), format_fps(frame_duration));
     let current = format_timecode(state.playhead(), frame_duration);
     let total = format_timecode(content_end(state.project()), frame_duration);
     let total = format!("/ {total}");
@@ -157,9 +157,10 @@ fn size_label(width: u32, height: u32) -> String {
     format!("{width}\u{d7}{height}")
 }
 
-/// The size of the output: a list of usual sizes and a width and height to type.
+/// The size and frame rate of the output: lists of usual values and a width and height to type.
 fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
-    let (width, height) = (state.project().output.width, state.project().output.height);
+    let output = &state.project().output;
+    let (width, height, frame_duration) = (output.width, output.height, output.frame_duration);
     let language = state.language();
     let draft_id = ui.scope_id().with("output-size-draft");
     let enabled = !state.is_exporting();
@@ -184,6 +185,14 @@ fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
             if ui.button(language.t(Message::Apply)).clicked() {
                 state.set_output_size(draft_width, draft_height);
                 ui.close();
+            }
+            ui.separator();
+            ui.colored_label(theme::TEXT_DIM, language.t(Message::FieldFrameRate));
+            for preset in OUTPUT_FRAME_DURATIONS {
+                if ui.selectable_label(preset == frame_duration, format_fps(preset)).clicked() {
+                    state.set_frame_duration(preset);
+                    ui.close();
+                }
             }
         })
     });

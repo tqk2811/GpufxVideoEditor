@@ -677,6 +677,13 @@ pub fn set_output_size(project: &Project, width: u32, height: u32) -> Result<Pro
     finish(next)
 }
 
+/// Changes how long one output frame lasts.
+pub fn set_frame_duration(project: &Project, frame_duration: Time) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    next.output.frame_duration = frame_duration;
+    finish(next)
+}
+
 /// Replaces the parameters of effect `effect` of a clip.
 pub fn set_effect_params(
     project: &Project,

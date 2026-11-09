@@ -12,7 +12,7 @@ use crate::timeline::hit::ClipHit;
 use crate::timeline::view::TimelineView;
 use crate::visuals::ClipVisuals;
 use engine::{
-    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_muted, set_output_size, set_speed,
+    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_speed,
     set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
@@ -266,6 +266,9 @@ pub fn speed_limits(project: &Project, key: ClipKey) -> Option<(f64, f64)> {
 /// The sizes offered for the output, widest shapes first.
 pub const OUTPUT_PRESETS: [(u32, u32); 6] = [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720), (1080, 1920), (1080, 1080)];
 const MAX_OUTPUT_SIDE: u32 = 7680;
+/// The frame rates offered for the output, as ticks per frame: 24, 25, 29.97, 30, 50 and 60 fps.
+/// Only rates with a whole number of ticks per frame can be kept exactly, which leaves out 23.976 and 59.94.
+pub const OUTPUT_FRAME_DURATIONS: [Time; 6] = [Time::from_ticks(3750), Time::from_ticks(3600), Time::from_ticks(3003), Time::from_ticks(3000), Time::from_ticks(1800), Time::from_ticks(1500)];
 
 /// `side` as an output side: encoders of 4:2:0 video need it even.
 fn even_side(side: u32) -> u32 {
@@ -1023,6 +1026,11 @@ impl EditorState {
     pub fn set_output_size(&mut self, width: u32, height: u32) {
         let (width, height) = (even_side(width), even_side(height));
         self.run(|project| set_output_size(project, width, height));
+    }
+
+    /// Sets how long one output frame lasts.
+    pub fn set_frame_duration(&mut self, frame_duration: Time) {
+        self.run(|project| set_frame_duration(project, frame_duration));
     }
 
     pub fn set_muted(&mut self, muted: bool) {
@@ -2535,6 +2543,16 @@ mod tests {
         state.set_output_size(1, 99_999);
         assert_eq!((state.project().output.width, state.project().output.height), (2, 7680));
         state.undo();
+        state.undo();
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn the_frame_rate_changes_and_undoes() {
+        let mut state = state_with_clip();
+        let before = state.project().clone();
+        state.set_frame_duration(OUTPUT_FRAME_DURATIONS[5]);
+        assert_eq!(state.project().output.frame_duration, Time::from_ticks(1500));
         state.undo();
         assert_eq!(state.project(), &before);
     }
