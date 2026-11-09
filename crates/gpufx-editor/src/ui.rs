@@ -89,8 +89,11 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState) {
         if consume_exact(input, Modifiers::NONE, Key::Delete) {
             state.delete_selected();
         }
-        // Reserved for playback.
-        consume_exact(input, Modifiers::NONE, Key::Space);
+        // Holding the key must not toggle again on each repeat.
+        let repeat = input.events.iter().any(|event| matches!(event, Event::Key { key: Key::Space, repeat: true, .. }));
+        if consume_exact(input, Modifiers::NONE, Key::Space) && !repeat {
+            state.toggle_playback();
+        }
     });
 }
 
@@ -125,6 +128,14 @@ fn status_line(ui: &mut egui::Ui, state: &EditorState) {
             ui.separator();
             ui.colored_label(REFUSED, format!("Preview: {message}"));
         }
+        if let Some(message) = state.playback_message() {
+            ui.separator();
+            ui.colored_label(REFUSED, format!("Audio: {message}"));
+        }
+        if state.silence_ms() > 0 {
+            ui.separator();
+            ui.label(format!("Audio gaps: {} ms", state.silence_ms()));
+        }
     });
 }
 
@@ -143,8 +154,10 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let ruler_response = ui.interact(ruler_rect, ui.scope_id().with("ruler"), Sense::click_and_drag());
     if ruler_response.is_pointer_button_down_on() {
         if let Some(pointer) = ruler_response.interact_pointer_pos() {
-            state.set_playhead(state.view.x_to_time(f64::from(pointer.x - tracks_left)));
+            state.scrub_to(state.view.x_to_time(f64::from(pointer.x - tracks_left)));
         }
+    } else {
+        state.end_scrub();
     }
 
     let tracks_response = ui.interact(tracks_rect, ui.scope_id().with("tracks"), Sense::click_and_drag());
@@ -434,6 +447,21 @@ mod tests {
         assert!(state.project().tracks[0].clips.is_empty());
         press(&mut state, Key::Y, Modifiers::COMMAND | Modifiers::ALT);
         assert!(state.project().tracks[0].clips.is_empty(), "Ctrl+Alt+Y does not redo");
+    }
+
+    #[test]
+    fn space_toggles_and_a_held_key_does_not_toggle_again() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        press_in(&ctx, &mut state, Key::Space, Modifiers::NONE, |_| {});
+        assert!(state.is_playing());
+        // Still down, so egui marks the second press as a repeat.
+        press_in(&ctx, &mut state, Key::Space, Modifiers::NONE, |_| {});
+        assert!(state.is_playing(), "a repeat is not a press");
+        press(&mut state, Key::Space, Modifiers::NONE);
+        assert!(!state.is_playing());
+        press(&mut state, Key::Space, Modifiers::SHIFT);
+        assert!(!state.is_playing(), "Shift+Space does nothing");
     }
 
     #[test]

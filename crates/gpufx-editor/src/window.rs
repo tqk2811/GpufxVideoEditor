@@ -1,9 +1,7 @@
 //! The window and its event loop.
 
 use std::sync::Arc;
-#[cfg(debug_assertions)]
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -16,11 +14,16 @@ use engine::Project;
 use engine::{Time, TrackKind};
 
 use crate::editor::EditorState;
+use crate::playback::device::Playback;
+use crate::playback::plan::{frames_to_ms, TransportCommand};
 use crate::presenter::Presenter;
-use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
+use crate::preview::backend::{editor_paths, D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::ui::{self, UiRequest};
+
+/// How often the playhead moves while playing.
+const PLAYING_REPAINT: Duration = Duration::from_millis(16);
 
 const MEDIA_EXTENSIONS: [&str; 10] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac"];
 
@@ -30,6 +33,11 @@ const MEDIA_EXTENSIONS: [&str; 10] = ["mp4", "mov", "mkv", "webm", "avi", "m4v",
 const SMOKE_VARIABLE: &str = "GPUFX_EDITOR_SMOKE";
 #[cfg(debug_assertions)]
 const SMOKE_LINGER: Duration = Duration::from_secs(4);
+/// With the smoke check, also play and seek once, and report the audio figures.
+#[cfg(debug_assertions)]
+const SMOKE_PLAY_VARIABLE: &str = "GPUFX_EDITOR_SMOKE_PLAY";
+#[cfg(debug_assertions)]
+const SMOKE_SEEK_AFTER: Duration = Duration::from_millis(1500);
 
 #[cfg(debug_assertions)]
 #[derive(Default)]
@@ -37,10 +45,15 @@ struct Smoke {
     enabled: bool,
     reported: bool,
     exit_at: Option<Instant>,
+    play: bool,
+    /// When the one seek of the check is due.
+    seek_due: Option<Instant>,
+    underrun_before_seek: u64,
 }
 
 /// Field order matters: the worker stops before the presenter and device are dropped.
 struct Session {
+    playback: Option<Playback>,
     preview: PreviewWorker<D3d12Producer>,
     gpu: Arc<Gpu>,
     presenter: Presenter,
@@ -50,6 +63,8 @@ struct Session {
     /// The request behind the frame on screen.
     shown: Option<RequestId>,
     snapshot: Option<(u64, Arc<Project>)>,
+    /// The revision the audio thread has.
+    audio_revision: u64,
     #[cfg(debug_assertions)]
     smoke: Smoke,
 }
@@ -69,6 +84,7 @@ impl Session {
             let mut smoke = Smoke::default();
             if let Some(path) = std::env::var_os(SMOKE_VARIABLE) {
                 smoke.enabled = true;
+                smoke.play = std::env::var_os(SMOKE_PLAY_VARIABLE).is_some();
                 state.add_track(TrackKind::Video);
                 state.add_clip_from_file(0, std::path::Path::new(&path));
                 state.set_playhead(Time::from_ticks(engine::TICKS_PER_SECOND));
@@ -76,6 +92,7 @@ impl Session {
             smoke
         };
         Ok(Self {
+            playback: None,
             preview,
             gpu,
             presenter,
@@ -84,6 +101,7 @@ impl Session {
             tracker: RequestTracker::default(),
             shown: None,
             snapshot: None,
+            audio_revision: 0,
             #[cfg(debug_assertions)]
             smoke,
         })
@@ -146,6 +164,95 @@ impl Session {
             Err(message) => println!("smoke read-back failed: {message}"),
         }
         self.smoke.exit_at = Instant::now().checked_add(SMOKE_LINGER);
+        if self.smoke.play {
+            self.state.toggle_playback();
+            self.smoke.seek_due = Instant::now().checked_add(SMOKE_SEEK_AFTER);
+        }
+    }
+
+    /// Seeks once, part way through the check, and remembers the gaps so far.
+    #[cfg(debug_assertions)]
+    fn drive_smoke(&mut self) {
+        if self.smoke.seek_due.is_some_and(|at| at <= Instant::now()) {
+            self.smoke.seek_due = None;
+            self.smoke.underrun_before_seek = self.playback.as_ref().map_or(0, |playback| playback.thread().shared().stats().underrun);
+            self.state.scrub_to(Time::from_ticks(engine::TICKS_PER_SECOND));
+            self.state.end_scrub();
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn report_smoke_audio(&self) {
+        if let (true, Some(playback)) = (self.smoke.play, &self.playback) {
+            let stats = playback.thread().shared().stats();
+            let after_seek = stats.underrun - self.smoke.underrun_before_seek;
+            println!("smoke audio played {} underrun {} (before the seek {}, after it {}) delay {} frames, {} ms", stats.played, stats.underrun, self.smoke.underrun_before_seek, after_seek, stats.delay, frames_to_ms(stats.delay));
+        }
+    }
+
+    /// Follows the clock, and notices the end of the timeline or a failure.
+    fn poll_playback(&mut self) {
+        let Some(playback) = &self.playback else { return };
+        if let Some(message) = playback.thread().take_error() {
+            self.state.playback_ended(Some(message));
+            self.playback = None;
+            return;
+        }
+        self.state.set_silence_ms(frames_to_ms(playback.thread().shared().stats().underrun));
+        if !self.state.is_playing() {
+            return;
+        }
+        let reading = playback.thread().reading();
+        self.state.follow_clock(reading.playhead());
+        if reading.finished() {
+            playback.thread().stop();
+            self.state.playback_ended(None);
+        }
+    }
+
+    fn sync_audio_project(&mut self) {
+        let revision = self.state.revision();
+        if revision == self.audio_revision {
+            return;
+        }
+        self.audio_revision = revision;
+        if let Some(playback) = &self.playback {
+            playback.thread().set_project(Arc::new(self.state.project().clone()));
+        }
+    }
+
+    fn apply_transport(&mut self) {
+        for command in self.state.take_transport() {
+            match command {
+                TransportCommand::Play { from } => {
+                    if self.playback.is_none() {
+                        match Playback::open(self.state.project(), Arc::new(editor_paths())) {
+                            Ok(playback) => {
+                                self.audio_revision = self.state.revision();
+                                self.playback = Some(playback);
+                            }
+                            Err(message) => {
+                                self.state.playback_ended(Some(message));
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(playback) = &self.playback {
+                        playback.thread().play(from);
+                    }
+                }
+                TransportCommand::Stop => {
+                    if let Some(playback) = &self.playback {
+                        playback.thread().stop();
+                    }
+                }
+                TransportCommand::Seek(time) => {
+                    if let Some(playback) = &self.playback {
+                        playback.thread().seek(time);
+                    }
+                }
+            }
+        }
     }
 
     /// Asks for the frame under the playhead when the wish changed since the last request.
@@ -166,13 +273,19 @@ impl Session {
 
     fn redraw(&mut self) -> Result<(), String> {
         self.collect_preview();
+        self.poll_playback();
+        #[cfg(debug_assertions)]
+        self.drive_smoke();
         let mut requests = Vec::new();
         let state = &mut self.state;
         let delay = self.presenter.render(&self.gpu, |root, preview| ui::show(root, state, &mut requests, preview))?;
-        self.next_repaint = self.smoke_exit_at().or_else(|| Instant::now().checked_add(delay));
+        let delay = if self.state.is_playing() { delay.min(PLAYING_REPAINT) } else { delay };
+        self.next_repaint = self.smoke_exit_at().filter(|_| !self.state.is_playing()).or_else(|| Instant::now().checked_add(delay));
         for request in requests {
             self.handle(request);
         }
+        self.sync_audio_project();
+        self.apply_transport();
         self.request_preview();
         Ok(())
     }
@@ -254,6 +367,8 @@ impl ApplicationHandler for EditorApp {
                 if let Err(message) = session.redraw() {
                     self.fail(event_loop, message);
                 } else if session.smoke_finished() {
+                    #[cfg(debug_assertions)]
+                    session.report_smoke_audio();
                     event_loop.exit();
                 }
             }

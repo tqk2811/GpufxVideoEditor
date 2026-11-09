@@ -18,6 +18,11 @@ const PACKAGE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/
 /// A project has no file yet, and clips added from a dialog hold absolute paths, which
 /// [`ProjectPaths`] keeps as they are.
 const UNSAVED_PROJECT_FILE: &str = "unsaved.json";
+/// How the editor finds files until projects have a place on disk.
+pub fn editor_paths() -> ProjectPaths {
+    ProjectPaths::new(Path::new(UNSAVED_PROJECT_FILE), vec![PathBuf::from(PACKAGE_ROOT)])
+}
+
 const RECYCLE_WAIT: Duration = Duration::from_secs(1);
 /// How long a decode runs before a newer request can stop it. Short decodes finish, so a continuous
 /// scrub keeps showing frames; a long catch-up is still stopped soon after it is no longer wanted.
@@ -60,7 +65,7 @@ fn classify(message: String) -> ProduceError {
 
 impl D3d12Producer {
     pub fn new(gpu: Arc<Gpu>) -> Self {
-        let paths = Arc::new(ProjectPaths::new(Path::new(UNSAVED_PROJECT_FILE), vec![PathBuf::from(PACKAGE_ROOT)]));
+        let paths = Arc::new(editor_paths());
         Self { gpu, paths, compositor: None, renderer: FrameRenderer::default(), abort: None }
     }
 

@@ -4,6 +4,7 @@
 #![cfg(windows)]
 
 pub mod editor;
+pub mod playback;
 pub mod presenter;
 pub mod preview;
 pub mod timeline;

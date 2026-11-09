@@ -1,16 +1,18 @@
 //! Editor state without a window: the project history, the selection and the status line. The UI
 //! calls these methods and draws the result; every timeline change goes through an engine command.
 
+use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{ClipDrag, EditCommand};
 use crate::timeline::view::TimelineView;
 use engine::{
-    add_clip, add_track, clip_at, delete_clip, nearest_free_start, split_clip, AudioOutput, Clip, ClipKey, EditError, EditHistory,
+    add_clip, add_track, audio_sample_count, clip_at, delete_clip, nearest_free_start, split_clip, AudioOutput, Clip, ClipKey, EditError, EditHistory,
     Output, Project, Time, TrackKind, SUPPORTED_VERSION,
 };
 use std::path::Path;
 
 const UNDO_DEPTH: usize = 200;
 const DRAG_FIRST: &str = "Finish the drag first";
+const NOTHING_TO_PLAY: &str = "Nothing to play: playback length follows the video frames, and audio alone has none yet";
 
 /// Length given to a new clip. The project does not record source lengths and no backend call
 /// reports one without opening a decoder.
@@ -32,6 +34,12 @@ pub struct EditorState {
     /// Counts the changes of the project; equal values mean an equal project.
     revision: u64,
     preview_error: Option<String>,
+    playing: bool,
+    transport: Vec<TransportCommand>,
+    /// Where a held ruler press last sought to, so holding it does not seek every frame.
+    scrub_target: Option<Time>,
+    playback_message: Option<String>,
+    silence_ms: u64,
     pub view: TimelineView,
     pub drag: Option<ClipDrag>,
 }
@@ -79,6 +87,11 @@ impl EditorState {
             status: Status::Idle,
             revision: 0,
             preview_error: None,
+            playing: false,
+            transport: Vec::new(),
+            scrub_target: None,
+            playback_message: None,
+            silence_ms: 0,
             view: TimelineView::default(),
             drag: None,
         }
@@ -110,6 +123,76 @@ impl EditorState {
 
     pub fn set_preview_error(&mut self, error: Option<String>) {
         self.preview_error = error;
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing
+    }
+
+    pub fn playback_message(&self) -> Option<&str> {
+        self.playback_message.as_deref()
+    }
+
+    pub fn silence_ms(&self) -> u64 {
+        self.silence_ms
+    }
+
+    pub fn set_silence_ms(&mut self, silence_ms: u64) {
+        self.silence_ms = silence_ms;
+    }
+
+    /// Space: starts from the playhead or stops where it is. A timeline with no samples cannot play.
+    pub fn toggle_playback(&mut self) {
+        if self.playing {
+            self.playing = false;
+            self.transport.push(TransportCommand::Stop);
+            return;
+        }
+        let end = audio_sample_count(self.project());
+        if end <= 0 {
+            self.status = Status::Info(NOTHING_TO_PLAY.to_owned());
+            return;
+        }
+        let from = start_time(self.playhead, end);
+        self.playhead = from;
+        self.playing = true;
+        self.playback_message = None;
+        self.transport.push(TransportCommand::Play { from });
+    }
+
+    /// The commands of this frame, for the window to carry out.
+    pub fn take_transport(&mut self) -> Vec<TransportCommand> {
+        std::mem::take(&mut self.transport)
+    }
+
+    /// A ruler press at `time`. Moves the playhead and, while playing, seeks once per new place.
+    pub fn scrub_to(&mut self, time: Time) {
+        self.set_playhead(time);
+        let time = self.playhead;
+        if self.playing && self.scrub_target != Some(time) {
+            self.transport.push(TransportCommand::Seek(time));
+        }
+        self.scrub_target = Some(time);
+    }
+
+    pub fn end_scrub(&mut self) {
+        self.scrub_target = None;
+    }
+
+    /// The playhead while playing, from the audio clock.
+    pub fn follow_clock(&mut self, time: Time) {
+        if self.playing {
+            self.set_playhead(time);
+        }
+    }
+
+    /// Playback ended by itself: at the end, or with a message for the status line.
+    pub fn playback_ended(&mut self, message: Option<String>) {
+        self.playing = false;
+        self.scrub_target = None;
+        if message.is_some() {
+            self.playback_message = message;
+        }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -546,6 +629,90 @@ mod tests {
         let mut empty = EditorState::default();
         empty.undo();
         assert_eq!(empty.revision(), 0, "an empty undo changes nothing");
+    }
+
+    fn playable() -> EditorState {
+        let mut state = state_with_clip();
+        state.take_transport();
+        state
+    }
+
+    #[test]
+    fn space_starts_from_the_playhead_and_stops_where_it_is() {
+        let mut state = playable();
+        state.set_playhead(seconds(2));
+        state.toggle_playback();
+        assert!(state.is_playing());
+        assert_eq!(state.take_transport(), vec![TransportCommand::Play { from: seconds(2) }]);
+        state.follow_clock(seconds(3));
+        state.toggle_playback();
+        assert!(!state.is_playing());
+        assert_eq!(state.take_transport(), vec![TransportCommand::Stop]);
+        assert_eq!(state.playhead(), seconds(3), "the playhead stays where it stopped");
+    }
+
+    #[test]
+    fn playing_from_the_end_starts_over() {
+        let mut state = playable();
+        state.set_playhead(seconds(10));
+        state.toggle_playback();
+        assert_eq!(state.take_transport(), vec![TransportCommand::Play { from: Time::ZERO }]);
+        assert_eq!(state.playhead(), Time::ZERO);
+    }
+
+    #[test]
+    fn an_empty_or_audio_only_timeline_explains_why_it_does_not_play() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Audio);
+        state.add_clip_from_file(0, Path::new("music.wav"));
+        state.take_transport();
+        state.toggle_playback();
+        assert!(!state.is_playing());
+        assert!(state.take_transport().is_empty());
+        assert_eq!(state.status(), &Status::Info(NOTHING_TO_PLAY.to_owned()));
+    }
+
+    #[test]
+    fn a_stopped_ruler_press_only_moves_the_playhead() {
+        let mut state = playable();
+        state.scrub_to(seconds(4));
+        assert_eq!(state.playhead(), seconds(4));
+        assert!(state.take_transport().is_empty());
+    }
+
+    #[test]
+    fn a_ruler_press_while_playing_seeks_once_per_new_place() {
+        let mut state = playable();
+        state.toggle_playback();
+        state.take_transport();
+        state.scrub_to(seconds(4));
+        state.follow_clock(seconds(5));
+        state.scrub_to(seconds(4));
+        assert_eq!(state.take_transport(), vec![TransportCommand::Seek(seconds(4))], "a held press seeks once");
+        state.scrub_to(seconds(6));
+        assert_eq!(state.take_transport(), vec![TransportCommand::Seek(seconds(6))]);
+        state.end_scrub();
+        state.scrub_to(seconds(6));
+        assert_eq!(state.take_transport(), vec![TransportCommand::Seek(seconds(6))], "a new press seeks again");
+    }
+
+    #[test]
+    fn following_the_clock_only_applies_while_playing() {
+        let mut state = playable();
+        state.set_playhead(seconds(1));
+        state.follow_clock(seconds(7));
+        assert_eq!(state.playhead(), seconds(1));
+    }
+
+    #[test]
+    fn an_end_with_a_message_reaches_the_status_and_stops() {
+        let mut state = playable();
+        state.toggle_playback();
+        state.playback_ended(Some("broken".to_owned()));
+        assert!(!state.is_playing());
+        assert_eq!(state.playback_message(), Some("broken"));
+        state.toggle_playback();
+        assert_eq!(state.playback_message(), None, "a new start clears it");
     }
 
     #[test]

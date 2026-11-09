@@ -19,3 +19,4 @@ egui-wgpu = { version = "0.37", default-features = false, features = ["winit"] }
 egui-winit = "0.37"
 winit = "0.30.13"
 rfd = "0.15"
+cpal = "0.18"

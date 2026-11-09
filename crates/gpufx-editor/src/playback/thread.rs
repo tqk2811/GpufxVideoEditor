@@ -1,0 +1,533 @@
+//! The preparing thread and the state it shares with the device callback.
+
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+use engine::render::{ClipKey, RenderError};
+use engine::{audio_channel, sample_position, AudioClock, AudioConsumer, AudioProducer, AudioSource, Project, Time, MIX_CHANNELS};
+
+use super::plan::{frames_to_prepare, output_delay_frames, prefill_done, ClockReading, BLOCK_FRAMES, LEAD_FRAMES, RING_BLOCKS};
+
+/// How long the thread sleeps when the lead is full. A seek or edit wakes it at once.
+const IDLE_WAIT: Duration = Duration::from_millis(10);
+/// Mixed in one go, so a command is looked at between steps of a long refill.
+const STEP_FRAMES: usize = 4 * BLOCK_FRAMES;
+
+/// What the callback writes and everyone else reads. All wait-free.
+#[derive(Default)]
+pub struct PlaybackShared {
+    gate: AtomicBool,
+    played: AtomicU64,
+    underrun: AtomicU64,
+    past_end: AtomicU64,
+    delay: AtomicU64,
+    anchor: AtomicI64,
+}
+
+/// Running totals of the callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlaybackStats {
+    pub played: u64,
+    /// Frames of silence because the audio was not prepared in time.
+    pub underrun: u64,
+    pub delay: u64,
+}
+
+impl PlaybackShared {
+    pub fn stats(&self) -> PlaybackStats {
+        PlaybackStats {
+            played: self.played.load(Ordering::Relaxed),
+            underrun: self.underrun.load(Ordering::Relaxed),
+            delay: self.delay.load(Ordering::Relaxed),
+        }
+    }
+
+    fn set_gate(&self, open: bool) {
+        self.gate.store(open, Ordering::Release);
+    }
+
+    fn begin(&self, anchor: i64) {
+        self.past_end.store(0, Ordering::Relaxed);
+        self.anchor.store(anchor, Ordering::Relaxed);
+    }
+}
+
+/// The whole device callback: no lock, no allocation. Silence while the gate is closed, and the
+/// consumer does not see those frames.
+pub fn fill_device_buffer(consumer: &mut AudioConsumer, shared: &PlaybackShared, out: &mut [f32], latency: Option<Duration>) {
+    if !shared.gate.load(Ordering::Acquire) {
+        out.fill(0.0);
+        return;
+    }
+    let report = consumer.pull(out);
+    shared.played.fetch_add(report.played as u64, Ordering::Relaxed);
+    shared.underrun.fetch_add(report.underrun as u64, Ordering::Relaxed);
+    if report.past_end > 0 {
+        shared.past_end.fetch_add(report.past_end as u64, Ordering::Relaxed);
+    } else {
+        shared.past_end.store(0, Ordering::Relaxed);
+    }
+    shared.delay.store(output_delay_frames(out.len() / MIX_CHANNELS, latency), Ordering::Relaxed);
+}
+
+#[derive(Default)]
+struct Commands {
+    playing: bool,
+    quit: bool,
+    project: Option<Arc<Project>>,
+    error: Option<String>,
+}
+
+#[derive(Default)]
+struct Control {
+    commands: Mutex<Commands>,
+    wake: Condvar,
+}
+
+impl Control {
+    fn lock(&self) -> MutexGuard<'_, Commands> {
+        self.commands.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// A source for projects that make no sound: every frame stays silent.
+struct NoAudio;
+
+impl AudioSource for NoAudio {
+    fn read(&mut self, _key: ClipKey, _source: &str, _position: i64, _out: &mut [f32]) -> Result<(), RenderError> {
+        Ok(())
+    }
+}
+
+fn sound_is_off(project: &Project) -> bool {
+    project.output.audio.is_none()
+}
+
+enum Step {
+    Worked,
+    Idle,
+    Failed(String),
+}
+
+fn step<S: AudioSource + ?Sized>(producer: &mut AudioProducer, source: &mut S, silent: bool) -> Step {
+    let want = frames_to_prepare(producer.prepared_frames(), LEAD_FRAMES, BLOCK_FRAMES).min(STEP_FRAMES);
+    if want == 0 {
+        return Step::Idle;
+    }
+    let attempt = catch_unwind(AssertUnwindSafe(|| {
+        if silent {
+            producer.prepare(&mut NoAudio, want)
+        } else {
+            producer.prepare(source, want)
+        }
+    }));
+    match attempt {
+        Ok(Ok(report)) if report.frames > 0 => Step::Worked,
+        Ok(Ok(_)) => Step::Idle,
+        Ok(Err(error)) => Step::Failed(error.0),
+        Err(_) => Step::Failed("the audio thread hit an internal error".to_owned()),
+    }
+}
+
+fn run<S: AudioSource + ?Sized>(mut producer: AudioProducer, source: &mut S, clock: &AudioClock, shared: &PlaybackShared, control: &Control, mut silent: bool) {
+    let mut commands = control.lock();
+    loop {
+        if commands.quit {
+            return;
+        }
+        if let Some(project) = commands.project.take() {
+            silent = sound_is_off(&project);
+            producer.set_project((*project).clone());
+        }
+        if !commands.playing {
+            commands = control.wake.wait(commands).unwrap_or_else(|poisoned| poisoned.into_inner());
+            continue;
+        }
+        drop(commands);
+        let done = step(&mut producer, source, silent);
+        let remaining = clock.end() - clock.position();
+        let ready = prefill_done(producer.prepared_frames(), remaining, LEAD_FRAMES);
+        commands = control.lock();
+        if commands.playing && ready {
+            shared.set_gate(true);
+        }
+        match done {
+            Step::Worked => {}
+            Step::Idle => {
+                let (guard, _) = control.wake.wait_timeout(commands, IDLE_WAIT).unwrap_or_else(|poisoned| poisoned.into_inner());
+                commands = guard;
+            }
+            Step::Failed(message) => {
+                shared.set_gate(false);
+                commands.playing = false;
+                commands.error = Some(message);
+            }
+        }
+    }
+}
+
+/// Owns the preparing thread and the clock.
+pub struct PreparingThread {
+    control: Arc<Control>,
+    shared: Arc<PlaybackShared>,
+    clock: AudioClock,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl PreparingThread {
+    /// Starts the thread on `project` and returns the consumer for the device. `make` runs on the
+    /// thread, because sources need not be `Send`.
+    pub fn spawn<S, M>(project: &Project, make: M) -> Result<(Self, AudioConsumer), String>
+    where
+        S: AudioSource,
+        M: FnOnce() -> S + Send + 'static,
+    {
+        let (producer, consumer, clock) = audio_channel(project.clone(), BLOCK_FRAMES, RING_BLOCKS);
+        let control = Arc::new(Control::default());
+        let shared = Arc::new(PlaybackShared::default());
+        let silent = sound_is_off(project);
+        let (thread_control, thread_shared, thread_clock) = (control.clone(), shared.clone(), clock.clone());
+        let handle = thread::Builder::new()
+            .name("audio-prepare".to_owned())
+            .spawn(move || {
+                let mut source = make();
+                run(producer, &mut source, &thread_clock, &thread_shared, &thread_control, silent);
+            })
+            .map_err(|e| format!("the audio thread could not start: {e}"))?;
+        Ok((Self { control, shared, clock, handle: Some(handle) }, consumer))
+    }
+
+    pub fn shared(&self) -> &Arc<PlaybackShared> {
+        &self.shared
+    }
+
+    /// Prepares from `from`; the gate opens when the lead is ready.
+    pub fn play(&self, from: Time) {
+        let mut commands = self.control.lock();
+        self.shared.begin(sample_position(from));
+        self.clock.seek(from);
+        commands.error = None;
+        commands.playing = true;
+        self.control.wake.notify_all();
+    }
+
+    pub fn stop(&self) {
+        let mut commands = self.control.lock();
+        self.shared.set_gate(false);
+        commands.playing = false;
+        self.control.wake.notify_all();
+    }
+
+    pub fn seek(&self, time: Time) {
+        self.shared.begin(sample_position(time));
+        self.clock.seek(time);
+        self.control.wake.notify_all();
+    }
+
+    /// Passes a changed project to the thread, which keeps running.
+    pub fn set_project(&self, project: Arc<Project>) {
+        self.control.lock().project = Some(project);
+        self.control.wake.notify_all();
+    }
+
+    /// A callable for the device error callback.
+    pub fn error_reporter(&self) -> impl Fn(String) + Send + 'static {
+        let (control, shared) = (self.control.clone(), self.shared.clone());
+        move |message| {
+            let mut commands = control.lock();
+            shared.set_gate(false);
+            commands.playing = false;
+            commands.error = Some(message);
+            control.wake.notify_all();
+        }
+    }
+
+    pub fn take_error(&self) -> Option<String> {
+        self.control.lock().error.take()
+    }
+
+    /// The figures for the playhead.
+    pub fn reading(&self) -> ClockReading {
+        ClockReading {
+            position: self.clock.position(),
+            end: self.clock.end(),
+            past_end: self.shared.past_end.load(Ordering::Relaxed),
+            delay: self.shared.delay.load(Ordering::Relaxed),
+            anchor: self.shared.anchor.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Drop for PreparingThread {
+    fn drop(&mut self) {
+        self.control.lock().quit = true;
+        self.control.wake.notify_all();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::{AudioOutput, Clip, Output, Track, TrackKind, SUPPORTED_VERSION};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    const TIMEOUT: Duration = Duration::from_secs(10);
+    /// A device of ten millisecond buffers.
+    const DEVICE_FRAMES: usize = 480;
+
+    /// Writes the source sample number into every channel so a pull shows where it came from.
+    #[derive(Clone, Default)]
+    struct Counting {
+        reads: Arc<AtomicUsize>,
+        fail_at: Option<i64>,
+        panic_at: Option<i64>,
+    }
+
+    impl AudioSource for Counting {
+        fn read(&mut self, _key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            assert_ne!(self.panic_at, Some(position), "deliberate test panic");
+            if self.fail_at == Some(position) {
+                return Err(RenderError("broken source".to_owned()));
+            }
+            for (i, frame) in out.chunks_exact_mut(2).enumerate() {
+                let value = (position + i as i64) as f32 / 1e7;
+                frame[0] = value;
+                frame[1] = value;
+            }
+            Ok(())
+        }
+    }
+
+    fn project(seconds: i64, audio: bool, clip_track: TrackKind) -> Project {
+        let duration = Time::from_seconds(seconds).unwrap();
+        let clip = Clip { source: "a.wav".to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO };
+        Project {
+            version: SUPPORTED_VERSION,
+            output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: audio.then_some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
+            tracks: vec![Track { kind: clip_track, clips: vec![clip], transitions: Vec::new() }],
+        }
+    }
+
+    fn wait_until(mut condition: impl FnMut() -> bool, what: &str) {
+        let start = Instant::now();
+        while !condition() {
+            assert!(start.elapsed() < TIMEOUT, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn pull(consumer: &mut AudioConsumer, shared: &PlaybackShared, frames: usize) -> Vec<f32> {
+        let mut out = vec![1.0f32; frames * 2];
+        fill_device_buffer(consumer, shared, &mut out, Some(Duration::ZERO));
+        out
+    }
+
+    fn open_gate(thread: &PreparingThread) {
+        let shared = thread.shared().clone();
+        wait_until(move || shared.gate.load(Ordering::Acquire), "the gate");
+    }
+
+    fn sample_of(value: f32) -> i64 {
+        (value * 1e7).round() as i64
+    }
+
+    #[test]
+    fn a_closed_gate_outputs_silence_and_does_not_move_the_clock() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        let out = pull(&mut consumer, thread.shared(), 480);
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert_eq!(thread.reading().position, 0);
+        assert_eq!(thread.shared().stats(), PlaybackStats::default());
+    }
+
+    #[test]
+    fn the_gate_opens_only_after_the_lead_is_prepared() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        thread.play(Time::from_seconds(1).unwrap());
+        open_gate(&thread);
+        let out = pull(&mut consumer, thread.shared(), 480);
+        assert_eq!(sample_of(out[0]), 48_000);
+        assert_eq!(sample_of(out[958]), 48_000 + 479);
+        let stats = thread.shared().stats();
+        assert_eq!(stats.underrun, 0);
+        assert_eq!(stats.played, 480);
+        assert_eq!(thread.reading().delay, 480, "buffer plus a zero latency");
+    }
+
+    #[test]
+    fn stopping_closes_the_gate_at_once_and_keeps_the_clock() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        thread.play(Time::ZERO);
+        open_gate(&thread);
+        pull(&mut consumer, thread.shared(), 480);
+        thread.stop();
+        let position = thread.reading().position;
+        let out = pull(&mut consumer, thread.shared(), 480);
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert_eq!(thread.reading().position, position);
+    }
+
+    #[test]
+    fn a_seek_after_a_full_lead_plays_from_the_target_without_silence() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(4, true, TrackKind::Video), Counting::default).unwrap();
+        thread.play(Time::ZERO);
+        open_gate(&thread);
+        pull(&mut consumer, thread.shared(), 480);
+        let target = Time::from_seconds(2).unwrap();
+        thread.seek(target);
+        assert_eq!(thread.reading().anchor, sample_position(target));
+        // Stale blocks are in the ring; the fresh lead must fit beside them.
+        let clock = thread.clock.clone();
+        let reads = thread.shared().clone();
+        wait_until(|| clock.position() == sample_position(target) && reads.stats().underrun == 0, "the seek");
+        thread::sleep(Duration::from_millis(50));
+        let out = pull(&mut consumer, thread.shared(), 480);
+        assert_eq!(sample_of(out[0]), sample_position(target));
+        assert_eq!(thread.shared().stats().underrun, 0, "a whole lead was ready after the seek");
+    }
+
+    #[test]
+    fn a_changed_project_reaches_the_thread_and_it_stays_alive() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), Counting::default).unwrap();
+        thread.play(Time::ZERO);
+        open_gate(&thread);
+        thread.set_project(Arc::new(project(1, true, TrackKind::Video)));
+        wait_until(|| thread.reading().end == 48_000, "the new end");
+        wait_until(
+            || {
+                pull(&mut consumer, thread.shared(), 480);
+                thread.shared().stats().played >= 480
+            },
+            "audio of the new project",
+        );
+        thread.stop();
+    }
+
+    #[test]
+    fn reaching_the_end_counts_past_the_end_and_finishes() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(1, true, TrackKind::Video), Counting::default).unwrap();
+        thread.play(sample_time_near_end());
+        open_gate(&thread);
+        wait_until(
+            || {
+                pull(&mut consumer, thread.shared(), 480);
+                thread.reading().finished()
+            },
+            "the end",
+        );
+        let reading = thread.reading();
+        assert_eq!(reading.position, reading.end);
+        assert!(reading.past_end >= reading.delay);
+    }
+
+    fn sample_time_near_end() -> Time {
+        Time::from_ticks(engine::TICKS_PER_SECOND - 3000)
+    }
+
+    #[test]
+    fn a_decoder_error_reaches_the_ui_and_closes_the_gate() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), || Counting { fail_at: Some(0), ..Default::default() }).unwrap();
+        thread.play(Time::ZERO);
+        wait_until(|| thread.control.lock().error.is_some(), "the error");
+        let message = thread.take_error().expect("an error");
+        assert!(message.contains("broken source"), "{message}");
+        assert!(pull(&mut consumer, thread.shared(), 480).iter().all(|sample| *sample == 0.0));
+        assert_eq!(thread.take_error(), None, "reported once");
+    }
+
+    #[test]
+    fn a_panicking_source_is_reported_not_fatal() {
+        let (thread, _consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), || Counting { panic_at: Some(0), ..Default::default() }).unwrap();
+        thread.play(Time::ZERO);
+        wait_until(|| thread.control.lock().error.is_some(), "the error");
+        assert!(thread.take_error().expect("an error").contains("internal error"));
+    }
+
+    #[test]
+    fn a_project_without_output_audio_plays_silence_without_reading_sources() {
+        let source = Counting::default();
+        let reads = source.reads.clone();
+        let (thread, mut consumer) = PreparingThread::spawn(&project(1, false, TrackKind::Video), move || source).unwrap();
+        thread.play(Time::ZERO);
+        open_gate(&thread);
+        let out = pull(&mut consumer, thread.shared(), 480);
+        assert!(out.iter().all(|sample| *sample == 0.0));
+        assert_eq!(thread.shared().stats().played, 480, "the clock still runs for the picture");
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn an_audio_only_project_has_no_length_and_does_not_panic() {
+        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Audio), Counting::default).unwrap();
+        assert_eq!(thread.reading().end, 0);
+        thread.play(Time::ZERO);
+        open_gate(&thread);
+        pull(&mut consumer, thread.shared(), 480);
+        assert!(thread.reading().finished());
+        assert_eq!(thread.reading().playhead(), Time::ZERO);
+    }
+
+    /// Plays a real-time device against the thread and returns the silence that a seek and an edit
+    /// caused, in frames. `read_cost` stands in for the time a decoder takes.
+    fn measure(read_cost: Duration) -> (u64, u64) {
+        #[derive(Clone)]
+        struct Slow(Duration);
+        impl AudioSource for Slow {
+            fn read(&mut self, _key: ClipKey, _source: &str, _position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+                thread::sleep(self.0);
+                out.fill(0.25);
+                Ok(())
+            }
+        }
+        let (thread, mut consumer) = PreparingThread::spawn(&project(20, true, TrackKind::Video), move || Slow(read_cost)).unwrap();
+        thread.play(Time::ZERO);
+        open_gate(&thread);
+        let device = |consumer: &mut AudioConsumer, duration: Duration| {
+            let mut out = vec![0.0f32; DEVICE_FRAMES * 2];
+            let start = Instant::now();
+            let mut next = start;
+            while start.elapsed() < duration {
+                fill_device_buffer(consumer, thread.shared(), &mut out, Some(Duration::ZERO));
+                next += Duration::from_millis(10);
+                if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                    thread::sleep(wait);
+                }
+            }
+        };
+        device(&mut consumer, Duration::from_millis(300));
+        let before = thread.shared().stats().underrun;
+        thread.seek(Time::from_seconds(5).unwrap());
+        device(&mut consumer, Duration::from_millis(300));
+        let seek = thread.shared().stats().underrun - before;
+        let before = thread.shared().stats().underrun;
+        thread.set_project(Arc::new(project(20, true, TrackKind::Video)));
+        device(&mut consumer, Duration::from_millis(300));
+        (seek, thread.shared().stats().underrun - before)
+    }
+
+    #[test]
+    fn a_seek_or_edit_causes_only_brief_silence_on_a_fast_source() {
+        let (seek, edit) = measure(Duration::ZERO);
+        eprintln!("silence after a seek: {seek} frames, after an edit: {edit} frames (no decode cost)");
+        // Tolerates a scheduler hiccup on a busy machine; anything near the lead is a regression.
+        assert!(seek <= 4_800, "seek silence {seek} frames");
+        assert!(edit <= 4_800, "edit silence {edit} frames");
+    }
+
+    #[test]
+    #[ignore = "real time, for reading the printed numbers"]
+    fn measure_silence_with_a_slow_source() {
+        for millis in [0, 5, 20] {
+            let (seek, edit) = measure(Duration::from_millis(millis));
+            eprintln!("read cost {millis} ms: silence after a seek {seek} frames, after an edit {edit} frames");
+        }
+    }
+}
