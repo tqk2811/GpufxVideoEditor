@@ -188,3 +188,23 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Ngôn ngữ hệ thống và đường dẫn cài đặt chỉ chạy trên Windows
 
 `crates/gpufx-editor/src/settings.rs:16-19,35-38`: dùng `GetUserDefaultUILanguage` của kernel32 và biến `APPDATA`. Khi làm bản Linux phải có cách lấy locale và đường dẫn cài đặt riêng, nếu không crate sẽ không link được. Ghi ngày 2026-11-09.
+
+### [Thấp] Dữ liệu mức âm thanh chưa có cache trên đĩa
+
+`crates/gpufx-editor/src/visuals/mod.rs:1-8`: cache mức âm chỉ nằm trong bộ nhớ, nên mỗi lần mở lại project phải đọc lại toàn bộ tiếng của từng file. Nên làm vì file dài tốn nhiều phút mỗi phiên. Ghi ngày 2026-11-09.
+
+### [Thấp] Thumbnail bỏ qua thông tin màu và alpha của nguồn
+
+`crates/d3d12-backend/src/thumbnail.rs:265` (`convert_kept`): `sws_getContext` dùng hệ màu mặc định, chưa gọi `sws_setColorspaceDetails` theo colorspace/range của khung, và nguồn có alpha chưa được xử lý riêng. Nên làm vì nguồn BT.709 hoặc full range có thumbnail lệch màu so với preview. Ghi ngày 2026-11-09.
+
+### [Thấp] Metadata xoay video chưa được áp dụng ở thumbnail và preview
+
+`crates/d3d12-backend/src/thumbnail.rs:102` (`initialize`) và đường decode preview: display matrix của luồng video không được đọc. Nên làm vì video quay dọc từ điện thoại hiện sai chiều. Ghi ngày 2026-11-09.
+
+### [Thấp] Worker thumbnail có thể kẹt trên ổ mạng chết
+
+`crates/d3d12-backend/src/thumbnail.rs:102` và `crates/d3d12-backend/src/audio.rs:168` (`avformat_open_input`): không có interrupt callback nên worker kẹt tới khi đóng app, chỉ `cancelled` giữa các gói là dừng được. Nên làm vì một ổ mạng chết chiếm hết worker và thumbnail của mọi file khác đứng lại. Ghi ngày 2026-11-09.
+
+### [Thấp] Nguồn đang đọc mức âm chặn nguồn hiện trên màn hình
+
+`crates/gpufx-editor/src/visuals/worker.rs:255` (`run_worker`, nhánh `Lane::Audio`): chỉ có một worker audio và job đã chạy không nhường chỗ, nên file dài đã cuộn khỏi màn hình làm chậm bars của file đang nhìn. Muốn nhường phải huỷ rồi đọc lại từ đầu và theo dõi nguồn nào đang được vẽ, không đơn giản nên chưa làm. Ghi ngày 2026-11-09.
