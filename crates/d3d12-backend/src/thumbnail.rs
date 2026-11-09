@@ -65,6 +65,8 @@ pub struct FrameSampler {
     target_height: u32,
     shown_width: u32,
     path: String,
+    /// How long one search for a frame may take.
+    decode_budget: Duration,
 }
 
 impl FrameSampler {
@@ -89,6 +91,7 @@ impl FrameSampler {
             target_height: target_height.max(1),
             shown_width: 1,
             path: text.to_owned(),
+            decode_budget: MAX_DECODE_TIME,
         };
         // SAFETY: on error, Drop releases whatever was created.
         unsafe { sampler.initialize(&c_path) }.map_err(|e| format!("{text}: {e}"))?;
@@ -117,7 +120,8 @@ impl FrameSampler {
         }
         check(ffi::avcodec_parameters_to_context(self.codec_context, (*stream).codecpar), "avcodec_parameters_to_context")?;
         (*self.codec_context).pkt_timebase = self.time_base;
-        // One core per sampler, and the shortcuts that do not change which frame is shown.
+        // One core per sampler, and cheap decoding. Skipping non-reference frames can show a frame
+        // a little later than the one asked for, which a thumbnail can afford.
         (*self.codec_context).thread_count = 1;
         (*self.codec_context).skip_loop_filter = ffi::AVDISCARD_ALL;
         (*self.codec_context).skip_frame = ffi::AVDISCARD_NONREF;
@@ -147,31 +151,40 @@ impl FrameSampler {
         let target = to_stream_pts(at, self.start_pts, self.time_base);
         // SAFETY: the contexts are valid after open.
         unsafe {
-            self.position(target)?;
-            let started = Instant::now();
-            let mut decoded = 0;
-            loop {
-                if cancelled() {
-                    return Err("cancelled".to_owned());
-                }
-                if self.finished || decoded >= MAX_DECODED_PER_REQUEST || (decoded > 0 && started.elapsed() > MAX_DECODE_TIME) {
-                    break;
-                }
-                match self.decode_one()? {
-                    true => {
-                        decoded += 1;
-                        if self.last_pts.is_some_and(|pts| pts >= target) {
-                            break;
-                        }
-                    }
-                    false => continue,
-                }
+            let mut found = self.search(target, cancelled)?;
+            if !found && (*self.codec_context).skip_frame != ffi::AVDISCARD_DEFAULT {
+                // A stream of almost only non-reference frames shows nothing while they are
+                // skipped. It stays off for this sampler, so later requests do not wait again.
+                (*self.codec_context).skip_frame = ffi::AVDISCARD_DEFAULT;
+                found = self.search(target, cancelled)?;
             }
-            if self.last_pts.is_none() {
+            if !found {
                 return Err(format!("{}: no frame could be decoded", self.path));
             }
             self.convert_kept()
         }
+    }
+
+    /// Decodes towards `target` within the budget; true when there is a frame to show.
+    unsafe fn search(&mut self, target: i64, cancelled: &dyn Fn() -> bool) -> Result<bool, String> {
+        self.position(target)?;
+        let started = Instant::now();
+        let mut decoded = 0;
+        loop {
+            if cancelled() {
+                return Err("cancelled".to_owned());
+            }
+            if self.finished || decoded >= MAX_DECODED_PER_REQUEST || started.elapsed() > self.decode_budget {
+                break;
+            }
+            if self.decode_one()? {
+                decoded += 1;
+                if self.last_pts.is_some_and(|pts| pts >= target) {
+                    break;
+                }
+            }
+        }
+        Ok(self.last_pts.is_some())
     }
 
     /// Seeks unless `target` can be reached by decoding on.
@@ -337,6 +350,78 @@ mod tests {
         let path = clip("short.mp4", &["-f", "lavfi", "-i", "testsrc=s=64x64:r=30:d=1", "-c:v", "mpeg4"]);
         let mut sampler = FrameSampler::open(&path, 16).expect("open");
         assert!(sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND * 50), &never).is_ok());
+    }
+
+    #[test]
+    fn a_stream_with_nothing_left_after_skipping_is_read_again_without_skipping() {
+        let path = clip("all-skipped.mp4", &["-f", "lavfi", "-i", "testsrc=s=64x64:r=30:d=1", "-c:v", "mpeg4"]);
+        let mut sampler = FrameSampler::open(&path, 16).expect("open");
+        // What a stream without reference frames looks like to the decoder.
+        unsafe { (*sampler.codec_context).skip_frame = ffi::AVDISCARD_ALL };
+        assert!(sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND / 2), &never).is_ok());
+        assert_eq!(unsafe { (*sampler.codec_context).skip_frame }, ffi::AVDISCARD_DEFAULT, "later requests do not search twice");
+    }
+
+    #[test]
+    fn the_time_budget_holds_before_the_first_frame() {
+        let path = clip("slow.mp4", &["-f", "lavfi", "-i", "testsrc=s=64x64:r=30:d=2", "-c:v", "mpeg4"]);
+        let mut sampler = FrameSampler::open(&path, 16).expect("open");
+        unsafe { (*sampler.codec_context).skip_frame = ffi::AVDISCARD_ALL };
+        sampler.decode_budget = Duration::ZERO;
+        assert!(sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND), &never).is_err(), "out of time and no frame is a failure");
+        assert!(!sampler.finished, "it read the file to the end instead of giving up");
+    }
+
+    /// Encodes with the GPL build, which has x264 and x265; `None` when it is not installed.
+    fn gpl_clip(name: &str, codec: &[&str]) -> Option<std::path::PathBuf> {
+        let tool = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/ffmpeg-gpl/bin/ffmpeg.exe"));
+        if !tool.exists() {
+            assert!(std::env::var_os("GPUFX_REQUIRE_GPU").is_none(), "third_party/ffmpeg-gpl is missing");
+            println!("skipping {name}: third_party/ffmpeg-gpl is missing");
+            return None;
+        }
+        let dir = std::env::temp_dir().join(format!("gpufx-thumbnail-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create the scratch directory");
+        let path = dir.join(name);
+        let status = std::process::Command::new(tool).args(["-hide_banner", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=s=320x180:r=30:d=4", "-pix_fmt", "yuv420p"]).args(codec).arg(&path).status().expect("ffmpeg runs");
+        assert!(status.success(), "generating {name} failed");
+        Some(path)
+    }
+
+    fn check_real_stream(name: &str, codec: &[&str]) {
+        let Some(path) = gpl_clip(name, codec) else { return };
+        let mut sampler = FrameSampler::open(&path, 36).expect("open");
+        let started = Instant::now();
+        let first = sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND), &never).expect("one second in");
+        let shown = sampler.last_pts.expect("a frame");
+        let wanted = to_stream_pts(Time::from_ticks(TICKS_PER_SECOND), sampler.start_pts, sampler.time_base);
+        let late = (shown - wanted) as f64 * f64::from(sampler.time_base.num) / f64::from(sampler.time_base.den);
+        assert!((0.0..1.0).contains(&late), "{name}: shown {late} s after the position");
+        let later = sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND * 3), &never).expect("three seconds in");
+        assert_ne!(first.rgba, later.rgba, "{name}");
+        let again = sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND), &never).expect("seek back");
+        assert_eq!(first.rgba, again.rgba, "{name}: seeking back shows the same frame");
+        println!("{name}: {:?}, shown {late:.3} s late", started.elapsed());
+    }
+
+    #[test]
+    fn h264_with_b_frames_gives_pictures() {
+        check_real_stream("x264-b.mp4", &["-c:v", "libx264", "-preset", "veryfast", "-bf", "3", "-g", "60"]);
+    }
+
+    #[test]
+    fn h264_with_intra_refresh_gives_pictures() {
+        check_real_stream("x264-intra-refresh.mp4", &["-c:v", "libx264", "-preset", "veryfast", "-bf", "0", "-x264-params", "intra-refresh=1:keyint=30"]);
+    }
+
+    #[test]
+    fn h264_of_mostly_non_reference_frames_gives_pictures() {
+        check_real_stream("x264-non-ref.mp4", &["-c:v", "libx264", "-preset", "veryfast", "-x264-params", "bframes=16:b-adapt=0:b-pyramid=none:keyint=250"]);
+    }
+
+    #[test]
+    fn hevc_gives_pictures() {
+        check_real_stream("x265.mp4", &["-c:v", "libx265", "-preset", "veryfast", "-x265-params", "log-level=error", "-tag:v", "hvc1"]);
     }
 
     #[test]
