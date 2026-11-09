@@ -21,7 +21,8 @@ pub(super) fn drag_field(ui: &mut Ui, value: &mut f64, range: RangeInclusive<f64
         None => ui.add(field),
     };
     let changed = response.changed() && *value != round_to_decimals(old, decimals);
-    *value = if changed { value.clamp(*range.start(), *range.end()) } else { old };
+    // Not `f64::clamp`: it panics on a reversed range, which a package manifest can state.
+    *value = if changed { value.max(*range.start()).min(*range.end()) } else { old };
     (response, changed)
 }
 
@@ -105,6 +106,13 @@ mod tests {
     fn typing_the_bound_over_an_out_of_range_value_is_an_edit() {
         assert_eq!(edit_field(-80.0, -60.0..=60.0, Some("-60")), (-60.0, true));
         assert_eq!(edit_field(70.0, -60.0..=60.0, Some("60")), (60.0, true));
+    }
+
+    /// A manifest may state min above max, and a vector value is not clamped when it is read, so
+    /// the field can hold one outside both bounds. The upper bound wins, as in `clamp_number`.
+    #[test]
+    fn typing_into_a_field_with_a_reversed_range_does_not_panic() {
+        assert_eq!(edit_field(20.0, 10.0..=0.0, Some("15")), (0.0, true));
     }
 
     #[test]
