@@ -191,7 +191,7 @@ fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, label: &s
 /// moves the slider under the pointer, and on a slider of this scale one pixel is 2.9% of the
 /// length of the clip. The keyboard changes it without a press.
 fn slider_speed(changed: bool, pressed: bool, moved: bool, value: f64) -> Option<f64> {
-    (changed && (!pressed || moved)).then(|| snap_speed(value))
+    (changed && (!pressed || moved)).then(|| if pressed { snap_speed(value) } else { value })
 }
 
 /// `value`, or exactly 1x when it is close to it.
@@ -351,6 +351,8 @@ mod tests {
         assert_eq!(slider_speed(true, true, true, 2.0), Some(2.0), "a real drag");
         assert_eq!(slider_speed(false, true, true, 2.0), None, "nothing changed");
         assert_eq!(slider_speed(true, false, false, 2.0), Some(2.0), "the keyboard");
+        assert_eq!(slider_speed(true, false, false, 1.029), Some(1.029), "an arrow key leaves 1x");
+        assert_eq!(slider_speed(true, true, true, 1.01), Some(1.0), "a drag snaps to 1x");
     }
 
     #[test]
