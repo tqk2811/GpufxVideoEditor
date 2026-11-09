@@ -183,6 +183,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::Apply => "Apply".to_owned(),
         Message::FieldSourceIn => "Start of video".to_owned(),
         Message::FieldVideoDuration => "Duration of video".to_owned(),
+        Message::FieldPlacement => "Position and size".to_owned(),
         Message::FieldVolume => "Volume".to_owned(),
         Message::SelectClipHint => "Select a clip on the timeline to edit it.".to_owned(),
         Message::Mute => "Mute".to_owned(),

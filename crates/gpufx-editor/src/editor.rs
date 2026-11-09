@@ -12,7 +12,7 @@ use crate::timeline::hit::ClipHit;
 use crate::timeline::view::TimelineView;
 use crate::visuals::ClipVisuals;
 use engine::{
-    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_speed,
+    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
     set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
@@ -288,6 +288,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         fade_in: Time::ZERO,
         fade_out: Time::ZERO,
         speed: 1.0,
+        placement: None,
     }
 }
 
@@ -1011,6 +1012,12 @@ impl EditorState {
         };
         let command = clamp_trim(self.project(), command);
         self.finish_drag(command);
+    }
+
+    /// Puts the selected clip back where it fits the frame, as one undo step.
+    pub fn reset_placement(&mut self) {
+        let Some(key) = self.selected_for(ClipAction::Change) else { return };
+        self.run(|project| set_placement(project, key, None));
     }
 
     /// The source time from where clip `key` begins to the end of its stream, when a probe stated
@@ -2631,6 +2638,32 @@ mod tests {
         state.apply_clip_field(ClipField::SourceIn(0.0));
         let clip = &state.project().tracks[0].clips[0];
         assert_eq!((clip.source_in, clip.duration), (Time::ZERO, whole));
+    }
+
+    #[test]
+    fn resetting_the_placement_clears_it_in_one_undo_step() {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        let placed = Some(engine::ClipPlacement { x: 0.1, y: 0.2, width: 0.5 });
+        assert!(state.run(|project| set_placement(project, key(0), placed)));
+        state.reset_placement();
+        assert_eq!(state.project().tracks[0].clips[0].placement, None);
+        state.undo();
+        assert_eq!(state.project().tracks[0].clips[0].placement, placed, "one undo brings it back");
+        state.undo();
+        assert_eq!(state.project().tracks[0].clips[0].placement, None, "and the step before it was the clip without one");
+    }
+
+    #[test]
+    fn resetting_the_placement_of_a_clip_on_a_locked_track_changes_nothing() {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        let placed = Some(engine::ClipPlacement { x: 0.1, y: 0.2, width: 0.5 });
+        assert!(state.run(|project| set_placement(project, key(0), placed)));
+        state.toggle_track_locked(0);
+        let before = state.project().clone();
+        state.reset_placement();
+        assert_eq!(state.project(), &before);
     }
 
     #[test]

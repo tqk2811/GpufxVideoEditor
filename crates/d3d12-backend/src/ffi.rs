@@ -142,3 +142,26 @@ pub fn check(code: i32, action: &str) -> Result<i32, String> {
         Ok(code)
     }
 }
+
+/// Width over height of a `width` x `height` picture as it is shown, with its sample aspect ratio
+/// applied. A ratio that is not a positive fraction (FFmpeg writes 0/0 for unknown) means square
+/// pixels.
+pub fn display_aspect(width: i32, height: i32, sample_aspect: AVRational) -> f64 {
+    let sample = if sample_aspect.num > 0 && sample_aspect.den > 0 { f64::from(sample_aspect.num) / f64::from(sample_aspect.den) } else { 1.0 };
+    f64::from(width.max(1)) * sample / f64::from(height.max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_display_aspect_applies_the_sample_aspect_ratio() {
+        let square = AVRational { num: 1, den: 1 };
+        assert!((display_aspect(1920, 1080, square) - 16.0 / 9.0).abs() < 1e-9);
+        assert!((display_aspect(1440, 1080, AVRational { num: 4, den: 3 }) - 16.0 / 9.0).abs() < 1e-9, "anamorphic 1440x1080 is 16:9");
+        for unknown in [AVRational { num: 0, den: 1 }, AVRational { num: 0, den: 0 }, AVRational { num: 1, den: 0 }, AVRational { num: -4, den: 3 }] {
+            assert!((display_aspect(1440, 1080, unknown) - 4.0 / 3.0).abs() < 1e-9, "{unknown:?} means square pixels");
+        }
+    }
+}

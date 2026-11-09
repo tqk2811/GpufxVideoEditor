@@ -6,8 +6,8 @@ use common::*;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, audio_segments, clip_at,
     delete_clip, frame_count, layers_at_frame, move_clip, nearest_free_start, remove_effect,
-    remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, validate,
-    AcceptAll, ClipKey, EditError, EditHistory, Effect, LayerContent, Project, SourceSample, Time,
+    remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, validate,
+    AcceptAll, ClipKey, ClipPlacement, PlacedRect, EditError, EditHistory, Effect, LayerContent, Project, SourceSample, Time,
     TrackKind, ValidationError,
 };
 
@@ -28,6 +28,71 @@ fn the_frame_duration_changes_and_zero_is_refused() {
     let start = project(3_000, vec![]);
     assert_eq!(set_frame_duration(&start, t(1_500)).unwrap().output.frame_duration, t(1_500));
     assert!(matches!(set_frame_duration(&start, t(0)), Err(EditError::Invalid(_))));
+}
+
+#[test]
+fn a_placement_is_kept_and_cleared_and_bad_numbers_are_refused() {
+    let start = project(3_000, vec![track(vec![clip("a", 0, 0, 9_000)], vec![])]);
+    let key = ClipKey { track: 0, clip: 0 };
+    let placement = ClipPlacement { x: -0.5, y: 0.25, width: 2.0 };
+    let placed = set_placement(&start, key, Some(placement)).unwrap();
+    assert_eq!(placed.tracks[0].clips[0].placement, Some(placement));
+    assert_eq!(set_placement(&placed, key, None).unwrap(), start);
+    for width in [0.0, -1.0, 9.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(set_placement(&start, key, Some(ClipPlacement { width, ..placement })), Err(EditError::Invalid(_))), "{width}");
+    }
+    assert!(matches!(set_placement(&start, key, Some(ClipPlacement { x: f64::NAN, ..placement })), Err(EditError::Invalid(_))));
+    assert!(matches!(set_placement(&start, key, Some(ClipPlacement { y: 9.0, ..placement })), Err(EditError::Invalid(_))));
+}
+
+#[test]
+fn a_placement_on_a_locked_track_is_refused() {
+    let mut start = project(3_000, vec![track(vec![clip("a", 0, 0, 9_000)], vec![])]);
+    start.tracks[0].locked = true;
+    let key = ClipKey { track: 0, clip: 0 };
+    assert!(matches!(set_placement(&start, key, Some(ClipPlacement { x: 0.0, y: 0.0, width: 0.5 })), Err(EditError::TrackLocked { .. })));
+}
+
+#[test]
+fn a_clip_without_a_placement_fits_the_frame_in_its_own_shape() {
+    let wide = PlacedRect::of(None, 16.0 / 9.0, 32.0 / 9.0);
+    assert_eq!(wide, PlacedRect { x: 0.0, y: 0.25, width: 1.0, height: 0.5 });
+    let tall = PlacedRect::of(None, 1.0, 0.5);
+    assert_eq!(tall, PlacedRect { x: 0.25, y: 0.0, width: 0.5, height: 1.0 });
+    assert!(PlacedRect::of(None, 16.0 / 9.0, 16.0 / 9.0).fills_frame(1920, 1080));
+    assert!(!wide.fills_frame(1920, 1080));
+}
+
+#[test]
+fn a_picture_within_a_pixel_of_the_frame_fills_it() {
+    // 16:9 in 854x480: the width is 0.67 px short of the frame.
+    assert!(PlacedRect::of(None, 854.0 / 480.0, 16.0 / 9.0).fills_frame(854, 480));
+    let two_short = PlacedRect { x: 1.0 / 854.0, y: 0.0, width: 1.0 - 2.0 / 854.0, height: 1.0 };
+    assert!(!two_short.fills_frame(854, 480));
+    let two_low = PlacedRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 - 2.0 / 480.0 };
+    assert!(!two_low.fills_frame(854, 480));
+    let moved = PlacedRect { x: 0.0, y: 2.0 / 480.0, width: 1.0, height: 1.0 };
+    assert!(!moved.fills_frame(854, 480));
+}
+
+#[test]
+fn a_new_output_shape_keeps_the_position_and_width_and_not_the_stretch() {
+    let placement = Some(ClipPlacement { x: 0.1, y: 0.2, width: 0.5 });
+    let landscape = PlacedRect::of(placement, 16.0 / 9.0, 16.0 / 9.0);
+    let square = PlacedRect::of(placement, 1.0, 16.0 / 9.0);
+    assert_eq!((landscape.x, landscape.y, landscape.width), (square.x, square.y, square.width));
+    assert_eq!(landscape.height, 0.5);
+    assert_eq!(square.height, 0.5 * 9.0 / 16.0);
+}
+
+#[test]
+fn a_placement_is_left_out_of_the_file_when_absent_and_read_back_when_set() {
+    let mut start = project(3_000, vec![track(vec![clip("a", 0, 0, 9_000)], vec![])]);
+    start.version = 2; // a version 1 file has no placement, so the editor always saves version 2
+    let text = serde_json::to_string(&start).unwrap();
+    assert!(!text.contains("placement"), "{text}");
+    let placed = set_placement(&start, ClipKey { track: 0, clip: 0 }, Some(ClipPlacement { x: 0.5, y: 0.5, width: 0.25 })).unwrap();
+    assert_eq!(Project::from_json(&serde_json::to_string(&placed).unwrap()).unwrap(), placed);
 }
 
 #[test]

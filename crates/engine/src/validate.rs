@@ -106,6 +106,8 @@ pub enum ValidationError {
         transition: usize,
         after_clip: usize,
     },
+    /// A clip `placement` is not finite or is out of its limits.
+    InvalidPlacement { track: usize, clip: usize },
     /// A clip `speed` is not a number between [`MIN_SPEED`] and [`MAX_SPEED`].
     InvalidSpeed { track: usize, clip: usize, speed: f64 },
     /// A clip `gain_db` is infinite or not a number.
@@ -220,6 +222,9 @@ impl fmt::Display for ValidationError {
                 "track {track}, transition {transition}: clips {after_clip} and {} are not adjacent",
                 after_clip + 1
             ),
+            InvalidPlacement { track, clip } => {
+                write!(f, "track {track}, clip {clip}: placement is out of its limits")
+            }
             InvalidSpeed { track, clip, speed } => {
                 write!(f, "track {track}, clip {clip}: speed {speed} must be between {MIN_SPEED} and {MAX_SPEED}")
             }
@@ -346,6 +351,9 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                     clip: c,
                     source: clip.source.clone(),
                 });
+            }
+            if clip.placement.is_some_and(|placement| !placement.is_valid()) {
+                errors.push(InvalidPlacement { track: t, clip: c });
             }
             if !speed_in_range(clip.speed) {
                 errors.push(InvalidSpeed {

@@ -109,6 +109,68 @@ pub struct Clip {
     /// the file when 1, so older projects load and save unchanged.
     #[serde(default = "default_speed", skip_serializing_if = "is_unit_speed")]
     pub speed: f64,
+    /// Where the picture sits in the frame. Absent: as large as fits, centred, in its own shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ClipPlacement>,
+}
+
+/// Where a clip sits in the output frame, in parts of the frame. The height follows from the shape
+/// of the source, so the picture is never stretched and a new output size keeps these numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ClipPlacement {
+    /// Left edge, in parts of the frame width.
+    pub x: f64,
+    /// Top edge, in parts of the frame height.
+    pub y: f64,
+    /// Width, in parts of the frame width.
+    pub width: f64,
+}
+
+/// The narrowest a placed clip may be, in parts of the frame width.
+pub const MIN_PLACEMENT_WIDTH: f64 = 0.01;
+/// The widest a placed clip may be, in parts of the frame width.
+pub const MAX_PLACEMENT_WIDTH: f64 = 8.0;
+/// How far from the frame origin the edges of a placed clip may be, in parts of the frame.
+pub const MAX_PLACEMENT_OFFSET: f64 = 8.0;
+
+impl ClipPlacement {
+    /// Whether every number is finite and within its limits.
+    pub fn is_valid(self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.x.abs() <= MAX_PLACEMENT_OFFSET && self.y.abs() <= MAX_PLACEMENT_OFFSET && (MIN_PLACEMENT_WIDTH..=MAX_PLACEMENT_WIDTH).contains(&self.width)
+    }
+}
+
+/// The rectangle of a picture in the output frame, in parts of the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlacedRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl PlacedRect {
+    /// Where a clip lands in a frame of `output_aspect`, for a source of `source_aspect`, both
+    /// width over height.
+    pub fn of(placement: Option<ClipPlacement>, output_aspect: f64, source_aspect: f64) -> PlacedRect {
+        let relative = output_aspect / source_aspect;
+        match placement {
+            Some(placement) => PlacedRect { x: placement.x, y: placement.y, width: placement.width, height: placement.width * relative },
+            None if relative <= 1.0 => PlacedRect { x: 0.0, y: (1.0 - relative) / 2.0, width: 1.0, height: relative },
+            None => {
+                let width = 1.0 / relative;
+                PlacedRect { x: (1.0 - width) / 2.0, y: 0.0, width, height: 1.0 }
+            }
+        }
+    }
+
+    /// Whether the picture lies on the whole frame of `width` x `height` pixels, to a pixel: a
+    /// source of the same shape as an output whose size is rounded (854x480 for 16:9) is off by
+    /// less than that, and moving it would only resample the picture for nothing.
+    pub fn fills_frame(self, width: u32, height: u32) -> bool {
+        let (columns, rows) = (f64::from(width), f64::from(height));
+        (self.x * columns).abs() < 1.0 && (self.y * rows).abs() < 1.0 && ((self.width - 1.0) * columns).abs() < 1.0 && ((self.height - 1.0) * rows).abs() < 1.0
+    }
 }
 
 /// The slowest playback speed of a clip.
@@ -289,6 +351,7 @@ impl From<ProjectV1> for Project {
                             fade_in: Time::ZERO,
                             fade_out: Time::ZERO,
                             speed: 1.0,
+                            placement: None,
                         })
                         .collect(),
                     transitions: track.transitions,

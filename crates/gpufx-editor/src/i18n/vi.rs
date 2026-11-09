@@ -166,6 +166,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::Apply => "Áp dụng".to_owned(),
         Message::FieldSourceIn => "Bắt đầu video".to_owned(),
         Message::FieldVideoDuration => "Thời lượng video".to_owned(),
+        Message::FieldPlacement => "Vị trí và kích thước".to_owned(),
         Message::FieldVolume => "Âm lượng".to_owned(),
         Message::SelectClipHint => "Chọn một clip trên timeline để chỉnh.".to_owned(),
         Message::Mute => "Tắt tiếng".to_owned(),

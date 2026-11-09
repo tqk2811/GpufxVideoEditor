@@ -19,6 +19,7 @@ pub fn clip(source: &str, start: i64, source_in: i64, duration: i64) -> Clip {
         fade_in: Time::ZERO,
         fade_out: Time::ZERO,
         speed: 1.0,
+        placement: None,
     }
 }
 

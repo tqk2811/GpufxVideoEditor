@@ -11,7 +11,7 @@
 use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
 use crate::stretch::StretchStates;
 use crate::audio_schedule::{sample_position, MIX_CHANNELS};
-use crate::project::{Effect, Project};
+use crate::project::{ClipPlacement, Effect, Project};
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, LayerContent, Progress, SourceSample,
 };
@@ -89,12 +89,14 @@ pub trait Compositor {
     /// Opens `source`, the path as written in the project.
     fn open_decoder(&mut self, source: &str) -> Result<Self::Decoder, RenderError>;
 
-    /// Resizes `frame` to the project size and applies the clip's `effects` to it.
+    /// Resizes `frame` to the project size, applies the clip's `effects` to it and puts the picture
+    /// at `placement`. What the picture does not cover is transparent.
     fn prepare_clip(
         &mut self,
         key: ClipKey,
         frame: &mut <Self::Decoder as Decoder>::Frame,
         effects: &[Effect],
+        placement: Option<ClipPlacement>,
         at: FrameContext,
     ) -> Result<Self::Image, RenderError>;
 
@@ -220,7 +222,7 @@ fn render_layer<C: Compositor>(
                 .expect("just used")
                 .wait_idle()?;
             let image =
-                compositor.prepare_clip(key(sample.clip), &mut frame, sample.effects, at)?;
+                compositor.prepare_clip(key(sample.clip), &mut frame, sample.effects, sample.placement, at)?;
             kept.0.push(frame);
             Ok(image)
         }
@@ -242,9 +244,9 @@ fn render_layer<C: Compositor>(
                 .expect("just used")
                 .wait_idle()?;
             let from_image =
-                compositor.prepare_clip(key(from.clip), &mut from_frame, from.effects, at)?;
+                compositor.prepare_clip(key(from.clip), &mut from_frame, from.effects, from.placement, at)?;
             let to_image =
-                match compositor.prepare_clip(key(to.clip), &mut to_frame, to.effects, at) {
+                match compositor.prepare_clip(key(to.clip), &mut to_frame, to.effects, to.placement, at) {
                     Ok(image) => image,
                     Err(e) => {
                         compositor.release(from_image);
@@ -464,6 +466,7 @@ mod tests {
             key: ClipKey,
             frame: &mut String,
             _effects: &[Effect],
+            _placement: Option<ClipPlacement>,
             at: FrameContext,
         ) -> Result<usize, RenderError> {
             let mut journal = self.journal.borrow_mut();

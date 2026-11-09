@@ -6,6 +6,7 @@ mod inspector;
 mod left_panel;
 mod numeric;
 mod param_widgets;
+mod placement;
 mod player;
 mod theme;
 mod timeline_panel;

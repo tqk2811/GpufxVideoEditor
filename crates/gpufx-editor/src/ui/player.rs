@@ -1,7 +1,7 @@
 //! The centre panel: the picture and the transport row under it.
 
 use super::icons::{self, Icon};
-use super::{theme, UiRequest};
+use super::{placement, theme, UiRequest};
 use crate::editor::{EditorState, Status, OUTPUT_FRAME_DURATIONS, OUTPUT_PRESETS};
 use crate::i18n::Message;
 use crate::presenter::PreviewTexture;
@@ -26,12 +26,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let rect = ui.max_rect();
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEADER_HEIGHT.min(rect.height())));
     let controls = Rect::from_min_max(Pos2::new(rect.left(), (rect.bottom() - CONTROLS_HEIGHT).max(header.bottom())), rect.max);
-    let picture = Rect::from_min_max(Pos2::new(rect.left(), header.bottom()), Pos2::new(rect.right(), controls.top()));
+    let area = Rect::from_min_max(Pos2::new(rect.left(), header.bottom()), Pos2::new(rect.right(), controls.top()));
 
     let painter = ui.painter_at(rect);
     painter.text(header.left_center() + Vec2::new(12.0, 0.0), Align2::LEFT_CENTER, state.language().t(Message::Player), FontId::proportional(14.0), theme::TEXT);
     painter.hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::BORDER));
-    draw_picture(ui, picture, preview);
+    draw_picture(ui, area, preview);
+    let output = &state.project().output;
+    let frame = picture_rect(area, (output.width, output.height));
+    placement::show(ui, state, area, frame);
     painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::BORDER));
     ui.scope_builder(UiBuilder::new().max_rect(controls.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, controls));
 }
@@ -98,12 +101,17 @@ pub fn show_fullscreen(ui: &mut egui::Ui, state: &mut EditorState, requests: &mu
     ui.scope_builder(UiBuilder::new().id_salt("fullscreen-transport").max_rect(bar.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, bar));
 }
 
+/// Where a picture of `size` pixels lands in `area`, letterboxed.
+fn picture_rect(area: Rect, size: (u32, u32)) -> Rect {
+    let (width, height) = fit_size(size, (area.width(), area.height()));
+    Rect::from_center_size(area.center(), Vec2::new(width, height))
+}
+
 fn draw_picture(ui: &egui::Ui, rect: Rect, preview: Option<PreviewTexture>) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
     let Some(texture) = preview else { return };
-    let (width, height) = fit_size((texture.width, texture.height), (rect.width(), rect.height()));
-    let picture = Rect::from_center_size(rect.center(), Vec2::new(width, height));
+    let picture = picture_rect(rect, (texture.width, texture.height));
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     painter.image(texture.id, picture, uv, Color32::WHITE);
 }

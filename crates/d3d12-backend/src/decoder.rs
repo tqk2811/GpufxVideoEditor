@@ -212,6 +212,14 @@ impl DecodedFrame {
         unsafe { (*self.frame).height as u32 }
     }
 
+    /// Width over height of the picture as it is shown: the sample aspect ratio of the frame
+    /// applied, the same rule as the thumbnails.
+    pub fn display_aspect(&self) -> f64 {
+        // SAFETY: self.frame is valid for the lifetime of self.
+        let sample_aspect = unsafe { (*self.frame).sample_aspect_ratio };
+        ffi::display_aspect(self.width() as i32, self.height() as i32, sample_aspect)
+    }
+
     /// The colour description for gpufx, with the same defaults as FFmpeg's vf_gpufx.
     pub fn color_info(&self) -> Result<ColorInfo, String> {
         // SAFETY: self.frame is valid for the lifetime of self.

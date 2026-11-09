@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
 use engine::schedule::Progress;
-use engine::Effect as ProjectEffect;
+use engine::{ClipPlacement, Effect as ProjectEffect, PlacedRect};
 use gpufx_core::d3d12::D3d12Frame;
 use gpufx_core::{ColorInfo, Effect, EffectGraph, FrameInfo, GpuContext, Package, PixelFormat};
 use serde_json::{Map, Value};
@@ -349,6 +349,10 @@ pub struct D3d12Compositor {
     clip_graphs: ClipCache<[String], ClipGraph>,
     transition_graphs: HashMap<String, TransitionGraph>,
     overlay: EffectGraph,
+    /// The overlay that puts a clip at its place; its numbers change clip by clip.
+    placer: EffectGraph,
+    /// A fully transparent image, only ever read. Not in the pool, whose images hold old pictures.
+    transparent: Option<ImageId>,
     readback: Option<wgpu::Buffer>,
     /// Passed to every decoder this compositor opens; see [`SequentialDecoder::set_abort`].
     abort: Option<(Arc<AtomicBool>, Duration)>,
@@ -362,7 +366,8 @@ impl D3d12Compositor {
     /// A compositor writing images of `width` x `height`.
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, readback: None, abort: None, closing: None, publish_clock: Arc::default() })
+        let placer = load_overlay(&gpu.context, &paths)?;
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, transparent: None, readback: None, abort: None, closing: None, publish_clock: Arc::default() })
     }
 
     /// Makes `closing` stop the decoders opened from now on at once, and lets a newer request stop
@@ -438,6 +443,41 @@ impl D3d12Compositor {
         unsafe { graph.process_d3d12_with_submit_lock(inputs, &mut outputs, Some(info), || gpu.lock_submits()) }.map_err(|e| format!("process_d3d12 failed: {e}"))?;
         images[output.0].fence_value = outputs[0].fence_value;
         Ok(())
+    }
+
+    /// The transparent image. A new committed resource is zeroed, and nothing ever writes to it.
+    fn transparent_image(&mut self) -> Result<ImageId, String> {
+        if let Some(image) = self.transparent {
+            return Ok(image);
+        }
+        self.images.push(Image::create(&self.gpu, self.width, self.height)?);
+        let image = ImageId(self.images.len() - 1);
+        self.transparent = Some(image);
+        Ok(image)
+    }
+
+    /// Draws `picture`, a full-frame image of a source of display aspect `source_aspect` (width over height, sample aspect ratio applied), at `placement` on a
+    /// transparent image. Gives `picture` back when it needs no moving, the usual case, at no cost.
+    fn place(&mut self, picture: ImageId, placement: Option<ClipPlacement>, source_aspect: f64, info: &FrameInfo) -> Result<ImageId, String> {
+        let (width, height) = (self.width, self.height);
+        let rect = PlacedRect::of(placement, f64::from(width) / f64::from(height), source_aspect);
+        if rect.fills_frame(width, height) {
+            return Ok(picture);
+        }
+        let background = self.transparent_image()?;
+        for (name, value) in [("x", rect.x), ("y", rect.y), ("scale", rect.width), ("height", rect.height)] {
+            self.placer.set_param(name, &[value]).map_err(|e| format!("overlay.{name}: {e}"))?;
+        }
+        let output = self.acquire()?;
+        let mut inputs = [self.images[background.0].frame(width, height), self.images[picture.0].frame(width, height)];
+        if let Err(message) = Self::run_graph(&self.gpu, &mut self.placer, &mut inputs, &mut self.images, output, width, height, info) {
+            self.release_image(output);
+            return Err(message);
+        }
+        self.images[background.0].fence_value = inputs[0].fence_value;
+        self.images[picture.0].fence_value = inputs[1].fence_value;
+        self.release_image(picture);
+        Ok(output)
     }
 
     /// `output` if wgpu reported nothing, otherwise an error, with `output` given back.
@@ -533,10 +573,11 @@ impl Compositor for D3d12Compositor {
         Ok(decoder)
     }
 
-    fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SequentialDecoder as Decoder>::Frame, effects: &[ProjectEffect], at: FrameContext) -> Result<ImageId, RenderError> {
+    fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SequentialDecoder as Decoder>::Frame, effects: &[ProjectEffect], placement: Option<ClipPlacement>, at: FrameContext) -> Result<ImageId, RenderError> {
         let info = Self::info(at);
         let (input, output) = input_then_output(|| decoded_input(frame), || self.acquire())?;
         let (width, height) = (self.width, self.height);
+        let source_aspect = frame.display_aspect();
         let mut inputs = [input];
         let (gpu, paths) = (&self.gpu, &self.paths);
         let shape: Vec<String> = effects.iter().map(|effect| graph_shape(&effect.package, &effect.params)).collect();
@@ -573,7 +614,14 @@ impl Compositor for D3d12Compositor {
             return Err(RenderError(e));
         }
         frame.raise_fence_value(inputs[0].fence_value);
-        self.checked_output(output)
+        let placed = match self.place(output, placement, source_aspect, &info) {
+            Ok(placed) => placed,
+            Err(message) => {
+                self.release_image(output);
+                return Err(RenderError(message));
+            }
+        };
+        self.checked_output(placed)
     }
 
     fn transition(&mut self, package: &str, params: &Map<String, Value>, from: ImageId, to: ImageId, progress: Progress, at: FrameContext) -> Result<ImageId, RenderError> {

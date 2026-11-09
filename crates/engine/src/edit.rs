@@ -30,7 +30,7 @@
 //!   hiding themselves stay possible, as does adding a track.
 
 use crate::audio_schedule::sample_position;
-use crate::project::{speed_in_range, speed_milli, Clip, Effect, Project, Track, TrackKind, Transition, SPEED_SCALE};
+use crate::project::{ClipPlacement, speed_in_range, speed_milli, Clip, Effect, Project, Track, TrackKind, Transition, SPEED_SCALE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -674,6 +674,14 @@ pub fn set_output_size(project: &Project, width: u32, height: u32) -> Result<Pro
     let mut next = project.clone();
     next.output.width = width;
     next.output.height = height;
+    finish(next)
+}
+
+/// Sets where a clip sits in the frame; `None` puts it back to fit the frame.
+pub fn set_placement(project: &Project, key: ClipKey, placement: Option<ClipPlacement>) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.placement = placement;
     finish(next)
 }
 

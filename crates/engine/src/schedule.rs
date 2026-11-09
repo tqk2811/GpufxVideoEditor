@@ -28,7 +28,7 @@
 //! * **Progress.** `elapsed = frame_time - window_start` out of `total = duration`, kept as an exact
 //!   ratio. [`Progress::parts_per_million`] floors `elapsed * 1_000_000 / total`.
 
-use crate::project::{Clip, Effect, Project, Track, Transition};
+use crate::project::{Clip, ClipPlacement, Effect, Project, Track, Transition};
 use crate::time::Time;
 use serde_json::{Map, Value};
 
@@ -64,6 +64,8 @@ pub struct SourceSample<'a> {
     pub source_time: Time,
     /// Effects to apply to this source before compositing.
     pub effects: &'a [Effect],
+    /// Where the picture sits in the frame.
+    pub placement: Option<ClipPlacement>,
 }
 
 /// What one track contributes to one frame.
@@ -142,6 +144,7 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
         source: &c.source,
         source_time: c.source_in.saturating_add(c.source_offset(offset)).max(Time::ZERO),
         effects: &c.effects,
+        placement: c.placement,
     }
 }
 

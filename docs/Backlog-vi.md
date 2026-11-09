@@ -314,3 +314,19 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Thả file có cả hình và tiếng lên track audio xử lý khác nhau theo nguồn
 
 `crates/gpufx-editor/src/editor.rs` `drop_media`: thả từ thư viện bị từ chối vì mục thư viện mang loại Video, còn thả từ Explorer thì nhận và lấy tiếng (`add_dropped_file`). Nên thống nhất, vì cùng một file mà kết quả khác nhau. Ghi ngày 2026-11-10.
+
+### [Thấp] Giới hạn cứng của overlay làm méo hình trong im lặng khi hình dạng cực đoan
+
+`crates/d3d12-backend/src/compositor.rs:468-470` (`place`): `set_param` của overlay kẹp giá trị theo manifest (`height` trên 1000, `scale` dưới 0,01), không báo lỗi, nên một placement cực đoan cho ra hình bị méo hoặc sai kích thước mà không ai biết. Chỉ gặp khi clip rất dẹt hoặc rất cao đặt ở khung rất khác hình dạng. Nên kiểm trước khi gọi `set_param` và trả lỗi hoặc ghi cảnh báo. Ghi ngày 2026-11-10.
+
+### [Thấp] Khung đỏ quá nhỏ thì các tay nắm che mất thân khung
+
+`crates/gpufx-editor/src/ui/placement.rs:11,177-181`: vùng bắt chuột của tay nắm là 14 px (`GRIP_HIT_SIZE`), nên khi khung nhỏ hơn khoảng 28 px thì các vùng này phủ kín thân và không còn chỗ để kéo di chuyển cho tới khi phóng to khung lên. Nên thu vùng bắt của tay nắm theo cỡ khung, hoặc nhận kéo thân bằng phím hay bằng ô trong inspector. Ghi ngày 2026-11-10.
+
+### [Thấp] Hình nguồn bị lấy mẫu hai lần khi phóng to
+
+`crates/d3d12-backend/src/compositor.rs:525-531` (`build_clip_graph`) rồi `place` (dòng 461): nguồn được scale về cỡ output trước, sau đó mới overlay lên vị trí. Phóng to nguồn 4K trong project 1080p thì hình bị mềm vì dữ liệu 4K đã mất ở lần scale đầu. Nên scale thẳng về cỡ đích của placement trong một lần khi clip có placement. Ghi ngày 2026-11-10.
+
+### [Thấp] Chưa có tool MCP đặt placement của clip
+
+`crates/gpufx-mcp/src/`: agent không đặt hay xoá được `Clip.placement` (vị trí và cỡ clip trong khung); chỉ người dùng làm được bằng khung đỏ trên player và nút Default ở panel Clip. Nên thêm tool theo mẫu các tool sửa clip khác, dùng `set_placement` của engine. Ghi ngày 2026-11-10.

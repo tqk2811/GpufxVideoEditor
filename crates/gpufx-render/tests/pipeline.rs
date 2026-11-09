@@ -358,6 +358,69 @@ fn top_track_covers_the_bottom_one() {
     assert_eq!(read_frame_number(capture.frame(25), W), 25, "the bottom track again");
 }
 
+/// A clip placed by `placement` (a JSON object), needing a version 2 project.
+fn placed_clip_json(source: &Path, start: i64, source_in: i64, duration: i64, placement: &str) -> String {
+    format!(r#"{{"source":"{}","start":{},"source_in":{},"duration":{},"effects":[],"placement":{}}}"#, json_path(source), start * FRAME, source_in * FRAME, duration * FRAME, placement)
+}
+
+fn project_json_v2(width: u32, height: u32, tracks: &str) -> String {
+    project_json(width, height, tracks).replacen(r#""version":1"#, r#""version":2"#, 1)
+}
+
+const RIGHT_TOP_QUARTER: &str = r#"{"x":0.5,"y":0,"width":0.5}"#;
+
+#[test]
+fn a_placed_clip_fills_only_its_rectangle_and_the_rest_is_black() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}}"#, placed_clip_json(&a, 0, 0, 3, RIGHT_TOP_QUARTER));
+    let mut capture = Capture::new(&[1]);
+    render_project(&gpu, &project_json_v2(W, H, &tracks), &mut capture).expect("render");
+    let frame = capture.frame(1);
+    for (x, y) in [(40, 40), (160, 90), (160, 300), (300, 340)] {
+        assert!(sample(frame, W, x, y) <= 4, "({x}, {y}) is outside the rectangle: {}", sample(frame, W, x, y));
+    }
+    for (x, y) in [(400, 60), (480, 90), (600, 150)] {
+        assert!((sample(frame, W, x, y) - GREY_A).abs() <= 6, "({x}, {y}) is inside the rectangle: {}", sample(frame, W, x, y));
+    }
+    assert!(sample(frame, W, 480, 270) <= 4, "below the rectangle is black");
+}
+
+#[test]
+fn a_lower_track_shows_through_where_a_placed_clip_does_not_cover() {
+    let _lock = gpu_lock();
+    let (a, b) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}},{{"clips":[{}]}}"#, clip_json(&a, 0, 0, 3), placed_clip_json(&b, 0, 0, 3, RIGHT_TOP_QUARTER));
+    let mut capture = Capture::new(&[1]);
+    render_project(&gpu, &project_json_v2(W, H, &tracks), &mut capture).expect("render");
+    let frame = capture.frame(1);
+    for (x, y) in [(40, 100), (160, 300), (480, 270), (600, 340)] {
+        assert!((sample(frame, W, x, y) - GREY_A).abs() <= 6, "({x}, {y}) shows the lower track: {}", sample(frame, W, x, y));
+    }
+    for (x, y) in [(400, 60), (480, 90), (600, 150)] {
+        assert!((sample(frame, W, x, y) - GREY_B).abs() <= 6, "({x}, {y}) shows the placed clip: {}", sample(frame, W, x, y));
+    }
+}
+
+#[test]
+fn a_clip_of_another_shape_is_letterboxed_in_the_frame() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}}"#, clip_json(&a, 0, 0, 3));
+    let mut capture = Capture::new(&[1]);
+    render_project(&gpu, &project_json(W, W, &tracks), &mut capture).expect("render");
+    let frame = capture.frame(1);
+    for (x, y) in [(320, 320), (100, 200), (560, 440)] {
+        assert!((sample(frame, W, x, y) - GREY_A).abs() <= 6, "({x}, {y}) is in the picture: {}", sample(frame, W, x, y));
+    }
+    for (x, y) in [(320, 40), (50, 100), (600, 600), (320, 560)] {
+        assert!(sample(frame, W, x, y) <= 4, "({x}, {y}) is in a bar: {}", sample(frame, W, x, y));
+    }
+}
+
 #[test]
 fn clips_are_resized_to_the_project_size() {
     let _lock = gpu_lock();

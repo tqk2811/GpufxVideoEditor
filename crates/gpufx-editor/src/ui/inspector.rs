@@ -133,6 +133,8 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
 
     if track_kind == TrackKind::Video {
         ui.separator();
+        ui.add_enabled_ui(editable, |ui| placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some()));
+        ui.separator();
         effects(ui, state, key, editable);
         transitions(ui, state, key, editable);
     }
@@ -170,6 +172,21 @@ fn time_field(ui: &mut egui::Ui, state: &mut EditorState, label: &str, actual: f
                 if let Some(field) = reset.filter(|_| clicked) {
                     state.apply_clip_field(field);
                 }
+            }
+        });
+    });
+}
+
+/// The place of a video clip in the frame, which the red frame on the player changes. The button
+/// puts the clip back where it fits the frame, and is off when it already does.
+fn placement_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, placed: bool) {
+    ui.horizontal(|ui| {
+        ui.colored_label(theme::TEXT_DIM, label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let tooltip = state.language().t(Message::Reset);
+            let clicked = ui.add_enabled_ui(placed && !state.is_holding(), |ui| icons::button_of_size(ui, Icon::Undo, &tooltip, false, RESET_BUTTON_SIDE).clicked()).inner;
+            if clicked {
+                state.reset_placement();
             }
         });
     });

@@ -66,8 +66,7 @@ enum Search {
 
 /// The display size of a thumbnail `height` tall for a stored `width`x`height` picture.
 fn scaled_width(width: i32, height: i32, sample_aspect: ffi::AVRational, target_height: u32) -> u32 {
-    let aspect = if sample_aspect.num > 0 && sample_aspect.den > 0 { f64::from(sample_aspect.num) / f64::from(sample_aspect.den) } else { 1.0 };
-    let shown = f64::from(width.max(1)) * aspect / f64::from(height.max(1));
+    let shown = ffi::display_aspect(width, height, sample_aspect);
     ((shown * f64::from(target_height)).round() as u32).clamp(1, target_height.saturating_mul(4).max(1))
 }
 
