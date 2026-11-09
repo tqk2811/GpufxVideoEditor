@@ -100,7 +100,6 @@ impl Session {
         let window_for_scan = window.clone();
         let session_window = window.clone();
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
-        #[cfg_attr(not(debug_assertions), expect(unused_mut))]
         let mut state = EditorState::default();
         #[cfg(debug_assertions)]
         let smoke = {
