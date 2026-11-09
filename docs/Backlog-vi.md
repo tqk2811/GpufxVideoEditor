@@ -159,3 +159,28 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Khung UI có thể đói khi hiệu ứng nặng giữ cổng submit
 
 `crates/gpufx-editor/src/presenter.rs`: UI chỉ thăm dò `try_lock_submits` mỗi 8 ms, nên khi một hiệu ứng nặng giữ cổng liên tục nó có thể không bao giờ lọt vào; các cú nhấp xếp hàng cho tới khi lọt. Ghi ngày 2026-11-09.
+
+
+### [Vừa] Hiệu ứng làm đổi kích thước ảnh đầu ra bị từ chối ngay khung đầu
+
+`crates/d3d12-backend/src/compositor.rs`: hiệu ứng như `scale` với `w`, `h` khác kích thước project (160x90 trong ảnh 320x180) bị gpufx từ chối, kể cả sau khi dựng lại graph, nên preview báo lỗi và hiệu ứng này chưa dùng được. Cần quyết định co ảnh về kích thước project hay ẩn các tham số đó. Ghi ngày 2026-11-09.
+
+### [Thấp] Nhánh dựng lại graph của transition chưa có test
+
+`crates/d3d12-backend/src/compositor.rs` (`needs_rebuild`): chưa có gói transition nào dùng size function, nên test GPU chỉ phủ đường cập nhật tại chỗ. Nhánh dựng lại dùng chung logic với clip effect. Ghi ngày 2026-11-09.
+
+### [Thấp] Tìm trong thư viện phân biệt dạng Unicode và dấu
+
+`crates/gpufx-editor/src/media.rs:79-82`: tên NFC và NFD không khớp nhau, gõ "dep" không ra "đẹp". Ghi ngày 2026-11-09.
+
+### [Thấp] Thư viện không đánh dấu file đã mất và không có nút gỡ
+
+`crates/gpufx-editor/src/media.rs`, `crates/gpufx-editor/src/ui/left_panel.rs`: file bị xoá khỏi đĩa vẫn còn trong lưới, bấm vẫn thêm clip, lỗi chỉ lộ ở preview hoặc khi xuất. Ghi ngày 2026-11-09.
+
+### [Thấp] Nhập video từ tab Âm thanh thì mục nằm ở tab Phương tiện
+
+`crates/gpufx-editor/src/media.rs:36-42`: `audio_only` chỉ lọc hộp thoại, người dùng ở tab Âm thanh không thấy mục vừa nhập. Ghi ngày 2026-11-09.
+
+### [Thấp] Lưới thư viện dựng lại toàn bộ mỗi khung
+
+`crates/gpufx-editor/src/ui/left_panel.rs:71,83`: clone danh sách và `to_lowercase` mỗi khung, lưới chưa dùng `show_rows`. Thư viện vài trăm file sẽ tốn thời gian khung. Ghi ngày 2026-11-09.
