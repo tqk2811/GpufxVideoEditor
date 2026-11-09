@@ -149,27 +149,62 @@ pub struct RenderSummary {
     pub clamped_samples: u64,
 }
 
+/// Things built for a clip, each remembered with what it was built from. An edit renumbers clips,
+/// so a key alone does not identify a clip across projects: an entry whose recorded spec differs
+/// from the one asked for belongs to another clip and is rebuilt.
+pub struct ClipCache<S: ToOwned + PartialEq + ?Sized, V> {
+    entries: HashMap<ClipKey, (S::Owned, V)>,
+}
+
+impl<S: ToOwned + PartialEq + ?Sized, V> Default for ClipCache<S, V> {
+    fn default() -> Self {
+        Self { entries: HashMap::new() }
+    }
+}
+
+impl<S: ToOwned + PartialEq + ?Sized, V> ClipCache<S, V> {
+    /// The entry of `key` for `wanted`, built by `build` when missing or stale. A failed build
+    /// leaves no entry, so the next call tries again.
+    pub fn get_or_build<E>(&mut self, key: ClipKey, wanted: &S, build: impl FnOnce() -> Result<V, E>) -> Result<&mut V, E> {
+        let stale = self.entries.get(&key).is_some_and(|(spec, _)| <S::Owned as std::borrow::Borrow<S>>::borrow(spec) != wanted);
+        if stale {
+            self.entries.remove(&key);
+        }
+        if !self.entries.contains_key(&key) {
+            let value = build()?;
+            self.entries.insert(key, (wanted.to_owned(), value));
+        }
+        Ok(&mut self.entries.get_mut(&key).expect("present or just inserted").1)
+    }
+
+    /// The entry of `key`, whatever it was built from.
+    pub fn get_mut(&mut self, key: ClipKey) -> Option<&mut V> {
+        self.entries.get_mut(&key).map(|(_, value)| value)
+    }
+
+    /// Keeps only the entries whose key passes `keep`.
+    pub fn retain(&mut self, mut keep: impl FnMut(ClipKey) -> bool) {
+        self.entries.retain(|key, _| keep(*key));
+    }
+}
+
 /// Decoded frames kept alive until the compositor has read the output of the current frame.
 struct FrameStore<F>(Vec<F>);
 
 fn decode_sample<C: Compositor>(
     compositor: &mut C,
-    decoders: &mut HashMap<ClipKey, C::Decoder>,
+    decoders: &mut ClipCache<str, C::Decoder>,
     key: ClipKey,
     sample: &SourceSample<'_>,
 ) -> Result<<C::Decoder as Decoder>::Frame, RenderError> {
-    if !decoders.contains_key(&key) {
-        let decoder = compositor.open_decoder(sample.source)?;
-        decoders.insert(key, decoder);
-    }
-    let decoder = decoders.get_mut(&key).expect("inserted above");
+    let decoder = decoders.get_or_build(key, sample.source, || compositor.open_decoder(sample.source))?;
     decoder.frame_at(sample.source_time)
 }
 
 /// Decodes the one or two samples of a layer and makes the decoders idle, then prepares them.
 fn render_layer<C: Compositor>(
     compositor: &mut C,
-    decoders: &mut HashMap<ClipKey, C::Decoder>,
+    decoders: &mut ClipCache<str, C::Decoder>,
     kept: &mut FrameStore<<C::Decoder as Decoder>::Frame>,
     track: usize,
     content: &LayerContent<'_>,
@@ -180,7 +215,7 @@ fn render_layer<C: Compositor>(
         LayerContent::Clip(sample) => {
             let mut frame = decode_sample(compositor, decoders, key(sample.clip), sample)?;
             decoders
-                .get_mut(&key(sample.clip))
+                .get_mut(key(sample.clip))
                 .expect("just used")
                 .wait_idle()?;
             let image =
@@ -198,11 +233,11 @@ fn render_layer<C: Compositor>(
             let mut from_frame = decode_sample(compositor, decoders, key(from.clip), from)?;
             let mut to_frame = decode_sample(compositor, decoders, key(to.clip), to)?;
             decoders
-                .get_mut(&key(from.clip))
+                .get_mut(key(from.clip))
                 .expect("just used")
                 .wait_idle()?;
             decoders
-                .get_mut(&key(to.clip))
+                .get_mut(key(to.clip))
                 .expect("just used")
                 .wait_idle()?;
             let from_image =
@@ -245,6 +280,70 @@ fn layer_clips(content: &LayerContent<'_>, track: usize) -> Vec<ClipKey> {
     }
 }
 
+/// Renders single frames of one project or of successive edits of it, reusing decoders. A failed
+/// frame keeps no image from the compositor, and the renderer stays usable.
+pub struct FrameRenderer<C: Compositor> {
+    decoders: ClipCache<str, C::Decoder>,
+}
+
+impl<C: Compositor> Default for FrameRenderer<C> {
+    fn default() -> Self {
+        Self { decoders: ClipCache::default() }
+    }
+}
+
+impl<C: Compositor> FrameRenderer<C> {
+    /// Composites output frame `index` and hands the image to `consume`, which must not release
+    /// it. The decoded frames stay alive until `consume` returns.
+    pub fn render_frame<R>(
+        &mut self,
+        project: &Project,
+        compositor: &mut C,
+        index: i64,
+        consume: impl FnOnce(&mut C, C::Image) -> Result<R, RenderError>,
+    ) -> Result<R, RenderError> {
+        let time = frame_time(project, index)
+            .ok_or_else(|| RenderError(format!("frame {index}: time overflows")))?;
+        let at = FrameContext { index, time };
+        let layers = layers_at_frame(project, index);
+        let mut kept = FrameStore(Vec::new());
+        let mut canvas: Option<C::Image> = None;
+        let mut used = Vec::new();
+        for layer in &layers {
+            used.extend(layer_clips(&layer.content, layer.track));
+            let failed = |e: RenderError| RenderError(format!("frame {index}, track {}: {e}", layer.track));
+            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at) {
+                Ok(image) => image,
+                Err(e) => {
+                    if let Some(base) = canvas {
+                        compositor.release(base);
+                    }
+                    return Err(failed(e));
+                }
+            };
+            canvas = Some(match canvas {
+                None => image,
+                Some(base) => {
+                    let joined = compositor.composite(base, image, at);
+                    compositor.release(base);
+                    compositor.release(image);
+                    joined.map_err(failed)?
+                }
+            });
+        }
+        let image = match canvas {
+            Some(image) => image,
+            None => compositor.blank()?,
+        };
+        let result = consume(compositor, image).map_err(|e| RenderError(format!("frame {index}: {e}")));
+        compositor.release(image);
+        drop(kept);
+        // A clip is contiguous on its track, so a clip unused in this frame is finished.
+        self.decoders.retain(|key| used.contains(&key));
+        result
+    }
+}
+
 /// Renders every frame of `project` (which must have passed [`crate::validate`]) into `sink`,
 /// without audio. A project with an audio output is refused, because the sink would get an audio
 /// stream with nothing in it; use [`render_with_audio`] for those.
@@ -274,49 +373,11 @@ pub fn render_with_audio<C: Compositor, S: FrameSink>(
     let mut mixed = 0i64;
     let mut clamped_samples = 0u64;
     let mut samples: Vec<f32> = Vec::new();
-    let mut decoders: HashMap<ClipKey, C::Decoder> = HashMap::new();
+    let mut renderer = FrameRenderer::default();
     let mut rgba = Vec::new();
     let frames = frame_count(project);
     for index in 0..frames {
-        let time = frame_time(project, index)
-            .ok_or_else(|| RenderError(format!("frame {index}: time overflows")))?;
-        let at = FrameContext { index, time };
-        let layers = layers_at_frame(project, index);
-        let mut kept = FrameStore(Vec::new());
-        let mut canvas = None;
-        let mut used = Vec::new();
-        for layer in &layers {
-            used.extend(layer_clips(&layer.content, layer.track));
-            let image = render_layer(
-                compositor,
-                &mut decoders,
-                &mut kept,
-                layer.track,
-                &layer.content,
-                at,
-            )
-            .map_err(|e| RenderError(format!("frame {index}, track {}: {e}", layer.track)))?;
-            canvas = Some(match canvas {
-                None => image,
-                Some(base) => {
-                    let joined = compositor.composite(base, image, at);
-                    compositor.release(base);
-                    compositor.release(image);
-                    joined.map_err(|e| {
-                        RenderError(format!("frame {index}, track {}: {e}", layer.track))
-                    })?
-                }
-            });
-        }
-        let image = match canvas {
-            Some(image) => image,
-            None => compositor.blank()?,
-        };
-        compositor
-            .read(image, &mut rgba)
-            .map_err(|e| RenderError(format!("frame {index}: {e}")))?;
-        compositor.release(image);
-        drop(kept);
+        renderer.render_frame(project, compositor, index, |compositor, image| compositor.read(image, &mut rgba))?;
         sink.write_frame(index, &rgba)
             .map_err(|e| RenderError(format!("frame {index}: {e}")))?;
         if let Some(source) = &mut audio {
@@ -332,8 +393,6 @@ pub fn render_with_audio<C: Compositor, S: FrameSink>(
                 .map_err(|e| RenderError(format!("frame {index}, audio: {e}")))?;
             mixed = end;
         }
-        // A clip is contiguous on its track, so a clip unused in this frame is finished.
-        decoders.retain(|key, _| used.contains(key));
     }
     Ok(RenderSummary {
         frames,
@@ -354,6 +413,8 @@ mod tests {
         events: Vec<String>,
         released: usize,
         acquired: usize,
+        /// `prepare_clip` fails on this track.
+        failing_track: Option<usize>,
     }
 
     struct FakeDecoder {
@@ -404,6 +465,9 @@ mod tests {
             at: FrameContext,
         ) -> Result<usize, RenderError> {
             let mut journal = self.journal.borrow_mut();
+            if journal.failing_track == Some(key.track) {
+                return Err(RenderError("broken effect".to_owned()));
+            }
             journal.acquired += 1;
             journal.events.push(format!(
                 "f{} clip {}:{} {frame}",
@@ -686,6 +750,83 @@ mod tests {
         let error = run_audio(WITH_AUDIO, &mut FailingSource).err().expect("must fail");
         assert!(error.0.contains("audio"), "{}", error.0);
         assert!(error.0.contains("broken audio"), "{}", error.0);
+    }
+
+    fn single_frame_rig() -> (FakeCompositor, FrameRenderer<FakeCompositor>, Rc<RefCell<Journal>>) {
+        let journal = Rc::new(RefCell::new(Journal::default()));
+        (FakeCompositor { journal: journal.clone() }, FrameRenderer::default(), journal)
+    }
+
+    fn consume_nothing(_: &mut FakeCompositor, _: usize) -> Result<(), RenderError> {
+        Ok(())
+    }
+
+    #[test]
+    fn a_renumbered_clip_reopens_its_decoder() {
+        let (mut compositor, mut renderer, journal) = single_frame_rig();
+        let first = Project::from_json(TWO_TRACKS).expect("valid json");
+        let renumbered = Project::from_json(&TWO_TRACKS.replace(r#""source":"a""#, r#""source":"c""#)).expect("valid json");
+        renderer.render_frame(&first, &mut compositor, 0, consume_nothing).expect("first frame");
+        renderer.render_frame(&renumbered, &mut compositor, 0, consume_nothing).expect("edited frame");
+        let opened: Vec<_> = journal.borrow().events.iter().filter(|e| e.starts_with("open")).cloned().collect();
+        assert_eq!(opened, ["open a", "open c"]);
+    }
+
+    #[test]
+    fn a_failed_layer_returns_the_images_of_earlier_layers_and_the_next_frame_works() {
+        let (mut compositor, mut renderer, journal) = single_frame_rig();
+        let project = Project::from_json(TWO_TRACKS).expect("valid json");
+        journal.borrow_mut().failing_track = Some(1);
+        let error = renderer.render_frame(&project, &mut compositor, 1, consume_nothing).expect_err("track 1 is broken");
+        assert!(error.0.contains("broken effect"), "{}", error.0);
+        assert_eq!(journal.borrow().acquired, journal.borrow().released, "the image of track 0 came back");
+        journal.borrow_mut().failing_track = None;
+        renderer.render_frame(&project, &mut compositor, 1, consume_nothing).expect("the next frame works");
+        assert_eq!(journal.borrow().acquired, journal.borrow().released);
+    }
+
+    #[test]
+    fn a_frame_past_the_end_is_blank_without_opening_a_decoder() {
+        let (mut compositor, mut renderer, journal) = single_frame_rig();
+        let project = Project::from_json(TWO_TRACKS).expect("valid json");
+        renderer.render_frame(&project, &mut compositor, 99, consume_nothing).expect("blank");
+        assert_eq!(journal.borrow().events, ["blank"]);
+    }
+
+    fn key(clip: usize) -> ClipKey {
+        ClipKey { track: 0, clip }
+    }
+
+    #[test]
+    fn clip_cache_keeps_an_entry_for_the_same_spec() {
+        let mut cache: ClipCache<str, i32> = ClipCache::default();
+        assert_eq!(*cache.get_or_build(key(0), "a", || Ok::<_, ()>(1)).unwrap(), 1);
+        assert_eq!(*cache.get_or_build(key(0), "a", || Ok::<_, ()>(2)).unwrap(), 1);
+    }
+
+    #[test]
+    fn clip_cache_rebuilds_when_the_key_now_names_another_clip() {
+        let mut cache: ClipCache<str, i32> = ClipCache::default();
+        cache.get_or_build(key(0), "a", || Ok::<_, ()>(1)).unwrap();
+        assert_eq!(*cache.get_or_build(key(0), "b", || Ok::<_, ()>(2)).unwrap(), 2);
+        assert_eq!(*cache.get_or_build(key(1), "b", || Ok::<_, ()>(3)).unwrap(), 3);
+    }
+
+    #[test]
+    fn clip_cache_compares_effect_lists() {
+        let effect = |package: &str| Effect { package: package.to_owned(), params: Map::new() };
+        let mut cache: ClipCache<[Effect], i32> = ClipCache::default();
+        cache.get_or_build(key(0), &[effect("blur")], || Ok::<_, ()>(1)).unwrap();
+        assert_eq!(*cache.get_or_build(key(0), &[effect("sharpen")], || Ok::<_, ()>(2)).unwrap(), 2);
+    }
+
+    #[test]
+    fn clip_cache_keeps_no_stale_entry_after_a_failed_rebuild() {
+        let mut cache: ClipCache<str, i32> = ClipCache::default();
+        cache.get_or_build(key(0), "a", || Ok::<_, ()>(1)).unwrap();
+        assert!(cache.get_or_build(key(0), "b", || Err::<i32, _>(())).is_err());
+        assert_eq!(cache.get_mut(key(0)), None, "must not leave a's value under b");
+        assert_eq!(*cache.get_or_build(key(0), "b", || Ok::<_, ()>(3)).unwrap(), 3);
     }
 
     #[test]

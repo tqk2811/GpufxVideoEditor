@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use engine::render::{ClipKey, Compositor, Decoder, FrameContext, RenderError};
+use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
 use engine::schedule::Progress;
 use engine::Effect as ProjectEffect;
 use gpufx_core::d3d12::D3d12Frame;
@@ -183,7 +183,7 @@ pub struct D3d12Compositor {
     height: u32,
     images: Vec<Image>,
     free: Vec<usize>,
-    clip_graphs: HashMap<ClipKey, EffectGraph>,
+    clip_graphs: ClipCache<[ProjectEffect], EffectGraph>,
     transition_graphs: HashMap<String, EffectGraph>,
     overlay: EffectGraph,
     readback: Option<wgpu::Buffer>,
@@ -193,7 +193,7 @@ impl D3d12Compositor {
     /// A compositor writing images of `width` x `height`.
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), clip_graphs: HashMap::new(), transition_graphs: HashMap::new(), overlay, readback: None })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, readback: None })
     }
 
     fn acquire(&mut self) -> Result<ImageId, String> {
@@ -217,14 +217,6 @@ impl D3d12Compositor {
         // No submit overlaps this call: the render loop is single threaded.
         unsafe { graph.process_d3d12(inputs, &mut outputs, Some(info)) }.map_err(|e| format!("process_d3d12 failed: {e}"))?;
         images[output.0].fence_value = outputs[0].fence_value;
-        Ok(())
-    }
-
-    fn ensure_clip_graph(&mut self, key: ClipKey, effects: &[ProjectEffect]) -> Result<(), String> {
-        if !self.clip_graphs.contains_key(&key) {
-            let graph = build_clip_graph(&self.gpu.context, &self.paths, self.width, self.height, effects)?;
-            self.clip_graphs.insert(key, graph);
-        }
         Ok(())
     }
 
@@ -294,10 +286,11 @@ impl Compositor for D3d12Compositor {
         let output = self.acquire()?;
         let (width, height) = (self.width, self.height);
         let mut inputs = [decoded_input(frame)?];
-        let result = self.ensure_clip_graph(key, effects).and_then(|()| {
-            let graph = self.clip_graphs.get_mut(&key).expect("just ensured");
-            Self::run_graph(graph, &mut inputs, &mut self.images, output, width, height, &info)
-        });
+        let (gpu, paths) = (&self.gpu, &self.paths);
+        let result = self
+            .clip_graphs
+            .get_or_build(key, effects, || build_clip_graph(&gpu.context, paths, width, height, effects))
+            .and_then(|graph| Self::run_graph(graph, &mut inputs, &mut self.images, output, width, height, &info));
         if let Err(e) = result {
             self.release_image(output);
             return Err(RenderError(e));
