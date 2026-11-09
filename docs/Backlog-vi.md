@@ -80,10 +80,6 @@ Resampler ở `crates/d3d12-backend/src/audio.rs:430` xuất float và không ch
 
 Seek về đầu của AAC trong MKV vẫn sai khoảng 1024 mẫu đầu (đo được sai 0,23 so với `ffmpeg` giải mã không seek), dù AAC trong MP4 đã đúng sau bản sửa `seek_demuxer` ở `crates/d3d12-backend/src/audio.rs`. Gói priming có timestamp -21 ms; nhiều khả năng demuxer Matroska kẹp timestamp seek về mục cue đầu rồi bỏ qua gói trước đó, chưa kiểm chứng bằng log. Nên làm nếu nguồn MKV là chuyện thường gặp, vì đầu clip nghe bị rè. Ghi ngày 2026-11-09.
 
-### [Vừa] Nhánh feat/editor-api của submodule chưa vào master của FFmpegGpuFilter
-
-`master` của repo này trỏ `external/FFmpegGpuFilter` tới commit `9f751c8`, commit này chỉ nằm trên nhánh `feat/editor-api` của submodule. User đã yêu cầu merge ngày 2026-11-09, nhưng không có phiên FFmpegGpuFilter nào đang mở để nhận việc và repo này không được sửa submodule. Cần merge nhánh đó vào `master` của FFmpegGpuFilter; xoá nhánh trước khi merge sẽ làm clone mới không lấy được submodule. Ghi ngày 2026-11-09.
-
 ### [Thấp] Kéo clip tới mép timeline không tự cuộn
 
 Khi kéo clip hoặc cạnh trim tới mép trái/phải của vùng track, view đứng yên nên không kéo được tới phần đang ngoài màn hình; phải thả, cuộn rồi kéo lại (`crates/gpufx-editor/src/ui.rs`, `handle_tracks`). Ghi ngày 2026-11-09.
