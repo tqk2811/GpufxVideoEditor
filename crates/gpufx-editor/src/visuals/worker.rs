@@ -10,10 +10,14 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use d3d12_backend::ThumbnailImage;
 use engine::Time;
+
+/// A worker with nothing to do closes its decoder after this long: an open file cannot be renamed
+/// or deleted on Windows.
+const IDLE_RELEASE: Duration = if cfg!(test) { Duration::from_millis(20) } else { Duration::from_secs(2) };
 
 /// Size and modification time: a file replaced under the same name gets new pictures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +43,8 @@ pub trait Generator: Send + Sync + 'static {
     type Local: Default;
     fn stamp(&self, path: &Path) -> Option<FileStamp>;
     fn inspect(&self, path: &Path) -> Result<SourceFacts, String>;
-    fn frame(&self, local: &mut Self::Local, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, String>;
+    /// A picture of `path`, which `identity` names: another identity on the same path is another file.
+    fn frame(&self, local: &mut Self::Local, identity: u32, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, String>;
     /// Calls `emit` with further peaks until it returns false or the audio ends.
     fn peaks(&self, path: &Path, emit: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String>;
 }
@@ -203,6 +208,7 @@ impl Drop for WorkerPool {
 fn run_worker<G: Generator>(shared: &Shared, generator: &G, lane: Lane) {
     let mut local = G::Local::default();
     let mut cursor: Cursor = None;
+    let mut holding_file = false;
     loop {
         let job = {
             let mut queues = shared.lock();
@@ -218,11 +224,25 @@ fn run_worker<G: Generator>(shared: &Shared, generator: &G, lane: Lane) {
                     queues.running.insert(job.key.clone());
                     break job;
                 }
-                queues = shared.work.wait(queues).unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !holding_file {
+                    queues = shared.work.wait(queues).unwrap_or_else(|poisoned| poisoned.into_inner());
+                    continue;
+                }
+                let (guard, waited) = shared.work.wait_timeout(queues, IDLE_RELEASE).unwrap_or_else(|poisoned| poisoned.into_inner());
+                queues = guard;
+                if waited.timed_out() {
+                    // Outside the lock: closing a file can be slow.
+                    drop(queues);
+                    local = G::Local::default();
+                    holding_file = false;
+                    cursor = None;
+                    queues = shared.lock();
+                }
             }
         };
         if let JobKey::Frame(_, bucket) = job.key {
             cursor = Some((job.path.clone(), bucket));
+            holding_file = true;
         }
         let done = match catch_unwind(AssertUnwindSafe(|| run_job(shared, generator, &mut local, &job))) {
             Ok(done) => done,
@@ -267,7 +287,7 @@ fn run_job<G: Generator>(shared: &Shared, generator: &G, local: &mut G::Local, j
         }
         JobKey::Frame(identity, bucket) => {
             let cancelled = || shared.shutdown.load(Ordering::Acquire);
-            let result = generator.frame(local, &job.path, Time::from_ticks(bucket), &cancelled);
+            let result = generator.frame(local, identity, &job.path, Time::from_ticks(bucket), &cancelled);
             Done::Frame { identity, bucket, result }
         }
         JobKey::Peaks(identity) => {
@@ -302,7 +322,7 @@ fn panic_message(payload: &Box<dyn Any + Send>) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     /// Answers instantly, except that frames wait while `block` is set.
     #[derive(Default)]
@@ -323,7 +343,7 @@ mod tests {
             Ok(SourceFacts { has_video: true, has_audio: false, aspect: 1.0, length: None })
         }
 
-        fn frame(&self, _: &mut (), _: &Path, at: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+        fn frame(&self, _: &mut (), _: u32, _: &Path, at: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
             assert_ne!(Some(at.ticks()), self.panic_at, "boom");
             self.calls.fetch_add(1, Ordering::SeqCst);
             while self.block.load(Ordering::SeqCst) {
@@ -446,6 +466,47 @@ mod tests {
         let done = pool.take_done();
         assert!(done.iter().any(|d| matches!(d, Done::Peaks { finished: false, peaks, .. } if peaks.is_empty())), "{done:?}");
         assert!(!done.iter().any(|d| matches!(d, Done::Peaks { finished: true, .. })), "{done:?}");
+    }
+
+    static RELEASED_DECODERS: AtomicU32 = AtomicU32::new(0);
+
+    /// Counts how often a worker lets go of what it keeps.
+    #[derive(Default)]
+    struct HeldDecoder;
+
+    impl Drop for HeldDecoder {
+        fn drop(&mut self) {
+            RELEASED_DECODERS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct Holding;
+
+    impl Generator for Holding {
+        type Local = HeldDecoder;
+
+        fn stamp(&self, _: &Path) -> Option<FileStamp> {
+            None
+        }
+
+        fn inspect(&self, _: &Path) -> Result<SourceFacts, String> {
+            Err("unused".to_owned())
+        }
+
+        fn frame(&self, _: &mut HeldDecoder, _: u32, _: &Path, _: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+            Ok(ThumbnailImage { width: 1, height: 1, rgba: vec![0; 4] })
+        }
+
+        fn peaks(&self, _: &Path, _: &mut dyn FnMut(&[f32]) -> bool) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_idle_worker_closes_its_decoder() {
+        let pool = WorkerPool::start(Arc::new(Holding), 1, 0, None);
+        pool.publish(vec![frame(1, 0)], Vec::new());
+        wait_for(|| RELEASED_DECODERS.load(Ordering::SeqCst) >= 1);
     }
 
     impl WorkerPool {

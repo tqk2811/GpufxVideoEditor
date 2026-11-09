@@ -1,7 +1,7 @@
 //! The file work behind thumbnails and levels, on the libav software decoders: no GPU, so it can
 //! run beside the preview and playback.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use d3d12_backend::{probe_media, AudioFileDecoder, FrameSampler, ThumbnailImage};
@@ -21,7 +21,9 @@ const MAX_PEAKS: usize = (PEAKS_PER_SECOND * 3600 * 24) as usize;
 pub struct FfmpegGenerator;
 
 impl Generator for FfmpegGenerator {
-    type Local = Option<(PathBuf, FrameSampler)>;
+    /// The open decoder and the source identity it was opened for: the same path with a new
+    /// identity is another file, and an open decoder would go on reading the old one.
+    type Local = Option<(u32, FrameSampler)>;
 
     fn stamp(&self, path: &Path) -> Option<FileStamp> {
         let metadata = std::fs::metadata(path).ok()?;
@@ -46,9 +48,11 @@ impl Generator for FfmpegGenerator {
         Ok(SourceFacts { has_video, has_audio: probe.has_audio, aspect, length: probe.video_duration.or(probe.audio_duration) })
     }
 
-    fn frame(&self, local: &mut Self::Local, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
-        if local.as_ref().is_none_or(|(open, _)| open != path) {
-            *local = Some((path.to_path_buf(), FrameSampler::open(path, THUMBNAIL_HEIGHT)?));
+    fn frame(&self, local: &mut Self::Local, identity: u32, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, String> {
+        if local.as_ref().is_none_or(|(open, _)| *open != identity) {
+            // Closed first: a sampler still open on a replaced file must not outlive this call.
+            *local = None;
+            *local = Some((identity, FrameSampler::open(path, THUMBNAIL_HEIGHT)?));
         }
         let (_, sampler) = local.as_mut().expect("opened above");
         sampler.picture_at(at, cancelled)

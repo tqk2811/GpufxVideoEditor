@@ -119,6 +119,27 @@ fn a_replaced_file_gets_new_pictures() {
     assert!(!visuals.live_identities.contains(&first));
 }
 
+/// Mean of the red and of the blue channel.
+fn red_and_blue(image: &ThumbnailImage) -> (u32, u32) {
+    let pixels = image.rgba.len() as u32 / 4;
+    let sum = |channel: usize| image.rgba.iter().skip(channel).step_by(4).map(|value| u32::from(*value)).sum::<u32>() / pixels;
+    (sum(0), sum(2))
+}
+
+#[test]
+fn a_file_overwritten_in_place_is_decoded_anew_under_its_new_identity() {
+    let never = || false;
+    let path = clip("overwritten.mp4", &["-f", "lavfi", "-i", "color=c=red:s=320x180:r=30:d=1", "-an", "-c:v", "mpeg4"]);
+    let mut local = None;
+    let old = FfmpegGenerator.frame(&mut local, 1, &path, Time::ZERO, &never).expect("the old file");
+    let (red, blue) = red_and_blue(&old);
+    assert!(red > blue + 80, "{red} {blue}");
+    clip("overwritten.mp4", &["-f", "lavfi", "-i", "color=c=blue:s=320x180:r=30:d=1", "-an", "-c:v", "mpeg4"]);
+    let new = FfmpegGenerator.frame(&mut local, 2, &path, Time::ZERO, &never).expect("the new file");
+    let (red, blue) = red_and_blue(&new);
+    assert!(blue > red + 80, "the worker still reads the old file: {red} {blue}");
+}
+
 #[test]
 fn pictures_are_made_in_the_background_and_the_frame_stays_cheap() {
     let path = clip("strip.mp4", &["-f", "lavfi", "-i", "testsrc=s=640x360:r=30:d=8", "-f", "lavfi", "-i", "sine=f=330:d=8", "-c:v", "mpeg4", "-c:a", "aac"]);
