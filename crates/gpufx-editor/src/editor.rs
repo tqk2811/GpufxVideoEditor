@@ -1,22 +1,27 @@
 //! Editor state without a window: the project history, the selection and the status line. The UI
 //! calls these methods and draws the result; every timeline change goes through an engine command.
 
+use crate::packages::{Catalog, PickerState};
 use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{ClipDrag, EditCommand};
 use crate::timeline::view::TimelineView;
 use engine::{
-    add_clip, add_track, audio_sample_count, clip_at, delete_clip, nearest_free_start, split_clip, AudioOutput, Clip, ClipKey, EditError, EditHistory,
-    Output, Project, Time, TrackKind, SUPPORTED_VERSION,
+    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, nearest_free_start, remove_effect, remove_transition, split_clip, AudioOutput, Clip, ClipKey,
+    EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
+use serde_json::Map;
 use std::path::Path;
 
 const UNDO_DEPTH: usize = 200;
 const DRAG_FIRST: &str = "Finish the drag first";
+const NO_NEIGHBOUR: &str = "A transition needs a selected clip that touches another clip on its track";
 const NOTHING_TO_PLAY: &str = "Nothing to play: playback length follows the video frames, and audio alone has none yet";
 
 /// Length given to a new clip. The project does not record source lengths and no backend call
 /// reports one without opening a decoder.
 pub const DEFAULT_CLIP_DURATION: Time = Time::from_ticks(900_000);
+/// Length given to a new transition; parameters and lengths are edited in a later phase.
+pub const DEFAULT_TRANSITION_DURATION: Time = Time::from_ticks(90_000);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Status {
@@ -44,6 +49,8 @@ pub struct EditorState {
     no_sound: Option<String>,
     pub view: TimelineView,
     pub drag: Option<ClipDrag>,
+    pub catalog: Catalog,
+    pub picker: PickerState,
 }
 
 /// A clip of the whole default length at `start`, with no effects.
@@ -97,6 +104,8 @@ impl EditorState {
             no_sound: None,
             view: TimelineView::default(),
             drag: None,
+            catalog: Catalog::default(),
+            picker: PickerState::default(),
         }
     }
 
@@ -306,6 +315,41 @@ impl EditorState {
         }
     }
 
+    /// The selected clip, or a status asking for one.
+    fn selected_for(&mut self, action: &str) -> Option<ClipKey> {
+        if self.selection.is_none() {
+            self.status = Status::Info(format!("Select a clip to {action}"));
+        }
+        self.selection
+    }
+
+    /// Adds effect `package` to the selected clip with its default parameters.
+    pub fn add_effect_package(&mut self, package: &str) {
+        let Some(key) = self.selected_for("add an effect") else { return };
+        let effect = Effect { package: package.to_owned(), params: Map::new() };
+        self.run(|project| add_effect(project, key, effect));
+    }
+
+    pub fn remove_effect_at(&mut self, effect: usize) {
+        let Some(key) = self.selected_for("remove an effect") else { return };
+        self.run(|project| remove_effect(project, key, effect));
+    }
+
+    /// Adds transition `package` where the selected clip touches a neighbour on its track.
+    pub fn add_transition_package(&mut self, package: &str) {
+        let Some(key) = self.selected_for("add a transition") else { return };
+        let Some(after_clip) = touching_pair(self.project(), key) else {
+            self.status = Status::Refused(NO_NEIGHBOUR.to_owned());
+            return;
+        };
+        let transition = Transition { after_clip, package: package.to_owned(), duration: DEFAULT_TRANSITION_DURATION, params: Map::new() };
+        self.run(|project| add_transition(project, key.track, transition));
+    }
+
+    pub fn remove_transition_after(&mut self, track: usize, after_clip: usize) {
+        self.run(|project| remove_transition(project, track, after_clip));
+    }
+
     pub fn delete_selected(&mut self) {
         let Some(key) = self.selection else {
             self.status = Status::Info("Select a clip to delete".to_owned());
@@ -352,6 +396,24 @@ impl EditorState {
         self.selection = None;
         self.status = Status::Idle;
     }
+}
+
+/// The first clip of a touching pair that includes `key`, preferring a pair with no transition yet.
+pub fn touching_pair(project: &Project, key: ClipKey) -> Option<usize> {
+    let track = project.tracks.get(key.track)?;
+    let touches = |first: usize| track.clips.get(first + 1).is_some_and(|next| track.clips[first].end() == Some(next.start));
+    let pairs: Vec<usize> = [Some(key.clip), key.clip.checked_sub(1)].into_iter().flatten().filter(|&first| touches(first)).collect();
+    let free = |first: &&usize| !track.transitions.iter().any(|transition| transition.after_clip == **first);
+    pairs.iter().find(free).or(pairs.first()).copied()
+}
+
+/// What sits on a clip: its effects by position and the transitions on either side, by the index of
+/// the clip before them.
+pub fn applied_to(project: &Project, key: ClipKey) -> (Vec<String>, Vec<(usize, String)>) {
+    let Some(track) = project.tracks.get(key.track) else { return (Vec::new(), Vec::new()) };
+    let effects = track.clips.get(key.clip).map_or_else(Vec::new, |clip| clip.effects.iter().map(|effect| effect.package.clone()).collect());
+    let transitions = track.transitions.iter().filter(|tr| tr.after_clip == key.clip || tr.after_clip.checked_add(1) == Some(key.clip)).map(|tr| (tr.after_clip, tr.package.clone())).collect();
+    (effects, transitions)
 }
 
 /// The file name of a clip source, for its label.
@@ -724,6 +786,104 @@ mod tests {
         assert_eq!(state.playback_message(), Some("broken"));
         state.toggle_playback();
         assert_eq!(state.playback_message(), None, "a new start clears it");
+    }
+
+    fn two_touching_clips() -> EditorState {
+        let mut state = state_with_clip();
+        state.add_clip_from_file(0, Path::new("b.mp4"));
+        state.select(Some(key(0)));
+        state
+    }
+
+    #[test]
+    fn effects_are_added_and_removed_through_commands_and_undo() {
+        let mut state = two_touching_clips();
+        state.add_effect_package("packages/gpufx/ffmpeg/grayscale");
+        let (effects, _) = applied_to(state.project(), key(0));
+        assert_eq!(effects, vec!["packages/gpufx/ffmpeg/grayscale".to_owned()]);
+        assert_eq!(state.project().tracks[0].clips[0].effects[0].params, Map::new(), "default parameters");
+        assert_eq!(state.selection(), Some(key(0)));
+        state.undo();
+        assert!(state.project().tracks[0].clips[0].effects.is_empty());
+        state.redo();
+        assert_eq!(state.project().tracks[0].clips[0].effects.len(), 1);
+    }
+
+    #[test]
+    fn removing_an_effect_uses_its_index() {
+        let mut state = two_touching_clips();
+        state.add_effect_package("a");
+        state.select(Some(key(0)));
+        state.add_effect_package("b");
+        state.select(Some(key(0)));
+        state.remove_effect_at(0);
+        assert_eq!(applied_to(state.project(), key(0)).0, vec!["b".to_owned()]);
+        state.select(Some(key(0)));
+        state.remove_effect_at(9);
+        assert!(matches!(state.status(), Status::Refused(_)));
+    }
+
+    #[test]
+    fn effects_need_a_selection_and_a_video_clip() {
+        let mut state = state_with_clip();
+        state.select(None);
+        state.add_effect_package("a");
+        assert!(matches!(state.status(), Status::Info(_)));
+        let mut audio = EditorState::default();
+        audio.add_track(TrackKind::Audio);
+        audio.add_clip_from_file(0, Path::new("a.wav"));
+        audio.add_effect_package("a");
+        assert!(matches!(audio.status(), Status::Refused(_)), "audio tracks have no picture");
+    }
+
+    #[test]
+    fn a_transition_joins_the_selected_clip_with_a_touching_neighbour() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        let track = &state.project().tracks[0];
+        assert_eq!(track.transitions.len(), 1);
+        assert_eq!(track.transitions[0].after_clip, 0);
+        assert_eq!(track.transitions[0].duration, DEFAULT_TRANSITION_DURATION);
+        state.undo();
+        assert!(state.project().tracks[0].transitions.is_empty());
+    }
+
+    #[test]
+    fn the_second_of_two_clips_also_finds_the_pair() {
+        let mut state = two_touching_clips();
+        state.select(Some(key(1)));
+        state.add_transition_package("mix");
+        assert_eq!(state.project().tracks[0].transitions[0].after_clip, 0);
+        let (_, transitions) = applied_to(state.project(), key(1));
+        assert_eq!(transitions, vec![(0, "mix".to_owned())]);
+    }
+
+    #[test]
+    fn a_clip_with_no_neighbour_refuses_a_transition() {
+        let mut state = state_with_clip();
+        state.add_transition_package("mix");
+        assert_eq!(state.status(), &Status::Refused(NO_NEIGHBOUR.to_owned()));
+        assert!(state.project().tracks[0].transitions.is_empty());
+    }
+
+    #[test]
+    fn a_second_transition_on_the_same_cut_is_refused() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        state.select(Some(key(0)));
+        state.add_transition_package("wipe");
+        assert!(matches!(state.status(), Status::Refused(_)));
+        assert_eq!(state.project().tracks[0].transitions.len(), 1);
+    }
+
+    #[test]
+    fn removing_a_transition_is_undoable() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        state.remove_transition_after(0, 0);
+        assert!(state.project().tracks[0].transitions.is_empty());
+        state.undo();
+        assert_eq!(state.project().tracks[0].transitions.len(), 1);
     }
 
     #[test]

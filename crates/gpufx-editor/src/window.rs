@@ -1,6 +1,7 @@
 //! The window and its event loop.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,12 +10,13 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use d3d12_backend::{Gpu, ProjectPaths};
+use d3d12_backend::{read_package_info, Gpu, ProjectPaths};
 use engine::Project;
 #[cfg(debug_assertions)]
 use engine::{Time, TrackKind};
 
 use crate::editor::EditorState;
+use crate::packages::{scan, Catalog};
 use crate::playback::device::Playback;
 use crate::playback::plan::{frames_to_ms, TransportCommand};
 use crate::presenter::Presenter;
@@ -72,6 +74,7 @@ struct Session {
     package_roots: Vec<PathBuf>,
     /// How files of the open project resolve; shared by preview, playback and export.
     paths: Arc<ProjectPaths>,
+    catalog: Option<Receiver<Catalog>>,
     #[cfg(debug_assertions)]
     smoke: Smoke,
 }
@@ -83,6 +86,7 @@ impl Session {
         let window = Arc::new(event_loop.create_window(attributes).map_err(|e| format!("creating the window failed: {e}"))?);
         let presenter = Presenter::new(&gpu, window.clone())?;
         let producer_gpu = gpu.clone();
+        let window_for_scan = window.clone();
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
         #[cfg_attr(not(debug_assertions), expect(unused_mut))]
         let mut state = EditorState::default();
@@ -100,6 +104,7 @@ impl Session {
         };
         let package_roots = package_roots();
         let paths = Arc::new(project_paths(None, &package_roots));
+        let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         Ok(Self {
             playback: None,
             preview,
@@ -114,6 +119,7 @@ impl Session {
             audio_revision: 0,
             package_roots,
             paths,
+            catalog: Some(catalog),
             #[cfg(debug_assertions)]
             smoke,
         })
@@ -144,6 +150,14 @@ impl Session {
                 }
                 self.state.set_preview_error(Some(message));
             }
+        }
+    }
+
+    /// Takes the package list once its scan has finished.
+    fn collect_catalog(&mut self) {
+        if let Some(Ok(catalog)) = self.catalog.as_ref().map(Receiver::try_recv) {
+            self.state.catalog = catalog;
+            self.catalog = None;
         }
     }
 
@@ -297,6 +311,7 @@ impl Session {
     }
 
     fn redraw(&mut self) -> Result<(), String> {
+        self.collect_catalog();
         self.collect_preview();
         self.poll_playback();
         #[cfg(debug_assertions)]
@@ -349,6 +364,19 @@ impl Session {
             }
         }
     }
+}
+
+/// Reads the package manifests away from the UI thread: some packages hold large textures.
+fn spawn_catalog_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<Catalog> {
+    let (sender, receiver) = channel();
+    let scanner = std::thread::Builder::new().name("packages".to_owned()).spawn(move || {
+        let _ = sender.send(scan(&roots, read_package_info));
+        window.request_redraw();
+    });
+    if let Err(e) = scanner {
+        eprintln!("gpufx-editor: the package scan could not start: {e}");
+    }
+    receiver
 }
 
 #[derive(Default)]

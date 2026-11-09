@@ -1,6 +1,7 @@
 //! Draws the editor and forwards input. Decisions live in `editor` and `timeline`.
 
-use crate::editor::{clip_label, EditorState, Status};
+use crate::editor::{applied_to, clip_label, EditorState, Status};
+use crate::packages::{filter_entries, short_name, PackageKind};
 use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
 use crate::timeline::drag::{begin_drag, clamp_trim, drag_command};
@@ -15,6 +16,9 @@ const RULER_HEIGHT: f32 = 28.0;
 const LINE_SCROLL_POINTS: f32 = 50.0;
 const PREVIEW_SHARE: f32 = 0.55;
 const MIN_TIMELINE_HEIGHT: f32 = 140.0;
+const PICKER_WIDTH: f32 = 260.0;
+/// Space kept under the list for the Add button, the problems and what the clip has.
+const PICKER_FOOTER_HEIGHT: f32 = 170.0;
 
 const BACKGROUND: Color32 = Color32::from_rgb(26, 26, 30);
 const ROW_EVEN: Color32 = Color32::from_rgb(36, 36, 42);
@@ -26,6 +30,7 @@ const AUDIO_CLIP: Color32 = Color32::from_rgb(58, 138, 96);
 const SELECTED: Color32 = Color32::from_rgb(250, 210, 90);
 const PLAYHEAD: Color32 = Color32::from_rgb(235, 80, 70);
 const REFUSED: Color32 = Color32::from_rgb(255, 120, 110);
+const TRANSITION: Color32 = Color32::from_rgba_premultiplied(120, 90, 30, 170);
 
 /// Work the window does after the frame, outside the UI pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +42,7 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     handle_shortcuts(root.ctx(), state);
     egui::Panel::top("toolbar").show(root, |ui| toolbar(ui, state));
     egui::Panel::bottom("status").show(root, |ui| status_line(ui, state));
+    egui::Panel::right("packages").default_size(PICKER_WIDTH).show(root, |ui| picker(ui, state));
     egui::CentralPanel::default().show(root, |ui| {
         let area = ui.available_rect_before_wrap();
         let (preview_rect, timeline_rect) = split_area(area);
@@ -115,6 +121,103 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState) {
         ui.separator();
         ui.label(format!("Playhead {}", format_time(state.playhead(), 1)));
     });
+}
+
+/// The effect and transition lists with their filter, then what the selected clip already has.
+fn picker(ui: &mut egui::Ui, state: &mut EditorState) {
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut state.picker.kind, PackageKind::Effect, "Effects");
+        ui.selectable_value(&mut state.picker.kind, PackageKind::Transition, "Transitions");
+    });
+    ui.add(egui::TextEdit::singleline(&mut state.picker.filter).hint_text("Filter"));
+    if !state.catalog.loaded {
+        ui.label("Reading the packages...");
+    } else if state.catalog.effects.is_empty() && state.catalog.transitions.is_empty() {
+        ui.colored_label(REFUSED, format!("No packages were found. Set {}.", crate::project_file::PACKAGE_ROOT_VARIABLE));
+    }
+    picker_list(ui, state);
+    let selected = state.picker.selected.clone();
+    if ui.add_enabled(selected.is_some(), egui::Button::new("Add to the selected clip")).clicked() {
+        if let Some(package) = &selected {
+            add_package(state, package);
+        }
+    }
+    picker_problems(ui, state);
+    ui.separator();
+    applied_list(ui, state);
+}
+
+fn add_package(state: &mut EditorState, package: &str) {
+    if state.picker.kind == PackageKind::Effect {
+        state.add_effect_package(package);
+    } else {
+        state.add_transition_package(package);
+    }
+}
+
+fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
+    let row_height = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y;
+    let entries: Vec<_> = filter_entries(state.catalog.entries(state.picker.kind), &state.picker.filter).into_iter().cloned().collect();
+    let list_height = (ui.available_height() - PICKER_FOOTER_HEIGHT).max(row_height * 3.0);
+    let mut double_clicked = None;
+    egui::ScrollArea::vertical().id_salt("package-list").max_height(list_height).auto_shrink([false, true]).show_rows(ui, row_height, entries.len(), |ui, rows| {
+        for entry in &entries[rows] {
+            let selected = state.picker.selected.as_deref() == Some(&entry.package);
+            let response = ui.selectable_label(selected, &entry.name).on_hover_text(if entry.description.is_empty() { entry.package.as_str() } else { entry.description.as_str() });
+            if response.clicked() {
+                state.picker.selected = Some(entry.package.clone());
+            }
+            if response.double_clicked() {
+                double_clicked = Some(entry.package.clone());
+            }
+        }
+    });
+    if let Some(package) = double_clicked {
+        add_package(state, &package);
+    }
+}
+
+fn picker_problems(ui: &mut egui::Ui, state: &EditorState) {
+    if state.catalog.problems.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(format!("{} packages could not be read", state.catalog.problems.len())).id_salt("package-problems").show(ui, |ui| {
+        for problem in &state.catalog.problems {
+            ui.colored_label(REFUSED, format!("{}: {}", short_name(&problem.package), problem.message));
+        }
+    });
+}
+
+fn applied_list(ui: &mut egui::Ui, state: &mut EditorState) {
+    let Some(key) = state.selection() else {
+        ui.label("Select a clip to see its effects");
+        return;
+    };
+    let (effects, transitions) = applied_to(state.project(), key);
+    let mut remove_effect = None;
+    let mut remove_transition = None;
+    for (index, package) in effects.iter().enumerate() {
+        ui.horizontal(|ui| {
+            if ui.small_button("x").on_hover_text("Remove").clicked() {
+                remove_effect = Some(index);
+            }
+            ui.label(short_name(package));
+        });
+    }
+    for (after_clip, package) in &transitions {
+        ui.horizontal(|ui| {
+            if ui.small_button("x").on_hover_text("Remove").clicked() {
+                remove_transition = Some(*after_clip);
+            }
+            ui.label(format!("Transition: {}", short_name(package)));
+        });
+    }
+    if let Some(index) = remove_effect {
+        state.remove_effect_at(index);
+    }
+    if let Some(after_clip) = remove_transition {
+        state.remove_transition_after(key.track, after_clip);
+    }
 }
 
 fn status_line(ui: &mut egui::Ui, state: &EditorState) {
@@ -300,8 +403,21 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
             let text = painter.with_clip_rect(rect.intersect(tracks_rect));
             text.text(rect.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_label(&clip.source), FontId::proportional(12.0), Color32::WHITE);
         }
+        draw_transitions(&painter, state, tracks_rect, row, track);
     }
     draw_drag_preview(ui, state, tracks_rect);
+}
+
+fn draw_transitions(painter: &egui::Painter, state: &EditorState, tracks_rect: Rect, row: Rect, track: &engine::Track) {
+    for transition in &track.transitions {
+        let Some(next) = track.clips.get(transition.after_clip + 1) else { continue };
+        let start = next.start.saturating_sub(transition.duration.half_floor());
+        let rect = span_rect(state, tracks_rect, row, start, start.saturating_add(transition.duration));
+        if rect.intersects(tracks_rect) {
+            painter.rect_filled(rect, CornerRadius::same(3), TRANSITION);
+            painter.rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, Color32::WHITE), StrokeKind::Inside);
+        }
+    }
 }
 
 fn span_rect(state: &EditorState, tracks_rect: Rect, row: Rect, start: Time, end: Time) -> Rect {

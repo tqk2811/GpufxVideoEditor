@@ -15,6 +15,7 @@ mod encoder;
 mod export;
 mod ffi;
 mod gpu;
+mod packages;
 mod paths;
 
 pub use audio::{AudioFileDecoder, AudioFiles};
@@ -23,4 +24,5 @@ pub use decoder::{is_cancelled, DecodedFrame, PublishClock, SequentialDecoder};
 pub use encoder::{encoder_exists, EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
 pub use export::{temporary_path, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;
+pub use packages::{read_package_info, PackageInfo};
 pub use paths::ProjectPaths;

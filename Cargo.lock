@@ -1283,6 +1283,7 @@ dependencies = [
  "egui-winit",
  "engine",
  "rfd",
+ "serde_json",
  "wgpu",
  "winit",
 ]
