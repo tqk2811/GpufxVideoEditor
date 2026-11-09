@@ -79,6 +79,7 @@ Giai đoạn 0 là cửa quyết định, không đạt thì dừng hoặc đổ
 2. **Audio:** cắt, mix, fade, audio làm đồng hồ chính cho preview.
 3. **UI tối thiểu:** cắt, kéo clip, nhiều track, chọn hiệu ứng từ manifest, undo.
 4. **Hoàn thiện:** keyframe, text, proxy, cache, phục hồi khi lỗi.
+4b. **MCP server cho agent:** chạy trên project file và điều khiển editor đang mở, chụp hình theo thời điểm hoặc frame index. Đặc tả ở [spec-mcp-server-vi.md](spec-mcp-server-vi.md).
 5. **Mở rộng:** quản lý màu/HDR, render trước cho AI, import/export OpenTimelineIO, có thể thêm OpenFX.
 
 Ước lượng thô: bản dựng được video ngắn cần vài tháng; cạnh tranh với Kdenlive cần nhiều năm.
