@@ -318,8 +318,10 @@ fn update_graph_params(graph: &mut EffectGraph, prefix: &str, package: &str, app
 
 /// Whether a graph whose numbers were just updated can no longer run: gpufx fixes the sizes its
 /// size functions compute, and refuses to go on when a parameter they read has changed. Costs no
-/// GPU work when the sizes are already known, and tells before any fence is staged.
-fn needs_rebuild(graph: &EffectGraph, pads: &[(u32, u32)]) -> bool {
+/// GPU work when the sizes are already known, and tells before any fence is staged. For new input
+/// sizes a shader computes them with a submit, hence the gate.
+fn needs_rebuild(gpu: &Gpu, graph: &EffectGraph, pads: &[(u32, u32)]) -> bool {
+    let _gate = gpu.lock_submits();
     graph.output_size(0, pads).is_err()
 }
 
@@ -414,10 +416,11 @@ impl D3d12Compositor {
         let mut outputs = [images[output.0].frame(width, height)];
         let pads: Vec<(u32, u32)> = inputs.iter().map(|frame| (frame.width, frame.height)).collect();
         // A shader that computes an output size submits once for new input sizes, so it happens
-        // here, under the gate; the call below then finds the answer. Its error comes back there.
+        // here, under the gate; the call below then finds the answer. A failure ends the step here:
+        // the answer is not kept, so the call below would compute it again outside the gate.
         {
             let _gate = gpu.lock_submits();
-            let _ = graph.output_size(0, &pads);
+            graph.output_size(0, &pads).map_err(|e| format!("computing the output size failed: {e}"))?;
         }
         // SAFETY: the resources and fences are live objects of the shared device, in COMMON once
         // their fences reach the values passed, and not reused by others before the fences signal.
@@ -547,7 +550,7 @@ impl Compositor for D3d12Compositor {
                 clip_graphs.retain(|entry| entry != key);
                 return Err(message);
             }
-            if changed && needs_rebuild(&built.graph, &pads) {
+            if changed && needs_rebuild(gpu, &built.graph, &pads) {
                 clip_graphs.retain(|entry| entry != key);
             }
             let built = clip_graphs.get_or_build(key, shape.as_slice(), &build)?;
@@ -573,7 +576,7 @@ impl Compositor for D3d12Compositor {
             let changed = built.applied != *params;
             let updated = update_graph_params(&mut built.graph, "", package, &built.applied, params);
             match updated {
-                Ok(()) if changed && needs_rebuild(&built.graph, &pads) => None,
+                Ok(()) if changed && needs_rebuild(&self.gpu, &built.graph, &pads) => None,
                 Ok(()) => {
                     built.applied.clone_from(params);
                     Some(Ok(built))
@@ -648,9 +651,51 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::cell::Cell;
+    use std::sync::Barrier;
+    use std::time::Instant;
 
     fn params(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()
+    }
+
+    /// The hardware device and the overlay graph, or `None` when the machine has no such device.
+    fn overlay_on_hardware() -> Option<(Gpu, EffectGraph)> {
+        let Some(gpu) = Gpu::create_hardware().expect("device") else {
+            assert!(std::env::var_os("GPUFX_REQUIRE_GPU").is_none(), "GPUFX_REQUIRE_GPU is set, but there is no hardware adapter");
+            return None;
+        };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        let overlay = load_overlay(&gpu.context, &ProjectPaths::new(Path::new("project.json"), vec![root])).expect("the overlay package");
+        Some((gpu, overlay))
+    }
+
+    #[test]
+    fn the_rebuild_check_waits_for_the_submit_gate() {
+        const HELD: Duration = Duration::from_millis(200);
+        let Some((gpu, overlay)) = overlay_on_hardware() else { return };
+        let taken = Barrier::new(2);
+        let waited = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let _gate = gpu.lock_submits();
+                taken.wait();
+                std::thread::sleep(HELD);
+            });
+            taken.wait();
+            let started = Instant::now();
+            needs_rebuild(&gpu, &overlay, &[(16, 16), (16, 16)]);
+            started.elapsed()
+        });
+        assert!(waited >= HELD / 2, "the check ran while the gate was held, after {waited:?}");
+    }
+
+    #[test]
+    fn a_failing_output_size_ends_the_step_before_gpufx_runs() {
+        let Some((gpu, mut overlay)) = overlay_on_hardware() else { return };
+        let mut images = vec![Image::create(&gpu, 16, 16).expect("an image")];
+        // The overlay takes two inputs, so asking for its size with one fails.
+        let mut inputs = [images[0].frame(16, 16)];
+        let error = D3d12Compositor::run_graph(&gpu, &mut overlay, &mut inputs, &mut images, ImageId(0), 16, 16, &FrameInfo::new(0.0, 0)).expect_err("one input is refused");
+        assert!(error.starts_with("computing the output size failed"), "{error}");
     }
 
     #[test]

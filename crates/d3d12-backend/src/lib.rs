@@ -3,8 +3,10 @@
 //! model or the scheduler.
 //!
 //! Rendering is single threaded, but a window may present from another thread. So every
-//! `process_d3d12` and `queue.submit` holds [`Gpu::lock_submits`]: none may overlap
-//! `process_d3d12`, which is the contract of `GpuContext::from_device` for one queue.
+//! `queue.submit`, and the part of `process_d3d12` from staging its fences to taking them back,
+//! holds [`Gpu::lock_submits`]: no other submit may come between them, which is the contract of
+//! `GpuContext::from_device` for one queue. So does computing output sizes, which submits. The rest
+//! of `process_d3d12`, such as building pipelines, runs outside it.
 
 #![cfg(windows)]
 
