@@ -58,7 +58,7 @@ Giải mã và ghép dùng shader gpufx, còn xuất dùng `rgba_to_nv12` ở `c
 
 ### [Thấp] Dọn dẹp rải rác ở engine và backend
 
-`canvas` không được giải phóng trên đường lỗi (`crates/engine/src/render.rs:264-282`). `clip_graphs` không bao giờ bị loại bỏ (`crates/d3d12-backend/src/compositor.rs:186`), nên project nhiều clip giữ graph của mọi clip. Thư mục package mặc định là đường dẫn lúc build (`crates/gpufx-render/src/main.rs:51`), không chạy được khi file thực thi được chép đi. `Decoder::wait_idle` trong trait trung lập là khái niệm riêng của D3D12VA. Ghi ngày 2026-11-09.
+`canvas` không được giải phóng trên đường lỗi (`crates/engine/src/render.rs:264-282`). `clip_graphs` không bao giờ bị loại bỏ (`crates/d3d12-backend/src/compositor.rs:186`), nên project nhiều clip giữ graph của mọi clip. Thư mục package mặc định là đường dẫn lúc build (`crates/gpufx-render/src/main.rs:68`), không chạy được khi file thực thi được chép đi. `Decoder::wait_idle` trong trait trung lập là khái niệm riêng của D3D12VA. Ghi ngày 2026-11-09.
 
 ### [Vừa] Transition giữa hai clip không có thêm tiếng ngoài điểm in/out không phải crossfade thật
 
@@ -132,10 +132,6 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/gpufx-editor/src/editor.rs`, `is_dirty` so số revision, mà undo cũng tăng revision, nên undo về đúng bản đã lưu vẫn hỏi lưu khi đóng. Nên làm nếu cảnh báo thừa gây khó chịu. Ghi ngày 2026-11-09.
 
-### [Vừa] Export chạy trong tiến trình editor
-
-`crates/gpufx-editor/src/export.rs` chạy render ngay trong tiến trình editor (luồng `export`) trên cùng device với preview, nên device bị mất lúc export kéo sập cả editor, và preview phải tạm dừng suốt thời gian export. User đã chốt làm: chạy `gpufx-render` thành tiến trình con và lấy tiến độ qua stdout, vì sau này có bản chạy không giao diện cho agent MCP. Ghi ngày 2026-11-09.
-
 ### [Thấp] Seek trong lúc clone project bị kẹp về điểm cuối cũ khi timeline dài ra
 
 `crates/gpufx-editor/src/playback/thread.rs:241`: lệnh seek tới trong lúc `producer.set_project` đang clone bị kẹp theo điểm cuối của project cũ, nên timeline vừa dài ra thì seek quá điểm cuối cũ bị đưa về đó. Nên làm vì người dùng sẽ thấy tua sai vị trí đúng lúc vừa sửa. Ghi ngày 2026-11-09.
@@ -146,7 +142,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Thấp] Bản render giữ lại khi đổi tên thất bại không được dọn
 
-`crates/d3d12-backend/src/export.rs:125`: file đích bị khoá thì mỗi lần xuất lại để thêm một file `*.tmp.*` đầy đủ, không có gì dọn. Nếu `out` đổi tên xong mà file hash lỗi thì báo thất bại dù đích đã bị thay. Nên thử lại hoặc kiểm quyền ghi trước khi render. Ghi ngày 2026-11-09.
+`crates/d3d12-backend/src/export.rs:128`: file đích bị khoá thì mỗi lần xuất lại để thêm một file `*.tmp.*` đầy đủ, không có gì dọn. Nếu `out` đổi tên xong mà file hash lỗi thì báo thất bại dù đích đã bị thay. Nên thử lại hoặc kiểm quyền ghi trước khi render. Ghi ngày 2026-11-09.
 
 ### [Thấp] Video không ghi độ dài mượn độ dài của container
 
@@ -229,3 +225,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/gpufx-editor/src/window.rs:456`: `window.fullscreen()` trả về chế độ winit được yêu cầu chứ không phải trạng thái thật của cửa sổ, nên Win+mũi tên hoặc đổi màn hình có thể để editor tin là vẫn fullscreen và các panel vẫn ẩn. Cần thử tay trên máy thật rồi mới quyết định có theo dõi trạng thái hệ điều hành hay không. Ghi ngày 2026-11-09.
 
+
+### [Thấp] Editor chết giữa lúc xuất để lại file tạm
+
+`crates/gpufx-editor/src/export/child.rs:95`: job object giết `gpufx-render` ngay khi editor crash, nên file `*.tmp.mp4` cạnh file đích và project tạm `gpufx-export.*.tmp.json` trong thư mục temp còn lại. Nên dọn ở lần mở editor sau, chỉ xoá file có PID không còn sống. Ghi ngày 2026-11-09.

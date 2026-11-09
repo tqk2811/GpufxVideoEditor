@@ -1,18 +1,27 @@
-//! Export on a thread of its own. The render path itself is `d3d12_backend::ExportJob`, shared with
-//! the CLI; this module only runs it in the background and reports. The UI must have stopped the
-//! preview and playback first, and passes the receiver that says the preview has let go.
+//! Export in a child process: `gpufx-render --progress json` renders the project, so a lost device
+//! or a crash there cannot take the editor down. [`child`] runs it; this module holds what the UI
+//! needs and the thread that follows the child. The render path itself is `d3d12_backend::ExportJob`.
+//!
+//! The preview and playback still stop during an export: the child needs the GPU memory and video
+//! decoders too, and editing stays off because the export shows the project it started with.
+
+pub mod child;
+pub mod machine;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu, AUTO_ENCODERS};
+use d3d12_backend::{EncoderChoice, ExportJob, ExportReport, AUTO_ENCODERS};
 use engine::{frame_count, Project};
 
 use crate::i18n::Message;
+
+pub use child::sibling_render_exe;
+pub use machine::ExportOutcome;
 
 /// Frames written so far, of the frames in the project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,14 +77,6 @@ pub fn finished_message(report: &ExportReport, out: &Path, has_audio: bool) -> M
     }
 }
 
-/// How an export thread ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExportOutcome {
-    Finished(ExportReport),
-    Cancelled,
-    Failed(String),
-}
-
 pub struct ExportWorker {
     done: Arc<AtomicI64>,
     total: i64,
@@ -85,8 +86,9 @@ pub struct ExportWorker {
 }
 
 impl ExportWorker {
-    /// Starts rendering `job` once `preview_released` has fired. `wake` is called when it ends.
-    pub fn start(job: ExportJob, gpu: Arc<Gpu>, preview_released: Receiver<()>, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
+    /// Runs `job` through the renderer at `tool` once `preview_released` has fired, so the child
+    /// and the preview do not hold GPU memory at the same time. `wake` is called when it ends.
+    pub fn start(job: ExportJob, package_roots: Vec<PathBuf>, tool: PathBuf, preview_released: Receiver<()>, wake: impl Fn() + Send + 'static) -> Result<Self, String> {
         let total = frame_count(&job.project);
         let done: Arc<AtomicI64> = Arc::default();
         let cancel: Arc<AtomicBool> = Arc::default();
@@ -95,8 +97,8 @@ impl ExportWorker {
         let handle = thread::Builder::new().name("export".to_owned()).spawn(move || {
             // Waits for the preview to drop its decoders and images; an error only means it is gone.
             let _ = preview_released.recv();
-            let run = catch_unwind(AssertUnwindSafe(|| run_job(&job, gpu, thread_cancel, &thread_done)));
-            let result = run.unwrap_or_else(|_| ExportOutcome::Failed("the export thread hit an internal error".to_owned()));
+            let run = catch_unwind(AssertUnwindSafe(|| child::run_child(&job, &package_roots, &tool, &thread_cancel, &thread_done, child::CANCEL_GRACE)));
+            let result = run.unwrap_or_else(|_| ExportOutcome::Failed(Message::ExportFailed("the export thread hit an internal error".to_owned())));
             *thread_outcome.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
             wake();
         });
@@ -113,7 +115,7 @@ impl ExportWorker {
         self.cancel.store(true, Ordering::SeqCst);
     }
 
-    /// The outcome, once the thread has finished. The thread has released the GPU by then.
+    /// The outcome, once the child and the thread have finished.
     pub fn poll(&mut self) -> Option<ExportOutcome> {
         let outcome = self.outcome.lock().unwrap_or_else(|p| p.into_inner()).take()?;
         if let Some(handle) = self.handle.take() {
@@ -129,21 +131,6 @@ impl Drop for ExportWorker {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
-    }
-}
-
-fn run_job(job: &ExportJob, gpu: Arc<Gpu>, cancel: Arc<AtomicBool>, done: &AtomicI64) -> ExportOutcome {
-    if let Err(message) = job.check() {
-        return ExportOutcome::Failed(message);
-    }
-    if cancel.load(Ordering::SeqCst) {
-        return ExportOutcome::Cancelled;
-    }
-    let progress = |frames: i64, _total: i64| done.store(frames, Ordering::SeqCst);
-    match job.run(gpu, ExportControl { cancel: Some(cancel), progress: Some(&progress), ..Default::default() }) {
-        Ok(report) => ExportOutcome::Finished(report),
-        Err(ExportError::Cancelled) => ExportOutcome::Cancelled,
-        Err(ExportError::Failed(message)) => ExportOutcome::Failed(message),
     }
 }
 

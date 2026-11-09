@@ -16,7 +16,7 @@ use engine::Project;
 use engine::{Time, TrackKind};
 
 use crate::editor::{EditorState, Status};
-use crate::export::{encoder_options, export_blocker, finished_message, ExportOutcome, ExportWorker};
+use crate::export::{encoder_options, export_blocker, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
 use crate::i18n::{Language, Message};
 use crate::packages::{scan, Catalog};
 use crate::playback::device::Playback;
@@ -243,7 +243,7 @@ impl Session {
             let message = message.to_owned();
             self.state.set_preview_error(Some(message));
         }
-        // An error of this thread, the presenter's: the worker and the export have their own.
+        // An error of this thread, the presenter's: the worker has its own, and the export is a process.
         if let Some(message) = self.gpu.take_error() {
             self.state.set_preview_error(Some(format!("wgpu error: {message}")));
         }
@@ -361,8 +361,9 @@ impl Session {
         }
     }
 
-    /// Starts an export of the current project to `out`. Playback and the preview stop first, so
-    /// the export has the GPU and decoders to itself; the thread waits for the preview to let go.
+    /// Starts an export of the current project to `out` in a child process. Playback and the
+    /// preview stop first, so the child has the GPU memory and decoders; it starts once the preview
+    /// has let go.
     fn start_export(&mut self, out: PathBuf) {
         if let Some(reason) = export_blocker(self.state.project()) {
             self.state.report_error(reason);
@@ -375,7 +376,7 @@ impl Session {
         let preview_released = self.preview.suspend();
         let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: option.choice, hashes: None };
         let window = self.window.clone();
-        match ExportWorker::start(job, self.gpu.clone(), preview_released, move || window.request_redraw()) {
+        match ExportWorker::start(job, self.package_roots.clone(), sibling_render_exe(), preview_released, move || window.request_redraw()) {
             Ok(worker) => {
                 self.export = Some(worker);
                 self.export_out = Some(out);
@@ -397,7 +398,7 @@ impl Session {
         let status = match outcome {
             ExportOutcome::Finished(report) => Status::Info(finished_message(&report, &out, self.state.project().output.audio.is_some())),
             ExportOutcome::Cancelled => Status::Info(Message::ExportCancelled),
-            ExportOutcome::Failed(message) => Status::Error(Message::ExportFailed(message)),
+            ExportOutcome::Failed(message) => Status::Error(message),
         };
         self.state.end_export(status);
         self.resume_preview();

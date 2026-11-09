@@ -164,6 +164,10 @@ pub enum Message {
     ExportFinishedSilent { frames: i64, path: String, encoder: String },
     ExportCancelled,
     ExportFailed(String),
+    /// The renderer is not beside the editor; holds its path.
+    ExportToolMissing(String),
+    /// The renderer ended without a result.
+    ExportChildCrashed { code: String, stderr: String },
     EncoderAuto,
     EncoderNeedsGpl(String),
     EncoderMissing(String),

@@ -1,4 +1,4 @@
-//! The editor's background export against the CLI: same project, same frames and PCM. GPU cases skip
+//! The editor's export through its child process against a direct CLI run: same project, same frames and PCM. GPU cases skip
 //! on a machine without a hardware adapter, or fail if `GPUFX_REQUIRE_GPU` is set.
 
 mod common;
@@ -59,11 +59,11 @@ fn export_job(file: &Path, out: &Path, hashes: Option<&Path>) -> ExportJob {
 }
 
 /// Starts the UI's worker on `file`, already past the wait for the preview.
-fn start_export(gpu: &Arc<Gpu>, file: &Path, out: &Path, hashes: Option<&Path>) -> ExportWorker {
+fn start_export(file: &Path, out: &Path, hashes: Option<&Path>) -> ExportWorker {
     let job = export_job(file, out, hashes);
     let (released, gate) = channel();
     released.send(()).expect("the receiver is alive");
-    ExportWorker::start(job, gpu.clone(), gate, || {}).expect("the export starts")
+    ExportWorker::start(job, package_roots(), PathBuf::from(env!("CARGO_BIN_EXE_gpufx-render")), gate, || {}).expect("the export starts")
 }
 
 fn wait(worker: &mut ExportWorker) -> ExportOutcome {
@@ -86,7 +86,9 @@ fn decoded_pcm(file: &Path) -> Vec<u8> {
 #[test]
 fn the_ui_export_matches_the_cli_in_frames_and_pcm() {
     let _lock = gpu_lock();
-    let Some(gpu) = hardware_gpu() else { return };
+    if hardware_gpu().is_none() {
+        return;
+    }
     let dir = scratch("export-matches-cli");
     let file = dir.join("project.json");
     save_project_file(&project_with_transition_and_sound(), &file).expect("save the project");
@@ -97,8 +99,11 @@ fn the_ui_export_matches_the_cli_in_frames_and_pcm() {
     let printed = String::from_utf8_lossy(&cli.stdout).into_owned();
     let cli_pcm = printed.lines().find_map(|line| line.strip_prefix("pcm sha256: ")).expect("the CLI reports the PCM hash");
 
-    let (ui_out, ui_hashes) = (dir.join("ui.mp4"), dir.join("ui.txt"));
-    let mut worker = start_export(&gpu, &file, &ui_out, Some(&ui_hashes));
+    // A folder name outside ASCII, which must survive the command line and the protocol.
+    let folder = dir.join("xuất thử");
+    std::fs::create_dir_all(&folder).expect("create the folder");
+    let (ui_out, ui_hashes) = (folder.join("ui.mp4"), folder.join("ui.txt"));
+    let mut worker = start_export(&file, &ui_out, Some(&ui_hashes));
     let report = match wait(&mut worker) {
         ExportOutcome::Finished(report) => report,
         other => panic!("the export did not finish: {other:?}"),
@@ -190,7 +195,9 @@ fn a_real_file_without_sound_cannot_be_added_to_an_audio_track() {
 #[test]
 fn a_cancelled_export_keeps_the_old_file_and_removes_the_partial_one() {
     let _lock = gpu_lock();
-    let Some(gpu) = hardware_gpu() else { return };
+    if hardware_gpu().is_none() {
+        return;
+    }
     let dir = scratch("export-cancel");
     let file = dir.join("project.json");
     save_project_file(&project_with_transition_and_sound(), &file).expect("save the project");
@@ -199,7 +206,7 @@ fn a_cancelled_export_keeps_the_old_file_and_removes_the_partial_one() {
     let bystander = dir.join("out.tmp.mp4");
     std::fs::write(&bystander, b"user video").expect("write the file");
 
-    let mut worker = start_export(&gpu, &file, &out, None);
+    let mut worker = start_export(&file, &out, None);
     let started = Instant::now();
     while worker.progress().done < 5 {
         assert!(started.elapsed() < TIMEOUT, "the export did not start");
