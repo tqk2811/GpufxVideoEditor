@@ -30,6 +30,11 @@ function Build-Variant {
         Invoke-Cargo (@('test') + $packages + $Features)
     }
     Invoke-Cargo (@('build', '--release', '-p', 'gpufx-render', '-p', 'gpufx-editor') + $Features)
+    # The editor runs gpufx-render.exe from its own folder to export.
+    foreach ($name in 'gpufx-render.exe', 'gpufx-editor.exe') {
+        $built = Join-Path $TargetDir "release\$name"
+        if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { throw "$built was not built" }
+    }
 }
 
 Push-Location $repoRoot
