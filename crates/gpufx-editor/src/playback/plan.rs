@@ -28,6 +28,12 @@ pub fn prefill_done(prepared: usize, remaining: i64, lead_frames: usize) -> bool
     prepared >= lead_frames || prepared as i64 >= remaining.max(0)
 }
 
+/// Whether the gate may open now: still playing, no edit waiting to replace what is prepared, and
+/// the prefill of the current generation is done. Ask with the command lock held.
+pub fn gate_may_open(playing: bool, edit_pending: bool, prepared: usize, remaining: i64, lead_frames: usize) -> bool {
+    playing && !edit_pending && prefill_done(prepared, remaining, lead_frames)
+}
+
 /// Frames between the position the clock reports after a pull and what is heard at that moment: the
 /// buffer just handed over, plus the time until its first frame reaches the speaker.
 pub fn output_delay_frames(buffer_frames: usize, latency: Option<Duration>) -> u64 {
@@ -145,6 +151,15 @@ mod tests {
         assert!(prefill_done(500, 500, 9_600), "only 500 frames are left");
         assert!(prefill_done(0, 0, 9_600), "nothing is left");
         assert!(prefill_done(0, -5, 9_600));
+    }
+
+    #[test]
+    fn the_gate_opens_only_while_playing_with_the_lead_and_no_edit_waiting() {
+        assert!(gate_may_open(true, false, 9_600, 48_000, 9_600));
+        assert!(!gate_may_open(false, false, 9_600, 48_000, 9_600), "stopped");
+        assert!(!gate_may_open(true, true, 9_600, 48_000, 9_600), "the lead is about to be replaced");
+        assert!(!gate_may_open(true, false, 0, 48_000, 9_600), "a new generation has no lead");
+        assert!(gate_may_open(true, false, 500, 500, 9_600), "only 500 frames are left");
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::time::Duration;
 use engine::render::{ClipKey, RenderError};
 use engine::{audio_channel, sample_position, AudioClock, AudioConsumer, AudioProducer, AudioSource, Project, Time, MIX_CHANNELS};
 
-use super::plan::{frames_to_prepare, output_delay_frames, prefill_done, ClockReading, BLOCK_FRAMES, LEAD_FRAMES, RING_BLOCKS};
+use super::plan::{frames_to_prepare, gate_may_open, output_delay_frames, ClockReading, BLOCK_FRAMES, LEAD_FRAMES, RING_BLOCKS};
 
 /// How long the thread sleeps when the lead is full. A seek or edit wakes it at once.
 const IDLE_WAIT: Duration = Duration::from_millis(10);
@@ -150,10 +150,9 @@ fn run<S: AudioSource + ?Sized>(mut producer: AudioProducer, source: &mut S, clo
         }
         drop(commands);
         let done = step(&mut producer, source, silent);
-        let remaining = clock.end() - clock.position();
-        let ready = prefill_done(producer.prepared_frames(), remaining, LEAD_FRAMES);
         commands = control.lock();
-        if commands.playing && ready {
+        // Decided under the lock: play and seek take it, so what is measured is what they left.
+        if gate_may_open(commands.playing, commands.project.is_some(), producer.prepared_frames(), clock.end() - clock.position(), LEAD_FRAMES) {
             shared.set_gate(true);
         }
         match done {
@@ -224,6 +223,8 @@ impl PreparingThread {
     }
 
     pub fn seek(&self, time: Time) {
+        // Held so the seek cannot land between the thread's gate decision and its wait.
+        let _commands = self.control.lock();
         self.shared.begin(sample_position(time));
         self.clock.seek(time);
         self.control.wake.notify_all();
@@ -379,6 +380,30 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_new_generation_just_before_the_gate_decision_does_not_open_it() {
+        let permits = Permits::default();
+        let source = permits.clone();
+        let (thread, _consumer) = PreparingThread::spawn(&project(4, true, TrackKind::Video), move || source).unwrap();
+        thread.play(Time::ZERO);
+        // The lead is one read short. Holding the lock lets the last read finish and leaves the
+        // thread waiting for the lock with a whole lead of the old generation.
+        permits.grant(9);
+        permits.wait_for(9);
+        let guard = thread.control.lock();
+        permits.grant(1);
+        permits.wait_for(10);
+        thread::sleep(Duration::from_millis(50));
+        // What stop and play do, without giving the lock away.
+        thread.shared.set_gate(false);
+        thread.clock.seek(Time::from_seconds(2).unwrap());
+        drop(guard);
+        thread::sleep(Duration::from_millis(100));
+        let open = thread.shared().gate.load(Ordering::Acquire);
+        permits.unlimited();
+        assert!(!open, "the gate opened for a generation with no lead");
     }
 
     #[test]
