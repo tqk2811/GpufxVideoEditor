@@ -21,13 +21,14 @@
 //!   `cos(i / n * pi / 2)` and the later one `sin(i / n * pi / 2)` (equal power).
 //! * **Fades.** Linear in amplitude and anchored to the clip's own start and end. `fade_in` gives
 //!   `i / n` at `i` samples after the first clip sample. `fade_out` mirrors it, so the last clip
-//!   sample has gain 0. In the part of a transition window outside the clip, a fade on that side
-//!   holds its end value of 0.
+//!   sample has gain 0. A fade on the side of a transition is rejected by [`crate::validate`]
+//!   (`FadeBesideTransition`), because it would silence part of the window; the scheduler assumes
+//!   it does not occur.
 //! * **Total length.** Audio stops with the last video frame, see [`audio_sample_count`].
 
 use crate::project::{Clip, Project, Track, Transition};
 use crate::render::ClipKey;
-use crate::schedule::{frame_count, frame_time};
+use crate::schedule::{frame_count, frame_time, transition_window};
 use crate::time::Time;
 use std::f64::consts::FRAC_PI_2;
 
@@ -175,9 +176,9 @@ fn find_transition(track: &Track, after_clip: usize) -> Option<&Transition> {
 
 /// The window of `transition`, whose later clip is `next`. `None` when it is shorter than a sample.
 fn window_of(transition: &Transition, next: &Clip) -> Option<Window> {
-    let start_time = next.start.saturating_sub(transition.duration.half_floor());
+    let (start_time, end_time) = transition_window(transition, next);
     let start = sample_position(start_time);
-    let end = sample_position(start_time.saturating_add(transition.duration));
+    let end = sample_position(end_time);
     (end > start).then_some(Window {
         start,
         len: end - start,

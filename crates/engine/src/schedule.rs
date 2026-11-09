@@ -24,7 +24,7 @@
 //! * **Progress.** `elapsed = frame_time - window_start` out of `total = duration`, kept as an exact
 //!   ratio. [`Progress::parts_per_million`] floors `elapsed * 1_000_000 / total`.
 
-use crate::project::{Effect, Project, Track};
+use crate::project::{Clip, Effect, Project, Track, Transition};
 use crate::time::Time;
 use serde_json::{Map, Value};
 
@@ -141,13 +141,19 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
     }
 }
 
+/// The start and end ticks of the window of `transition`, whose later clip is `next`. The window
+/// is centred on the cut, which is the start of `next`.
+pub(crate) fn transition_window(transition: &Transition, next: &Clip) -> (Time, Time) {
+    let start = next.start.saturating_sub(transition.duration.half_floor());
+    (start, start.saturating_add(transition.duration))
+}
+
 fn content_at(track: &Track, t: Time) -> Option<LayerContent<'_>> {
     for tr in &track.transitions {
         let Some(b) = track.clips.get(tr.after_clip + 1) else {
             continue;
         };
-        let window_start = b.start.saturating_sub(tr.duration.half_floor());
-        let window_end = window_start.saturating_add(tr.duration);
+        let (window_start, window_end) = transition_window(tr, b);
         if t >= window_start && t < window_end {
             return Some(LayerContent::Transition {
                 package: &tr.package,

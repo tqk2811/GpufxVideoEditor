@@ -46,7 +46,7 @@ Phiên bản 2 thêm các trường tuỳ chọn. Engine vẫn đọc được p
 }
 ```
 
-Kiểm hợp lệ thêm: `sample_rate` khác 48000, `channels` khác 2, `gain_db` không hữu hạn, fade âm, tổng `fade_in` và `fade_out` dài hơn clip, track audio có transition hoặc effect, nguồn của track audio không có luồng tiếng. Clip video mà nguồn không có tiếng thì coi là im lặng, không báo lỗi.
+Kiểm hợp lệ thêm: `sample_rate` khác 48000, `channels` khác 2, `gain_db` không hữu hạn, fade âm, `fade_in` ở clip sau một transition hoặc `fade_out` ở clip trước một transition (fade cạnh transition làm lỗ im lặng trong cửa sổ), `gain_db` lớn hơn 60, `bitrate` bằng 0, tổng `fade_in` và `fade_out` dài hơn clip, track audio có transition hoặc effect, nguồn của track audio không có luồng tiếng. Clip video mà nguồn không có tiếng thì coi là im lặng, không báo lỗi.
 
 ## Thời gian
 

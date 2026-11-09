@@ -32,7 +32,7 @@ impl Resolver for AcceptAll {
 }
 
 /// One validation problem. Indices are zero-based positions in the project JSON.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     /// `output.width` or `output.height` is zero.
     InvalidOutputSize { width: u32, height: u32 },
@@ -115,6 +115,17 @@ pub enum ValidationError {
         field: &'static str,
         value: Time,
     },
+    /// A clip has a `fade_in` while it is the later clip of a transition, or a `fade_out` while it
+    /// is the earlier clip. The fade would leave a silent hole inside the transition window.
+    FadeBesideTransition {
+        track: usize,
+        clip: usize,
+        field: &'static str,
+    },
+    /// A clip `gain_db` is above 60.
+    GainTooLarge { track: usize, clip: usize, gain_db: f64 },
+    /// `output.audio.bitrate` is zero.
+    InvalidAudioBitrate,
     /// `fade_in + fade_out` is longer than the clip.
     FadesExceedClip {
         track: usize,
@@ -213,6 +224,14 @@ impl fmt::Display for ValidationError {
             NegativeFade { track, clip, field, value } => {
                 write!(f, "track {track}, clip {clip}: {field} {value} must not be negative")
             }
+            FadeBesideTransition { track, clip, field } => write!(
+                f,
+                "track {track}, clip {clip}: {field} cannot be used on the side of a transition"
+            ),
+            GainTooLarge { track, clip, gain_db } => {
+                write!(f, "track {track}, clip {clip}: gain_db {gain_db} must not be above 60")
+            }
+            InvalidAudioBitrate => write!(f, "output: audio bitrate must be positive"),
             FadesExceedClip { track, clip, fade_in, fade_out, duration } => write!(
                 f,
                 "track {track}, clip {clip}: fade_in {fade_in} plus fade_out {fade_out} is longer than duration {duration}"
@@ -265,6 +284,9 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             errors.push(UnsupportedChannelCount {
                 channels: audio.channels,
             });
+        }
+        if audio.bitrate == 0 {
+            errors.push(InvalidAudioBitrate);
         }
     }
 
@@ -319,6 +341,12 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             }
             if !clip.gain_db.is_finite() {
                 errors.push(NonFiniteGain { track: t, clip: c });
+            } else if clip.gain_db > 60.0 {
+                errors.push(GainTooLarge {
+                    track: t,
+                    clip: c,
+                    gain_db: clip.gain_db,
+                });
             }
             let mut fades_ok = true;
             for (field, value) in [("fade_in", clip.fade_in), ("fade_out", clip.fade_out)] {
@@ -443,6 +471,30 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             }
             if ok {
                 valid.push((i, tr.after_clip, tr.duration));
+            }
+        }
+
+        // A fade beside a transition would silence part of its window.
+        for tr in &track.transitions {
+            let Some(next) = tr.after_clip.checked_add(1) else {
+                continue;
+            };
+            if next >= track.clips.len() {
+                continue;
+            }
+            if track.clips[tr.after_clip].fade_out > Time::ZERO {
+                errors.push(FadeBesideTransition {
+                    track: t,
+                    clip: tr.after_clip,
+                    field: "fade_out",
+                });
+            }
+            if track.clips[next].fade_in > Time::ZERO {
+                errors.push(FadeBesideTransition {
+                    track: t,
+                    clip: next,
+                    field: "fade_in",
+                });
             }
         }
 

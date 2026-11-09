@@ -336,15 +336,6 @@ fn crossfade_mixes_both_sources_with_their_gains() {
 }
 
 #[test]
-fn a_fade_out_silences_the_transition_tail_outside_the_clip() {
-    let mut p = crossfade();
-    p.tracks[0].clips[0].fade_out = t(9000); // ends at the cut, sample 48000
-    let a = audio_segments(&p, 0, 200_000)[0].gain;
-    assert_eq!(a.gain_at(47_999), 0.0);
-    assert_eq!(a.gain_at(50_000), 0.0, "holds 0 after the clip end");
-}
-
-#[test]
 fn audio_before_the_source_start_is_silence_and_is_not_read() {
     let mut p = crossfade();
     p.tracks[0].clips[1].source_in = t(0); // b would need 12000 samples before its beginning

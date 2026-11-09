@@ -90,7 +90,11 @@ fn version_1_ignores_fields_of_version_2() {
 
 #[test]
 fn version_1_serializes_without_audio_fields() {
-    let text = serde_json::to_string(&one_clip()).unwrap();
+    let v1 = r#"{"version":1,"output":{"width":1,"height":1,"frame_duration":3000},
+        "tracks":[{"clips":[{"source":"a","start":0,"source_in":0,"duration":3000}]}]}"#;
+    let p = Project::from_json(v1).unwrap();
+    assert_eq!(p.version, 2, "a loaded version 1 project is saved as the current version");
+    let text = serde_json::to_string(&p).unwrap();
     for field in ["audio", "kind", "gain_db", "muted", "fade_in", "fade_out"] {
         assert!(!text.contains(field), "{field} must not appear in {text}");
     }
@@ -182,6 +186,63 @@ fn rejects_negative_fades() {
             },
         ]
     );
+}
+
+fn with_transition() -> Project {
+    project(
+        3000,
+        vec![track(
+            vec![clip("a.mp4", 0, 0, 30_000), clip("b.mp4", 30_000, 0, 30_000)],
+            vec![transition(0, 6000)],
+        )],
+    )
+}
+
+#[test]
+fn rejects_fade_out_on_the_earlier_clip_of_a_transition() {
+    let mut p = with_transition();
+    p.tracks[0].clips[0].fade_out = t(3000);
+    assert_eq!(
+        only(&p),
+        vec![E::FadeBesideTransition { track: 0, clip: 0, field: "fade_out" }]
+    );
+}
+
+#[test]
+fn rejects_fade_in_on_the_later_clip_of_a_transition() {
+    let mut p = with_transition();
+    p.tracks[0].clips[1].fade_in = t(3000);
+    assert_eq!(
+        only(&p),
+        vec![E::FadeBesideTransition { track: 0, clip: 1, field: "fade_in" }]
+    );
+}
+
+#[test]
+fn a_fade_on_the_side_without_a_transition_is_valid() {
+    let mut p = with_transition();
+    p.tracks[0].clips[0].fade_in = t(3000);
+    p.tracks[0].clips[1].fade_out = t(3000);
+    assert_eq!(only(&p), vec![]);
+}
+
+#[test]
+fn gain_of_60_db_is_valid_and_above_it_is_rejected() {
+    let mut p = one_clip();
+    p.tracks[0].clips[0].gain_db = 60.0;
+    assert_eq!(only(&p), vec![]);
+    p.tracks[0].clips[0].gain_db = 60.5;
+    assert_eq!(
+        only(&p),
+        vec![E::GainTooLarge { track: 0, clip: 0, gain_db: 60.5 }]
+    );
+}
+
+#[test]
+fn rejects_zero_audio_bitrate() {
+    let mut p = with_audio(48_000, 2);
+    p.output.audio.as_mut().unwrap().bitrate = 0;
+    assert_eq!(only(&p), vec![E::InvalidAudioBitrate]);
 }
 
 #[test]

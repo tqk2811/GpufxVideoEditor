@@ -206,7 +206,7 @@ struct ClipV1 {
 impl From<ProjectV1> for Project {
     fn from(project: ProjectV1) -> Project {
         Project {
-            version: project.version,
+            version: SUPPORTED_VERSION,
             output: Output {
                 width: project.output.width,
                 height: project.output.height,
