@@ -88,6 +88,18 @@ struct LiveEdit {
     was_clean: bool,
 }
 
+/// Whether two projects are equal when the `locked` flag of every track is ignored.
+fn same_ignoring_locked(a: &Project, b: &Project) -> bool {
+    if a.tracks.len() != b.tracks.len() {
+        return false;
+    }
+    let (mut a, mut b) = (a.clone(), b.clone());
+    for track in a.tracks.iter_mut().chain(b.tracks.iter_mut()) {
+        track.locked = false;
+    }
+    a == b
+}
+
 fn stream_of(kind: TrackKind) -> StreamKind {
     match kind {
         TrackKind::Video => StreamKind::Video,
@@ -512,7 +524,10 @@ impl EditorState {
             Ok(after) => {
                 if *after != before {
                     self.revision += 1;
-                    self.audio_revision = self.revision;
+                    // Locking a track changes nothing that is heard, so it must not flush the audio ring.
+                    if !same_ignoring_locked(after, &before) {
+                        self.audio_revision = self.revision;
+                    }
                 }
                 self.status = Status::Idle;
                 true
@@ -1043,6 +1058,19 @@ mod tests {
         assert!(state.revision() > revision, "the preview is asked for again");
         assert!(state.audio_revision() > audio, "playback gets the new project");
         assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn toggling_lock_leaves_the_audio_revision_alone_but_toggling_hide_changes_it() {
+        let mut state = state_with_clip();
+        let (revision, audio) = (state.revision(), state.audio_revision());
+        state.toggle_track_locked(0);
+        assert!(state.revision() > revision, "the project changed and is dirty");
+        assert_eq!(state.audio_revision(), audio, "a lock is not heard");
+        state.toggle_track_locked(0);
+        assert_eq!(state.audio_revision(), audio);
+        state.toggle_track_hidden(0);
+        assert!(state.audio_revision() > audio, "a hidden track is not heard");
     }
 
     #[test]
