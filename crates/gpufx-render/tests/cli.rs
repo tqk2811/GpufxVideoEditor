@@ -538,6 +538,16 @@ fn a_json_run_reports_a_project_that_cannot_be_read() {
 }
 
 #[test]
+fn a_non_unicode_path_is_an_ordinary_error() {
+    use std::os::windows::ffi::OsStringExt;
+    // An unpaired surrogate is a valid file name on Windows and not valid Unicode.
+    let name = std::ffi::OsString::from_wide(&[0x61, 0xD800, 0x62]);
+    let run = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).arg(&name).arg("--out").arg(&name).args(["--progress", "json"]).output().expect("run gpufx-render");
+    assert_eq!(run.status.code(), Some(1), "no panic: {}", String::from_utf8_lossy(&run.stderr));
+    assert!(matches!(&events(&run.stdout)[..], [ProgressEvent::Error { message }] if message.contains("reading")), "{:?}", String::from_utf8_lossy(&run.stdout));
+}
+
+#[test]
 fn a_bad_argument_is_an_error_event_too() {
     let run = Command::new(env!("CARGO_BIN_EXE_gpufx-render")).args(["--progress", "json", "--nonsense"]).output().expect("run gpufx-render");
     assert!(matches!(&events(&run.stdout)[..], [ProgressEvent::Error { .. }]));

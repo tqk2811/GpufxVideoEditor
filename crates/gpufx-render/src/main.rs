@@ -41,26 +41,28 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut hashes = None;
     let mut package_roots = Vec::new();
     let mut progress = ProgressMode::Text;
-    let mut arguments = std::env::args().skip(1);
+    // Paths need not be Unicode on Windows, so the arguments stay OS strings until they are read as text.
+    let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
         let mut value = |name: &str| arguments.next().ok_or_else(|| format!("{name} needs a value"));
-        match argument.as_str() {
+        let flag = argument.to_string_lossy();
+        match flag.as_ref() {
             "--out" => out = Some(PathBuf::from(value("--out")?)),
             "--encoder" => {
-                let name = value("--encoder")?;
+                let name = value("--encoder")?.to_string_lossy().into_owned();
                 encoder = if name == "auto" { EncoderChoice::Auto } else { EncoderChoice::Named(name) };
             }
             "--hashes" => hashes = Some(PathBuf::from(value("--hashes")?)),
             "--packages" => package_roots.push(PathBuf::from(value("--packages")?)),
             "--progress" => {
-                progress = match value("--progress")?.as_str() {
+                progress = match value("--progress")?.to_string_lossy().as_ref() {
                     "text" => ProgressMode::Text,
                     "json" => ProgressMode::Json,
                     other => return Err(format!("--progress must be text or json, not {other}")),
                 }
             }
             "-h" | "--help" => return Err(USAGE.to_owned()),
-            other if project.is_none() && !other.starts_with("--") => project = Some(PathBuf::from(other)),
+            other if project.is_none() && !other.starts_with("--") => project = Some(PathBuf::from(&argument)),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
     }
@@ -163,7 +165,7 @@ fn run() -> Result<(), Failure> {
 
 /// Whether the command line asks for JSON, known even when the rest of it is wrong.
 fn json_requested() -> bool {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     arguments.windows(2).any(|pair| pair[0] == "--progress" && pair[1] == "json")
 }
 
