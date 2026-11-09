@@ -4,10 +4,10 @@ use egui::emath::round_to_decimals;
 use egui::{DragValue, Response, Ui};
 use std::ops::RangeInclusive;
 
-/// What the field writes back for `old` when its text is left as it was: `old` as shown, rounded
-/// to `decimals`, then clamped to the range as every text edit is.
-fn unedited_text_value(old: f64, decimals: usize, range: &RangeInclusive<f64>) -> f64 {
-    round_to_decimals(old, decimals).max(*range.start()).min(*range.end())
+/// `range` grown to hold `old`, so that text left as it was comes back as `old` and only a value
+/// the user entered can land on a bound.
+fn range_holding(old: f64, range: &RangeInclusive<f64>) -> RangeInclusive<f64> {
+    range.start().min(old)..=range.end().max(old)
 }
 
 /// A [`DragValue`] showing at most `decimals` decimals. The bool is true when the user really
@@ -15,15 +15,13 @@ fn unedited_text_value(old: f64, decimals: usize, range: &RangeInclusive<f64>) -
 /// only an edit is clamped.
 pub(super) fn drag_field(ui: &mut Ui, value: &mut f64, range: RangeInclusive<f64>, speed: f64, decimals: usize, suffix: &str, size: Option<[f32; 2]>) -> (Response, bool) {
     let old = *value;
-    let field = DragValue::new(value).range(range.clone()).speed(speed).max_decimals(decimals).suffix(suffix).update_while_editing(false).clamp_existing_to_range(false);
+    let field = DragValue::new(value).range(range_holding(old, &range)).speed(speed).max_decimals(decimals).suffix(suffix).update_while_editing(false).clamp_existing_to_range(false);
     let response = match size {
         Some(size) => ui.add_sized(size, field),
         None => ui.add(field),
     };
-    let changed = response.changed() && *value != unedited_text_value(old, decimals, &range);
-    if !changed {
-        *value = old;
-    }
+    let changed = response.changed() && *value != round_to_decimals(old, decimals);
+    *value = if changed { value.clamp(*range.start(), *range.end()) } else { old };
     (response, changed)
 }
 
@@ -33,13 +31,19 @@ mod tests {
     use egui::{Event, Modifiers, PointerButton, Pos2, RawInput, Rect};
 
     #[test]
-    fn text_left_alone_gives_the_rounded_clamped_value() {
-        assert_eq!(unedited_text_value(1.033_333_3, 3, &(0.0..=10.0)), 1.033);
-        assert_eq!(unedited_text_value(70.0, 1, &(-60.0..=60.0)), 60.0);
+    fn the_range_of_the_field_grows_only_to_hold_the_old_value() {
+        assert_eq!(range_holding(5.0, &(0.0..=10.0)), 0.0..=10.0);
+        assert_eq!(range_holding(70.0, &(-60.0..=60.0)), -60.0..=70.0);
+        assert_eq!(range_holding(-80.0, &(-60.0..=60.0)), -80.0..=60.0);
     }
 
     /// Clicks into the field, then clicks elsewhere, as a user who only looked at the number does.
     fn click_in_and_out(start: f64, range: RangeInclusive<f64>) -> (f64, bool) {
+        edit_field(start, range, None)
+    }
+
+    /// As [`click_in_and_out`], typing `typed` over the whole field in between.
+    fn edit_field(start: f64, range: RangeInclusive<f64>, typed: Option<&str>) -> (f64, bool) {
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 200.0));
         let mut value = start;
@@ -62,6 +66,10 @@ mod tests {
         frame(vec![press(inside, true)]);
         frame(vec![press(inside, false)]);
         frame(vec![]);
+        if let Some(typed) = typed {
+            let select_all = Event::Key { key: egui::Key::A, physical_key: Some(egui::Key::A), pressed: true, repeat: false, modifiers: Modifiers::COMMAND };
+            frame(vec![select_all, Event::Text(typed.to_owned())]);
+        }
         let outside = Pos2::new(350.0, 180.0);
         frame(vec![Event::PointerMoved(outside)]);
         frame(vec![press(outside, true)]);
@@ -90,5 +98,18 @@ mod tests {
     #[test]
     fn clicking_into_a_field_holding_an_out_of_range_value_changes_nothing() {
         assert_eq!(click_in_and_out(70.0, -60.0..=60.0), (70.0, false));
+        assert_eq!(click_in_and_out(-80.0, -60.0..=60.0), (-80.0, false));
+    }
+
+    #[test]
+    fn typing_the_bound_over_an_out_of_range_value_is_an_edit() {
+        assert_eq!(edit_field(-80.0, -60.0..=60.0, Some("-60")), (-60.0, true));
+        assert_eq!(edit_field(70.0, -60.0..=60.0, Some("60")), (60.0, true));
+    }
+
+    #[test]
+    fn typing_past_the_range_is_clamped_even_toward_an_out_of_range_value() {
+        assert_eq!(edit_field(-80.0, -60.0..=60.0, Some("-70")), (-60.0, true));
+        assert_eq!(edit_field(5.0, 0.0..=10.0, Some("99")), (10.0, true));
     }
 }
