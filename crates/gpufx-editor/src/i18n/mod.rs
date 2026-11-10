@@ -248,6 +248,7 @@ pub enum Message {
     FieldPlacement,
     DropOnTimeline,
     OutputSizeCustom,
+    FrameRateCustom,
     Apply,
     FieldVolume,
     SelectClipHint,

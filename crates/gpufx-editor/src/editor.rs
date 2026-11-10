@@ -2616,6 +2616,17 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_frame_rate_outside_the_presets_is_kept_and_undoes() {
+        let mut state = state_with_clip();
+        let before = state.project().clone();
+        let custom = crate::timecode::frame_duration_from_fps(7.0).expect("in range");
+        state.set_frame_duration(custom);
+        assert_eq!(state.project().output.frame_duration, Time::from_ticks(12_857));
+        state.undo();
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
     fn the_frame_rate_changes_and_undoes() {
         let mut state = state_with_clip();
         let before = state.project().clone();

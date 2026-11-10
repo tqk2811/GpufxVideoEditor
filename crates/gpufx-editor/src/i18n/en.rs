@@ -236,6 +236,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldStart => "Timeline start".to_owned(),
         Message::DropOnTimeline => "Drop files on the timeline to add them".to_owned(),
         Message::OutputSizeCustom => "Custom size".to_owned(),
+        Message::FrameRateCustom => "Custom frame rate".to_owned(),
         Message::Apply => "Apply".to_owned(),
         Message::FieldSourceIn => "Start of video".to_owned(),
         Message::FieldVideoDuration => "Duration of video".to_owned(),

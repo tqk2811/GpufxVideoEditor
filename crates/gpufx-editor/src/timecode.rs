@@ -1,6 +1,6 @@
 //! Times and project figures as the UI shows them, and seconds for numeric fields.
 
-use engine::{Time, TICKS_PER_SECOND};
+use engine::{Time, MIN_FRAME_DURATION, TICKS_PER_SECOND};
 
 /// Frames per second for labels and the frame part of a timecode.
 fn frames_per_second(frame_duration: Time) -> i64 {
@@ -35,6 +35,24 @@ pub fn format_fps(frame_duration: Time) -> String {
         format!("{exact:.2} fps")
     }
 }
+
+/// The frame rate `frame_duration` stands for, in frames per second.
+pub fn fps_from_frame_duration(frame_duration: Time) -> f64 {
+    TICKS_PER_SECOND as f64 / frame_duration.ticks().max(1) as f64
+}
+
+/// One frame of a custom rate of `fps` frames per second, rounded to a whole tick and never shorter
+/// than [`MIN_FRAME_DURATION`]. `None` for a rate that is not a number or outside 1 to 60 fps.
+pub fn frame_duration_from_fps(fps: f64) -> Option<Time> {
+    if !fps.is_finite() || !(MIN_FPS..=MAX_FPS).contains(&fps) {
+        return None;
+    }
+    let ticks = (TICKS_PER_SECOND as f64 / fps).round() as i64;
+    Some(Time::from_ticks(ticks.max(MIN_FRAME_DURATION.ticks())))
+}
+
+pub const MIN_FPS: f64 = 1.0;
+pub const MAX_FPS: f64 = 60.0;
 
 fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 {
@@ -95,6 +113,29 @@ mod tests {
     fn the_frame_rate_is_shown_whole_when_it_is_whole() {
         assert_eq!(format_fps(THIRTY), "30 fps");
         assert_eq!(format_fps(Time::from_ticks(3003)), "29.97 fps");
+    }
+
+    #[test]
+    fn a_custom_frame_rate_becomes_whole_ticks() {
+        assert_eq!(frame_duration_from_fps(1.0), Some(Time::from_ticks(90_000)));
+        assert_eq!(frame_duration_from_fps(60.0), Some(Time::from_ticks(1500)));
+        assert_eq!(frame_duration_from_fps(30.0), Some(Time::from_ticks(3000)));
+        assert_eq!(frame_duration_from_fps(7.0), Some(Time::from_ticks(12_857)));
+    }
+
+    #[test]
+    fn a_frame_rate_out_of_range_or_not_a_number_is_refused() {
+        for fps in [0.5, 61.0, 0.0, -30.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(frame_duration_from_fps(fps), None, "{fps}");
+        }
+    }
+
+    #[test]
+    fn the_frame_rate_of_a_duration_comes_back_to_the_same_duration() {
+        for ticks in [3750, 3600, 3003, 3000, 1800, 1500, 12_857, 90_000] {
+            let duration = Time::from_ticks(ticks);
+            assert_eq!(frame_duration_from_fps(fps_from_frame_duration(duration)), Some(duration));
+        }
     }
 
     #[test]
