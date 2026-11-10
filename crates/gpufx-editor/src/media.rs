@@ -3,7 +3,7 @@
 use d3d12_backend::MediaProbe;
 use engine::{nearest_free_start, Project, Time, TrackKind};
 
-use crate::editor::clip_label;
+use crate::editor::{clip_label, DEFAULT_IMAGE_DURATION};
 use crate::project_file::same_source;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,9 @@ pub struct MediaItem {
 
 /// One item for `path` from what a probe found, or `None` when it has nothing playable.
 pub fn item_from_probe(path: &str, probe: &MediaProbe) -> Option<MediaItem> {
+    if engine::is_image_source(path) {
+        return Some(MediaItem { source: path.to_owned(), name: clip_label(path).to_owned(), kind: MediaKind::Video, duration: Some(DEFAULT_IMAGE_DURATION), estimated: true });
+    }
     let (kind, duration) = if probe.has_video {
         (MediaKind::Video, probe.video_duration)
     } else if probe.has_audio {
@@ -72,7 +75,8 @@ impl MediaLibrary {
         for track in &project.tracks {
             let kind = if track.is_audio() { MediaKind::Audio } else { MediaKind::Video };
             for clip in &track.clips {
-                let used_to = clip.source_end();
+                // An image has no source length: however long a clip made it, its item stays at the default.
+                let used_to = if clip.is_image() { DEFAULT_IMAGE_DURATION } else { clip.source_end() };
                 let known = self.items.iter_mut().find(|item| same_source(&item.source, &clip.source));
                 match known {
                     Some(item) if item.estimated => item.duration = item.duration.map_or(Some(used_to), |seen| Some(seen.max(used_to))),
@@ -162,6 +166,12 @@ mod tests {
         assert_eq!(choose_track(&timeline, TrackKind::Video, seconds(1), Time::ZERO), TrackChoice::Existing(1));
         timeline.tracks[1].hidden = true;
         assert_eq!(choose_track(&timeline, TrackKind::Video, seconds(1), Time::ZERO), TrackChoice::New);
+    }
+
+    #[test]
+    fn a_probed_image_is_a_video_item_of_the_default_length_marked_as_an_estimate() {
+        let item = item_from_probe("C:/a/logo.PNG", &MediaProbe { has_video: true, has_audio: false, video_duration: None, audio_duration: None, video_problem: None, audio_problem: None }).unwrap();
+        assert_eq!((item.kind, item.duration, item.estimated), (MediaKind::Video, Some(DEFAULT_IMAGE_DURATION), true));
     }
 
     #[test]

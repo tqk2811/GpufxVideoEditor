@@ -81,6 +81,10 @@ unsafe fn find_stream(input: &Input, kind: ffi::AVMediaType, label: &str, contai
 /// Reads which streams `path` has and how long they run. A file with no usable video or audio is
 /// an error that says why.
 pub fn probe_media(path: &Path) -> Result<MediaProbe, String> {
+    if engine::is_image_source(&path.to_string_lossy()) {
+        crate::still::still_dimensions(path)?;
+        return Ok(MediaProbe { has_video: true, has_audio: false, video_duration: None, audio_duration: None, video_problem: None, audio_problem: None });
+    }
     let shown = path.display();
     let text = path.to_str().ok_or_else(|| format!("{shown}: the path is not valid UTF-8"))?;
     let c_path = CString::new(text).map_err(|_| format!("{shown}: the path contains NUL"))?;

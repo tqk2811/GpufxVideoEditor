@@ -7,14 +7,14 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
 use engine::schedule::{ClipClock, Progress};
-use engine::{ClipPlacement, Effect as ProjectEffect, PlacedRect, Time, TICKS_PER_SECOND};
+use engine::{is_image_source, ClipPlacement, Effect as ProjectEffect, PlacedRect, Time, TICKS_PER_SECOND};
 use gpufx_core::d3d12::D3d12Frame;
 use gpufx_core::{ColorInfo, Effect, EffectGraph, FrameInfo, GpuContext, Package, PixelFormat};
 use serde_json::{Map, Value};
@@ -28,13 +28,19 @@ use windows::Win32::Graphics::Direct3D12::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
 
+use crate::alpha_merge::{larger_alpha_effect, restore_alpha_effect};
 use crate::decoder::{DecodedFrame, PublishClock, SequentialDecoder};
 use crate::gpu::Gpu;
 use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
+use crate::still::{aligned_rows, read_still, StillPicture};
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const MAX_SPARE_IMAGES: usize = 3;
+/// How much GPU memory stills may keep for reuse: what is on no clip is let go first.
+const STILL_CACHE_BYTES: u64 = 1 << 30;
+/// The side of the images a graph is tried on, to see what it does with alpha.
+const ALPHA_PROBE_SIDE: u32 = 16;
 
 /// An index into the image pool, or [`BLANK_IMAGE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +58,8 @@ struct Image {
     view: wgpu::TextureView,
     width: u32,
     height: u32,
+    /// The colours in the texture are multiplied by the alpha, as what [`D3d12Compositor::place`] writes.
+    premultiplied: bool,
 }
 
 fn import_texture(gpu: &Gpu, resource: &ID3D12Resource, size: wgpu::Extent3d, usage: wgpu::TextureUsages, state: wgpu::TextureUses) -> wgpu::Texture {
@@ -115,7 +123,38 @@ impl Image {
         let view = display.create_view(&wgpu::TextureViewDescriptor::default());
         // SAFETY: the resource is valid and this wrapper only records barriers on it.
         let barrier_texture = unsafe { hal::dx12::Device::texture_from_raw(resource.clone(), OUTPUT_FORMAT, wgpu::TextureDimension::D2, size, 1, 1) };
-        Ok(Self { resource, fence, fence_value: 0, barrier_texture, copy_source, view, width, height })
+        Ok(Self { resource, fence, fence_value: 0, barrier_texture, copy_source, view, width, height, premultiplied: false })
+    }
+
+    /// Makes an image of `picture` on the GPU and waits until it is there.
+    fn upload(gpu: &Gpu, picture: &StillPicture) -> Result<Self, String> {
+        let (width, height) = (picture.width, picture.height);
+        let image = Self::create(gpu, width, height)?;
+        let size = extent(width, height);
+        let target = import_texture(gpu, &image.resource, size, wgpu::TextureUsages::COPY_DST, wgpu::TextureUses::COPY_DST);
+        let row_bytes = width * 4;
+        let aligned_row = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let bytes = aligned_rows(&picture.rgba, row_bytes as usize, aligned_row as usize);
+        let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor { label: Some("still upload"), size: bytes.len() as u64, usage: wgpu::BufferUsages::COPY_SRC, mapped_at_creation: true });
+        staging.slice(..).get_mapped_range_mut().map_err(|e| format!("mapping the upload buffer failed: {e}"))?.copy_from_slice(&bytes);
+        staging.unmap();
+        let mut before = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("still upload state") });
+        image.record_transition(&mut before, wgpu::TextureUses::COPY_DST, false);
+        let mut copy = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("still upload") });
+        copy.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo { buffer: &staging, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(aligned_row), rows_per_image: Some(height) } },
+            wgpu::TexelCopyTextureInfo { texture: &target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            size,
+        );
+        let mut after = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("still upload state back") });
+        image.record_transition(&mut after, wgpu::TextureUses::COPY_DST, true);
+        let submission = {
+            let _gate = gpu.lock_submits();
+            gpu.queue.submit([before.finish(), copy.finish(), after.finish()])
+        };
+        gpu.device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None }).map_err(|e| format!("waiting for the GPU failed: {e}"))?;
+        gpu.check_errors()?;
+        Ok(image)
     }
 
     fn frame(&self, width: u32, height: u32) -> D3d12Frame {
@@ -129,6 +168,13 @@ impl Image {
             fence_value: self.fence_value,
             color: ColorInfo::default(),
         }
+    }
+
+    /// The frame of this image as the top of a composite: what is premultiplied must say so.
+    fn composited_top(&self, width: u32, height: u32) -> D3d12Frame {
+        let mut frame = self.frame(width, height);
+        frame.color.premultiplied = self.premultiplied;
+        frame
     }
 
     /// Records the barrier between COMMON (where gpufx leaves and expects the resource) and `state`.
@@ -250,6 +296,95 @@ fn decoded_input(frame: &DecodedFrame) -> Result<D3d12Frame, String> {
         fence_value: frame.fence_value(),
         color: frame.color_info()?,
     })
+}
+
+/// A still on the GPU, shared by every clip that shows it. The GPU only ever reads it; the fence
+/// value goes up with each read, like the transparent image's.
+pub struct StillImage {
+    image: Image,
+    fence_value: AtomicU64,
+    aspect: f64,
+    has_alpha: bool,
+}
+
+impl StillImage {
+    fn input(&self) -> D3d12Frame {
+        let mut frame = self.image.frame(self.image.width, self.image.height);
+        frame.fence_value = self.fence_value.load(Ordering::Relaxed);
+        frame
+    }
+}
+
+/// A picture to composite: a decoded video frame, or a still, the same at any time.
+pub enum SourceFrame {
+    Video(DecodedFrame),
+    Still(Arc<StillImage>),
+}
+
+impl SourceFrame {
+    fn input(&self) -> Result<D3d12Frame, String> {
+        match self {
+            Self::Video(frame) => decoded_input(frame),
+            Self::Still(still) => Ok(still.input()),
+        }
+    }
+
+    fn display_aspect(&self) -> f64 {
+        match self {
+            Self::Video(frame) => frame.display_aspect(),
+            Self::Still(still) => still.aspect,
+        }
+    }
+
+    fn raise_fence_value(&mut self, value: u64) {
+        match self {
+            Self::Video(frame) => frame.raise_fence_value(value),
+            Self::Still(still) => {
+                still.fence_value.fetch_max(value, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Whether the picture has see-through parts, so even a whole frame of it needs placing.
+    fn has_alpha(&self) -> bool {
+        matches!(self, Self::Still(still) if still.has_alpha)
+    }
+
+    fn is_still(&self) -> bool {
+        matches!(self, Self::Still(_))
+    }
+}
+
+/// What a clip reads its pictures from.
+pub enum SourceDecoder {
+    Video(SequentialDecoder),
+    Still(Arc<StillImage>),
+}
+
+impl Decoder for SourceDecoder {
+    type Frame = SourceFrame;
+
+    fn frame_at(&mut self, time: Time) -> Result<SourceFrame, RenderError> {
+        match self {
+            Self::Video(decoder) => decoder.frame_at(time).map(SourceFrame::Video),
+            Self::Still(still) => Ok(SourceFrame::Still(still.clone())),
+        }
+    }
+
+    fn wait_idle(&mut self) -> Result<(), RenderError> {
+        match self {
+            Self::Video(decoder) => decoder.wait_idle(),
+            Self::Still(_) => Ok(()),
+        }
+    }
+}
+
+/// A still kept for the next clip that shows the file.
+struct CachedStill {
+    stamp: (u64, Option<SystemTime>),
+    still: Arc<StillImage>,
+    bytes: u64,
+    last_used: u64,
 }
 
 /// The numbers of a parameter value, or `None` for text, which is set through its own call.
@@ -404,6 +539,8 @@ pub struct D3d12Compositor {
     placer: EffectGraph,
     /// A fully transparent image, only ever read. Not in the pool, whose images hold old pictures.
     transparent: Option<ImageId>,
+    stills: HashMap<PathBuf, CachedStill>,
+    stills_used: u64,
     readback: Option<wgpu::Buffer>,
     /// Passed to every decoder this compositor opens; see [`SequentialDecoder::set_abort`].
     abort: Option<(Arc<AtomicBool>, Duration)>,
@@ -418,7 +555,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, transparent: None, readback: None, abort: None, closing: None, publish_clock: Arc::default() })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, transparent: None, stills: HashMap::new(), stills_used: 0, readback: None, abort: None, closing: None, publish_clock: Arc::default() })
     }
 
     /// Makes `closing` stop the decoders opened from now on at once, and lets a newer request stop
@@ -493,7 +630,40 @@ impl D3d12Compositor {
         // gate is held for that part only, so building pipelines does not stop the UI.
         unsafe { graph.process_d3d12_with_submit_lock(inputs, &mut outputs, Some(info), || gpu.lock_submits()) }.map_err(|e| format!("process_d3d12 failed: {e}"))?;
         images[output.0].fence_value = outputs[0].fence_value;
+        images[output.0].premultiplied = false;
         Ok(())
+    }
+
+    /// The still of `path`, decoded once and kept on the GPU while the file stays the same.
+    fn load_still(&mut self, path: &Path) -> Result<Arc<StillImage>, String> {
+        let metadata = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let stamp = (metadata.len(), metadata.modified().ok());
+        self.stills_used += 1;
+        let key = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some(cached) = self.stills.get_mut(&key) {
+            if cached.stamp == stamp {
+                cached.last_used = self.stills_used;
+                return Ok(cached.still.clone());
+            }
+        }
+        let picture = read_still(path)?;
+        let image = Image::upload(&self.gpu, &picture)?;
+        let bytes = u64::from(picture.width) * u64::from(picture.height) * 4;
+        let still = Arc::new(StillImage { aspect: picture.aspect(), has_alpha: picture.has_alpha, fence_value: AtomicU64::new(image.fence_value), image });
+        self.stills.insert(key, CachedStill { stamp, still: still.clone(), bytes, last_used: self.stills_used });
+        self.trim_stills();
+        Ok(still)
+    }
+
+    /// Lets go of the stills used longest ago, while over the limit. One on a clip stays.
+    fn trim_stills(&mut self) {
+        let mut total: u64 = self.stills.values().map(|cached| cached.bytes).sum();
+        while total > STILL_CACHE_BYTES {
+            let oldest = self.stills.iter().filter(|(_, cached)| Arc::strong_count(&cached.still) == 1).min_by_key(|(_, cached)| cached.last_used).map(|(key, cached)| (key.clone(), cached.bytes));
+            let Some((key, bytes)) = oldest else { break };
+            self.stills.remove(&key);
+            total -= bytes;
+        }
     }
 
     /// The transparent image. A new committed resource is zeroed, and nothing ever writes to it.
@@ -508,11 +678,13 @@ impl D3d12Compositor {
     }
 
     /// Draws `picture`, a full-frame image of a source of display aspect `source_aspect` (width over height, sample aspect ratio applied), at `placement` on a
-    /// transparent image. Gives `picture` back when it needs no moving, the usual case, at no cost.
-    fn place(&mut self, picture: ImageId, placement: Option<ClipPlacement>, source_aspect: f64, info: &FrameInfo) -> Result<ImageId, String> {
+    /// transparent image. Gives `picture` back when it needs no moving, the usual case, at no cost, unless
+    /// `through_alpha` says it has see-through parts, whose colours only count through their alpha.
+    /// The overlay mixes with the zero colour of the transparent image, so the result is premultiplied.
+    fn place(&mut self, picture: ImageId, placement: Option<ClipPlacement>, source_aspect: f64, through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
         let (width, height) = (self.width, self.height);
         let rect = PlacedRect::of(placement, f64::from(width) / f64::from(height), source_aspect);
-        if rect.fills_frame(width, height) {
+        if rect.fills_frame(width, height) && !through_alpha {
             return Ok(picture);
         }
         let background = self.transparent_image()?;
@@ -527,6 +699,7 @@ impl D3d12Compositor {
         }
         self.images[background.0].fence_value = inputs[0].fence_value;
         self.images[picture.0].fence_value = inputs[1].fence_value;
+        self.images[output.0].premultiplied = true;
         self.release_image(picture);
         Ok(output)
     }
@@ -574,7 +747,8 @@ fn open_effect(context: &Arc<GpuContext>, path: &Path, package: &str) -> Result<
 
 /// `scale` to the project size, then the clip's effects, as one graph, and which clock parameters
 /// each effect declares.
-fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32, height: u32, effects: &[ProjectEffect]) -> Result<(EffectGraph, Vec<ClockParams>), String> {
+/// With `restore_alpha`, the scaled source also goes around the effects, and their result takes its alpha.
+fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32, height: u32, effects: &[ProjectEffect], restore_alpha: bool) -> Result<(EffectGraph, Vec<ClockParams>), String> {
     let scale_package = package_path(paths, "packages/gpufx/ffmpeg/scale")?;
     let mut pending = Vec::with_capacity(effects.len() + 1);
     let mut scale = open_effect(context, &scale_package, "scale")?;
@@ -590,18 +764,61 @@ fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32,
         clocks.push(clock);
         pending.push((format!("fx{index}"), effect));
     }
-    let text = (0..pending.len()).map(|i| format!("e{i}")).collect::<Vec<_>>().join("|");
+    let chain = |range: std::ops::Range<usize>| range.map(|i| format!("e{i}")).collect::<Vec<_>>().join("|");
+    let text = if restore_alpha {
+        let last = pending.len();
+        let graph = format!("[0]e0[scaled]; [scaled]split[picture][matte]; [picture]{}[done]; [done][matte]e{last}", chain(1..last));
+        pending.push(("alpha".to_owned(), restore_alpha_effect(context)?));
+        graph
+    } else {
+        chain(0..pending.len())
+    };
     let mut pending = pending.into_iter();
     let graph = EffectGraph::parse(&text, |_| Ok(pending.next().expect("one effect per item"))).map_err(|e| format!("building the clip graph failed: {e}"))?;
     Ok((graph, clocks))
 }
 
-fn build_transition_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, package: &str, params: &Map<String, Value>) -> Result<EffectGraph, String> {
+/// With `larger_alpha`, the result takes the larger alpha of the two sides at each pixel.
+fn build_transition_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, package: &str, params: &Map<String, Value>, larger_alpha: bool) -> Result<EffectGraph, String> {
     let path = package_path(paths, package)?;
     let mut effect = open_effect(context, &path, package)?;
     apply_params(&mut effect, package, params, &["progress"])?;
     let mut holder = Some(effect);
-    EffectGraph::parse("transition", |_| Ok(("transition".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("package {package}: {e}"))
+    let mut merge = if larger_alpha { Some(larger_alpha_effect(context)?) } else { None };
+    let text = if larger_alpha { "[0]split[a][a_alpha]; [1]split[b][b_alpha]; [a][b]transition[mixed]; [mixed][a_alpha][b_alpha]alpha" } else { "transition" };
+    EffectGraph::parse(text, |name| {
+        let effect = if name == "alpha" { merge.take() } else { holder.take() };
+        Ok((name.to_owned(), effect.expect("one effect per item")))
+    })
+    .map_err(|e| format!("package {package}: {e}"))
+}
+
+/// Whether `graph` writes an alpha where its inputs have none: tried on transparent images, one per
+/// input, every pixel of the result is at least half opaque. A graph that keeps alpha, or moves it or
+/// paints only some of the picture, leaves see-through pixels. A picture effect that fails on such a
+/// small image says yes: its result would be better cut by the source's alpha than a solid block.
+fn writes_alpha(gpu: &Gpu, graph: &mut EffectGraph, input_count: usize, info: &FrameInfo) -> bool {
+    // An error from before the trial belongs to the real frame, which is going to fail with it.
+    if gpu.check_errors().is_err() {
+        return true;
+    }
+    let mut probe = || -> Result<bool, String> {
+        let side = ALPHA_PROBE_SIDE;
+        let sources = (0..input_count).map(|_| Image::create(gpu, side, side)).collect::<Result<Vec<_>, _>>()?;
+        let mut inputs: Vec<D3d12Frame> = sources.iter().map(|image| image.frame(side, side)).collect();
+        let mut outputs = [Image::create(gpu, side, side)?];
+        D3d12Compositor::run_graph(gpu, graph, &mut inputs, &mut outputs, ImageId(0), side, side, info)?;
+        outputs[0].wait()?;
+        let buffer = readback_buffer(gpu, side, side);
+        let mut rgba = Vec::new();
+        outputs[0].read_rgba(gpu, &buffer, &mut rgba)?;
+        gpu.check_errors()?;
+        Ok(rgba.chunks_exact(4).all(|pixel| pixel[3] >= 128))
+    };
+    let result = probe();
+    // Whatever went wrong in the trial belongs to the trial, not to the next real frame.
+    gpu.take_error();
+    result.unwrap_or(true)
 }
 
 fn load_overlay(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<EffectGraph, String> {
@@ -615,10 +832,14 @@ fn load_overlay(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<Effec
 }
 
 impl Compositor for D3d12Compositor {
-    type Decoder = SequentialDecoder;
+    type Decoder = SourceDecoder;
     type Image = ImageId;
 
-    fn open_decoder(&mut self, source: &str) -> Result<SequentialDecoder, RenderError> {
+    fn open_decoder(&mut self, source: &str) -> Result<SourceDecoder, RenderError> {
+        if is_image_source(source) {
+            let path = self.paths.source_path(source);
+            return self.load_still(&path).map(SourceDecoder::Still).map_err(RenderError);
+        }
         let mut decoder = SequentialDecoder::open(&self.paths.source_path(source), self.gpu.raw_device())?;
         if let Some((flag, grace)) = &self.abort {
             decoder.set_abort(flag.clone(), *grace);
@@ -626,19 +847,37 @@ impl Compositor for D3d12Compositor {
         } else {
             decoder.set_abort_policy(self.closing.clone(), None);
         }
-        Ok(decoder)
+        Ok(SourceDecoder::Video(decoder))
     }
 
-    fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SequentialDecoder as Decoder>::Frame, effects: &[ProjectEffect], placement: Option<ClipPlacement>, clock: ClipClock, at: FrameContext) -> Result<ImageId, RenderError> {
+    fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SourceDecoder as Decoder>::Frame, effects: &[ProjectEffect], placement: Option<ClipPlacement>, clock: ClipClock, at: FrameContext) -> Result<ImageId, RenderError> {
         let info = Self::info(at);
-        let (input, output) = input_then_output(|| decoded_input(frame), || self.acquire())?;
+        let (input, output) = input_then_output(|| frame.input(), || self.acquire())?;
         let (width, height) = (self.width, self.height);
         let source_aspect = frame.display_aspect();
+        let has_alpha = frame.has_alpha();
         let mut inputs = [input];
         let (gpu, paths) = (&self.gpu, &self.paths);
-        let shape: Vec<String> = effects.iter().map(|effect| graph_shape(&effect.package, &effect.params)).collect();
+        // The input format is part of what a graph was built for.
+        let mut shape: Vec<String> = effects.iter().map(|effect| graph_shape(&effect.package, &effect.params)).collect();
+        if frame.is_still() {
+            shape.push("\0still".to_owned());
+        }
+        if has_alpha {
+            shape.push("\0alpha".to_owned());
+        }
         let build = || {
-            build_clip_graph(&gpu.context, paths, width, height, effects).map(|(graph, clocks)| {
+            // A clip graph is built once, so this is one trial for one clip, and none for a source without alpha.
+            let restore_alpha = has_alpha
+                && !effects.is_empty()
+                && match build_clip_graph(&gpu.context, paths, ALPHA_PROBE_SIDE, ALPHA_PROBE_SIDE, effects, false) {
+                    Ok((mut graph, clocks)) => {
+                        let _ = set_clip_clock(&mut graph, &clocks, effects, clock);
+                        writes_alpha(gpu, &mut graph, 1, &info)
+                    }
+                    Err(_) => true,
+                };
+            build_clip_graph(&gpu.context, paths, width, height, effects, restore_alpha).map(|(graph, clocks)| {
                 let applied = clocks.iter().zip(effects).map(|(clock, effect)| clock.user_params(&effect.params).into_owned()).collect();
                 ClipGraph { graph, applied, clocks }
             })
@@ -677,7 +916,7 @@ impl Compositor for D3d12Compositor {
             return Err(RenderError(e));
         }
         frame.raise_fence_value(inputs[0].fence_value);
-        let placed = match self.place(output, placement, source_aspect, &info) {
+        let placed = match self.place(output, placement, source_aspect, has_alpha, &info) {
             Ok(placed) => placed,
             Err(message) => {
                 self.release_image(output);
@@ -688,7 +927,11 @@ impl Compositor for D3d12Compositor {
     }
 
     fn transition(&mut self, package: &str, params: &Map<String, Value>, from: ImageId, to: ImageId, progress: Progress, at: FrameContext) -> Result<ImageId, RenderError> {
-        let graph_key = graph_shape(package, params);
+        let see_through = self.images[from.0].premultiplied || self.images[to.0].premultiplied;
+        let mut graph_key = graph_shape(package, params);
+        if see_through {
+            graph_key.push_str("\0alpha");
+        }
         let info = Self::info(at);
         let value = progress.elapsed.ticks() as f64 / progress.total.ticks() as f64;
         let (width, height) = (self.width, self.height);
@@ -708,7 +951,15 @@ impl Compositor for D3d12Compositor {
         });
         let mut built = match usable {
             Some(result) => result?,
-            None => TransitionGraph { graph: build_transition_graph(&self.gpu.context, &self.paths, package, params)?, applied: params.clone() },
+            None => {
+                let larger_alpha = see_through && {
+                    // One trial per graph, halfway through, and none between two opaque pictures.
+                    let mut trial = build_transition_graph(&self.gpu.context, &self.paths, package, params, false)?;
+                    trial.set_param("progress", &[0.5]).map_err(|e| format!("package {package}: setting progress failed: {e}"))?;
+                    writes_alpha(&self.gpu, &mut trial, 2, &info)
+                };
+                TransitionGraph { graph: build_transition_graph(&self.gpu.context, &self.paths, package, params, larger_alpha)?, applied: params.clone() }
+            }
         };
         let output = self.acquire()?;
         let mut inputs = [self.images[from.0].frame(width, height), self.images[to.0].frame(width, height)];
@@ -724,6 +975,8 @@ impl Compositor for D3d12Compositor {
         }
         self.images[from.0].fence_value = inputs[0].fence_value;
         self.images[to.0].fence_value = inputs[1].fence_value;
+        // Both sides are read as they are, premultiplied or opaque, so what they mix to is premultiplied.
+        self.images[output.0].premultiplied = see_through;
         self.checked_output(output)
     }
 
@@ -731,7 +984,9 @@ impl Compositor for D3d12Compositor {
         let info = Self::info(at);
         let output = self.acquire()?;
         let (width, height) = (self.width, self.height);
-        let mut inputs = [self.images[base.0].frame(width, height), self.images[top.0].frame(width, height)];
+        // The base is what stands behind, taken as it is. Only the top is mixed through its alpha, so
+        // only its premultiplied colours have to be turned back for the overlay.
+        let mut inputs = [self.images[base.0].frame(width, height), self.images[top.0].composited_top(width, height)];
         let result = Self::run_graph(&self.gpu, &mut self.overlay, &mut inputs, &mut self.images, output, width, height, &info);
         if let Err(e) = result {
             self.release_image(output);

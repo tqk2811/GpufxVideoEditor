@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
-use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_TRANSITION_DURATION};
+use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_IMAGE_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::export::{export_blocker, ExportOutcome};
 use crate::i18n::Language;
 use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
@@ -198,6 +198,12 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
     check_speed(speed)?;
     let mut clip = new_clip(&stored, start, Time::ZERO);
     clip.source_in = source_in;
+    if clip.is_image() {
+        // A still has no source position or speed: it runs as long as asked, 5 seconds by default.
+        clip.source_in = Time::ZERO;
+        clip.duration = duration.unwrap_or(DEFAULT_IMAGE_DURATION);
+        return Ok(clip);
+    }
     clip.speed = engine::speed_milli(speed) as f64 / engine::SPEED_SCALE as f64;
     clip.duration = duration.or(remaining.map(|length| clip.timeline_ticks(length))).unwrap_or(DEFAULT_CLIP_DURATION);
     if let (Some(length), Some(duration)) = (known, duration) {

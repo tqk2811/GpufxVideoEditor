@@ -14,9 +14,12 @@ use crate::timeline::snap::{snap_command, snap_onto_track, snap_points, snap_spa
 use crate::timeline::view::TimelineView;
 use crate::asset_install::InstalledAudioPack;
 use crate::audio_library::AudioLibrary;
+use crate::sticker_install::InstalledStickerPack;
+use crate::sticker_library::StickerLibrary;
 use crate::effect_previews::PreviewManager;
 use crate::visuals::ClipVisuals;
 use engine::{
+    ClipPlacement, PlacedRect,
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
     set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
@@ -32,6 +35,10 @@ const UNDO_DEPTH: usize = 200;
 
 /// Length given to a clip whose file states none, and to a clip added without a probe.
 pub const DEFAULT_CLIP_DURATION: Time = Time::from_ticks(900_000);
+/// How long a new clip of a still image runs; its end can be dragged out as far as wanted.
+pub const DEFAULT_IMAGE_DURATION: Time = Time::from_ticks(5 * engine::TICKS_PER_SECOND);
+/// How much of the frame width a new sticker takes.
+const STICKER_WIDTH: f64 = 0.25;
 /// Length given to a new transition, until the inspector changes it.
 pub const DEFAULT_TRANSITION_DURATION: Time = Time::from_ticks(90_000);
 
@@ -73,6 +80,7 @@ pub struct EditorState {
     pub catalog: Catalog,
     /// The audio packs installed on this machine.
     pub audio_library: AudioLibrary,
+    pub sticker_library: StickerLibrary,
     pub picker: PickerState,
     pub encoders: Vec<EncoderOption>,
     pub encoder: usize,
@@ -157,6 +165,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::SplitInsideTransition { key, at } => Message::EditSplitInsideTransition { track: label(key.track), at: seconds_text(*at) },
         EditError::TrackLocked { track } => Message::EditTrackLocked(label(*track)),
         EditError::SpeedOverlap { key, end, next_start } => Message::EditSpeedOverlap { track: label(key.track), end: seconds_text(*end), next: seconds_text(*next_start) },
+        EditError::SpeedOfImage { key } => Message::EditSpeedOfImage(label(key.track)),
         EditError::Invalid(errors) => Message::EditInvalid(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
     }
 }
@@ -184,6 +193,7 @@ pub enum LeftTab {
     Audio,
     Effects,
     Transitions,
+    Stickers,
 }
 
 /// What the panels remember between frames.
@@ -192,6 +202,9 @@ pub struct UiState {
     pub left_tab: LeftTab,
     pub media_search: String,
     pub audio_search: String,
+    pub sticker_search: String,
+    /// The category the Sticker tab is filtered by; `None` shows them all.
+    pub sticker_category: Option<String>,
     pub fullscreen: bool,
     /// When the pointer or a key last did something in fullscreen; the controls hide after a while.
     pub fullscreen_activity: Option<f64>,
@@ -370,6 +383,7 @@ impl EditorState {
             loading: None,
             catalog: Catalog::default(),
             audio_library: AudioLibrary::default(),
+            sticker_library: StickerLibrary::default(),
             picker: PickerState::default(),
             encoders: Vec::new(),
             encoder: 0,
@@ -886,9 +900,12 @@ impl EditorState {
         if let Some(item) = item_from_probe(&path.to_string_lossy(), probe) {
             self.library.add(item);
         }
-        if self.place_clip(track, path, length.unwrap_or(DEFAULT_CLIP_DURATION)) {
+        let is_image = engine::is_image_source(&path.to_string_lossy());
+        let fallback = if is_image { DEFAULT_IMAGE_DURATION } else { DEFAULT_CLIP_DURATION };
+        if self.place_clip(track, path, length.unwrap_or(fallback)) {
             self.status = Status::Info(match length {
                 Some(length) => Message::AddedWithLength { name, seconds: format!("{:.2}", length.ticks() as f64 / engine::TICKS_PER_SECOND as f64) },
+                None if is_image => Message::Added(name),
                 None => Message::AddedNoLength { name, seconds: DEFAULT_CLIP_DURATION.ticks() / engine::TICKS_PER_SECOND },
             });
         }
@@ -923,9 +940,10 @@ impl EditorState {
             self.library.add(item);
         }
         let media_kind = if kind == TrackKind::Video { crate::media::MediaKind::Video } else { crate::media::MediaKind::Audio };
-        let item = MediaItem { source: path.to_string_lossy().into_owned(), name: name.clone(), kind: media_kind, duration, estimated: false };
+        let is_image = engine::is_image_source(&path.to_string_lossy());
+        let item = MediaItem { source: path.to_string_lossy().into_owned(), name: name.clone(), kind: media_kind, duration: if is_image { Some(DEFAULT_IMAGE_DURATION) } else { duration }, estimated: is_image };
         let key = self.drop_media(&item, track, at)?;
-        if duration.is_none() {
+        if duration.is_none() && !is_image {
             self.status = Status::Info(Message::AddedNoLength { name, seconds: DEFAULT_CLIP_DURATION.ticks() / engine::TICKS_PER_SECOND });
         }
         let end = self.project().tracks[key.track].clips[key.clip].end();
@@ -1197,7 +1215,7 @@ impl EditorState {
             TrackChoice::Existing(index) => index,
             TrackChoice::New => self.project().tracks.len(),
         };
-        let clip = new_clip(&item.source, start, duration);
+        let clip = self.new_library_clip(item, start, duration);
         let added = self.run(|project| {
             let with_track = if choice == TrackChoice::New { add_track(project, track_kind)? } else { project.clone() };
             add_clip(&with_track, track, clip)
@@ -1238,8 +1256,22 @@ impl EditorState {
         self.add_dropped(item, index, start, true, kind, duration)
     }
 
+    /// A clip of `item`. A sticker comes small and centred, not as large as fits like other media.
+    fn new_library_clip(&self, item: &MediaItem, start: Time, duration: Time) -> Clip {
+        let mut clip = new_clip(&item.source, start, duration);
+        if item.source.starts_with("asset:sticker/") {
+            let output = &self.project().output;
+            let output_aspect = f64::from(output.width) / f64::from(output.height.max(1));
+            let source_aspect = self.sticker_library.aspect_of(&item.source).unwrap_or(1.0);
+            let wide = ClipPlacement { x: 0.0, y: 0.0, width: STICKER_WIDTH };
+            let height = PlacedRect::of(Some(wide), output_aspect, source_aspect).height;
+            clip.placement = Some(ClipPlacement { x: (1.0 - STICKER_WIDTH) / 2.0, y: (1.0 - height) / 2.0, width: STICKER_WIDTH });
+        }
+        clip
+    }
+
     fn add_dropped(&mut self, item: &MediaItem, track: usize, start: Time, new_track: bool, kind: TrackKind, duration: Time) -> Option<ClipKey> {
-        let clip = new_clip(&item.source, start, duration);
+        let clip = self.new_library_clip(item, start, duration);
         let added = self.run(|project| {
             let with_track = if new_track { add_track(project, kind)? } else { project.clone() };
             add_clip(&with_track, track, clip)
@@ -1282,6 +1314,12 @@ impl EditorState {
     pub fn show_installed_audio_pack(&mut self, installed: &InstalledAudioPack) {
         self.report_info(Message::AudioPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
         self.ui.left_tab = LeftTab::Audio;
+    }
+
+    /// Says that a sticker pack is there and shows the Sticker tab.
+    pub fn show_installed_sticker_pack(&mut self, installed: &InstalledStickerPack) {
+        self.report_info(Message::StickerPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
+        self.ui.left_tab = LeftTab::Stickers;
     }
 
     /// Places a sound of the library. Its manifest only gives an estimate: a sound not yet measured
@@ -2963,6 +3001,57 @@ mod tests {
         state.add_media_at_playhead(&media("m.wav", crate::media::MediaKind::Audio, None));
         assert_eq!(state.project().tracks[1].clips.len(), 1, "the free audio track takes it");
         assert_eq!(state.project().tracks[1].clips[0].duration, DEFAULT_CLIP_DURATION);
+    }
+
+    #[test]
+    fn a_dropped_or_added_image_runs_five_seconds_and_can_be_dragged_longer() {
+        let mut state = EditorState::default();
+        let with_track = add_track(state.project(), TrackKind::Video).unwrap();
+        state.replace_project(with_track, None);
+        state.add_probed_file(0, Path::new("C:/a/logo.png"), &MediaProbe { has_video: true, has_audio: false, video_duration: None, audio_duration: None, video_problem: None, audio_problem: None });
+        let clip = state.project().tracks[0].clips[0].clone();
+        assert_eq!((clip.duration, clip.placement), (DEFAULT_IMAGE_DURATION, None));
+        assert!(matches!(state.status(), Status::Info(Message::Added(_))), "no word about a missing length: {:?}", state.status());
+        assert_eq!(state.source_remaining(ClipKey { track: 0, clip: 0 }), None, "no length to stop at");
+        let listed = state.library.visible(crate::media::MediaKind::Video, "");
+        assert_eq!((listed.len(), listed[0].duration), (1, Some(DEFAULT_IMAGE_DURATION)));
+        let longer = engine::trim_end(state.project(), ClipKey { track: 0, clip: 0 }, seconds(90)).unwrap();
+        state.replace_project(longer, None);
+        assert_eq!(state.library.visible(crate::media::MediaKind::Video, "")[0].duration, Some(DEFAULT_IMAGE_DURATION), "a long clip does not make the library item long");
+    }
+
+    #[test]
+    fn a_sticker_of_the_library_comes_small_and_centred() {
+        let mut state = EditorState::default();
+        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None };
+        state.add_media_at_playhead(&sticker.media_item());
+        let clip = state.project().tracks.iter().find(|track| track.kind == TrackKind::Video).unwrap().clips[0].clone();
+        assert_eq!(clip.duration, DEFAULT_IMAGE_DURATION);
+        let placement = clip.placement.expect("a sticker is not stretched over the whole frame");
+        assert!((placement.width - STICKER_WIDTH).abs() < 1e-9 && placement.x > 0.0 && placement.y > 0.0, "{placement:?}");
+    }
+
+    /// The placement a sticker of `size` gets, and the height its rectangle has in the frame.
+    fn placed_sticker(size: (u32, u32)) -> (ClipPlacement, f64) {
+        let mut state = EditorState::default();
+        let source = "asset:sticker/p/images/a.png";
+        let sticker = crate::sticker_library::LibrarySticker { source: source.to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: Some(size) };
+        state.sticker_library = crate::sticker_library::StickerLibrary { packs: vec![crate::sticker_library::StickerPack { id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker.clone()] }], problems: Vec::new(), loaded: true };
+        state.add_media_at_playhead(&sticker.media_item());
+        let output = state.project().output.clone();
+        let clip = state.project().tracks.iter().find(|track| track.kind == TrackKind::Video).unwrap().clips[0].clone();
+        let placement = clip.placement.unwrap();
+        let aspect = f64::from(size.0) / f64::from(size.1);
+        (placement, PlacedRect::of(Some(placement), f64::from(output.width) / f64::from(output.height), aspect).height)
+    }
+
+    #[test]
+    fn a_sticker_of_any_shape_is_centred_by_its_real_height() {
+        for size in [(100, 200), (400, 100)] {
+            let (placement, height) = placed_sticker(size);
+            assert!((placement.y + height / 2.0 - 0.5).abs() < 1e-9, "{size:?}: y {} with height {height}", placement.y);
+            assert!((placement.x + STICKER_WIDTH / 2.0 - 0.5).abs() < 1e-9, "{size:?}");
+        }
     }
 
     #[test]

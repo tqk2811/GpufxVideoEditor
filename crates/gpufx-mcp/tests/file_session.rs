@@ -29,6 +29,28 @@ fn two_clips(session: &mut FileSession) -> u64 {
 }
 
 #[test]
+fn clip_trim_start_pulls_the_left_edge_of_an_image_out_with_no_source_offset() {
+    // A PNG header is all a clip of an image needs to be added.
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1F, 0x15, 0xC4, 0x89, 0, 0, 0, 0]);
+    png.extend_from_slice(b"IDAT");
+    png.extend_from_slice(&[0x35, 0xAF, 0x06, 0x1E]);
+    let dir = std::env::temp_dir().join(format!("gpufx-mcp-image-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let image = dir.join("sticker.png");
+    std::fs::write(&image, &png).unwrap();
+
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    let added = call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": image.to_string_lossy(), "start": 2 * SECOND, "duration": 2 * SECOND}));
+    call_ok(&mut session, "clip_trim_start", json!({"expected_revision": revision(&added), "clip": {"track": 0, "clip": 0}, "start": SECOND}));
+    let clip = project_of(&mut session).tracks[0].clips[0].clone();
+    assert_eq!((clip.start, clip.source_in, clip.duration), (Time::from_ticks(SECOND), Time::ZERO, Time::from_ticks(3 * SECOND)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn each_edit_tool_gives_what_the_engine_command_gives() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
     let mut revision_now = two_clips(&mut session);

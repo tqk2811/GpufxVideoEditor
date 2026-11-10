@@ -120,6 +120,7 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::SplitInsideTransition { .. } => "split_inside_transition",
         EditError::TrackLocked { .. } => "track_locked",
         EditError::SpeedOverlap { .. } => "speed_overlap",
+        EditError::SpeedOfImage { .. } => "speed_of_image",
         EditError::Invalid(_) => "invalid_project",
     }
 }

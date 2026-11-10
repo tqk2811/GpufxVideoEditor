@@ -23,14 +23,14 @@ use crate::package_import::{entries_of, name_parts, read_manifest, validate_entr
 pub const AUDIO_LIMITS: Limits = Limits { files: 16_384, total_bytes: 1024 * MIB, file_bytes: 128 * MIB };
 /// How much a file of a pack may grow when unpacked.
 pub const MAX_COMPRESSION_RATIO: u64 = 200;
-const MANIFEST: &str = "manifest.json";
+pub(crate) const MANIFEST: &str = "manifest.json";
 /// Beside the type folders: what an install is working on, each ignored by the library.
 const TEMPORARY_FOLDER: &str = ".install-tmp";
 const BACKUP_FOLDER: &str = ".install-old";
 const LOCK_FILE: &str = ".install.lock";
-/// A file the pack holds besides its audio.
-const DOCUMENT_EXTENSIONS: [&str; 2] = ["txt", "md"];
-const SUPPORTED_FORMAT: u32 = 1;
+/// A file a pack holds besides its media.
+pub(crate) const DOCUMENT_EXTENSIONS: [&str; 2] = ["txt", "md"];
+pub(crate) const SUPPORTED_FORMAT: u32 = 1;
 /// The most sounds a manifest may list; a pack is read whole and listed in the window.
 pub const MAX_MANIFEST_ITEMS: usize = 16_384;
 /// The longest a sound may say it lasts; only keeps the time in range.
@@ -107,7 +107,7 @@ pub struct AudioManifestItem {
 }
 
 /// The extension of `name`, lower-cased.
-fn extension(name: &str) -> String {
+pub(crate) fn extension(name: &str) -> String {
     name.rsplit_once('.').map_or_else(String::new, |(_, extension)| extension.to_ascii_lowercase())
 }
 
@@ -120,36 +120,51 @@ pub fn parse_audio_manifest(bytes: &[u8]) -> Result<AudioManifest, ImportProblem
     serde_json::from_slice(bytes).map_err(|e| ImportProblem::BadManifest(e.to_string()))
 }
 
+/// Checks the parts every pack manifest shares: its format, id, labels and how many items it lists.
+pub(crate) fn check_pack_header(format: u32, id: &str, name: &str, version: &str, license: &AudioLicense, items: usize, noun: &str) -> Result<(), ImportProblem> {
+    let bad = |detail: String| Err(ImportProblem::BadManifest(detail));
+    if format != SUPPORTED_FORMAT {
+        return bad(format!("format {format} is not supported"));
+    }
+    if !is_safe_id(id) {
+        return Err(ImportProblem::BadId(id.to_owned()));
+    }
+    if name.trim().is_empty() || version.trim().is_empty() || license.spdx.trim().is_empty() {
+        return bad("name, version and license.spdx must not be empty".to_owned());
+    }
+    if license.files.is_empty() {
+        return bad("license.files is empty".to_owned());
+    }
+    if items == 0 {
+        return bad("items is empty".to_owned());
+    }
+    if items > MAX_MANIFEST_ITEMS {
+        return bad(format!("items lists {items} {noun}, more than the {MAX_MANIFEST_ITEMS} allowed"));
+    }
+    Ok(())
+}
+
+/// Checks that item ids and names are filled and ids are unique, ignoring case.
+pub(crate) fn check_item_ids<'a>(items: impl Iterator<Item = (&'a str, &'a str)>) -> Result<(), ImportProblem> {
+    let mut ids = HashSet::new();
+    for (id, name) in items {
+        if id.trim().is_empty() || name.trim().is_empty() {
+            return Err(ImportProblem::BadManifest("an item has an empty id or name".to_owned()));
+        }
+        if !ids.insert(id.to_lowercase()) {
+            return Err(ImportProblem::BadManifest(format!("the item id \"{id}\" is used twice")));
+        }
+    }
+    Ok(())
+}
+
 /// Checks what a manifest says, apart from the files. Gives the type of the pack.
 pub fn check_manifest_fields(manifest: &AudioManifest) -> Result<AudioPackKind, ImportProblem> {
     let bad = |detail: String| Err(ImportProblem::BadManifest(detail));
-    if manifest.format != SUPPORTED_FORMAT {
-        return bad(format!("format {} is not supported", manifest.format));
-    }
     let Some(kind) = AudioPackKind::from_name(&manifest.kind) else { return Err(ImportProblem::UnknownType(manifest.kind.clone())) };
-    if !is_safe_id(&manifest.id) {
-        return Err(ImportProblem::BadId(manifest.id.clone()));
-    }
-    if manifest.name.trim().is_empty() || manifest.version.trim().is_empty() || manifest.license.spdx.trim().is_empty() {
-        return bad("name, version and license.spdx must not be empty".to_owned());
-    }
-    if manifest.license.files.is_empty() {
-        return bad("license.files is empty".to_owned());
-    }
-    if manifest.items.is_empty() {
-        return bad("items is empty".to_owned());
-    }
-    if manifest.items.len() > MAX_MANIFEST_ITEMS {
-        return bad(format!("items lists {} sounds, more than the {MAX_MANIFEST_ITEMS} allowed", manifest.items.len()));
-    }
-    let mut ids = HashSet::new();
+    check_pack_header(manifest.format, &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "sounds")?;
+    check_item_ids(manifest.items.iter().map(|item| (item.id.as_str(), item.name.as_str())))?;
     for item in &manifest.items {
-        if item.id.trim().is_empty() || item.name.trim().is_empty() {
-            return bad("an item has an empty id or name".to_owned());
-        }
-        if !ids.insert(item.id.to_lowercase()) {
-            return bad(format!("the item id \"{}\" is used twice", item.id));
-        }
         if !item.duration.is_finite() || item.duration <= 0.0 || item.duration > MAX_ITEM_SECONDS {
             return bad(format!("item \"{}\" has an invalid duration", item.id));
         }
@@ -165,8 +180,9 @@ fn checked_manifest_path(name: &str) -> Result<(), ImportProblem> {
     name_parts(name).map(|_| ()).map_err(|problem| ImportProblem::Entry { entry: name.to_owned(), problem })
 }
 
-/// Checks that the files a manifest names are files of the zip, and of the right kind.
-fn check_manifest_files(manifest: &AudioManifest, entries: &[ZipEntry]) -> Result<(), ImportProblem> {
+/// Checks that the files a manifest names are files of the zip, of the right kind: `is_media`
+/// says which an item may name, called `what` in its message.
+pub(crate) fn check_named_files<'a>(license: &[String], items: impl Iterator<Item = &'a str>, entries: &[ZipEntry], is_media: fn(&str) -> bool, what: &str) -> Result<(), ImportProblem> {
     let files: HashSet<String> = entries.iter().filter(|entry| entry.kind == EntryKind::File).map(|entry| entry.name.replace('\\', "/")).collect();
     let exists = |name: &str| -> Result<(), ImportProblem> {
         checked_manifest_path(name)?;
@@ -176,26 +192,31 @@ fn check_manifest_files(manifest: &AudioManifest, entries: &[ZipEntry]) -> Resul
             Err(ImportProblem::BadManifest(format!("\"{name}\" is not in the zip")))
         }
     };
-    for name in &manifest.license.files {
+    for name in license {
         exists(name)?;
         if !DOCUMENT_EXTENSIONS.contains(&extension(name).as_str()) {
             return Err(ImportProblem::BadManifest(format!("\"{name}\" is not a text file")));
         }
     }
-    for item in &manifest.items {
-        exists(&item.file)?;
-        if !is_audio_file(&item.file) {
-            return Err(ImportProblem::BadManifest(format!("\"{}\" is not an audio file", item.file)));
+    for file in items {
+        exists(file)?;
+        if !is_media(file) {
+            return Err(ImportProblem::BadManifest(format!("\"{file}\" is not {what}")));
         }
     }
     Ok(())
 }
 
-/// Only the audio, the documents and the manifest at the root may be in a pack.
-fn check_extensions(entries: &[ZipEntry]) -> Result<(), ImportProblem> {
+fn check_manifest_files(manifest: &AudioManifest, entries: &[ZipEntry]) -> Result<(), ImportProblem> {
+    check_named_files(&manifest.license.files, manifest.items.iter().map(|item| item.file.as_str()), entries, is_audio_file, "an audio file")
+}
+
+/// Only the media of the pack (what `is_media` accepts), its documents and the manifest at the root
+/// may be in it.
+pub(crate) fn check_entry_extensions(entries: &[ZipEntry], is_media: fn(&str) -> bool) -> Result<(), ImportProblem> {
     for entry in entries.iter().filter(|entry| entry.kind == EntryKind::File) {
         let name = entry.name.replace('\\', "/");
-        let allowed = name == MANIFEST || is_audio_file(&name) || DOCUMENT_EXTENSIONS.contains(&extension(&name).as_str());
+        let allowed = name == MANIFEST || is_media(&name) || DOCUMENT_EXTENSIONS.contains(&extension(&name).as_str());
         if !allowed {
             return Err(ImportProblem::Entry { entry: entry.name.clone(), problem: EntryProblem::ExtensionNotAllowed });
         }
@@ -260,7 +281,7 @@ pub(crate) fn extract_all<R: Read + Seek>(zip: &mut ZipArchive<R>, entries: &[Zi
     Ok(())
 }
 
-fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut last = Ok(());
     for attempt in 0..RENAME_ATTEMPTS {
         if attempt > 0 {
@@ -301,7 +322,7 @@ pub(crate) fn replace_folder(new: &Path, target: &Path, backup: &Path, mut renam
 
 /// Removes what a crashed install left. A backup whose pack is gone is put back, so a crash during
 /// a replace loses nothing; only called with the install lock held.
-fn clean_leftovers(packages: &Path) {
+pub(crate) fn clean_leftovers(packages: &Path) {
     clean_leftovers_with(packages, &mut rename_with_retries);
 }
 
@@ -333,7 +354,7 @@ fn clean_leftovers_with(packages: &Path, rename: &mut dyn FnMut(&Path, &Path) ->
 
 /// Takes the install lock: held for a whole install or recovery, so no second editor works in the
 /// working folders at the same time.
-fn lock_installs(packages: &Path) -> std::io::Result<File> {
+pub(crate) fn lock_installs(packages: &Path) -> std::io::Result<File> {
     fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).share_mode(0).open(packages.join(LOCK_FILE))
 }
 
@@ -358,10 +379,10 @@ pub(crate) fn recover_interrupted_install_with(user_root: &Path, rename: &mut dy
 }
 
 /// Takes away the working folders once they are empty; one still in use stays.
-fn remove_empty_working_folders(packages: &Path, kind: AudioPackKind) {
+fn remove_empty_working_folders(packages: &Path, type_folder: &str) {
     let _ = fs::remove_dir(packages.join(TEMPORARY_FOLDER));
     let backups = packages.join(BACKUP_FOLDER);
-    let _ = fs::remove_dir(backups.join(kind.name()));
+    let _ = fs::remove_dir(backups.join(type_folder));
     let _ = fs::remove_dir(backups);
 }
 
@@ -369,12 +390,6 @@ fn remove_empty_working_folders(packages: &Path, kind: AudioPackKind) {
 fn next_temporary_name() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
-}
-
-/// The manifest of the installed pack at `target`, if it can be read.
-fn installed_manifest(target: &Path) -> Option<AudioManifest> {
-    let bytes = fs::read(target.join(MANIFEST)).ok()?;
-    parse_audio_manifest(&bytes).ok()
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. An existing pack of the same id
@@ -394,34 +409,63 @@ pub(crate) fn install_audio_pack_with(source: &Path, user_root: &Path, overwrite
     let mut zip = ZipArchive::new(BufReader::new(file)).map_err(|e| ImportProblem::NotAZip(e.to_string()))?;
     let entries = entries_of(&mut zip, limits.limits)?;
     validate_entries(&entries, limits.limits)?;
-    check_extensions(&entries)?;
+    check_entry_extensions(&entries, is_audio_file)?;
     let manifest = parse_audio_manifest(&read_manifest(&mut zip)?)?;
     let kind = check_manifest_fields(&manifest)?;
     check_manifest_files(&manifest, &entries)?;
 
     let id = manifest.id.to_ascii_lowercase();
-    let target = packages.join(kind.name()).join(&id);
+    let unpacked = unpack_into_place(&mut zip, &entries, &packages, kind.name(), &id, &manifest.name, overwrite, limits, rename, |temporary| {
+        let unpacked = parse_audio_manifest(&fs::read(temporary.join(MANIFEST)).map_err(|e| ImportProblem::WriteFailed(e.to_string()))?)?;
+        if unpacked == manifest {
+            Ok(())
+        } else {
+            Err(ImportProblem::BadManifest("it changed while the zip was being read".to_owned()))
+        }
+    })?;
+    Ok(match unpacked {
+        Unpacked::AlreadyThere { name } => ImportOutcome::AlreadyInstalled { name },
+        Unpacked::Done { replaced } => ImportOutcome::AudioInstalled(InstalledAudioPack { kind, id, name: manifest.name, replaced }),
+    })
+}
+
+/// What unpacking a checked pack came to.
+pub(crate) enum Unpacked {
+    /// The pack is installed and `overwrite` was not given; `name` is what it is called.
+    AlreadyThere { name: String },
+    Done { replaced: bool },
+}
+
+/// Unpacks `zip`, already checked, to `<packages>/<type_folder>/<id>`, atomically: to a temporary
+/// folder, verified there by `check_unpacked`, and renamed into place, replacing an existing pack
+/// only when `overwrite` allows. A failure leaves the old pack and no half-installed one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn unpack_into_place<R: Read + Seek>(zip: &mut ZipArchive<R>, entries: &[ZipEntry], packages: &Path, type_folder: &str, id: &str, name: &str, overwrite: bool, limits: ExtractLimits, rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>, check_unpacked: impl FnOnce(&Path) -> Result<(), ImportProblem>) -> Result<Unpacked, ImportProblem> {
+    let target = packages.join(type_folder).join(id);
     let replaced = target.exists();
     if replaced && !overwrite {
-        return Ok(ImportOutcome::AlreadyInstalled { name: installed_manifest(&target).map_or_else(|| manifest.name.clone(), |installed| installed.name) });
+        return Ok(Unpacked::AlreadyThere { name: installed_pack_name(&target).unwrap_or_else(|| name.to_owned()) });
     }
     let temporary = packages.join(TEMPORARY_FOLDER).join(next_temporary_name());
     let result = fs::create_dir_all(&temporary).map_err(|e| ImportProblem::WriteFailed(e.to_string())).and_then(|()| {
-        extract_all(&mut zip, &entries, &temporary, limits)?;
+        extract_all(zip, entries, &temporary, limits)?;
         // What was unpacked is what is installed: the manifest is read back from the folder.
-        let unpacked = parse_audio_manifest(&fs::read(temporary.join(MANIFEST)).map_err(|e| ImportProblem::WriteFailed(e.to_string()))?)?;
-        if unpacked != manifest {
-            return Err(ImportProblem::BadManifest("it changed while the zip was being read".to_owned()));
-        }
-        let backup = packages.join(BACKUP_FOLDER).join(kind.name()).join(&id);
+        check_unpacked(&temporary)?;
+        let backup = packages.join(BACKUP_FOLDER).join(type_folder).join(id);
         replace_folder(&temporary, &target, &backup, |from, to| rename(from, to)).map_err(|e| ImportProblem::WriteFailed(e.to_string()))
     });
     if result.is_err() {
         let _ = fs::remove_dir_all(&temporary);
     }
-    remove_empty_working_folders(&packages, kind);
+    remove_empty_working_folders(packages, type_folder);
     result?;
-    Ok(ImportOutcome::AudioInstalled(InstalledAudioPack { kind, id, name: manifest.name, replaced }))
+    Ok(Unpacked::Done { replaced })
+}
+
+/// The name in the manifest of the pack in `folder`, whatever its type, if it can be read.
+fn installed_pack_name(folder: &Path) -> Option<String> {
+    let manifest: serde_json::Value = serde_json::from_slice(&fs::read(folder.join(MANIFEST)).ok()?).ok()?;
+    Some(manifest.get("name")?.as_str()?.to_owned())
 }
 
 /// The folder an installed pack of `kind` and `id` lives in.
@@ -435,6 +479,12 @@ mod tests {
     use std::io::Cursor;
     use zip::write::SimpleFileOptions;
     use zip::CompressionMethod;
+
+    /// The manifest of the installed audio pack at `target`, if it can be read.
+    fn installed_manifest(target: &Path) -> Option<AudioManifest> {
+        let bytes = fs::read(target.join(MANIFEST)).ok()?;
+        parse_audio_manifest(&bytes).ok()
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gpufx-asset-install-{name}-{}", std::process::id()));

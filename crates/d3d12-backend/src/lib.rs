@@ -10,6 +10,7 @@
 
 #![cfg(windows)]
 
+mod alpha_merge;
 mod audio;
 mod compositor;
 mod decoder;
@@ -23,10 +24,11 @@ mod packages;
 mod paths;
 mod probe;
 mod progress;
+mod still;
 mod thumbnail;
 
 pub use audio::{AudioFileDecoder, AudioFiles};
-pub use compositor::{D3d12Compositor, SharedImage};
+pub use compositor::{D3d12Compositor, SharedImage, SourceDecoder, SourceFrame};
 pub use decoder::{is_cancelled, DecodedFrame, PublishClock, SequentialDecoder};
 pub use effect_preview::{preview_image_files, PreviewError, PreviewLoop, PreviewRenderer, PREVIEW_FPS, PREVIEW_FRAMES, PREVIEW_SIZE};
 pub use effect_preview_protocol::{InvalidJob, PreviewBlame, PreviewEvent, PreviewJob, PreviewJobKind, PREVIEW_PROTOCOL};
@@ -34,7 +36,8 @@ pub use encoder::{encoder_exists, EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
 pub use export::{overwritten_input, reserve_temporary, same_file, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;
 pub use packages::{expression_error, read_package_info, read_zip_package_info, PackageInfo, ParamInfo, ParamKind, CLIP_DURATION, CLIP_TIME};
-pub use paths::{asset_source, check_path_part, is_asset_source, is_safe_id, parse_asset_source, AssetProblem, AssetRef, PathPartProblem, ProjectPaths, ASSET_AUDIO_EXTENSIONS, ASSET_PREFIX, ASSET_TYPES, MAX_ASSET_ID_LENGTH};
+pub use paths::{asset_source, check_path_part, is_asset_source, is_safe_id, parse_asset_source, AssetProblem, AssetRef, PathPartProblem, ProjectPaths, ASSET_AUDIO_EXTENSIONS, ASSET_IMAGE_EXTENSIONS, ASSET_PREFIX, ASSET_TYPES, MAX_ASSET_ID_LENGTH};
 pub use probe::{probe_media, MediaProbe};
 pub use progress::{ProgressEvent, CANCEL_LINE, MAX_EVENT_LINE, PROGRESS_PROTOCOL};
+pub use still::{read_still, still_dimensions, still_thumbnail, StillPicture, MAX_STILL_SIDE};
 pub use thumbnail::{FrameSampler, ThumbnailError, ThumbnailImage};

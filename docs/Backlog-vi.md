@@ -1,5 +1,9 @@
 # Backlog
 
+### [Vừa] Giải mã ảnh không huỷ được và ảnh hỏng được giải mã lại mỗi lần render
+
+`crates/d3d12-backend/src/compositor.rs` `load_still` (khối gọi `read_still` và `Image::upload`) và `open_decoder` chạy đồng bộ, bỏ qua cờ abort/closing; `Image::upload` chờ `PollType::Wait` không có timeout. Ảnh lớn hoặc GPU kẹt làm preview và lệnh đóng phải chờ hết. Ảnh hỏng không có negative cache nên mỗi lần render lại đọc và giải mã file từ đầu. Nên kiểm cờ trước khi giải mã, thêm timeout chờ, và nhớ lỗi theo dấu (cỡ + mtime) của file. Ghi ngày 2026-11-10.
+
 ### [Vừa] Project lưu đường dẫn gói người dùng cố định, đổi máy là mất gói và không biết bản cũ hay mới
 
 `crates/gpufx-editor/src/package_import.rs:338` (`install_zip`) trả về `packages/gpufx/user/<id>.zip`, và project lưu đúng chuỗi đó. Mang project sang máy khác thì báo không tìm thấy gói mà không có cách lấy lại gói đó, và vì gói không có phiên bản nên không phân biệt được bản cũ với bản mới khi hai máy cài khác nhau. Nên cân nhắc lưu id kèm phiên bản trong project, hoặc nhúng gói vào project. Ghi ngày 2026-11-10.
@@ -11,6 +15,38 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 ### [Vừa] Chờ decoder rảnh trước mỗi lần mix làm mất giải mã song song
 
 `D3d12Decoder::wait_until_idle` ở `crates/poc/src/decoder.rs` và `SequentialDecoder::wait_idle` ở `crates/d3d12-backend/src/decoder.rs:389-401` chờ CPU trước mỗi `mix` để khung không còn bị decode khác tham chiếu. Phát p99 có lần lên 31,4 ms, sát ngưỡng 33 ms, chưa rõ nguyên nhân. Bản editor cần đồng bộ trên GPU hoặc tách luồng. Ghi ngày 2026-11-09.
+
+### [Thấp] `still_dimensions` bỏ qua hướng EXIF
+
+`crates/d3d12-backend/src/still.rs:54` (`still_dimensions`) đọc kích thước từ header mà không xoay theo EXIF, còn `read_still` xoay rồi; `crates/gpufx-editor/src/visuals/backend.rs:42` và tỉ lệ sticker trong thư viện dùng con số đó, nên ảnh chụp dọc có EXIF cho tỉ lệ ngược so với lúc render. Nên đọc orientation khi lấy kích thước. Ghi ngày 2026-11-10.
+
+### [Thấp] Ảnh hỏng chỉ lộ khi render
+
+`crates/d3d12-backend/src/paths.rs:277` chỉ kiểm được đường dẫn và phần mở rộng của ảnh, không kiểm nội dung; ảnh hỏng qua được validate và chỉ báo lỗi lúc tới khung có clip đó. Nên kiểm header lúc thêm clip hoặc lúc validate. Ghi ngày 2026-11-10.
+
+### [Thấp] Đua khi khôi phục cài đặt dở
+
+`crates/gpufx-editor/src/asset_install.rs:364` (`recover_interrupted_install`) khôi phục thư mục cài dở lúc khởi động mà có thể chạy cùng một lượt cài ở tiến trình editor khác. Nên giữ cùng lock cài đặt suốt lúc khôi phục. Ghi ngày 2026-11-10.
+
+### [Thấp] Trần cache ảnh 1 GiB tính riêng từng compositor
+
+`crates/d3d12-backend/src/compositor.rs` `STILL_CACHE_BYTES` áp cho từng `D3d12Compositor`, nên preview và export chạy cùng lúc có thể giữ gấp đôi. Nên dùng chung bộ đếm theo `Gpu` nếu số lượng compositor tăng. Ghi ngày 2026-11-10.
+
+### [Thấp] Ảnh có tỉ lệ cực đoan bị overlay kẹp scale
+
+`crates/d3d12-backend/src/compositor.rs` `place` truyền `height` theo `PlacedRect`, mà package overlay giới hạn `scale`/`height`; ảnh rất dài hoặc rất cao với placement lớn có thể bị kẹp nên méo so với khung đã chọn. Nên kiểm và báo hoặc tách nhiều bước. Ghi ngày 2026-11-10.
+
+### [Thấp] Transition nhận màu premultiplied như straight
+
+`crates/d3d12-backend/src/compositor.rs` `transition` (dòng gán `premultiplied = see_through`) đưa ảnh đã `place` vào gpufx với cờ `premultiplied` tắt, nên shader transition tính trên màu premultiplied (xem `external/FFmpegGpuFilter/crates/gpufx-core/src/frame.rs:258` nói effect phải thấy straight). Mix tuyến tính vẫn đúng, nhưng effect đổi màu làm sai vùng bán trong suốt. Nên báo `premultiplied` ở input transition. Ghi ngày 2026-11-10.
+
+### [Thấp] MCP `clip_add` với asset:sticker không có placement mặc định
+
+`crates/gpufx-mcp/src/tools.rs:163` (`clip_add`) qua `AgentEdit::ClipAdd` thêm sticker theo khớp cả khung, khác lúc thêm từ tab Sticker (nhỏ, căn giữa theo tỉ lệ thật). Agent phải tự gọi set placement. Nên dùng chung mặc định với `new_library_clip`. Ghi ngày 2026-11-10.
+
+### [Thấp] Ảnh đổi trên đĩa vẫn dùng bản cũ cho tới khi rời clip
+
+`crates/d3d12-backend/src/compositor.rs` `load_still` kiểm dấu file khi mở decoder, nên đang ở trong clip ảnh thì đổi file không được cập nhật tới khi clip được mở lại. Chấp nhận được vì rẻ; nên có tín hiệu làm mới nếu cần. Ghi ngày 2026-11-10.
 
 ### [Thấp] Fence theo khung đã cấp phát, chưa theo khung đã submit
 
@@ -394,3 +430,11 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Transition khai báo clip_time/clip_duration: tên bị ẩn nhưng không có đồng hồ
 
 `crates/gpufx-editor/src/params.rs:44`, `crates/gpufx-editor/src/agent/run.rs:125` và `:260` ẩn tên `clip_time`/`clip_duration` khỏi inspector và MCP bất kể vai trò của gói, nhưng `crates/d3d12-backend/src/compositor.rs:602` chỉ cấp đồng hồ cho effect của clip, không cấp cho transition, và `TransitionAdd` không lọc nên giá trị người dùng nhập vẫn được lưu và áp. Kết quả: tham số không thấy được nhưng vẫn chi phối hình. Nên lọc theo vai trò (chỉ ẩn ở effect clip), hoặc cấp đồng hồ cho transition, và để `TransitionAdd` bỏ các tên này. Ghi ngày 2026-11-10.
+
+### [Thấp] Transition ghi đè alpha giữa hai sticker khác hình dạng cho bóng đen
+
+`crates/d3d12-backend/src/alpha_merge.rs:45` lấy alpha kết quả là `max(a_from, a_to)`. Tại pixel một bên đục, bên kia trong suốt, màu premultiplied mờ dần nhưng alpha giữ 1, nên silhouette tối dần về đen rồi biến mất khi transition hết. Chưa thấy transition có sẵn nào ghi alpha 1, chỉ gói tự viết mới dính. Nên làm nếu có gói như vậy: chạy transition lần hai trên matte (alpha của mỗi bên đưa vào rgb) và lấy kết quả làm alpha. Ghi ngày 2026-11-10.
+
+### [Thấp] Probe alpha là suy đoán một lần cho mỗi graph
+
+`crates/d3d12-backend/src/compositor.rs:800` (`writes_alpha`) probe trên ảnh đen trong suốt, với clock của frame dựng đầu tiên, và kết quả được cache theo khoá không chứa số. Gói bên thứ ba ghi alpha theo tham số hoặc theo thời gian, hay chỉ phủ đục một phần, sẽ bị đoán sai và vùng trong suốt thành khối đặc. Effect vừa di chuyển hình vừa ghi alpha 1 bị cắt theo hình gốc. Mỗi `ClipKey` có alpha tốn một lần probe chặn thread. Nên làm nếu gói như vậy xuất hiện hoặc timeline có hàng chục sticker: cho manifest khai báo việc giữ alpha. Ghi ngày 2026-11-10.

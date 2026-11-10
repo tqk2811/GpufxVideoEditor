@@ -101,6 +101,12 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::text_dim())).wrap());
     }
     ui.add_enabled_ui(editable, |ui| {
+        // A still has no source to walk through and no sound.
+        if clip.is_image() {
+            time_field(ui, state, &language.t(Message::FieldVideoDuration), to_seconds(clip.duration), ClipField::Duration, None);
+            time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start, None);
+            return;
+        }
         let full_source = state.source_remaining(key).filter(|left| clip.timeline_ticks(*left) != clip.duration);
         time_field(ui, state, &language.t(Message::FieldSourceIn), to_seconds(clip.source_in), ClipField::SourceIn, Some((clip.source_in != Time::ZERO).then_some(ClipField::SourceIn(0.0))));
         time_field(ui, state, &language.t(Message::FieldVideoDuration), to_seconds(clip.source_offset(clip.duration)), ClipField::Duration, Some(full_source.map(|source| ClipField::Duration(to_seconds(source)))));

@@ -20,5 +20,6 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Thre
 
 [dev-dependencies]
 gpufx-editor = { path = "../gpufx-editor" }
+png = "0.18"
 # Must stay the wgpu major version d3d12-backend uses.
 wgpu = { version = "30", default-features = false, features = ["dx12"] }

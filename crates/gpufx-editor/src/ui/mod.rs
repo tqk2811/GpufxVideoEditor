@@ -687,6 +687,8 @@ mod tests {
         click(&ctx, &mut state, left_panel::rail_cell_center(left, 3));
         assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Transitions);
         assert_eq!(state.picker.kind, crate::packages::PackageKind::Transition);
+        click(&ctx, &mut state, left_panel::rail_cell_center(left, 4));
+        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Stickers);
     }
 
     #[test]
