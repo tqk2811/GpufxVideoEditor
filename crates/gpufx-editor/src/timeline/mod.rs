@@ -3,4 +3,5 @@
 pub mod drag;
 pub mod hit;
 pub mod ruler;
+pub mod snap;
 pub mod view;

@@ -263,6 +263,7 @@ pub enum Message {
     SplitShortcut,
     TrimBefore,
     TrimAfter,
+    SnapToggle,
     DeleteShortcut,
     ZoomIn,
     ZoomOut,

@@ -5,7 +5,7 @@ use super::{theme, UiRequest};
 use crate::editor::{clip_label, format_speed, DropBatch, EditorState};
 use crate::i18n::{Language, Message};
 use crate::media::MediaItem;
-use crate::timeline::drag::{clamp_trim, drag_command, DragKind};
+use crate::timeline::drag::DragKind;
 use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
 use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
 use crate::timeline::view::{content_end, ViewArea, Wheel, TRACK_HEIGHT};
@@ -72,6 +72,10 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
                 state.delete_selected();
             }
         });
+        ui.separator();
+        if icons::button(ui, Icon::Magnet, &language.t(Message::SnapToggle), !state.ui.snap_off).clicked() {
+            state.ui.snap_off = !state.ui.snap_off;
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| zoom_controls(ui, state, toolbar_rect));
     });
 }
@@ -161,6 +165,8 @@ fn handle_media_drop(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rect
     let (track, at) = drop_target(state, tracks_rect, pointer);
     if ctx.input(|input| input.pointer.any_released()) {
         if egui::DragAndDrop::take_payload::<MediaItem>(&ctx).is_some() {
+            let free = ctx.input(|input| input.modifiers.shift);
+            let at = state.snapped_drop_time(at, item.duration, track, free);
             state.drop_media(&item, track, at);
         }
         return false;
@@ -268,11 +274,12 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     if response.drag_stopped_by(egui::PointerButton::Primary) {
         if let (Some(drag), Some(pointer)) = (state.drag, response.interact_pointer_pos()) {
             let (x, y) = local(pointer);
+            let free = ui.input(|input| input.modifiers.shift);
             if outside_the_rows(state, tracks_rect, pointer) {
-                state.finish_drag_on_new_track(drag, state.view.x_to_time(x));
+                state.finish_drag_on_new_track(drag, state.view.x_to_time(x), free);
             } else {
-                let command = clamp_trim(state.project(), drag_command(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height)));
-                state.finish_drag(command);
+                let snapped = state.snapped_drag(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height), free);
+                state.finish_drag(snapped.command);
             }
         }
         state.drag = None;
@@ -484,11 +491,19 @@ fn draw_drag_preview(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
     let height = f64::from(tracks_rect.height());
     let x = f64::from(pointer.x - tracks_rect.left());
     let y = f64::from(pointer.y - tracks_rect.top());
-    let command = clamp_trim(state.project(), drag_command(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height)));
-    let Some(span) = command.landing(state.project()) else { return };
+    let free = ui.input(|input| input.modifiers.shift);
+    let snapped = state.snapped_drag(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height), free);
+    let Some(span) = snapped.command.landing(state.project()) else { return };
     let row = row_rect(state, tracks_rect, span.track, track_count);
     let rect = span_rect(state, tracks_rect, row, span.start, span.end);
-    ui.painter_at(tracks_rect).rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(2.0, theme::drop_outline()), StrokeKind::Inside);
+    let painter = ui.painter_at(tracks_rect);
+    painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(2.0, theme::drop_outline()), StrokeKind::Inside);
+    if let Some(guide) = snapped.guide {
+        let guide_x = tracks_rect.left() + state.view.time_to_x(guide) as f32;
+        if guide_x >= tracks_rect.left() && guide_x <= tracks_rect.right() {
+            painter.vline(guide_x, tracks_rect.y_range(), Stroke::new(1.5, theme::accent()));
+        }
+    }
 }
 
 fn draw_ruler(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect) {

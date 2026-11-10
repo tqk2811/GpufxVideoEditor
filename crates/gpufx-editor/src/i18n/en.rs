@@ -211,6 +211,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::SplitShortcut => "Split at the playhead (S)".to_owned(),
         Message::TrimBefore => "Trim before the playhead".to_owned(),
         Message::TrimAfter => "Trim after the playhead".to_owned(),
+        Message::SnapToggle => "Snap to clip edges (hold Shift while dragging to turn it off)".to_owned(),
         Message::DeleteShortcut => "Delete clip (Delete)".to_owned(),
         Message::ZoomIn => "Zoom in".to_owned(),
         Message::ZoomOut => "Zoom out".to_owned(),

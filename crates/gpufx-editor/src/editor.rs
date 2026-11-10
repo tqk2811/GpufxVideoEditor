@@ -9,6 +9,7 @@ use crate::project_lock::ProjectLock;
 use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_command, ClipDrag, EditCommand};
 use crate::timeline::hit::ClipHit;
+use crate::timeline::snap::{snap_command, snap_onto_track, snap_points, snap_span, snap_tolerance, Snapped};
 use crate::timeline::view::TimelineView;
 use crate::visuals::ClipVisuals;
 use engine::{
@@ -183,6 +184,8 @@ pub struct UiState {
     pub files_dropped: Vec<(PathBuf, Option<egui::Pos2>)>,
     /// Drops on the timeline, the first being read one file at a time.
     pub drop_batches: VecDeque<DropBatch>,
+    /// Snapping to clip edges is off. The default, false, keeps it on.
+    pub snap_off: bool,
 }
 
 /// The files of one drop on the timeline and the place the next of them goes.
@@ -989,6 +992,36 @@ impl EditorState {
         }
     }
 
+    /// The command of `drag` with the pointer at `pointer_time`, pulled onto the edges of other
+    /// clips, the playhead and zero, and the time to draw a guide line at. `free` turns snapping off
+    /// for this moment, as holding Shift does. The preview and the release both use this, so they
+    /// always agree.
+    pub fn snapped_drag(&self, drag: &ClipDrag, pointer_time: Time, pointer_track: Option<usize>, free: bool) -> Snapped {
+        let command = drag_command(drag, pointer_time, pointer_track);
+        if self.ui.snap_off || free {
+            return Snapped { command: clamp_trim(self.project(), command), guide: None };
+        }
+        let points = snap_points(self.project(), Some(drag.key), self.playhead());
+        snap_command(self.project(), command, &points, snap_tolerance(self.view.pixels_per_second()))
+    }
+
+    /// Where a library item dropped with its start at `at` begins: pulled onto a snap point by its
+    /// start or end unless snapping is off or `free`. On `track` only a start the track really has
+    /// free counts; `None` is a new track, where anything does. An unknown `duration` counts as the
+    /// default.
+    pub fn snapped_drop_time(&self, at: Time, duration: Option<Time>, track: Option<usize>, free: bool) -> Time {
+        if self.ui.snap_off || free {
+            return at;
+        }
+        let duration = duration.unwrap_or(DEFAULT_CLIP_DURATION);
+        let points = snap_points(self.project(), None, self.playhead());
+        let tolerance = snap_tolerance(self.view.pixels_per_second());
+        match track {
+            Some(track) => snap_onto_track(self.project(), track, &points, at, duration, tolerance),
+            None => snap_span(&points, at, duration, tolerance).map_or(at, |(start, _)| start),
+        }
+    }
+
     /// Issues the command of a finished drag and selects the clip where it landed.
     pub fn finish_drag(&mut self, command: EditCommand) {
         self.drag = None;
@@ -1179,12 +1212,21 @@ impl EditorState {
 
     /// Ends a move dropped outside the track rows: the clip goes to a new track of its kind, as
     /// one undo step. A drag that is not a move ends as it would anywhere else.
-    pub fn finish_drag_on_new_track(&mut self, drag: ClipDrag, pointer_time: Time) {
+    /// `free` turns snapping off for this drop, as holding Shift does.
+    pub fn finish_drag_on_new_track(&mut self, drag: ClipDrag, pointer_time: Time, free: bool) {
         let command = drag_command(&drag, pointer_time, None);
-        let EditCommand::Move { key, desired_start, .. } = command else {
-            self.finish_drag(clamp_trim(self.project(), command));
+        let EditCommand::Move { key, mut desired_start, .. } = command else {
+            let snapped = self.snapped_drag(&drag, pointer_time, None, free);
+            self.finish_drag(snapped.command);
             return;
         };
+        if !self.ui.snap_off && !free {
+            let duration = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map(|clip| clip.duration);
+            let points = snap_points(self.project(), Some(key), self.playhead());
+            if let Some((start, _)) = duration.and_then(|duration| snap_span(&points, desired_start, duration, snap_tolerance(self.view.pixels_per_second()))) {
+                desired_start = start;
+            }
+        }
         self.drag = None;
         let Some(kind) = self.project().tracks.get(key.track).map(|track| track.kind) else { return };
         let track = self.project().tracks.len();
@@ -2608,7 +2650,7 @@ mod tests {
         let before = state.project().clone();
         let hit = ClipHit { key: key(0), zone: crate::timeline::hit::ClipZone::Body };
         let drag = begin_drag(state.project(), hit, Time::ZERO).unwrap();
-        state.finish_drag_on_new_track(drag, seconds(4));
+        state.finish_drag_on_new_track(drag, seconds(4), false);
         assert_eq!(state.project().tracks.len(), 3);
         assert_eq!(state.project().tracks[2].kind, TrackKind::Video);
         assert_eq!(clips(state.project(), 2), vec![(seconds(4), DEFAULT_CLIP_DURATION)]);
@@ -2625,8 +2667,72 @@ mod tests {
         let drag = begin_drag(state.project(), hit, Time::ZERO).unwrap();
         state.toggle_track_locked(0);
         let before = state.project().clone();
-        state.finish_drag_on_new_track(drag, seconds(4));
+        state.finish_drag_on_new_track(drag, seconds(4), false);
         assert_eq!(state.project(), &before);
+    }
+
+    /// Two clips on track 0: a at 0 for the default 10 s, and b after a gap, at 20 s.
+    fn state_with_two_clips() -> EditorState {
+        let mut state = state_with_clip();
+        state.add_clip_from_file(0, Path::new("C:/media/b.mp4"));
+        let clip = state.project().tracks[0].clips[1].clone();
+        let moved = EditCommand::Move { key: key(1), track: 0, desired_start: seconds(20) };
+        assert_eq!(clip.start, DEFAULT_CLIP_DURATION);
+        state.finish_drag(moved);
+        state
+    }
+
+    /// Half the snap tolerance at the default zoom: close enough to snap.
+    fn nudge() -> Time {
+        Time::from_ticks(snap_tolerance(state_view_pps()).ticks() / 2)
+    }
+
+    fn state_view_pps() -> f64 {
+        EditorState::default().view.pixels_per_second()
+    }
+
+    #[test]
+    fn snapped_drag_pulls_to_an_edge_unless_free_or_off() {
+        let mut state = state_with_two_clips();
+        let hit = ClipHit { key: key(1), zone: crate::timeline::hit::ClipZone::Body };
+        let drag = begin_drag(state.project(), hit, seconds(20)).unwrap();
+        let near = DEFAULT_CLIP_DURATION.saturating_add(nudge());
+        let snapped = state.snapped_drag(&drag, near, Some(0), false);
+        assert_eq!(snapped.command, EditCommand::Move { key: key(1), track: 0, desired_start: DEFAULT_CLIP_DURATION });
+        assert_eq!(snapped.guide, Some(DEFAULT_CLIP_DURATION));
+        let free = state.snapped_drag(&drag, near, Some(0), true);
+        assert_eq!(free, Snapped { command: EditCommand::Move { key: key(1), track: 0, desired_start: near }, guide: None });
+        state.ui.snap_off = true;
+        assert_eq!(state.snapped_drag(&drag, near, Some(0), false), free);
+    }
+
+    #[test]
+    fn a_clip_moved_outside_the_rows_snaps_unless_free() {
+        let mut state = state_with_two_clips();
+        let hit = ClipHit { key: key(1), zone: crate::timeline::hit::ClipZone::Body };
+        let drag = begin_drag(state.project(), hit, seconds(20)).unwrap();
+        let near = DEFAULT_CLIP_DURATION.saturating_add(nudge());
+        let before = state.project().clone();
+        state.finish_drag_on_new_track(drag, near, true);
+        assert_eq!(clips(state.project(), 2)[0].0, near);
+        state.undo();
+        assert_eq!(state.project(), &before);
+        state.finish_drag_on_new_track(drag, near, false);
+        assert_eq!(clips(state.project(), 2)[0].0, DEFAULT_CLIP_DURATION);
+    }
+
+    #[test]
+    fn snapped_drop_time_pulls_the_item_to_an_edge_unless_free_or_off() {
+        let mut state = state_with_two_clips();
+        let near = DEFAULT_CLIP_DURATION.saturating_add(nudge());
+        assert_eq!(state.snapped_drop_time(near, Some(seconds(3)), Some(0), false), DEFAULT_CLIP_DURATION);
+        // By its end: 3 s long, ending a little past where b starts.
+        let end_near = seconds(20).saturating_add(nudge()).saturating_sub(seconds(3));
+        assert_eq!(state.snapped_drop_time(end_near, Some(seconds(3)), Some(0), false), seconds(17));
+        assert_eq!(state.snapped_drop_time(end_near, Some(seconds(3)), None, false), seconds(17));
+        assert_eq!(state.snapped_drop_time(near, Some(seconds(3)), Some(0), true), near);
+        state.ui.snap_off = true;
+        assert_eq!(state.snapped_drop_time(near, None, Some(0), false), near);
     }
 
     #[test]

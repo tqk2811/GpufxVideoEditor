@@ -29,6 +29,7 @@ pub enum Icon {
     Unlock,
     Eye,
     EyeOff,
+    Magnet,
 }
 
 const ICON_STROKE: f32 = 1.5;
@@ -168,6 +169,17 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.circle_stroke(c, s * 0.26, stroke);
             if icon == Icon::EyeOff {
                 painter.line_segment([p(-0.75, -0.75), p(0.75, 0.75)], stroke);
+            }
+        }
+        Icon::Magnet => {
+            // A U: the lower half of two circles, the legs going up, the tips closed off.
+            line(painter, arc(p(0.0, 0.05), s * 0.65, 0.0, std::f32::consts::PI), stroke);
+            line(painter, arc(p(0.0, 0.05), s * 0.25, 0.0, std::f32::consts::PI), stroke);
+            for x in [-1.0, 1.0] {
+                painter.line_segment([p(x * 0.65, 0.05), p(x * 0.65, -0.8)], stroke);
+                painter.line_segment([p(x * 0.25, 0.05), p(x * 0.25, -0.8)], stroke);
+                painter.line_segment([p(x * 0.25, -0.8), p(x * 0.65, -0.8)], stroke);
+                painter.line_segment([p(x * 0.25, -0.4), p(x * 0.65, -0.4)], stroke);
             }
         }
     }

@@ -194,6 +194,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::SplitShortcut => "Tách tại đầu phát (S)".to_owned(),
         Message::TrimBefore => "Cắt phần trước đầu phát".to_owned(),
         Message::TrimAfter => "Cắt phần sau đầu phát".to_owned(),
+        Message::SnapToggle => "Hút vào mép clip (giữ Shift khi kéo để tạm tắt)".to_owned(),
         Message::DeleteShortcut => "Xóa clip (Delete)".to_owned(),
         Message::ZoomIn => "Phóng to".to_owned(),
         Message::ZoomOut => "Thu nhỏ".to_owned(),

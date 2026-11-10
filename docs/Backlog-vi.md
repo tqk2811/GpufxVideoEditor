@@ -80,6 +80,14 @@ Resampler ở `crates/d3d12-backend/src/audio.rs:430` xuất float và không ch
 
 Seek về đầu của AAC trong MKV vẫn sai khoảng 1024 mẫu đầu (đo được sai 0,23 so với `ffmpeg` giải mã không seek), dù AAC trong MP4 đã đúng sau bản sửa `seek_demuxer` ở `crates/d3d12-backend/src/audio.rs`. Gói priming có timestamp -21 ms; nhiều khả năng demuxer Matroska kẹp timestamp seek về mục cue đầu rồi bỏ qua gói trước đó, chưa kiểm chứng bằng log. Nên làm nếu nguồn MKV là chuyện thường gặp, vì đầu clip nghe bị rè. Ghi ngày 2026-11-09.
 
+### [Thấp] Hút mép khi kéo sang track mới hoặc thả từ thư viện không có đường báo hiệu
+
+Kéo clip ra ngoài các hàng và kéo file từ thư viện vẫn hút mép lúc thả, nhưng không vẽ đường dọc nên clip có thể lệch tới 8 điểm so với con trỏ mà không thấy trước (`crates/gpufx-editor/src/ui/timeline_panel.rs`, `draw_drag_preview`, `handle_media_drop`). Nên làm để hành vi nhất quán với kéo clip trên hàng. Ghi ngày 2026-11-10.
+
+### [Thấp] Hút đầu clip ở tốc độ khác 1 có thể hở dưới một bước lưới
+
+Đầu clip bị engine làm tròn theo lưới tốc độ, nên khi hút vào mép clip trước vẫn có thể hở tới khoảng 11 ms trong khi đường báo hiệu vẽ như đã khít (`crates/gpufx-editor/src/timeline/snap.rs`, `lands`). Nếu mép đó trùng biên khung thì khung đó không có clip nào. Cần quyết định có chấp nhận không hay chỉ hút khi lưới đủ nhỏ. Ghi ngày 2026-11-10.
+
 ### [Thấp] Kéo clip tới mép timeline không tự cuộn
 
 Khi kéo clip hoặc cạnh trim tới mép trái/phải của vùng track, view đứng yên nên không kéo được tới phần đang ngoài màn hình; phải thả, cuộn rồi kéo lại (`crates/gpufx-editor/src/ui.rs`, `handle_tracks`). Ghi ngày 2026-11-09.
