@@ -43,7 +43,7 @@ pub use edit::{
 pub use project::{
     ClipPlacement, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH,
     AudioOutput, Clip, Effect, LoadError, Output, Project, Track, TrackKind, Transition,
-    speed_in_range, speed_milli, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MIN_SUPPORTED_VERSION, SPEED_SCALE, SUPPORTED_VERSION,
+    is_image_source, speed_in_range, speed_milli, IMAGE_EXTENSIONS, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MIN_SUPPORTED_VERSION, SPEED_SCALE, SUPPORTED_VERSION,
 };
 pub use render::{ClipKey, RenderError};
 pub use schedule::{

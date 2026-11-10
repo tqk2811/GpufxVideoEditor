@@ -167,7 +167,7 @@ fn handle_media_drop(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rect
         if egui::DragAndDrop::take_payload::<MediaItem>(&ctx).is_some() {
             let free = ctx.input(|input| input.modifiers.shift);
             let at = state.snapped_drop_time(at, item.duration, track, free);
-            if d3d12_backend::is_asset_source(&item.source) {
+            if d3d12_backend::is_asset_source(&item.source) && item.kind == crate::media::MediaKind::Audio {
                 state.place_library_audio(&item, crate::editor::LibraryTarget::Dropped { track, at });
             } else {
                 state.drop_media(&item, track, at);

@@ -8,9 +8,13 @@ use engine::Resolver;
 /// What starts a clip source naming a file of an installed asset pack: `asset:<type>/<id>/<file>`.
 pub const ASSET_PREFIX: &str = "asset:";
 /// The pack types a clip source may name, each a folder under `<root>/packages`.
-pub const ASSET_TYPES: [&str; 2] = ["sfx", "music"];
-/// The extensions of the files of a pack a clip may play.
+pub const ASSET_TYPES: [&str; 3] = ["sfx", "music", "sticker"];
+/// The pack type whose files are pictures; the others are sounds.
+pub const STICKER_ASSET_TYPE: &str = "sticker";
+/// The extensions of the files of a sound pack a clip may play.
 pub const ASSET_AUDIO_EXTENSIONS: [&str; 2] = ["flac", "mp3"];
+/// The extensions of the files of a sticker pack a clip may show.
+pub const ASSET_IMAGE_EXTENSIONS: [&str; 4] = engine::IMAGE_EXTENSIONS;
 /// The longest pack id, which is also a folder name.
 pub const MAX_ASSET_ID_LENGTH: usize = 128;
 /// What an asset source that cannot be resolved turns into: no file can have this name on Windows.
@@ -74,6 +78,8 @@ pub enum AssetProblem {
     UnknownType { source: String, kind: String },
     /// The file is not one a clip may play.
     NotAudio { source: String },
+    /// The file is not a picture a clip may show.
+    NotImage { source: String },
     /// No package root holds the pack.
     PackMissing { kind: String, id: String },
     FileMissing { kind: String, id: String, file: String },
@@ -87,6 +93,7 @@ impl fmt::Display for AssetProblem {
             Self::Invalid { source } => write!(f, "'{source}' is not a valid asset source"),
             Self::UnknownType { source, kind } => write!(f, "'{source}' names the unknown pack type '{kind}'"),
             Self::NotAudio { source } => write!(f, "'{source}' is not an audio file of a pack"),
+            Self::NotImage { source } => write!(f, "'{source}' is not an image of a pack"),
             Self::PackMissing { kind, id } => write!(f, "the {kind} pack '{id}' is not installed"),
             Self::FileMissing { kind, id, file } => write!(f, "the {kind} pack '{id}' has no file '{file}'"),
             Self::Escapes { source } => write!(f, "'{source}' leads out of its pack"),
@@ -124,7 +131,11 @@ pub fn parse_asset_source(source: &str) -> Result<AssetRef, AssetProblem> {
         return Err(invalid());
     }
     let extension = Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-    if !ASSET_AUDIO_EXTENSIONS.contains(&extension.as_str()) {
+    if kind == STICKER_ASSET_TYPE {
+        if !ASSET_IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+            return Err(AssetProblem::NotImage { source: source.to_owned() });
+        }
+    } else if !ASSET_AUDIO_EXTENSIONS.contains(&extension.as_str()) {
         return Err(AssetProblem::NotAudio { source: source.to_owned() });
     }
     Ok(AssetRef { kind: kind.to_owned(), id: id.to_ascii_lowercase(), file: file.to_owned() })
@@ -418,6 +429,19 @@ mod tests {
         assert!(matches!(parse_asset_source("asset:../pack/a.flac"), Err(AssetProblem::UnknownType { .. })));
         assert!(matches!(parse_asset_source("asset:sfx/pack/manifest.json"), Err(AssetProblem::NotAudio { .. })));
         assert!(matches!(parse_asset_source("asset:sfx/pack/LICENSE.txt"), Err(AssetProblem::NotAudio { .. })));
+    }
+
+    #[test]
+    fn a_sticker_source_takes_images_only_and_is_refused_the_same_way_as_a_sound() {
+        assert_eq!(parse_asset_source("asset:sticker/pack/images/a.png").unwrap().file, "images/a.png");
+        assert_eq!(parse_asset_source("asset:sticker/PACK/a.WebP").unwrap().id, "pack");
+        for source in ["asset:sticker/pack/a.flac", "asset:sticker/pack/manifest.json"] {
+            assert!(matches!(parse_asset_source(source), Err(AssetProblem::NotImage { .. })), "{source}");
+        }
+        assert!(matches!(parse_asset_source("asset:sfx/pack/a.png"), Err(AssetProblem::NotAudio { .. })), "a sound pack holds no images");
+        for source in ["asset:sticker/pack/../a.png", "asset:sticker/../pack/a.png", "asset:sticker/pack/a.png:stream.png", "asset:sticker/pack/CON.png"] {
+            assert!(matches!(parse_asset_source(source), Err(AssetProblem::Invalid { .. })), "{source}");
+        }
     }
 
     #[test]

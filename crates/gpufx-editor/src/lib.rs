@@ -22,6 +22,8 @@ pub mod preview;
 pub mod project_file;
 pub mod project_lock;
 pub mod settings;
+pub mod sticker_install;
+pub mod sticker_library;
 pub mod tasks;
 pub mod timecode;
 pub mod timeline;

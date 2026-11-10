@@ -119,6 +119,7 @@ pub enum Action {
     PackageInstalled { package: String },
     /// An audio pack was installed: the library must be read again.
     AudioPackInstalled,
+    StickerPackInstalled,
     SaveTo(PathBuf),
     StartExport(PathBuf),
     /// The project was replaced, so playback of the old one must go.
@@ -465,6 +466,10 @@ impl Tasks {
                     state.show_installed_audio_pack(&installed);
                     Action::AudioPackInstalled
                 }
+                Ok(ImportOutcome::StickerInstalled(installed)) => {
+                    state.show_installed_sticker_pack(&installed);
+                    Action::StickerPackInstalled
+                }
                 Err(problem) => {
                     state.report_refused(Message::PackageImportRefused(problem));
                     Action::Nothing
@@ -527,6 +532,15 @@ mod tests {
         let installed = crate::asset_install::InstalledAudioPack { kind: crate::asset_install::AudioPackKind::Sfx, id: "p".to_owned(), name: "P".to_owned(), replaced: false };
         assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::AudioInstalled(installed)))), Action::AudioPackInstalled);
         assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Audio);
+    }
+
+    #[test]
+    fn an_installed_sticker_pack_asks_for_the_library_and_shows_the_sticker_tab() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let load = start_package_import(&mut tasks, &mut state);
+        let installed = crate::sticker_install::InstalledStickerPack { id: "p".to_owned(), name: "P".to_owned(), replaced: false };
+        assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::StickerInstalled(installed)))), Action::StickerPackInstalled);
+        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Stickers);
     }
 
     #[test]

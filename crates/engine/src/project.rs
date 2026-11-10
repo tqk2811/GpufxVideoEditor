@@ -378,7 +378,21 @@ impl Project {
     }
 }
 
+/// The extensions of the still images a clip may show, lower-cased.
+pub const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+
+/// Whether `source`, a path or an `asset:` source, names a still image, by its extension.
+pub fn is_image_source(source: &str) -> bool {
+    let name = source.rsplit(['/', '\\']).next().unwrap_or(source);
+    name.rsplit_once('.').is_some_and(|(_, extension)| IMAGE_EXTENSIONS.iter().any(|known| extension.eq_ignore_ascii_case(known)))
+}
+
 impl Clip {
+    /// Whether the clip shows a still image: it has no sound and no source length to run out of.
+    pub fn is_image(&self) -> bool {
+        is_image_source(&self.source)
+    }
+
     /// Timeline end (exclusive), or `None` on overflow.
     pub fn end(&self) -> Option<Time> {
         self.start.checked_add(self.duration)

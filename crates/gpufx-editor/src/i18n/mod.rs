@@ -210,6 +210,17 @@ pub enum Message {
     // Left panel.
     TabMedia,
     TabAudio,
+    TabStickers,
+    SearchStickers,
+    AllCategories,
+    StickerLibraryEmpty,
+    StickerAddHint,
+    StickerPackInstalled { name: String, replaced: bool },
+    /// The Sticker tab has not finished reading the installed packs.
+    ReadingStickerPacks,
+    /// How many sticker packs or stickers could not be read.
+    StickerPackProblems(usize),
+    EditSpeedOfImage(TrackLabel),
     TabEffects,
     Transitions,
     ImportFromComputer,
@@ -343,6 +354,15 @@ mod tests {
             Message::PackageImportRefused(ImportProblem::RatioTooHigh { entry: name(), limit: 200 }),
             Message::PackageImportRefused(ImportProblem::Entry { entry: name(), problem: EntryProblem::ExtensionNotAllowed }),
             Message::AudioPackInstalled { name: name(), replaced: true },
+            Message::TabStickers,
+            Message::SearchStickers,
+            Message::AllCategories,
+            Message::StickerLibraryEmpty,
+            Message::StickerAddHint,
+            Message::StickerPackInstalled { name: name(), replaced: true },
+            Message::ReadingStickerPacks,
+            Message::StickerPackProblems(2),
+            Message::EditSpeedOfImage(TrackLabel::Video(1)),
             Message::SessionAudio,
             Message::InstalledPacks,
             Message::ReadingAudioPacks,
@@ -390,6 +410,9 @@ mod tests {
         assert!(finished(2).contains("Exported 2 frames to"), "{}", finished(2));
         assert!(finished(0).contains("Exported 0 frames to"), "{}", finished(0));
         assert!(Language::English.t(Message::ExportFinishedSilent { frames: 1, path: "a.mp4".to_owned(), encoder: "x".to_owned() }).contains("Exported 1 frame to"));
+        assert_eq!(Language::English.t(Message::StickerPackProblems(1)), "1 pack or sticker could not be read");
+        assert_eq!(Language::Vietnamese.t(Message::StickerPackProblems(2)), "Không đọc được 2 gói hoặc sticker");
+        assert_eq!(Language::Vietnamese.t(Message::ReadingStickerPacks), "Đang đọc các gói sticker đã cài...");
         assert_eq!(Language::English.t(Message::PackageProblems(1)), "1 package could not be read");
         assert_eq!(Language::English.t(Message::PackageProblems(3)), "3 packages could not be read");
         let unusable = |stream| Language::English.t(Message::StreamUnusable { name: "a".to_owned(), stream, reason: "r".to_owned() });

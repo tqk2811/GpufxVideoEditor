@@ -18,6 +18,7 @@ use zip::ZipArchive;
 
 use crate::asset_install::{install_audio_pack, AudioPackKind, InstalledAudioPack};
 use crate::packages::{classify, PackageKind};
+use crate::sticker_install::{install_sticker_pack, InstalledStickerPack, STICKER_TYPE};
 
 pub(crate) const MIB: u64 = 1 << 20;
 /// The folder under `packages/gpufx` that imported shader packages go to.
@@ -29,8 +30,8 @@ const MAX_MANIFEST_BYTES: u64 = 16 * MIB;
 const MAX_ARCHIVE_BYTES: u64 = 2048 * MIB;
 /// A shader zip is read whole: its files, within [`SHADER_LIMITS`], and the zip's own headers.
 const MAX_SHADER_ARCHIVE_BYTES: u64 = 264 * MIB;
-/// The types of the packages that are neither shaders nor audio.
-const NON_SHADER_TYPES: [&str; 5] = ["sticker", "font", "text-style", "text-animation", "subtitle-style"];
+/// The types of the packages the editor cannot use yet.
+const NON_SHADER_TYPES: [&str; 4] = ["font", "text-style", "text-animation", "subtitle-style"];
 
 /// What a zip may declare. Sizes are as declared: what is really read is counted where it is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +119,7 @@ pub enum ImportProblem {
 pub enum ImportOutcome {
     Installed(InstalledPackage),
     AudioInstalled(InstalledAudioPack),
+    StickerInstalled(InstalledStickerPack),
     /// A package with this name is there, and overwriting was not allowed.
     AlreadyInstalled { name: String },
 }
@@ -205,6 +207,7 @@ enum Declared {
     /// A gpufx shader package, which has no `type`, with its id.
     Shader(Option<String>),
     Audio(AudioPackKind),
+    Sticker,
 }
 
 /// What the manifest declares. A `type` the editor cannot use is an error here, so that it is
@@ -215,6 +218,7 @@ fn declared_package(manifest: &[u8]) -> Result<Declared, ImportProblem> {
     match object.get("type") {
         None => Ok(Declared::Shader(object.get("id").and_then(Value::as_str).map(str::to_owned))),
         Some(Value::String(kind)) if AudioPackKind::from_name(kind).is_some() => Ok(Declared::Audio(AudioPackKind::from_name(kind).unwrap_or(AudioPackKind::Sfx))),
+        Some(Value::String(kind)) if kind == STICKER_TYPE => Ok(Declared::Sticker),
         Some(Value::String(kind)) if NON_SHADER_TYPES.contains(&kind.as_str()) => Err(ImportProblem::NotSupportedYet(kind.clone())),
         Some(Value::String(kind)) => Err(ImportProblem::UnknownType(kind.clone())),
         Some(_) => Err(ImportProblem::BadManifest("`type` is not a string".to_owned())),
@@ -304,8 +308,10 @@ pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<I
     }
     let file = File::open(source).map_err(|e| ImportProblem::Unreadable(e.to_string()))?;
     // A large zip may well be an audio pack, which is told apart without reading it whole.
-    if let Declared::Audio(_) = inspect(BufReader::new(file), ARCHIVE_LIMITS)? {
-        return install_audio_pack(source, user_root, overwrite);
+    match inspect(BufReader::new(file), ARCHIVE_LIMITS)? {
+        Declared::Audio(_) => return install_audio_pack(source, user_root, overwrite),
+        Declared::Sticker => return install_sticker_pack(source, user_root, overwrite),
+        Declared::Shader(_) => {}
     }
     let bytes = read_bounded(source, MAX_SHADER_ARCHIVE_BYTES)?;
     let Declared::Shader(id) = inspect(Cursor::new(bytes.as_slice()), SHADER_LIMITS)? else { return Err(ImportProblem::BadManifest("it changed while it was being read".to_owned())) };
@@ -582,8 +588,10 @@ mod tests {
     fn a_known_but_unsupported_type_installs_nothing_and_a_bad_zip_says_so() {
         let dir = scratch("unsupported");
         let root = dir.join("root");
+        let font = zip_bytes(&[("manifest.json", br#"{"type":"font","name":"Sans"}"#), ("sans.ttf", b"x")]);
+        assert_eq!(install_zip(&written(&dir, &font), &root, false), Err(ImportProblem::NotSupportedYet("font".to_owned())));
         let sticker = zip_bytes(&[("manifest.json", br#"{"type":"sticker","name":"Smile"}"#), ("smile.png", b"x")]);
-        assert_eq!(install_zip(&written(&dir, &sticker), &root, false), Err(ImportProblem::NotSupportedYet("sticker".to_owned())));
+        assert!(matches!(install_zip(&written(&dir, &sticker), &root, false), Err(ImportProblem::BadManifest(_))), "a sticker pack goes to its own, stricter reader");
         let audio = zip_bytes(&[("manifest.json", br#"{"type":"sfx","name":"Bells"}"#), ("bell.flac", b"x")]);
         assert!(matches!(install_zip(&written(&dir, &audio), &root, false), Err(ImportProblem::BadManifest(_))), "an audio pack goes to its own, stricter reader");
         let unknown = zip_bytes(&[("manifest.json", br#"{"type":"hologram"}"#)]);

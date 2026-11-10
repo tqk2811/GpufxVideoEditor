@@ -161,6 +161,12 @@ pub enum ValidationError {
         clip: usize,
         effect: usize,
     },
+    /// A clip on a track of kind `audio` shows a still image.
+    ImageOnAudioTrack {
+        track: usize,
+        clip: usize,
+        source: String,
+    },
     /// The source of a clip on a track of kind `audio` has no audio stream.
     SourceHasNoAudio {
         track: usize,
@@ -273,6 +279,9 @@ impl fmt::Display for ValidationError {
             AudioTrackEffect { track, clip, effect } => {
                 write!(f, "track {track}, clip {clip}, effect {effect}: an audio track cannot have effects")
             }
+            ImageOnAudioTrack { track, clip, source } => {
+                write!(f, "track {track}, clip {clip}: the image '{source}' cannot go on an audio track")
+            }
             SourceHasNoAudio { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: source '{source}' has no audio stream")
             }
@@ -373,6 +382,12 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 });
             } else if !resolver.source_exists(&clip.source) {
                 errors.push(SourceNotFound {
+                    track: t,
+                    clip: c,
+                    source: clip.source.clone(),
+                });
+            } else if track.is_audio() && clip.is_image() {
+                errors.push(ImageOnAudioTrack {
                     track: t,
                     clip: c,
                     source: clip.source.clone(),

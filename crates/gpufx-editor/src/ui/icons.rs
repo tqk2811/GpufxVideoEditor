@@ -8,6 +8,7 @@ use super::theme;
 pub enum Icon {
     Film,
     Music,
+    Sticker,
     Sparkle,
     Transition,
     Upload,
@@ -66,6 +67,12 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 painter.line_segment([p(x, -0.72), p(x, 0.72)], stroke);
             }
             painter.line_segment([p(-0.85, 0.0), p(0.85, 0.0)], stroke);
+        }
+        Icon::Sticker => {
+            painter.circle_stroke(p(0.0, 0.0), s * 0.8, stroke);
+            painter.circle_filled(p(-0.3, -0.2), s * 0.12, stroke.color);
+            painter.circle_filled(p(0.3, -0.2), s * 0.12, stroke.color);
+            line(painter, vec![p(-0.4, 0.3), p(-0.15, 0.5), p(0.15, 0.5), p(0.4, 0.3)], stroke);
         }
         Icon::Music => {
             painter.circle_stroke(p(-0.35, 0.55), s * 0.25, stroke);

@@ -18,6 +18,7 @@ use engine::{Time, TrackKind};
 use crate::agent::gateway::{pipe_name, AgentGateway};
 use crate::agent::{check_export, execute, AgentError, AgentHost};
 use crate::audio_library::{scan_audio_packs, AudioLibrary};
+use crate::sticker_library::{scan_sticker_packs, StickerLibrary};
 use crate::asset_install::recover_interrupted_install;
 use crate::editor::{EditorState, LeftTab, SoundPreviewWish, Status};
 use crate::export::{encoder_options, export_blocker, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
@@ -41,7 +42,7 @@ const PLAYING_REPAINT: Duration = Duration::from_millis(16);
 /// How often the export bar moves.
 const EXPORT_REPAINT: Duration = Duration::from_millis(100);
 
-const MEDIA_EXTENSIONS: [&str; 10] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac"];
+const MEDIA_EXTENSIONS: [&str; 14] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac", "png", "jpg", "jpeg", "webp"];
 const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "wav", "m4a", "flac", "aac", "ogg"];
 
 /// Hidden check of the frame path: names a media file to open at one second, and the app reports
@@ -144,6 +145,7 @@ struct Session {
     title: String,
     catalog: Option<Receiver<Catalog>>,
     audio_library: Option<Receiver<AudioLibrary>>,
+    sticker_library: Option<Receiver<StickerLibrary>>,
     tasks: Tasks,
     arrivals: Receiver<Arrival>,
     arrival_sender: Sender<Arrival>,
@@ -190,6 +192,7 @@ impl Session {
         let previews_window = session_window.clone();
         state.previews.get_mut().start_for_editor(package_roots.clone(), Arc::new(move || previews_window.request_redraw()));
         let audio_library = spawn_audio_scan(package_roots.clone(), window_for_scan.clone());
+        let sticker_library = spawn_sticker_scan(package_roots.clone(), window_for_scan.clone());
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
         let (arrival_sender, arrivals) = channel();
@@ -218,6 +221,7 @@ impl Session {
             title: String::new(),
             catalog: Some(catalog),
             audio_library: Some(audio_library),
+            sticker_library: Some(sticker_library),
             tasks: Tasks::default(),
             arrivals,
             arrival_sender,
@@ -304,7 +308,14 @@ impl Session {
         }
     }
 
-    /// Takes the installed audio packs once their scan has finished.
+    /// Takes the installed sticker packs once their scan has finished.
+    fn collect_sticker_library(&mut self) {
+        if let Some(Ok(library)) = self.sticker_library.as_ref().map(Receiver::try_recv) {
+            self.state.sticker_library = library;
+            self.sticker_library = None;
+        }
+    }
+
     fn collect_audio_library(&mut self) {
         if let Some(Ok(library)) = self.audio_library.as_ref().map(Receiver::try_recv) {
             self.state.audio_library = library;
@@ -561,6 +572,7 @@ impl Session {
     fn redraw(&mut self) -> Result<(), String> {
         self.collect_catalog();
         self.collect_audio_library();
+        self.collect_sticker_library();
         self.collect_arrivals();
         self.poll_export();
         self.collect_preview();
@@ -773,6 +785,7 @@ impl Session {
             }
             Action::PackageInstalled { package } => self.package_installed(&package),
             Action::AudioPackInstalled => self.audio_pack_installed(),
+            Action::StickerPackInstalled => self.sticker_pack_installed(),
             Action::SaveTo(path) => self.save_project(path),
             Action::StartExport(path) => self.start_export(path, None),
             Action::ProjectReplaced => {
@@ -797,6 +810,15 @@ impl Session {
     /// Reads the installed packs again and drops what still points at files of the old one.
     fn audio_pack_installed(&mut self) {
         self.audio_library = Some(spawn_audio_scan(self.package_roots.clone(), self.window.clone()));
+        self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.state.visuals.get_mut().set_paths(self.paths.clone());
+        self.tracker = RequestTracker::default();
+        self.shown = None;
+    }
+
+    /// Reads the installed sticker packs again, for the new pack and any replaced files.
+    fn sticker_pack_installed(&mut self) {
+        self.sticker_library = Some(spawn_sticker_scan(self.package_roots.clone(), self.window.clone()));
         self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         self.tracker = RequestTracker::default();
@@ -967,6 +989,22 @@ fn spawn_audio_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<AudioL
     });
     if let Err(e) = scanner {
         eprintln!("gpufx-editor: the audio pack scan could not start: {e}");
+    }
+    receiver
+}
+
+/// Reads the manifests of the installed sticker packs away from the UI thread.
+fn spawn_sticker_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<StickerLibrary> {
+    let (sender, receiver) = channel();
+    let scanner = std::thread::Builder::new().name("sticker-packs".to_owned()).spawn(move || {
+        if let Some(user_root) = user_package_root() {
+            recover_interrupted_install(&user_root);
+        }
+        let _ = sender.send(scan_sticker_packs(&roots));
+        window.request_redraw();
+    });
+    if let Err(e) = scanner {
+        eprintln!("gpufx-editor: the sticker pack scan could not start: {e}");
     }
     receiver
 }

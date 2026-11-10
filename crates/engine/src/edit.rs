@@ -71,6 +71,8 @@ pub enum EditError {
     TrackLocked { track: usize },
     /// At this speed the clip would need to last past the start of the next clip.
     SpeedOverlap { key: ClipKey, end: Time, next_start: Time },
+    /// A still image has no playback speed to change.
+    SpeedOfImage { key: ClipKey },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -124,6 +126,7 @@ impl fmt::Display for EditError {
                 "track {}, clip {}: at this speed the clip ends at {end}, past the next clip at {next_start}",
                 key.track, key.clip
             ),
+            SpeedOfImage { key } => write!(f, "track {}, clip {}: an image has no speed", key.track, key.clip),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
                 for error in errors {
@@ -371,7 +374,8 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     if new_start == clip.start {
         return finish(project.clone());
     }
-    let source_in = clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())?;
+    // A still has the same picture at every time, so its edge can go anywhere and it keeps no offset.
+    let source_in = if clip.is_image() { Time::ZERO } else { clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())? };
     if source_in < Time::ZERO {
         return Err(EditError::BeforeSourceStart { key, source_in });
     }
@@ -644,6 +648,9 @@ pub fn set_fades(
 pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
+    if clip.is_image() {
+        return Err(EditError::SpeedOfImage { key });
+    }
     let mut next = project.clone();
     if !speed_in_range(speed) {
         clip_mut(&mut next, key)?.speed = speed;

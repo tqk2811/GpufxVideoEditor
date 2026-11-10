@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use d3d12_backend::{probe_media, AudioFileDecoder, FrameSampler, ThumbnailError, ThumbnailImage};
+use d3d12_backend::{probe_media, still_dimensions, still_thumbnail, AudioFileDecoder, FrameSampler, ThumbnailError, ThumbnailImage};
 use engine::{Time, MIX_CHANNELS, MIX_SAMPLE_RATE};
 
 use super::levels::PEAKS_PER_SECOND;
@@ -20,10 +20,17 @@ const MAX_PEAKS: usize = (PEAKS_PER_SECOND * 3600 * 24) as usize;
 #[derive(Debug, Default)]
 pub struct FfmpegGenerator;
 
+/// What one worker keeps open between jobs, for the source identity it was opened for.
+#[derive(Default)]
+pub struct LocalDecoders {
+    video: Option<(u32, FrameSampler)>,
+    still: Option<(u32, ThumbnailImage)>,
+}
+
 impl Generator for FfmpegGenerator {
     /// The open decoder and the source identity it was opened for: the same path with a new
     /// identity is another file, and an open decoder would go on reading the old one.
-    type Local = Option<(u32, FrameSampler)>;
+    type Local = LocalDecoders;
 
     fn stamp(&self, path: &Path) -> Option<FileStamp> {
         let metadata = std::fs::metadata(path).ok()?;
@@ -31,6 +38,10 @@ impl Generator for FfmpegGenerator {
     }
 
     fn inspect(&self, path: &Path) -> Result<SourceFacts, String> {
+        if engine::is_image_source(&path.to_string_lossy()) {
+            let (width, height) = still_dimensions(path)?;
+            return Ok(SourceFacts { has_video: true, has_audio: false, aspect: width as f32 / height.max(1) as f32, length: None });
+        }
         let probe = probe_media(path)?;
         let sampler = if probe.has_video { FrameSampler::open(path, THUMBNAIL_HEIGHT).map(Some) } else { Ok(None) };
         let (has_video, aspect) = match sampler {
@@ -49,16 +60,23 @@ impl Generator for FfmpegGenerator {
     }
 
     fn frame(&self, local: &mut Self::Local, identity: u32, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {
-        if local.as_ref().is_none_or(|(open, _)| *open != identity) {
-            // Closed first: a sampler still open on a replaced file must not outlive this call.
-            *local = None;
-            *local = Some((identity, FrameSampler::open(path, THUMBNAIL_HEIGHT)?));
+        if engine::is_image_source(&path.to_string_lossy()) {
+            // Every tile of a still is the same picture, so it is decoded once.
+            if local.still.as_ref().is_none_or(|(open, _)| *open != identity) {
+                local.still = Some((identity, still_thumbnail(path, THUMBNAIL_HEIGHT)?));
+            }
+            return Ok(local.still.as_ref().expect("made above").1.clone());
         }
-        let (_, sampler) = local.as_mut().expect("opened above");
+        if local.video.as_ref().is_none_or(|(open, _)| *open != identity) {
+            // Closed first: a sampler still open on a replaced file must not outlive this call.
+            local.video = None;
+            local.video = Some((identity, FrameSampler::open(path, THUMBNAIL_HEIGHT)?));
+        }
+        let (_, sampler) = local.video.as_mut().expect("opened above");
         let result = sampler.picture_at(at, cancelled);
         if matches!(result, Err(ThumbnailError::Failed(_))) {
             // A decoder that lost its file stays lost; the next request opens it again.
-            *local = None;
+            local.video = None;
         }
         result
     }

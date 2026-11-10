@@ -130,7 +130,7 @@ fn red_and_blue(image: &ThumbnailImage) -> (u32, u32) {
 fn a_file_overwritten_in_place_is_decoded_anew_under_its_new_identity() {
     let never = || false;
     let path = clip("overwritten.mp4", &["-f", "lavfi", "-i", "color=c=red:s=320x180:r=30:d=1", "-an", "-c:v", "mpeg4"]);
-    let mut local = None;
+    let mut local = crate::visuals::backend::LocalDecoders::default();
     let old = FfmpegGenerator.frame(&mut local, 1, &path, Time::ZERO, &never).expect("the old file");
     let (red, blue) = red_and_blue(&old);
     assert!(red > blue + 80, "{red} {blue}");

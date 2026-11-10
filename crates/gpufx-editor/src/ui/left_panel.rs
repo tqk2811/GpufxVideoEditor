@@ -9,6 +9,7 @@ use crate::effect_previews::{AnimationState, LoopFrames, PreviewManager, TileSta
 use crate::i18n::{Language, Message};
 use crate::layout::grid_columns;
 use crate::media::{MediaItem, MediaKind};
+use crate::sticker_library::LibrarySticker;
 use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageEntry, PackageKind};
 use crate::timecode::format_duration;
 use std::cell::RefCell;
@@ -60,6 +61,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
             audio_tab(ui, state, requests);
         }
         LeftTab::Effects | LeftTab::Transitions => picker(ui, state, requests),
+        LeftTab::Stickers => {
+            state.ui.tile_hover.clear();
+            sticker_tab(ui, state, requests);
+        }
     });
 }
 
@@ -87,6 +92,7 @@ fn rail_tabs(ui: &mut egui::Ui, state: &mut EditorState, rail: Rect) {
         (LeftTab::Audio, Icon::Music, Message::TabAudio),
         (LeftTab::Effects, Icon::Sparkle, Message::TabEffects),
         (LeftTab::Transitions, Icon::Transition, Message::Transitions),
+        (LeftTab::Stickers, Icon::Sticker, Message::TabStickers),
     ];
     let height = rail_cell_height(rail.height(), entries.len());
     for (index, (tab, icon, label)) in entries.into_iter().enumerate() {
@@ -111,7 +117,7 @@ fn rail_tabs(ui: &mut egui::Ui, state: &mut EditorState, rail: Rect) {
             match tab {
                 LeftTab::Effects => state.picker.set_kind(PackageKind::Effect),
                 LeftTab::Transitions => state.picker.set_kind(PackageKind::Transition),
-                LeftTab::Media | LeftTab::Audio => {}
+                LeftTab::Media | LeftTab::Audio | LeftTab::Stickers => {}
             }
         }
     }
@@ -148,6 +154,113 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
     if let Some(item) = chosen {
         state.add_media_at_playhead(&item);
     }
+}
+
+/// The Sticker tab: the import button, a search, a category filter and the grid.
+fn sticker_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
+    let language = state.language();
+    if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportPackage), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
+        requests.push(UiRequest::ImportPackage);
+    }
+    search_box(ui, &mut state.ui.sticker_search, &language.t(Message::SearchStickers));
+    category_filter(ui, state);
+    let (search, category) = (state.ui.sticker_search.clone(), state.ui.sticker_category.clone());
+    let found: Vec<LibrarySticker> = state.sticker_library.matching(&search, category.as_deref()).into_iter().cloned().collect();
+    if found.is_empty() {
+        let message = empty_sticker_message(state.sticker_library.loaded, search.trim().is_empty() && category.is_none());
+        ui.add(egui::Label::new(egui::RichText::new(language.t(message)).color(theme::text_dim())).wrap());
+        sticker_problems(ui, state);
+        return;
+    }
+    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::StickerAddHint)).color(theme::text_dim())).wrap());
+    let width = (ui.available_width() - ui.spacing().scroll.allocated_width()).max(1.0);
+    let (columns, side) = picker_grid(width);
+    let mut chosen = None;
+    egui::ScrollArea::vertical().id_salt("sticker-grid").auto_shrink([false, false]).show_rows(ui, side + TILE_CAPTION, found.len().div_ceil(columns), |ui, rows| {
+        for row in rows {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = TILE_GAP;
+                for sticker in &found[row_tiles(row, columns, found.len())] {
+                    if sticker_tile(ui, state, sticker, side) {
+                        chosen = Some(sticker.media_item());
+                    }
+                }
+            });
+        }
+    });
+    sticker_problems(ui, state);
+    if let Some(item) = chosen {
+        state.add_media_at_playhead(&item);
+    }
+}
+
+/// What the Sticker tab says when it has nothing to show.
+fn empty_sticker_message(loaded: bool, unfiltered: bool) -> Message {
+    if !loaded {
+        Message::ReadingStickerPacks
+    } else if unfiltered {
+        Message::StickerLibraryEmpty
+    } else {
+        Message::NoSearchMatch
+    }
+}
+
+/// The combo box of the categories; "all" clears the filter.
+fn category_filter(ui: &mut egui::Ui, state: &mut EditorState) {
+    let language = state.language();
+    let categories: Vec<String> = state.sticker_library.categories().into_iter().map(str::to_owned).collect();
+    let all = language.t(Message::AllCategories);
+    let shown = state.ui.sticker_category.clone().unwrap_or_else(|| all.clone());
+    egui::ComboBox::from_id_salt("sticker-category").selected_text(shown).width(ui.available_width()).show_ui(ui, |ui| {
+        ui.selectable_value(&mut state.ui.sticker_category, None, all);
+        for category in categories {
+            ui.selectable_value(&mut state.ui.sticker_category, Some(category.clone()), category);
+        }
+    });
+}
+
+fn sticker_problems(ui: &mut egui::Ui, state: &EditorState) {
+    if state.sticker_library.problems.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(state.language().t(Message::StickerPackProblems(state.sticker_library.problems.len()))).id_salt("sticker-pack-problems").show(ui, |ui| {
+        for problem in &state.sticker_library.problems {
+            ui.colored_label(theme::refused(), format!("{}: {}", problem.pack, problem.message));
+        }
+    });
+}
+
+/// One square tile of the Sticker tab: the picture on a checker-free dark background, its name below.
+/// Can be dragged onto a track like any media. True on a first click.
+fn sticker_tile(ui: &mut egui::Ui, state: &EditorState, sticker: &LibrarySticker, side: f32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(side, side + TILE_CAPTION), Sense::click_and_drag());
+    response.dnd_set_drag_payload(sticker.media_item());
+    let painter = ui.painter_at(rect);
+    let radius = CornerRadius::same(theme::CONTROL_RADIUS);
+    let picture = Rect::from_min_size(rect.min, Vec2::splat(side));
+    painter.rect_filled(picture, radius, theme::thumb_bg());
+    // Only a tile scrolled into view asks for its picture, which a worker makes off the UI thread.
+    let poster = ui.is_rect_visible(picture).then(|| state.visuals.borrow_mut().poster(&sticker.source, None)).flatten();
+    match poster {
+        Some((texture, aspect)) => {
+            let fitted = Rect::from_center_size(picture.center(), fit_size(picture.shrink(6.0).size(), aspect));
+            painter.image(texture, fitted, Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        None => icons::paint(&painter, Rect::from_center_size(picture.center(), Vec2::splat(24.0)), Icon::Sticker, theme::text_dim()),
+    }
+    let stroke = if response.hovered() { Stroke::new(1.0, theme::accent()) } else { Stroke::new(1.0, theme::border()) };
+    painter.rect_stroke(picture, radius, stroke, StrokeKind::Inside);
+    let mut job = egui::text::LayoutJob::simple_singleline(sticker.name.clone(), FontId::proportional(12.0), theme::text());
+    job.wrap = egui::text::TextWrapping::truncate_at_width((side - 4.0).max(1.0));
+    let galley = painter.layout_job(job);
+    painter.galley(egui::pos2(rect.left() + 2.0, picture.bottom() + (TILE_CAPTION - galley.size().y) / 2.0), galley, theme::text());
+    let response = response.on_hover_text(sticker_tooltip(sticker));
+    response.clicked() && !response.double_clicked() && !response.triple_clicked()
+}
+
+fn sticker_tooltip(sticker: &LibrarySticker) -> String {
+    let tags = if sticker.tags.is_empty() { sticker.category.clone() } else { format!("{} [{}]", sticker.category, sticker.tags.join(", ")) };
+    format!("{}\n{tags}", sticker.name)
 }
 
 /// The grid of `items`, and the one chosen this frame.
@@ -626,6 +739,13 @@ fn picker_problems(ui: &mut egui::Ui, state: &EditorState) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_sticker_tab_uses_its_own_words_and_not_the_audio_ones() {
+        assert_eq!(super::empty_sticker_message(false, true), super::Message::ReadingStickerPacks);
+        assert_eq!(super::empty_sticker_message(true, true), super::Message::StickerLibraryEmpty);
+        assert_eq!(super::empty_sticker_message(true, false), super::Message::NoSearchMatch);
+    }
+
     use super::*;
 
     #[test]
