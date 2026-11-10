@@ -6,7 +6,7 @@ use crate::editor::{EditorState, Status, OUTPUT_FRAME_DURATIONS, OUTPUT_PRESETS}
 use crate::i18n::Message;
 use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
-use crate::timecode::{aspect_label, format_fps, format_timecode};
+use crate::timecode::{aspect_label, format_fps, format_timecode, fps_from_frame_duration, frame_duration_from_fps};
 use crate::timeline::view::content_end;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
 
@@ -171,6 +171,7 @@ fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
     let (width, height, frame_duration) = (output.width, output.height, output.frame_duration);
     let language = state.language();
     let draft_id = ui.scope_id().with("output-size-draft");
+    let fps_draft_id = ui.scope_id().with("output-fps-draft");
     let enabled = !state.is_exporting();
     let menu = ui.add_enabled_ui(enabled, |ui| {
         ui.menu_button(label, |ui| {
@@ -202,11 +203,29 @@ fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
                     ui.close();
                 }
             }
+            ui.separator();
+            ui.colored_label(theme::text_dim(), language.t(Message::FrameRateCustom));
+            let mut draft_fps = ui.data(|data| data.get_temp::<f64>(fps_draft_id)).unwrap_or_else(|| fps_from_frame_duration(frame_duration));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut draft_fps).speed(0.1).max_decimals(3).suffix(" fps"));
+            });
+            ui.data_mut(|data| data.insert_temp(fps_draft_id, draft_fps));
+            // Only 1 to 60 fps is taken; anything else leaves Apply off instead of being clamped.
+            let custom = frame_duration_from_fps(draft_fps);
+            if ui.add_enabled(custom.is_some(), egui::Button::new(language.t(Message::Apply))).clicked() {
+                if let Some(custom) = custom {
+                    state.set_frame_duration(custom);
+                    ui.close();
+                }
+            }
         })
     });
     // What was typed and not applied does not come back the next time the menu opens.
     if menu.inner.inner.is_none() {
-        ui.data_mut(|data| data.remove_temp::<(u32, u32)>(draft_id));
+        ui.data_mut(|data| {
+            data.remove_temp::<(u32, u32)>(draft_id);
+            data.remove_temp::<f64>(fps_draft_id);
+        });
     }
 }
 
