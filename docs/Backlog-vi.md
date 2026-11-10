@@ -1,5 +1,9 @@
 # Backlog
 
+### [Vừa] Project lưu đường dẫn gói người dùng cố định, đổi máy là mất gói và không biết bản cũ hay mới
+
+`crates/gpufx-editor/src/package_import.rs:338` (`install_zip`) trả về `packages/gpufx/user/<id>.zip`, và project lưu đúng chuỗi đó. Mang project sang máy khác thì báo không tìm thấy gói mà không có cách lấy lại gói đó, và vì gói không có phiên bản nên không phân biệt được bản cũ với bản mới khi hai máy cài khác nhau. Nên cân nhắc lưu id kèm phiên bản trong project, hoặc nhúng gói vào project. Ghi ngày 2026-11-10.
+
 ### [Vừa] Tua clip GOP dài vượt ngưỡng đề xuất
 
 Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 200 ms (`docs/plans/result-poc-phase0-vi.md`). Footage thật thường có GOP dài, nên giai đoạn sau cần proxy, cache hoặc giải mã trước. Ghi ngày 2026-11-09.
@@ -358,3 +362,11 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Still và loop của preview dùng chung bản ghi lỗi
 
 `crates/gpufx-editor/src/effect_previews/key.rs` `preview_key` không có loại ảnh nên `.attempt` và `.failed` dùng chung cho still và loop: một lần lỗi mỗi loại tính thành hai lần, và loop hỏng chặn cả still. Nên thêm loại vào tên file hoặc nội dung bản ghi. Ghi ngày 2026-11-10.
+
+### [Thấp] File tạm `.importing-<pid>` mồ côi khi app bị kill giữa lúc ghi
+
+`crates/gpufx-editor/src/package_import.rs:283` (`write_replacing`) ghi qua file `<id>.zip.importing-<pid>` rồi đổi tên. Nếu app bị kill giữa chừng thì file tạm nằm lại trong `packages/gpufx/user` và không có chỗ nào dọn. Nên quét và xoá file `.importing-*` cũ khi khởi động. Ghi ngày 2026-11-10.
+
+### [Thấp] Zip có thể đổi trong lúc hộp thoại ghi đè đang mở
+
+`crates/gpufx-editor/src/tasks.rs:330` (`PromptAnswered`) và `install_zip` (`package_import.rs:304`): câu hỏi ghi đè dựa trên lần đọc đầu, còn lần cài thứ hai đọc lại file. Nếu file zip bị thay giữa hai lần thì lần cài thứ hai có thể thay một id khác mà không hỏi. Nên giữ byte đã kiểm hoặc so lại id trước khi ghi đè. Ghi ngày 2026-11-10.

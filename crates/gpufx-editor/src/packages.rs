@@ -89,11 +89,16 @@ fn collect(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
 /// refuses, or panics on, becomes a problem and the scan goes on.
 pub fn scan(roots: &[PathBuf], read: impl Fn(&Path) -> Result<PackageInfo, String>) -> Catalog {
     let mut catalog = Catalog { loaded: true, ..Catalog::default() };
+    // The first root with a name is the one a project resolves it to.
+    let mut seen = HashSet::new();
     for root in roots {
         let mut found = Vec::new();
         collect(&root.join("packages").join("gpufx"), 0, &mut found);
         for path in found {
             let package = package_name(root, &path);
+            if !seen.insert(package.clone()) {
+                continue;
+            }
             let info = catch_unwind(AssertUnwindSafe(|| read(&path))).unwrap_or_else(|_| Err("reading the package panicked".to_owned()));
             match info {
                 Ok(info) => {
@@ -124,9 +129,11 @@ pub fn filter_entries<'a>(entries: &'a [PackageEntry], filter: &str) -> Vec<&'a 
     }).collect()
 }
 
-/// The last part of a package name, for showing it.
+/// The last part of a package name, for showing it, without the `.zip` of a zipped package.
 pub fn short_name(package: &str) -> &str {
-    package.rsplit('/').next().unwrap_or(package)
+    let last = package.rsplit('/').next().unwrap_or(package);
+    let stem = last.len().checked_sub(".zip".len()).filter(|&end| last.is_char_boundary(end) && last[end..].eq_ignore_ascii_case(".zip"));
+    stem.map_or(last, |end| &last[..end])
 }
 
 /// The group of a package: its folders under `packages/gpufx`, or the path it was stored under.
@@ -311,5 +318,23 @@ mod tests {
     fn a_package_is_shown_by_its_last_part() {
         assert_eq!(short_name("packages/gpufx/ffmpeg/mix"), "mix");
         assert_eq!(short_name("mix"), "mix");
+    }
+
+    #[test]
+    fn a_zip_is_shown_without_its_extension() {
+        assert_eq!(short_name("packages/gpufx/user/io.example.iris.zip"), "io.example.iris");
+        assert_eq!(short_name("iris.ZIP"), "iris");
+        assert_eq!(short_name("a.zip/iris"), "iris", "only the last part counts");
+        assert_eq!(short_name("packages/gpufx/ffmpeg/zip"), "zip", "a name that is only those letters");
+    }
+
+    #[test]
+    fn a_name_found_in_two_roots_is_listed_once_from_the_first() {
+        let (first, second) = (fixture("first-root"), fixture("second-root"));
+        let catalog = scan(&[first.clone(), second.clone()], fake_read);
+        assert_eq!(catalog.effects.len(), 1, "as a project resolves it");
+        assert_eq!(catalog.problems.len(), 1);
+        std::fs::remove_dir_all(&first).unwrap();
+        std::fs::remove_dir_all(&second).unwrap();
     }
 }

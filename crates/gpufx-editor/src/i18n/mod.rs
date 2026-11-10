@@ -7,6 +7,8 @@
 mod en;
 mod vi;
 
+use crate::package_import::ImportProblem;
+
 /// A display language of the editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Language {
@@ -211,6 +213,12 @@ pub enum Message {
     TabEffects,
     Transitions,
     ImportFromComputer,
+    ImportPackage,
+    FilterPackage,
+    /// Replace the installed package with this name?
+    PromptOverwritePackage(String),
+    PackageInstalled { name: String, transition: bool, replaced: bool },
+    PackageImportRefused(ImportProblem),
     SearchMedia,
     SearchAudio,
     SearchEffects,
@@ -286,6 +294,7 @@ pub enum Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package_import::EntryProblem;
 
     #[test]
     fn every_language_has_a_unique_code_that_reads_back() {
@@ -309,6 +318,12 @@ mod tests {
             Message::StreamMissing { name: name(), stream: StreamKind::Audio },
             Message::SelectClip(ClipAction::AddTransition),
             Message::PromptCancelExport,
+            Message::ImportPackage,
+            Message::FilterPackage,
+            Message::PromptOverwritePackage(name()),
+            Message::PackageInstalled { name: name(), transition: true, replaced: false },
+            Message::PackageImportRefused(ImportProblem::NotSupportedYet(name())),
+            Message::PackageImportRefused(ImportProblem::Entry { entry: name(), problem: EntryProblem::Colon }),
             Message::MenuFile,
             Message::MenuTheme,
             Message::ThemeSystem,

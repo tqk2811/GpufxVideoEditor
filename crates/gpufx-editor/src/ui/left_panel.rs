@@ -54,7 +54,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
             state.ui.tile_hover.clear();
             library(ui, state, requests, MediaKind::Audio)
         }
-        LeftTab::Effects | LeftTab::Transitions => picker(ui, state),
+        LeftTab::Effects | LeftTab::Transitions => picker(ui, state, requests),
     });
 }
 
@@ -215,8 +215,11 @@ fn fit_size(room: Vec2, aspect: f32) -> Vec2 {
 }
 
 /// The effect and transition lists with their filter.
-fn picker(ui: &mut egui::Ui, state: &mut EditorState) {
+fn picker(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let language: Language = state.language();
+    if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportPackage), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
+        requests.push(UiRequest::ImportPackage);
+    }
     search_box(ui, &mut state.picker.filter, &language.t(Message::SearchEffects));
     if !state.catalog.loaded {
         ui.colored_label(theme::text_dim(), language.t(Message::ReadingPackages));

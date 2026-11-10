@@ -23,6 +23,7 @@ use egui::{CornerRadius, CursorIcon, Event, Key, Modifiers, Rect, Sense, Stroke,
 pub enum UiRequest {
     PickClipFile { track: usize },
     ImportMedia { audio_only: bool },
+    ImportPackage,
     NewProject,
     OpenProject,
     SaveProject,

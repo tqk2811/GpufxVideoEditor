@@ -27,7 +27,8 @@ use crate::presenter::Presenter;
 use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, PlaybackFrames, PlaybackRun, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
-use crate::project_file::{load_project_file, package_roots, project_paths, save_project_file};
+use crate::package_import::{install_zip, ImportProblem};
+use crate::project_file::{load_project_file, package_roots, project_paths, save_project_file, user_package_root};
 use crate::project_lock::held_elsewhere;
 use crate::tasks::{run_guarded, Action, Arrival, FileDialog, Prompt, Request, TaskId, Tasks};
 use crate::ui::{self, UiRequest};
@@ -648,13 +649,14 @@ impl Session {
         let picker = match dialog {
             FileDialog::PickClip { .. } | FileDialog::ImportMedia { audio_only: false } => base().add_filter(language.t(Message::FilterMedia), &MEDIA_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportMedia { audio_only: true } => base().add_filter(language.t(Message::FilterAudio), &AUDIO_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
+            FileDialog::ImportPackage => base().add_filter(language.t(Message::FilterPackage), &["zip"]),
             FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
             FileDialog::SaveProject => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
         };
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
-                FileDialog::PickClip { .. } | FileDialog::ImportMedia { .. } | FileDialog::OpenProject => picker.pick_file(),
+                FileDialog::PickClip { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::OpenProject => picker.pick_file(),
                 FileDialog::SaveProject | FileDialog::Export => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
@@ -665,7 +667,7 @@ impl Session {
         let dialog = rfd::MessageDialog::new()
             .set_parent(self.window.as_ref())
             .set_title("gpufx editor")
-            .set_description(self.state.language().t(prompt.question()))
+            .set_description(self.state.language().t(prompt.question(self.tasks.package_to_overwrite())))
             .set_buttons(rfd::MessageButtons::YesNo);
         self.spawn_task("prompt", TaskId::Modal, move || Arrival::PromptAnswered { prompt, accepted: dialog.show() == rfd::MessageDialogResult::Yes });
     }
@@ -696,11 +698,27 @@ impl Session {
                     Arrival::ProjectRead { load, file, result }
                 });
             }
+            Action::ImportPackage { load, path, overwrite } => self.spawn_task("package-import", TaskId::Load(load), move || {
+                let result = user_package_root().ok_or(ImportProblem::NoUserFolder).and_then(|root| install_zip(&path, &root, overwrite));
+                Arrival::PackageImported { load, path, result }
+            }),
+            Action::PackageInstalled { package } => self.package_installed(&package),
             Action::SaveTo(path) => self.save_project(path),
             Action::StartExport(path) => self.start_export(path, None),
             Action::ProjectReplaced => self.playback = None,
             Action::Exit => self.exit_accepted = true,
         }
+    }
+
+    /// Reads the package list again and lets go of everything built from the old files. New paths
+    /// make the preview worker drop its compositor, whose graphs are cached by package name.
+    fn package_installed(&mut self, package: &str) {
+        self.catalog = Some(spawn_catalog_scan(self.package_roots.clone(), self.window.clone()));
+        self.state.previews.get_mut().forget(package);
+        self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.state.visuals.get_mut().set_paths(self.paths.clone());
+        self.tracker = RequestTracker::default();
+        self.shown = None;
     }
 
     /// Takes the results of finished dialogs and loads, and applies a load that had to wait.
@@ -761,6 +779,7 @@ impl Session {
             UiRequest::SaveProjectAs => self.begin_task(Request::SaveProjectAs),
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
+            UiRequest::ImportPackage => self.begin_task(Request::ImportPackage),
             UiRequest::SetLanguage(language) => self.set_language(language),
             UiRequest::SetTheme(choice) => self.set_theme(choice),
             UiRequest::SetAgentAccess(enabled) => {

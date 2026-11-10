@@ -76,13 +76,21 @@ pub fn expression_error(text: &str, vars: &[String]) -> Option<String> {
 
 /// Opens the package at `path` as the renderer would, which also checks its files.
 pub fn read_package_info(path: &Path) -> Result<PackageInfo, String> {
-    let package = Package::open(path).map_err(|e| e.to_string())?;
+    Package::open(path).map(|package| package_info(&package)).map_err(|e| e.to_string())
+}
+
+/// [`read_package_info`] for the bytes of a zip that is not on disk under its final name.
+pub fn read_zip_package_info(bytes: &[u8]) -> Result<PackageInfo, String> {
+    Package::from_zip_bytes(bytes).map(|package| package_info(&package)).map_err(|e| e.to_string())
+}
+
+fn package_info(package: &Package) -> PackageInfo {
     let manifest = &package.manifest;
-    Ok(PackageInfo {
+    PackageInfo {
         name: manifest.name.clone(),
         description: manifest.description.clone(),
         inputs: manifest.inputs.len(),
         has_progress: manifest.params.iter().any(|param| param.name == "progress"),
         params: manifest.params.iter().map(param_info).collect(),
-    })
+    }
 }

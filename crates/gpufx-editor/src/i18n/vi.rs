@@ -1,6 +1,8 @@
 //! Vietnamese strings. No `_` arm: a new message must be given text here.
 
 use super::{ClipAction, ClipEdge, Message, StreamKind, TrackLabel};
+use crate::package_import::{EntryProblem, ImportProblem};
+use crate::packages::PackageKind;
 
 fn stream_name(stream: StreamKind) -> &'static str {
     match stream {
@@ -14,6 +16,48 @@ fn track_label(track: TrackLabel) -> String {
         TrackLabel::Video(number) => format!("Track video {number}"),
         TrackLabel::Audio(number) => format!("Track âm thanh {number}"),
         TrackLabel::Position(number) => format!("Track {number}"),
+    }
+}
+
+fn entry_problem(problem: EntryProblem) -> &'static str {
+    match problem {
+        EntryProblem::UnsafePath => "đường dẫn không an toàn",
+        EntryProblem::Symlink => "đây là symbolic link",
+        EntryProblem::NotAFile => "đây không phải file thường",
+        EntryProblem::Colon => "tên có dấu hai chấm",
+        EntryProblem::InvalidCharacter => "tên có ký tự Windows không cho phép",
+        EntryProblem::DeviceName => "tên trùng tên thiết bị của Windows",
+        EntryProblem::TrailingDotOrSpace => "tên kết thúc bằng dấu chấm hoặc dấu cách",
+        EntryProblem::Duplicate => "có mục khác trùng tên, không tính hoa thường",
+        EntryProblem::Encrypted => "mục này được mã hoá",
+    }
+}
+
+fn kind_name(kind: PackageKind) -> &'static str {
+    match kind {
+        PackageKind::Effect => "hiệu ứng",
+        PackageKind::Transition => "chuyển cảnh",
+    }
+}
+
+fn import_problem(problem: &ImportProblem) -> String {
+    match problem {
+        ImportProblem::Unreadable(detail) => format!("không đọc được file ({detail})."),
+        ImportProblem::NotAZip(detail) => format!("đây không phải file zip hợp lệ ({detail})."),
+        ImportProblem::Entry { entry, problem } => format!("mục \"{entry}\" trong zip bị từ chối: {}.", entry_problem(*problem)),
+        ImportProblem::TooManyFiles { limit } => format!("zip có hơn {limit} file."),
+        ImportProblem::TooLarge { entry: Some(entry), limit_mib } => format!("\"{entry}\" lớn hơn {limit_mib} MiB."),
+        ImportProblem::TooLarge { entry: None, limit_mib } => format!("zip lớn hơn {limit_mib} MiB."),
+        ImportProblem::NoManifest => "zip không có manifest.json ở thư mục gốc.".to_owned(),
+        ImportProblem::BadManifest(detail) => format!("manifest.json không hợp lệ ({detail})."),
+        ImportProblem::UnknownType(kind) => format!("không nhận ra loại \"{kind}\"."),
+        ImportProblem::NotSupportedYet(kind) => format!("chưa hỗ trợ gói loại \"{kind}\"."),
+        ImportProblem::BadPackage(detail) => format!("đây không phải gói hiệu ứng hợp lệ ({detail})."),
+        ImportProblem::NotUsable { inputs } => format!("với {inputs} đầu vào, gói này không phải hiệu ứng cũng không phải chuyển cảnh."),
+        ImportProblem::KindChanged { existing, new } => format!("gói đã cài với id này là {} còn gói này là {}, thay vào sẽ làm hỏng các dự án đang dùng nó.", kind_name(*existing), kind_name(*new)),
+        ImportProblem::BadId(id) => format!("id \"{id}\" không dùng làm tên file được."),
+        ImportProblem::NoUserFolder => "chưa đặt LOCALAPPDATA nên không có chỗ để cài.".to_owned(),
+        ImportProblem::WriteFailed(detail) => format!("ghi gói thất bại ({detail})."),
     }
 }
 
@@ -147,6 +191,11 @@ pub(super) fn text(message: &Message) -> String {
         Message::TabEffects => "Hiệu ứng".to_owned(),
         Message::Transitions => "Chuyển cảnh".to_owned(),
         Message::ImportFromComputer => "Nhập từ máy tính".to_owned(),
+        Message::ImportPackage => "Nhập gói (.zip)".to_owned(),
+        Message::FilterPackage => "Gói".to_owned(),
+        Message::PromptOverwritePackage(name) => format!("Gói \"{name}\" đã được cài. Thay thế gói đó? Sau đó nên kiểm tra lại các clip đang dùng gói này."),
+        Message::PackageInstalled { name, transition, replaced } => format!("Đã {} \"{name}\" vào {}.", if *replaced { "thay thế" } else { "cài" }, if *transition { "Chuyển cảnh" } else { "Hiệu ứng" }),
+        Message::PackageImportRefused(problem) => format!("Chưa cài gói: {}", import_problem(problem)),
         Message::SearchMedia => "Tìm trong phương tiện".to_owned(),
         Message::SearchAudio => "Tìm trong âm thanh".to_owned(),
         Message::SearchEffects => "Tìm hiệu ứng".to_owned(),

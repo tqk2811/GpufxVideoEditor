@@ -11,11 +11,13 @@ use engine::Project;
 
 use crate::editor::{clip_label, EditorState};
 use crate::i18n::Message;
+use crate::package_import::{ImportOutcome, ImportProblem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileDialog {
     PickClip { track: usize },
     ImportMedia { audio_only: bool },
+    ImportPackage,
     OpenProject,
     SaveProject,
     Export,
@@ -33,11 +35,15 @@ pub enum Prompt {
     /// The project has unsaved changes; go on and lose them?
     DiscardFor(Discard),
     CancelExportForClose,
+    /// A package with the name in [`Tasks::package_to_overwrite`] is installed; replace it?
+    OverwritePackage,
 }
 
 impl Prompt {
-    pub fn question(self) -> Message {
+    /// The question to ask. `overwriting` is the name of the package an overwrite would replace.
+    pub fn question(self, overwriting: Option<&str>) -> Message {
         match self {
+            Self::OverwritePackage => Message::PromptOverwritePackage(overwriting.unwrap_or_default().to_owned()),
             Self::DiscardFor(Discard::NewProject) => Message::PromptDiscardForNew,
             Self::DiscardFor(Discard::OpenProject) => Message::PromptDiscardForOpen,
             Self::DiscardFor(Discard::Close) => Message::PromptDiscardForClose,
@@ -56,6 +62,7 @@ pub enum Request {
     SaveProjectAs,
     PickClip { track: usize },
     ImportMedia { audio_only: bool },
+    ImportPackage,
     Export,
 }
 
@@ -77,6 +84,7 @@ pub enum Arrival {
     MediaProbed { load: u64, path: PathBuf, result: Result<MediaProbe, String> },
     DropProbed { load: u64, path: PathBuf, result: Result<MediaProbe, String> },
     ProjectRead { load: u64, file: PathBuf, result: Result<Project, String> },
+    PackageImported { load: u64, path: PathBuf, result: Result<ImportOutcome, ImportProblem> },
     /// The thread of a task panicked, so it will never deliver a result.
     TaskFailed { task: TaskId, message: String },
 }
@@ -102,6 +110,9 @@ pub enum Action {
     ProbeDrop { load: u64, path: PathBuf },
     ProbeMedia { load: u64, path: PathBuf },
     ReadProject { load: u64, file: PathBuf },
+    ImportPackage { load: u64, path: PathBuf, overwrite: bool },
+    /// A package was installed: the list must be read again and what was built from it dropped.
+    PackageInstalled { package: String },
     SaveTo(PathBuf),
     StartExport(PathBuf),
     /// The project was replaced, so playback of the old one must go.
@@ -131,6 +142,14 @@ enum Finished {
     Media { path: PathBuf, result: Result<MediaProbe, String> },
     Drop { path: PathBuf, result: Result<MediaProbe, String> },
     Project { file: PathBuf, result: Result<Project, String>, base_revision: Option<u64> },
+    Package { path: PathBuf, result: Result<ImportOutcome, ImportProblem> },
+}
+
+/// A zip waiting for the answer to whether it may replace the package installed under its name.
+#[derive(Debug)]
+struct PendingOverwrite {
+    path: PathBuf,
+    name: String,
 }
 
 /// One dialog or prompt at a time, and one load; a prompt may be up while a load runs.
@@ -142,6 +161,7 @@ pub struct Tasks {
     last_load: u64,
     /// The revision when Open was allowed to replace the project; it goes to the load once a file is picked.
     open_base: Option<u64>,
+    overwrite: Option<PendingOverwrite>,
 }
 
 fn name_of(path: &Path) -> String {
@@ -151,6 +171,11 @@ fn name_of(path: &Path) -> String {
 impl Tasks {
     pub fn is_idle(&self) -> bool {
         self.modal.is_none() && self.load.is_none()
+    }
+
+    /// The name of the installed package the overwrite prompt is about.
+    pub fn package_to_overwrite(&self) -> Option<&str> {
+        self.overwrite.as_ref().map(|pending| pending.name.as_str())
     }
 
     /// Whether a finished load waits for a drag, an export or a prompt to end.
@@ -213,6 +238,7 @@ impl Tasks {
             Request::SaveProject | Request::SaveProjectAs => self.start_dialog(FileDialog::SaveProject),
             Request::PickClip { track } => self.start_dialog(FileDialog::PickClip { track }),
             Request::ImportMedia { audio_only } => self.start_dialog(FileDialog::ImportMedia { audio_only }),
+            Request::ImportPackage => self.start_dialog(FileDialog::ImportPackage),
             Request::Export => self.start_dialog(FileDialog::Export),
         }
     }
@@ -283,6 +309,10 @@ impl Tasks {
                         let load = self.start_load(state, &path, None);
                         Action::ProbeMedia { load, path }
                     }
+                    FileDialog::ImportPackage => {
+                        let load = self.start_load(state, &path, None);
+                        Action::ImportPackage { load, path, overwrite: false }
+                    }
                     FileDialog::OpenProject => {
                         let base = self.open_base.take();
                         let load = self.start_load(state, &path, base);
@@ -299,10 +329,22 @@ impl Tasks {
             }
             Arrival::PromptAnswered { prompt, accepted } => {
                 self.modal = None;
+                let overwrite = self.overwrite.take();
                 if !accepted {
                     return Action::Nothing;
                 }
                 match prompt {
+                    Prompt::OverwritePackage if state.is_exporting() => {
+                        state.report_refused(Message::ExportRunning);
+                        Action::Nothing
+                    }
+                    Prompt::OverwritePackage => match overwrite {
+                        Some(PendingOverwrite { path, .. }) => {
+                            let load = self.start_load(state, &path, None);
+                            Action::ImportPackage { load, path, overwrite: true }
+                        }
+                        None => Action::Nothing,
+                    },
                     Prompt::DiscardFor(Discard::NewProject) => {
                         state.new_project();
                         Action::ProjectReplaced
@@ -319,6 +361,7 @@ impl Tasks {
             Arrival::ClipProbed { load, track, path, result } => self.load_finished(state, load, Finished::Clip { track, path, result }),
             Arrival::MediaProbed { load, path, result } => self.load_finished(state, load, Finished::Media { path, result }),
             Arrival::DropProbed { load, path, result } => self.load_finished(state, load, Finished::Drop { path, result }),
+            Arrival::PackageImported { load, path, result } => self.load_finished(state, load, Finished::Package { path, result }),
             Arrival::ProjectRead { load, file, result } => {
                 let base_revision = self.load.filter(|running| running.id == load).and_then(|running| running.base_revision);
                 self.load_finished(state, load, Finished::Project { file, result, base_revision })
@@ -380,6 +423,20 @@ impl Tasks {
                 }
                 Action::Nothing
             }
+            Finished::Package { path, result } => match result {
+                Ok(ImportOutcome::AlreadyInstalled { name }) => {
+                    self.overwrite = Some(PendingOverwrite { path, name });
+                    self.start_prompt(Prompt::OverwritePackage)
+                }
+                Ok(ImportOutcome::Installed(installed)) => {
+                    state.show_installed_package(&installed);
+                    Action::PackageInstalled { package: installed.package }
+                }
+                Err(problem) => {
+                    state.report_refused(Message::PackageImportRefused(problem));
+                    Action::Nothing
+                }
+            },
             Finished::Project { file, result, base_revision } => match result {
                 Ok(_) if base_revision.is_some_and(|base| base != state.revision()) => {
                     state.report_refused(Message::OpenCancelled);
@@ -404,6 +461,71 @@ mod tests {
     use crate::editor::Status;
     use crate::timeline::drag::{ClipDrag, DragKind};
     use engine::{ClipKey, Time, TrackKind};
+
+    /// Picks a zip in the dialog and returns the id of the load that installs it.
+    fn start_package_import(tasks: &mut Tasks, state: &mut EditorState) -> u64 {
+        assert_eq!(tasks.begin(state, Request::ImportPackage), Action::ShowFileDialog(FileDialog::ImportPackage));
+        match tasks.on_arrival(state, picked(FileDialog::ImportPackage, "pack.zip")) {
+            Action::ImportPackage { load, overwrite: false, .. } => load,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn imported(load: u64, result: Result<ImportOutcome, ImportProblem>) -> Arrival {
+        Arrival::PackageImported { load, path: PathBuf::from("pack.zip"), result }
+    }
+
+    #[test]
+    fn a_name_already_installed_is_asked_about_and_yes_imports_again_with_overwrite() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let load = start_package_import(&mut tasks, &mut state);
+        let action = tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::AlreadyInstalled { name: "Iris".to_owned() })));
+        assert_eq!(action, Action::ShowPrompt(Prompt::OverwritePackage));
+        assert_eq!(Prompt::OverwritePackage.question(tasks.package_to_overwrite()), Message::PromptOverwritePackage("Iris".to_owned()));
+        match tasks.on_arrival(&mut state, Arrival::PromptAnswered { prompt: Prompt::OverwritePackage, accepted: true }) {
+            Action::ImportPackage { path, overwrite: true, .. } => assert_eq!(path, PathBuf::from("pack.zip")),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(tasks.package_to_overwrite(), None);
+    }
+
+    #[test]
+    fn yes_to_the_overwrite_during_an_export_installs_nothing() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let load = start_package_import(&mut tasks, &mut state);
+        tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::AlreadyInstalled { name: "Iris".to_owned() })));
+        state.begin_export(10);
+        let action = tasks.on_arrival(&mut state, Arrival::PromptAnswered { prompt: Prompt::OverwritePackage, accepted: true });
+        assert_eq!(action, Action::Nothing);
+        assert_eq!(state.status(), &Status::Refused(Message::ExportRunning));
+        assert!(tasks.is_idle());
+        assert_eq!(tasks.package_to_overwrite(), None);
+    }
+
+    #[test]
+    fn no_to_the_overwrite_installs_nothing_and_frees_the_slot() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let load = start_package_import(&mut tasks, &mut state);
+        tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::AlreadyInstalled { name: "Iris".to_owned() })));
+        assert_eq!(tasks.on_arrival(&mut state, Arrival::PromptAnswered { prompt: Prompt::OverwritePackage, accepted: false }), Action::Nothing);
+        assert!(tasks.is_idle());
+        assert_eq!(tasks.package_to_overwrite(), None);
+    }
+
+    #[test]
+    fn an_installed_package_is_shown_in_its_list_and_a_refused_one_is_reported() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let load = start_package_import(&mut tasks, &mut state);
+        let installed = crate::package_import::InstalledPackage { package: "packages/gpufx/user/a.zip".to_owned(), name: "A".to_owned(), kind: crate::packages::PackageKind::Transition, replaced: false };
+        assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::Installed(installed)))), Action::PackageInstalled { package: "packages/gpufx/user/a.zip".to_owned() });
+        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Transitions);
+        assert_eq!(state.picker.kind, crate::packages::PackageKind::Transition);
+        assert_eq!(state.picker.selected.as_deref(), Some("packages/gpufx/user/a.zip"));
+
+        let load = start_package_import(&mut tasks, &mut state);
+        assert_eq!(tasks.on_arrival(&mut state, imported(load, Err(ImportProblem::NoManifest))), Action::Nothing);
+        assert!(tasks.is_idle());
+    }
 
     const PICK: FileDialog = FileDialog::PickClip { track: 0 };
 

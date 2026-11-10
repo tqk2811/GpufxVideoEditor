@@ -11,6 +11,7 @@ pub mod export;
 pub mod i18n;
 pub mod layout;
 pub mod media;
+pub mod package_import;
 pub mod packages;
 pub mod params;
 pub mod playback;

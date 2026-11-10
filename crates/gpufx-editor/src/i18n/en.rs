@@ -1,6 +1,8 @@
 //! English strings. No `_` arm: a new message must be given text here.
 
 use super::{ClipAction, ClipEdge, Message, StreamKind, TrackLabel};
+use crate::package_import::{EntryProblem, ImportProblem};
+use crate::packages::PackageKind;
 
 fn stream_name(stream: StreamKind) -> &'static str {
     match stream {
@@ -31,6 +33,48 @@ fn track_label(track: TrackLabel) -> String {
         TrackLabel::Video(number) => format!("Video track {number}"),
         TrackLabel::Audio(number) => format!("Audio track {number}"),
         TrackLabel::Position(number) => format!("Track {number}"),
+    }
+}
+
+fn entry_problem(problem: EntryProblem) -> &'static str {
+    match problem {
+        EntryProblem::UnsafePath => "its path is unsafe",
+        EntryProblem::Symlink => "it is a symbolic link",
+        EntryProblem::NotAFile => "it is not a regular file",
+        EntryProblem::Colon => "its name has a colon",
+        EntryProblem::InvalidCharacter => "its name has a character Windows does not allow",
+        EntryProblem::DeviceName => "its name is a Windows device name",
+        EntryProblem::TrailingDotOrSpace => "its name ends with a dot or a space",
+        EntryProblem::Duplicate => "another entry has the same name, ignoring case",
+        EntryProblem::Encrypted => "it is encrypted",
+    }
+}
+
+fn kind_name(kind: PackageKind) -> &'static str {
+    match kind {
+        PackageKind::Effect => "an effect",
+        PackageKind::Transition => "a transition",
+    }
+}
+
+fn import_problem(problem: &ImportProblem) -> String {
+    match problem {
+        ImportProblem::Unreadable(detail) => format!("the file could not be read ({detail})."),
+        ImportProblem::NotAZip(detail) => format!("this is not a valid zip file ({detail})."),
+        ImportProblem::Entry { entry, problem } => format!("\"{entry}\" in the zip is refused: {}.", entry_problem(*problem)),
+        ImportProblem::TooManyFiles { limit } => format!("the zip has more than {limit} files."),
+        ImportProblem::TooLarge { entry: Some(entry), limit_mib } => format!("\"{entry}\" is larger than {limit_mib} MiB."),
+        ImportProblem::TooLarge { entry: None, limit_mib } => format!("the zip is larger than {limit_mib} MiB."),
+        ImportProblem::NoManifest => "the zip has no manifest.json at its root.".to_owned(),
+        ImportProblem::BadManifest(detail) => format!("its manifest.json is invalid ({detail})."),
+        ImportProblem::UnknownType(kind) => format!("its type \"{kind}\" is not known."),
+        ImportProblem::NotSupportedYet(kind) => format!("packages of type \"{kind}\" are not supported yet."),
+        ImportProblem::BadPackage(detail) => format!("it is not a valid effect package ({detail})."),
+        ImportProblem::NotUsable { inputs } => format!("with {inputs} inputs it is neither an effect nor a transition."),
+        ImportProblem::KindChanged { existing, new } => format!("the installed package of this id is {} and this one is {}, which would break the projects using it.", kind_name(*existing), kind_name(*new)),
+        ImportProblem::BadId(id) => format!("its id \"{id}\" cannot be used as a file name."),
+        ImportProblem::NoUserFolder => "LOCALAPPDATA is not set, so there is nowhere to install it.".to_owned(),
+        ImportProblem::WriteFailed(detail) => format!("writing it failed ({detail})."),
     }
 }
 
@@ -164,6 +208,11 @@ pub(super) fn text(message: &Message) -> String {
         Message::TabEffects => "Effects".to_owned(),
         Message::Transitions => "Transitions".to_owned(),
         Message::ImportFromComputer => "Import from computer".to_owned(),
+        Message::ImportPackage => "Import package (.zip)".to_owned(),
+        Message::FilterPackage => "Package".to_owned(),
+        Message::PromptOverwritePackage(name) => format!("A package named \"{name}\" is already installed. Replace it? Clips using this package may need to be checked afterwards."),
+        Message::PackageInstalled { name, transition, replaced } => format!("{} \"{name}\" in {}.", if *replaced { "Replaced" } else { "Installed" }, if *transition { "Transitions" } else { "Effects" }),
+        Message::PackageImportRefused(problem) => format!("The package was not installed: {}", import_problem(problem)),
         Message::SearchMedia => "Search media".to_owned(),
         Message::SearchAudio => "Search audio".to_owned(),
         Message::SearchEffects => "Search effects".to_owned(),

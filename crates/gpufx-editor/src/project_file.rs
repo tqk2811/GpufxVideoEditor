@@ -14,6 +14,8 @@ use engine::{validate, Project, Resolver, MIN_FRAME_DURATION};
 pub const PACKAGE_ROOT_VARIABLE: &str = "GPUFX_PACKAGE_ROOT";
 /// The packages of a checkout, the last place looked in.
 const DEV_PACKAGE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/FFmpegGpuFilter");
+/// The folder under `%LOCALAPPDATA%` that this editor keeps its data in.
+const USER_FOLDER: &str = "gpufx-editor";
 /// A project with no file yet: its clips hold absolute paths, which [`ProjectPaths`] keeps as they are.
 const UNSAVED_PROJECT_FILE: &str = "unsaved.json";
 
@@ -32,11 +34,23 @@ fn package_root_variable(value: Option<OsString>) -> Option<PathBuf> {
     value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
-/// The package root of this run, or none when no candidate has packages.
+/// `<local app data>\gpufx-editor`, which holds what the user installed, when the variable is set.
+fn user_root_in(local_app_data: Option<OsString>) -> Option<PathBuf> {
+    local_app_data.filter(|value| !value.is_empty()).map(|folder| PathBuf::from(folder).join(USER_FOLDER))
+}
+
+/// Where the user's own packages are, under `%LOCALAPPDATA%`, whether or not one is installed yet.
+pub fn user_package_root() -> Option<PathBuf> {
+    user_root_in(std::env::var_os("LOCALAPPDATA"))
+}
+
+/// The packages that come with the app, then the user's. The user's root is listed even while it
+/// does not exist, so a package installed later is found without restarting.
 pub fn package_roots() -> Vec<PathBuf> {
     let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
     let variable = package_root_variable(std::env::var_os(PACKAGE_ROOT_VARIABLE));
-    choose_package_root(variable, exe_dir, PathBuf::from(DEV_PACKAGE_ROOT), has_packages).into_iter().collect()
+    let shipped = choose_package_root(variable, exe_dir, PathBuf::from(DEV_PACKAGE_ROOT), has_packages);
+    shipped.into_iter().chain(user_package_root()).collect()
 }
 
 /// The paths of the project stored in `file`, or of an unsaved one.
@@ -313,6 +327,21 @@ mod tests {
         assert_eq!(package_root_variable(Some(OsString::new())), None);
         assert_eq!(package_root_variable(None), None);
         assert_eq!(package_root_variable(Some(OsString::from("var"))), Some(root("var")));
+    }
+
+    #[test]
+    fn the_user_root_is_under_local_app_data_when_it_is_set() {
+        assert_eq!(user_root_in(Some(OsString::from(r"C:\Local"))), Some(PathBuf::from(r"C:\Local\gpufx-editor")));
+        assert_eq!(user_root_in(Some(OsString::new())), None);
+        assert_eq!(user_root_in(None), None);
+    }
+
+    #[test]
+    fn the_user_root_comes_after_the_shipped_packages() {
+        let roots = package_roots();
+        let user = user_package_root().expect("LOCALAPPDATA is set on Windows");
+        assert_eq!(roots.last(), Some(&user), "{roots:?}");
+        assert!(roots.len() >= 2, "the checkout has packages: {roots:?}");
     }
 
     #[test]

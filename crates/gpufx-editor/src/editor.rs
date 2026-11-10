@@ -4,7 +4,8 @@
 use crate::export::{EncoderOption, ExportOutcome, ExportProgress};
 use crate::i18n::{ClipAction, ClipEdge, Language, Message, StreamKind, TrackLabel};
 use crate::media::{choose_track, item_from_probe, MediaItem, MediaLibrary, TrackChoice};
-use crate::packages::{Catalog, PickerState};
+use crate::package_import::InstalledPackage;
+use crate::packages::{Catalog, PackageKind, PickerState};
 use crate::project_lock::ProjectLock;
 use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_command, ClipDrag, EditCommand};
@@ -409,6 +410,16 @@ impl EditorState {
         self.status = Status::Info(Message::Saved(file.display().to_string()));
         self.project_file = Some(file);
         self.saved_revision = self.revision;
+    }
+
+    /// Says that `installed` is there and shows it in its own list, selected.
+    pub fn show_installed_package(&mut self, installed: &InstalledPackage) {
+        let transition = installed.kind == PackageKind::Transition;
+        self.report_info(Message::PackageInstalled { name: installed.name.clone(), transition, replaced: installed.replaced });
+        self.ui.left_tab = if transition { LeftTab::Transitions } else { LeftTab::Effects };
+        self.picker.set_kind(installed.kind);
+        self.picker.filter.clear();
+        self.picker.selected = Some(installed.package.clone());
     }
 
     pub fn report_error(&mut self, message: Message) {

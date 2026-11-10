@@ -145,6 +145,10 @@ impl<T> TileCache<T> {
         })
     }
 
+    fn remove(&mut self, package: &str) {
+        self.entries.remove(package);
+    }
+
     fn insert(&mut self, package: String, value: T) {
         self.clock += 1;
         if !self.entries.contains_key(&package) && self.entries.len() >= self.capacity {
@@ -458,6 +462,19 @@ impl PreviewManager {
             },
             Some(Stage::Backoff { reason, .. } | Stage::Failed(reason)) => TileState::Failed(reason.clone()),
         }
+    }
+
+    /// Forgets what is known about `package`, whose files changed: its previews are looked for again
+    /// under the digest of the new files. What a job still running delivers afterwards is the old
+    /// picture for at most that one job.
+    pub fn forget(&mut self, package: &str) {
+        self.stills.remove(package);
+        self.loops.remove(package);
+        self.stages.retain(|item, _| item.package != package);
+        self.uploads.retain(|(item, _, _)| item.package != package);
+        // The list last published may be the same, and then it would not be sent again.
+        self.published_loads.clear();
+        self.published_jobs.clear();
     }
 
     /// What the hovered tile of `package` can play. Only a hovered tile asks for a loop.
