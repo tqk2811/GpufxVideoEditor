@@ -1,5 +1,5 @@
-# Downloads the LGPL and GPL FFmpeg builds into third_party/ffmpeg and third_party/ffmpeg-gpl,
-# and generates the POC test clips.
+# Initialises the FFmpegGpuFilter submodule and its packages, downloads the LGPL and GPL FFmpeg builds
+# into third_party/ffmpeg and third_party/ffmpeg-gpl, and generates the POC test clips.
 # The clips are encoded by the ffmpeg on PATH (libx264 required). They are local test data
 # and are never distributed, so a GPL build is fine for this step only.
 [CmdletBinding()]
@@ -21,6 +21,14 @@ $gplUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-202
 $gplSha256 = '8e6372ef8382b9b0acc74ceddfebcff5627442d6d4330ab9c2ce8a8695d217e0'
 $toolsDir = Join-Path $repoRoot '.tools'
 $clipsDir = Join-Path $repoRoot 'test-clips'
+
+# Not --recursive: that would also fetch the FFmpeg sources of FFmpegGpuFilter, which the editor does not use.
+function Initialize-Submodules {
+    & git -C $repoRoot submodule update --init external/FFmpegGpuFilter
+    if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
+    & git -C (Join-Path $repoRoot 'external\FFmpegGpuFilter') submodule update --init packages
+    if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
+}
 
 function Install-FFmpeg {
     if ((Test-Path (Join-Path $ffmpegRoot 'include\libavcodec\avcodec.h')) -and -not $Force) {
@@ -118,6 +126,7 @@ function New-TestClip {
     Write-Host "Generated $output"
 }
 
+Initialize-Submodules
 Install-FFmpeg
 Install-GplFFmpeg
 

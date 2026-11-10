@@ -11,6 +11,11 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $packages = @('-p', 'engine', '-p', 'd3d12-backend', '-p', 'gpufx-render', '-p', 'gpufx-editor', '-p', 'gpufx-mcp')
 
+# The tests that need effects skip themselves without this folder, and the editor would ship with no effects.
+if (-not (Test-Path -LiteralPath (Join-Path $repoRoot 'external\FFmpegGpuFilter\packages\gpufx') -PathType Container)) {
+    throw 'external\FFmpegGpuFilter\packages is empty: run scripts\setup-poc.ps1, or git -C external/FFmpegGpuFilter submodule update --init packages'
+}
+
 function Invoke-Cargo {
     param([string[]]$CargoArguments)
 
