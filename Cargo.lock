@@ -1422,9 +1422,11 @@ dependencies = [
  "d3d12-backend",
  "engine",
  "gpufx-editor",
+ "png",
  "serde_json",
  "sha2 0.10.9",
  "wgpu",
+ "windows",
 ]
 
 [[package]]

@@ -1,5 +1,7 @@
 //! `gpufx-render`: renders a project JSON to a video file.
 
+mod effect_previews;
+
 use std::cell::Cell;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -18,7 +20,12 @@ const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--enco
     --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>\n\
     --progress  text (default), or json: one JSON event per stdout line, and a 'cancel' line on stdin stops the render\n\
     \x20           (see docs/plans/spec-mcp-server-vi.md)\n\
-    --cancel-on-stdin-eof  with --progress json: the end of stdin stops the render, so a parent that dies stops it too";
+    --cancel-on-stdin-eof  with --progress json: the end of stdin stops the render, so a parent that dies stops it too\n\
+    \n\
+    usage: gpufx-render --effect-previews\n\
+    \n\
+    --effect-previews  helper mode, alone on the command line: JSON jobs on stdin, JSON events on stdout, exits at the end of stdin\n\
+    \x20           (see crates/gpufx-render/src/effect_previews.rs)";
 
 /// How long a render gets to stop by itself once stdin has ended, under `--cancel-on-stdin-eof`.
 const CANCEL_ON_EOF_DEADLINE: Duration = Duration::from_secs(30);
@@ -191,6 +198,14 @@ fn json_requested() -> bool {
 }
 
 fn main() -> ExitCode {
+    let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if arguments.iter().any(|argument| argument == "--effect-previews") {
+        if arguments.len() != 1 {
+            eprintln!("error: --effect-previews takes no other argument\n{USAGE}");
+            return ExitCode::FAILURE;
+        }
+        return effect_previews::run_stdio();
+    }
     let json = json_requested();
     match run() {
         Ok(()) => ExitCode::SUCCESS,

@@ -17,6 +17,29 @@ pub const MAX_EVENT_LINE: usize = 64 * 1024;
 /// What replaces the end of an `error` message that would not fit on a line.
 const TRUNCATED: &str = "...";
 
+/// `event` as one line, within [`MAX_EVENT_LINE`]. A line that is too long has `message` (the one free-text
+/// field of the event) cut, with [`TRUNCATED`] at its end, and `shorten` builds the event again from it.
+/// Without a `message` the line is returned as it is.
+pub(crate) fn bounded_line<T: Serialize>(event: &T, message: Option<&str>, shorten: impl FnOnce(String) -> T) -> String {
+    let line = serde_json::to_string(event).expect("an event has only strings and numbers");
+    let Some(message) = message.filter(|_| line.len() > MAX_EVENT_LINE) else {
+        return line;
+    };
+    let quoted_length = |text: &str| serde_json::to_string(text).expect("a string").len() - 2;
+    let mut room = MAX_EVENT_LINE.saturating_sub(line.len() - quoted_length(message) + TRUNCATED.len());
+    let mut keep = 0;
+    for (at, character) in message.char_indices() {
+        // A control character or a quote takes several bytes of JSON.
+        let cost = quoted_length(character.encode_utf8(&mut [0; 4]));
+        if cost > room {
+            break;
+        }
+        room -= cost;
+        keep = at + character.len_utf8();
+    }
+    serde_json::to_string(&shorten(format!("{}{TRUNCATED}", &message[..keep]))).expect("an event has only strings and numbers")
+}
+
 /// One line of the protocol. Exactly one of `Finished`, `Cancelled` and `Error` ends a run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -37,26 +60,11 @@ impl ProgressEvent {
     /// The event as one line, without the line end. An `error` message is cut to keep the line
     /// within [`MAX_EVENT_LINE`], so the reader always gets it.
     pub fn to_line(&self) -> String {
-        let line = serde_json::to_string(self).expect("an event has only strings and numbers");
-        match self {
-            Self::Error { message } if line.len() > MAX_EVENT_LINE => {
-                let quoted_length = |text: &str| serde_json::to_string(text).expect("a string").len() - 2;
-                let mut room = MAX_EVENT_LINE - (line.len() - quoted_length(message)) - TRUNCATED.len();
-                let mut keep = 0;
-                for (at, character) in message.char_indices() {
-                    // A control character or a quote takes several bytes of JSON.
-                    let cost = quoted_length(character.encode_utf8(&mut [0; 4]));
-                    if cost > room {
-                        break;
-                    }
-                    room -= cost;
-                    keep = at + character.len_utf8();
-                }
-                let shorter = Self::Error { message: format!("{}{TRUNCATED}", &message[..keep]) };
-                serde_json::to_string(&shorter).expect("an event has only strings and numbers")
-            }
-            _ => line,
-        }
+        let message = match self {
+            Self::Error { message } => Some(message.as_str()),
+            _ => None,
+        };
+        bounded_line(self, message, |message| Self::Error { message })
     }
 
     /// The event on `line`, or `None` for anything else: other programs may write to stdout too.
