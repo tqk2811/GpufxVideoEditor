@@ -1391,6 +1391,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "wgpu",
  "windows-sys 0.61.2",
  "winit",

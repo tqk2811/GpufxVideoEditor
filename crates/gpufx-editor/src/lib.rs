@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod editor;
+pub mod effect_previews;
 pub mod export;
 pub mod i18n;
 pub mod layout;
