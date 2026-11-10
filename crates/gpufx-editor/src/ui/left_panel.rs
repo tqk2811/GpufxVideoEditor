@@ -3,11 +3,14 @@
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
 use crate::editor::{EditorState, LeftTab};
+use crate::effect_previews::TileState;
 use crate::i18n::{Language, Message};
 use crate::layout::grid_columns;
 use crate::media::{MediaItem, MediaKind};
-use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageKind};
+use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageEntry, PackageKind};
 use crate::timecode::format_duration;
+use std::ops::Range;
+
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
 
 const RAIL_WIDTH: f32 = 68.0;
@@ -20,6 +23,9 @@ const CELL_GAP: f32 = 8.0;
 const CELL_CAPTION: f32 = 24.0;
 const THUMB_RATIO: f32 = 0.6;
 const PICKER_FOOTER_HEIGHT: f32 = 44.0;
+const TILE_MIN: f32 = 96.0;
+const TILE_GAP: f32 = 8.0;
+const TILE_CAPTION: f32 = 22.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let rect = ui.max_rect();
@@ -220,29 +226,124 @@ fn add_package(state: &mut EditorState, package: &str) {
     }
 }
 
-/// The height of a selectable label, without the spacing `show_rows` adds itself.
-pub(super) fn selectable_row_height(ui: &egui::Ui) -> f32 {
-    (ui.text_style_height(&egui::TextStyle::Body) + 2.0 * ui.spacing().button_padding.y).max(ui.spacing().interact_size.y)
+/// The layout of the picker grid for a content `width`: the number of columns and the side of a
+/// square tile, which is at least [`TILE_MIN`] unless the width itself is smaller.
+fn picker_grid(width: f32) -> (usize, f32) {
+    let columns = grid_columns(width, TILE_MIN, TILE_GAP);
+    let side = ((width - TILE_GAP * (columns as f32 - 1.0)) / columns as f32).max(1.0);
+    (columns, side)
+}
+
+/// The tiles of grid row `row`, as indices into `total` tiles.
+fn row_tiles(row: usize, columns: usize, total: usize) -> Range<usize> {
+    let start = row.saturating_mul(columns).min(total);
+    start..start.saturating_add(columns).min(total)
+}
+
+/// The tiles in the grid rows `rows`: only these are built, and only these ask for a preview.
+fn visible_tiles(rows: Range<usize>, columns: usize, total: usize) -> Range<usize> {
+    let start = rows.start.saturating_mul(columns).min(total);
+    start..rows.end.saturating_mul(columns).min(total).max(start)
+}
+
+/// How a tile shows its preview state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TileLook {
+    Picture,
+    Placeholder,
+    /// The placeholder with a warning on it.
+    Broken,
+}
+
+fn tile_look(tile: &TileState) -> TileLook {
+    match tile {
+        TileState::Still(_) => TileLook::Picture,
+        TileState::Pending | TileState::Loading | TileState::Unavailable(_) => TileLook::Placeholder,
+        TileState::Failed(_) => TileLook::Broken,
+    }
+}
+
+/// The tooltip of a tile: the full name, what the package says about itself (its path when it says
+/// nothing), and the reason a preview is missing, if there is one.
+fn tile_tooltip(label: &str, entry: &PackageEntry, language: Language, tile: &TileState) -> String {
+    let about = if entry.description.is_empty() { entry.package.as_str() } else { entry.description.as_str() };
+    let mut text = format!("{label}\n{about}");
+    match tile {
+        TileState::Failed(reason) => text.push_str(&format!("\n{}", language.t(Message::PreviewFailed(reason.clone())))),
+        TileState::Unavailable(reason) => text.push_str(&format!("\n{}", language.t(Message::PreviewUnavailable(reason.clone())))),
+        TileState::Pending | TileState::Loading | TileState::Still(_) => {}
+    }
+    text
+}
+
+/// One square tile of the picker: the preview on an opaque background, since a preview with
+/// transparent pixels must not show the panel through it, and a caption of one line below.
+fn package_tile(ui: &mut egui::Ui, side: f32, label: &str, selected: bool, tile: &TileState) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(side, side + TILE_CAPTION), Sense::click());
+    let painter = ui.painter_at(rect);
+    let radius = CornerRadius::same(theme::CONTROL_RADIUS);
+    let picture = Rect::from_min_size(rect.min, Vec2::splat(side));
+    painter.rect_filled(picture, radius, theme::thumb_bg());
+    match (tile_look(tile), tile) {
+        (TileLook::Picture, TileState::Still(texture)) => {
+            painter.image(texture.id(), picture.shrink(1.0), Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        (look, _) => {
+            icons::paint(&painter, Rect::from_center_size(picture.center(), Vec2::splat(28.0)), Icon::Sparkle, theme::text_dim());
+            if look == TileLook::Broken {
+                icons::paint(&painter, Rect::from_min_size(picture.right_top() + Vec2::new(-20.0, 4.0), Vec2::splat(16.0)), Icon::Warning, theme::refused());
+            }
+        }
+    }
+    let stroke = if selected {
+        Stroke::new(2.0, theme::accent())
+    } else if response.hovered() {
+        Stroke::new(1.0, theme::accent())
+    } else {
+        Stroke::new(1.0, theme::border())
+    };
+    painter.rect_stroke(picture, radius, stroke, StrokeKind::Inside);
+    let color = if selected { theme::accent_text() } else { theme::text() };
+    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), FontId::proportional(12.0), color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width((side - 4.0).max(1.0));
+    let galley = painter.layout_job(job);
+    painter.galley(egui::pos2(rect.left() + 2.0, picture.bottom() + (TILE_CAPTION - galley.size().y) / 2.0), galley, color);
+    response
 }
 
 fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
-    let row_height = selectable_row_height(ui);
+    let language = state.language();
     let duplicates = duplicated_names(state.catalog.entries(state.picker.kind));
     let entries: Vec<_> = filter_entries(state.catalog.entries(state.picker.kind), &state.picker.filter).into_iter().cloned().collect();
-    let list_height = (ui.available_height() - PICKER_FOOTER_HEIGHT).max(row_height * 3.0);
+    let width = (ui.available_width() - ui.spacing().scroll.allocated_width()).max(1.0);
+    let (columns, side) = picker_grid(width);
+    let list_height = (ui.available_height() - PICKER_FOOTER_HEIGHT).max(TILE_MIN);
     let mut double_clicked = None;
-    egui::ScrollArea::vertical().id_salt("package-list").max_height(list_height).auto_shrink([false, false]).show_rows(ui, row_height, entries.len(), |ui, rows| {
-        for entry in &entries[rows] {
-            let selected = state.picker.selected.as_deref() == Some(&entry.package);
-            let response = ui.selectable_label(selected, list_label(entry, &duplicates)).on_hover_text(if entry.description.is_empty() { entry.package.as_str() } else { entry.description.as_str() });
-            if response.clicked() {
-                state.picker.selected = Some(entry.package.clone());
-            }
-            if response.double_clicked() {
-                double_clicked = Some(entry.package.clone());
-            }
+    let mut visible: Vec<&str> = Vec::new();
+    egui::ScrollArea::vertical().id_salt("package-list").max_height(list_height).auto_shrink([false, false]).show_rows(ui, side + TILE_CAPTION, entries.len().div_ceil(columns), |ui, rows| {
+        let shown = visible_tiles(rows.clone(), columns, entries.len());
+        visible.extend(entries[shown].iter().map(|entry| entry.package.as_str()));
+        for row in rows {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = TILE_GAP;
+                for entry in &entries[row_tiles(row, columns, entries.len())] {
+                    let selected = state.picker.selected.as_deref() == Some(&entry.package);
+                    // The borrow ends here: nothing below holds it across the drawing.
+                    let tile = state.previews.borrow_mut().tile(&entry.package);
+                    let label = list_label(entry, &duplicates);
+                    let response = package_tile(ui, side, &label, selected, &tile).on_hover_text(tile_tooltip(&label, entry, language, &tile));
+                    if response.clicked() {
+                        state.picker.selected = Some(entry.package.clone());
+                    }
+                    if response.double_clicked() {
+                        double_clicked = Some(entry.package.clone());
+                    }
+                }
+            });
         }
     });
+    // No hover animation yet, so no loop is asked for.
+    state.previews.borrow_mut().set_wanted(None, visible.iter().copied());
     if let Some(package) = double_clicked {
         add_package(state, &package);
     }
@@ -293,15 +394,60 @@ mod tests {
         assert_eq!(empty_message("beach"), Message::NoSearchMatch);
     }
 
+    fn entry(package: &str, name: &str, description: &str) -> PackageEntry {
+        PackageEntry { package: package.to_owned(), name: name.to_owned(), description: description.to_owned(), kind: PackageKind::Effect, params: Vec::new() }
+    }
+
     #[test]
-    fn the_picker_row_height_is_the_height_of_a_selectable_label() {
-        let (mut label, mut computed) = (0.0, 0.0);
-        let ctx = egui::Context::default();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
-            label = ui.selectable_label(false, "Package").rect.height();
-            computed = selectable_row_height(ui);
-        });
-        output.textures_delta.clear();
-        assert_eq!(computed, label);
+    fn the_picker_grid_fills_the_width_with_tiles_of_at_least_the_minimum_side() {
+        let (columns, side) = picker_grid(400.0);
+        assert_eq!(columns, 3);
+        assert!((side * 3.0 + TILE_GAP * 2.0 - 400.0).abs() < 0.01);
+        assert!(side >= TILE_MIN);
+        assert_eq!(picker_grid(TILE_MIN).0, 1);
+        let (columns, side) = picker_grid(40.0);
+        assert_eq!((columns, side), (1, 40.0), "a narrow panel still has one tile");
+        assert!(picker_grid(0.0).1 >= 1.0);
+    }
+
+    #[test]
+    fn a_grid_row_holds_the_next_tiles_and_the_last_row_may_be_short() {
+        assert_eq!(row_tiles(0, 3, 7), 0..3);
+        assert_eq!(row_tiles(2, 3, 7), 6..7);
+        assert_eq!(row_tiles(3, 3, 7), 7..7, "past the last row there is nothing");
+        assert_eq!(row_tiles(0, 3, 0), 0..0);
+    }
+
+    #[test]
+    fn only_the_tiles_of_the_visible_rows_are_visible() {
+        assert_eq!(visible_tiles(1..3, 3, 20), 3..9);
+        assert_eq!(visible_tiles(5..7, 3, 20), 15..20);
+        assert_eq!(visible_tiles(7..9, 3, 20), 20..20);
+        assert_eq!(visible_tiles(0..0, 3, 20), 0..0);
+        assert_eq!(visible_tiles(0..4, 3, 0), 0..0);
+    }
+
+    #[test]
+    fn a_tile_shows_a_picture_only_for_a_still_and_a_warning_only_for_a_failure() {
+        assert_eq!(tile_look(&TileState::Pending), TileLook::Placeholder);
+        assert_eq!(tile_look(&TileState::Loading), TileLook::Placeholder);
+        assert_eq!(tile_look(&TileState::Unavailable("no".to_owned())), TileLook::Placeholder);
+        assert_eq!(tile_look(&TileState::Failed("no".to_owned())), TileLook::Broken);
+    }
+
+    #[test]
+    fn the_tooltip_has_the_full_name_the_description_and_the_reason_of_a_missing_preview() {
+        let described = entry("packages/gpufx/ffmpeg/blur", "Blur", "Softens the picture");
+        assert_eq!(tile_tooltip("Blur", &described, Language::English, &TileState::Pending), "Blur
+Softens the picture");
+        let bare = entry("packages/gpufx/ffmpeg/blur", "Blur", "");
+        assert_eq!(tile_tooltip("Blur", &bare, Language::English, &TileState::Loading), "Blur
+packages/gpufx/ffmpeg/blur");
+        let failed = tile_tooltip("Blur (ffmpeg)", &described, Language::English, &TileState::Failed("the shader did not compile".to_owned()));
+        assert!(failed.starts_with("Blur (ffmpeg)
+Softens the picture
+") && failed.ends_with("the shader did not compile"), "{failed}");
+        let unavailable = tile_tooltip("Blur", &described, Language::Vietnamese, &TileState::Unavailable("no helper".to_owned()));
+        assert!(unavailable.ends_with("no helper") && unavailable.lines().count() == 3, "{unavailable}");
     }
 }

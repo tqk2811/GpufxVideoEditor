@@ -156,6 +156,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::ReadingPackages => "Đang đọc danh sách gói...".to_owned(),
         Message::NoPackages(variable) => format!("Không tìm thấy gói nào. Đặt biến {variable}."),
         Message::AddToClip => "Thêm vào clip đã chọn".to_owned(),
+        Message::PreviewFailed(reason) => format!("Không tạo được ảnh xem trước: {reason}"),
+        Message::PreviewUnavailable(reason) => format!("Không có ảnh xem trước: {reason}"),
         Message::PackageProblems(count) => format!("{count} gói không đọc được"),
 
         Message::ClipTitle => "Clip".to_owned(),

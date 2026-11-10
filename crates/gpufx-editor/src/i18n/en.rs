@@ -173,6 +173,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::ReadingPackages => "Reading the package list...".to_owned(),
         Message::NoPackages(variable) => format!("No packages found. Set {variable}."),
         Message::AddToClip => "Add to selected clip".to_owned(),
+        Message::PreviewFailed(reason) => format!("The preview could not be made: {reason}"),
+        Message::PreviewUnavailable(reason) => format!("Previews are not available: {reason}"),
         Message::PackageProblems(count) => format!("{} could not be read", counted(*count as i64, "package")),
 
         Message::ClipTitle => "Clip".to_owned(),

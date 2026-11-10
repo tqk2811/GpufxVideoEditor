@@ -221,6 +221,10 @@ pub enum Message {
     NoPackages(String),
     AddToClip,
     PackageProblems(usize),
+    /// The tooltip of a tile whose preview could not be made, with the reason.
+    PreviewFailed(String),
+    /// The tooltip of a tile when previews cannot be made at all, with the reason.
+    PreviewUnavailable(String),
 
     // Inspector.
     ClipTitle,

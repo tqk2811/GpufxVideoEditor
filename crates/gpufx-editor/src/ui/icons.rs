@@ -30,6 +30,7 @@ pub enum Icon {
     Eye,
     EyeOff,
     Magnet,
+    Warning,
 }
 
 const ICON_STROKE: f32 = 1.5;
@@ -181,6 +182,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 painter.line_segment([p(x * 0.25, -0.8), p(x * 0.65, -0.8)], stroke);
                 painter.line_segment([p(x * 0.25, -0.4), p(x * 0.65, -0.4)], stroke);
             }
+        }
+        Icon::Warning => {
+            line(painter, vec![p(0.0, -0.85), p(0.95, 0.8), p(-0.95, 0.8), p(0.0, -0.85)], stroke);
+            painter.line_segment([p(0.0, -0.3), p(0.0, 0.25)], stroke);
+            painter.circle_filled(p(0.0, 0.52), s * 0.07, color);
         }
     }
 }
