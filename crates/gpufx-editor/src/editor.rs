@@ -159,6 +159,7 @@ pub enum LeftTab {
     Media,
     Audio,
     Effects,
+    Transitions,
 }
 
 /// What the panels remember between frames.

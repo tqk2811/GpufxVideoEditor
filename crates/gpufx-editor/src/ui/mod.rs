@@ -541,7 +541,7 @@ mod tests {
     fn fullscreen_draws_only_the_player_so_clicks_do_not_reach_the_panels() {
         let mut state = fullscreen_state();
         let left = panels(window()).left;
-        click(&egui::Context::default(), &mut state, egui::pos2(left.left() + left.width() * 5.0 / 6.0, left.top() + 20.0));
+        click(&egui::Context::default(), &mut state, left_panel::rail_cell_center(left, 2));
         assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Media, "the tab is not there");
     }
 
@@ -675,9 +675,13 @@ mod tests {
     fn clicking_a_tab_switches_the_left_panel() {
         let mut state = state();
         let left = panels(egui::vec2(1280.0, 720.0)).left;
-        let at = egui::pos2(left.left() + left.width() * 5.0 / 6.0, left.top() + 20.0);
-        click(&egui::Context::default(), &mut state, at);
+        let ctx = egui::Context::default();
+        click(&ctx, &mut state, left_panel::rail_cell_center(left, 2));
         assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Effects);
+        assert_eq!(state.picker.kind, crate::packages::PackageKind::Effect);
+        click(&ctx, &mut state, left_panel::rail_cell_center(left, 3));
+        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Transitions);
+        assert_eq!(state.picker.kind, crate::packages::PackageKind::Transition);
     }
 
     #[test]
@@ -921,7 +925,7 @@ mod tests {
         let mut state = state();
         state.library.add(crate::media::MediaItem { source: "b.mp4".to_owned(), name: "b.mp4".to_owned(), kind: crate::media::MediaKind::Video, duration: Some(seconds(2)), estimated: false });
         let left = panels(egui::vec2(1280.0, 720.0)).left;
-        let at = egui::pos2(left.left() + 40.0, left.top() + 200.0);
+        let at = egui::pos2(left.left() + 40.0 + 68.0, left.top() + 200.0);
         let ctx = egui::Context::default();
         click(&ctx, &mut state, at);
         assert_eq!(state.project().tracks.iter().map(|track| track.clips.len()).sum::<usize>(), 2, "the first click adds the file");

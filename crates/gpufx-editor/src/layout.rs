@@ -9,7 +9,7 @@ pub const TOP_BAR_HEIGHT: f32 = 46.0;
 pub const STATUS_HEIGHT: f32 = 22.0;
 
 const LEFT_SHARE: f32 = 0.22;
-const LEFT_MIN: f32 = 180.0;
+const LEFT_MIN: f32 = 240.0;
 const LEFT_MAX: f32 = 420.0;
 const RIGHT_SHARE: f32 = 0.2;
 const RIGHT_MIN: f32 = 180.0;

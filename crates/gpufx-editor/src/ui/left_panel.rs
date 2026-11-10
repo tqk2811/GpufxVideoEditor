@@ -10,7 +10,8 @@ use crate::packages::{duplicated_names, filter_entries, list_label, short_name, 
 use crate::timecode::format_duration;
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
 
-const TAB_HEIGHT: f32 = 52.0;
+const RAIL_WIDTH: f32 = 68.0;
+const RAIL_CELL_HEIGHT: f32 = 56.0;
 const TAB_FONT: f32 = 12.0;
 const TAB_FONT_MIN: f32 = 9.5;
 const TAB_PADDING: f32 = 6.0;
@@ -22,43 +23,70 @@ const PICKER_FOOTER_HEIGHT: f32 = 44.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let rect = ui.max_rect();
-    let tabs_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), TAB_HEIGHT.min(rect.height())));
-    tabs(ui, state, tabs_rect);
-    ui.painter_at(rect).hline(rect.x_range(), tabs_rect.bottom(), Stroke::new(1.0, theme::border()));
-    let content = Rect::from_min_max(egui::pos2(rect.left(), tabs_rect.bottom()), rect.max).shrink(10.0);
+    let rail = Rect::from_min_size(rect.min, Vec2::new(RAIL_WIDTH.min(rect.width()), rect.height()));
+    rail_tabs(ui, state, rail);
+    ui.painter_at(rect).vline(rail.right(), rect.y_range(), Stroke::new(1.0, theme::border()));
+    let content = Rect::from_min_max(egui::pos2(rail.right(), rect.top()), rect.max).shrink(10.0);
     if content.width() < 1.0 || content.height() < 1.0 {
         return;
     }
     ui.scope_builder(UiBuilder::new().max_rect(content), |ui| match state.ui.left_tab {
         LeftTab::Media => library(ui, state, requests, MediaKind::Video),
         LeftTab::Audio => library(ui, state, requests, MediaKind::Audio),
-        LeftTab::Effects => picker(ui, state),
+        LeftTab::Effects | LeftTab::Transitions => picker(ui, state),
     });
 }
 
-fn tabs(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
+/// The height of one entry of the rail: all `count` entries stay reachable in a panel too short
+/// for the usual height.
+fn rail_cell_height(available: f32, count: usize) -> f32 {
+    if RAIL_CELL_HEIGHT * count as f32 <= available {
+        RAIL_CELL_HEIGHT
+    } else {
+        available / count.max(1) as f32
+    }
+}
+
+/// The centre of the rail entry `index` in a left panel at `panel`, for tests that click it.
+#[cfg(test)]
+pub(super) fn rail_cell_center(panel: Rect, index: usize) -> egui::Pos2 {
+    egui::pos2(panel.left() + 1.0 + RAIL_WIDTH / 2.0, panel.top() + 1.0 + RAIL_CELL_HEIGHT * (index as f32 + 0.5))
+}
+
+/// The icons on the left edge, one per tab.
+fn rail_tabs(ui: &mut egui::Ui, state: &mut EditorState, rail: Rect) {
     let language = state.language();
-    let entries = [(LeftTab::Media, Icon::Film, Message::TabMedia), (LeftTab::Audio, Icon::Music, Message::TabAudio), (LeftTab::Effects, Icon::Sparkle, Message::TabEffects)];
-    let width = rect.width() / entries.len() as f32;
+    let entries = [
+        (LeftTab::Media, Icon::Film, Message::TabMedia),
+        (LeftTab::Audio, Icon::Music, Message::TabAudio),
+        (LeftTab::Effects, Icon::Sparkle, Message::TabEffects),
+        (LeftTab::Transitions, Icon::Transition, Message::Transitions),
+    ];
+    let height = rail_cell_height(rail.height(), entries.len());
     for (index, (tab, icon, label)) in entries.into_iter().enumerate() {
-        let cell = Rect::from_min_size(rect.min + Vec2::new(width * index as f32, 0.0), Vec2::new(width, rect.height()));
+        let cell = Rect::from_min_size(rail.min + Vec2::new(0.0, height * index as f32), Vec2::new(rail.width(), height));
         let response = ui.interact(cell, ui.scope_id().with(("left-tab", index)), Sense::click());
         let selected = state.ui.left_tab == tab;
-        if response.hovered() && !selected {
-            ui.painter().rect_filled(cell.shrink(3.0), CornerRadius::same(theme::CONTROL_RADIUS), theme::panel_raised());
+        let painter = ui.painter_at(cell);
+        if selected {
+            painter.rect_filled(cell.shrink(3.0), CornerRadius::same(theme::CONTROL_RADIUS), theme::accent_soft());
+            painter.vline(cell.left() + 1.0, cell.y_range(), Stroke::new(2.0, theme::accent()));
+        } else if response.hovered() {
+            painter.rect_filled(cell.shrink(3.0), CornerRadius::same(theme::CONTROL_RADIUS), theme::panel_raised());
         }
         let color = if selected { theme::accent_text() } else { theme::text_dim() };
-        let painter = ui.painter_at(cell);
-        let icon_rect = Rect::from_center_size(egui::pos2(cell.center().x, cell.top() + 18.0), Vec2::splat(16.0));
+        let icon_rect = Rect::from_center_size(egui::pos2(cell.center().x, cell.center().y - 8.0), Vec2::splat(16.0));
         icons::paint(&painter, icon_rect, icon, color);
         let label = language.t(label);
         let natural = painter.layout_no_wrap(label.clone(), FontId::proportional(TAB_FONT), color).size().x;
-        painter.text(egui::pos2(cell.center().x, cell.top() + 37.0), Align2::CENTER_CENTER, label, FontId::proportional(tab_font_size(natural, cell.width())), color);
-        if selected {
-            painter.hline(cell.shrink2(Vec2::new(14.0, 0.0)).x_range(), cell.bottom() - 2.0, Stroke::new(2.0, theme::accent()));
-        }
+        painter.text(egui::pos2(cell.center().x, cell.center().y + 12.0), Align2::CENTER_CENTER, label, FontId::proportional(tab_font_size(natural, cell.width())), color);
         if response.clicked() {
             state.ui.left_tab = tab;
+            match tab {
+                LeftTab::Effects => state.picker.set_kind(PackageKind::Effect),
+                LeftTab::Transitions => state.picker.set_kind(PackageKind::Transition),
+                LeftTab::Media | LeftTab::Audio => {}
+            }
         }
     }
 }
@@ -168,13 +196,6 @@ fn fit_size(room: Vec2, aspect: f32) -> Vec2 {
 /// The effect and transition lists with their filter.
 fn picker(ui: &mut egui::Ui, state: &mut EditorState) {
     let language: Language = state.language();
-    ui.horizontal(|ui| {
-        for (kind, label) in [(PackageKind::Effect, Message::TabEffects), (PackageKind::Transition, Message::Transitions)] {
-            if ui.selectable_label(state.picker.kind == kind, language.t(label)).clicked() {
-                state.picker.set_kind(kind);
-            }
-        }
-    });
     search_box(ui, &mut state.picker.filter, &language.t(Message::SearchEffects));
     if !state.catalog.loaded {
         ui.colored_label(theme::text_dim(), language.t(Message::ReadingPackages));
@@ -255,6 +276,15 @@ mod tests {
         let fitted = tab_font_size(70.0, 60.0);
         assert!(fitted < TAB_FONT && fitted >= TAB_FONT_MIN, "{fitted}");
         assert_eq!(tab_font_size(500.0, 60.0), TAB_FONT_MIN);
+    }
+
+    #[test]
+    fn the_rail_cells_keep_their_height_unless_the_panel_is_too_short() {
+        assert_eq!(rail_cell_height(600.0, 4), RAIL_CELL_HEIGHT);
+        assert_eq!(rail_cell_height(4.0 * RAIL_CELL_HEIGHT, 4), RAIL_CELL_HEIGHT);
+        let short = rail_cell_height(120.0, 4);
+        assert_eq!(short, 30.0);
+        assert!(short * 4.0 <= 120.0);
     }
 
     #[test]

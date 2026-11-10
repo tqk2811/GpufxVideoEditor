@@ -9,6 +9,7 @@ pub enum Icon {
     Film,
     Music,
     Sparkle,
+    Transition,
     Upload,
     Plus,
     Play,
@@ -69,6 +70,7 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.circle_stroke(p(0.5, 0.4), s * 0.25, stroke);
             line(painter, vec![p(-0.1, 0.55), p(-0.1, -0.7), p(0.75, -0.85), p(0.75, 0.4)], stroke);
         }
+        Icon::Transition => line(painter, vec![p(-0.85, -0.7), p(-0.85, 0.7), p(0.85, -0.7), p(0.85, 0.7), p(-0.85, -0.7)], stroke),
         Icon::Sparkle => {
             let star = |center: Pos2, size: f32| {
                 let q = |x: f32, y: f32| center + Vec2::new(x, y) * size;
