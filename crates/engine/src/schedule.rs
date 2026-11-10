@@ -27,10 +27,13 @@
 //!   the ends of a file.
 //! * **Progress.** `elapsed = frame_time - window_start` out of `total = duration`, kept as an exact
 //!   ratio. [`Progress::parts_per_million`] floors `elapsed * 1_000_000 / total`.
-//! * **Clip clock.** `elapsed = frame_time - start` out of `duration`, in timeline ticks: the time
-//!   the viewer sees, so `speed` does not scale it (a 2x clip of 5 s on the timeline counts 0 to 5).
-//!   Each clip counts from its own start, also after a split. Inside a transition window a clip
-//!   can be drawn before its start or past its end; the clock is held at 0 or at `duration` there.
+//! * **Clip clock.** `elapsed = frame_time - visible_start` out of `duration = visible_end -
+//!   visible_start`, in timeline ticks: the time the viewer sees, so `speed` does not scale it (a 2x
+//!   clip of 5 s on the timeline counts 0 to 5). The clip is visible from the start of the window of
+//!   the transition into it (else its `start`) to the end of the window of the transition out of it
+//!   (else `start + duration`), so a clip that fades in starts counting when it first appears, not
+//!   at the cut. Each clip counts from its own first visible moment, also after a split. `elapsed`
+//!   is clamped to `0..=duration`.
 
 use crate::project::{Clip, ClipPlacement, Effect, Project, Track, Transition};
 use crate::time::Time;
@@ -60,9 +63,11 @@ impl Progress {
 /// How far a clip has played, in timeline time (see the module rounding rules).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClipClock {
-    /// Time since the start of the clip, in `0..=duration`.
+    /// Time since the clip first became visible (the start of the transition window into it, else
+    /// its start), in `0..=duration`.
     pub elapsed: Time,
-    /// Length of the clip on the timeline.
+    /// Length of the time the clip is visible: from the start of the window of the transition into
+    /// it (else its start) to the end of the window of the transition out of it (else its end).
     pub duration: Time,
 }
 
@@ -154,14 +159,36 @@ pub fn layers_at_frame(project: &Project, frame: i64) -> Vec<Layer<'_>> {
 fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
     let c = &track.clips[clip];
     let offset = t.saturating_sub(c.start);
+    let (visible_start, visible_end) = visible_span(track, clip);
     SourceSample {
         clip,
         source: &c.source,
         source_time: c.source_in.saturating_add(c.source_offset(offset)).max(Time::ZERO),
         effects: &c.effects,
         placement: c.placement,
-        clock: ClipClock { elapsed: offset.max(Time::ZERO).min(c.duration), duration: c.duration },
+        clock: ClipClock {
+            elapsed: t.saturating_sub(visible_start).max(Time::ZERO).min(visible_end.saturating_sub(visible_start)),
+            duration: visible_end.saturating_sub(visible_start),
+        },
     }
+}
+
+/// The time clip `clip` is visible: from the start of the window of the transition into it (else its
+/// start) to the end of the window of the transition out of it (else its end).
+fn visible_span(track: &Track, clip: usize) -> (Time, Time) {
+    let c = &track.clips[clip];
+    let start = track
+        .transitions
+        .iter()
+        .find(|tr| tr.after_clip + 1 == clip)
+        .map_or(c.start, |tr| transition_window(tr, c).0);
+    let end = track
+        .transitions
+        .iter()
+        .find(|tr| tr.after_clip == clip)
+        .and_then(|tr| track.clips.get(clip + 1).map(|next| transition_window(tr, next).1))
+        .unwrap_or_else(|| c.start.saturating_add(c.duration));
+    (start, end)
 }
 
 /// The start and end ticks of the window of `transition`, whose later clip is `next`. The window

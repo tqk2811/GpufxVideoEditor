@@ -256,18 +256,19 @@ fn a_zoom_in_clip_shorter_than_its_duration_keeps_the_zoom_in_its_transition() {
     let Some(gpu) = gpu() else { return };
     let root = ProbeRoot::new("zoom-hold");
     let Some(package) = install_pack(&root, "zoom-in") else { return };
-    // Clip 0 lasts 0.5 s, shorter than the default 0.6 s, with a transition out of 10 frames: its
-    // clock stays at the end for frames 15..19 and the zoom must stay, as it does with `hold`.
+    // Clip 0 lasts 12 frames and a transition out of 10 frames starts at frame 7 and ends at frame
+    // 17, so the clip is visible for 17 frames (0.567 s), shorter than the default 0.6 s: its clock
+    // never reaches the end of the zoom and the zoom must not jump back, as with `hold`.
     let project = |params: &str| {
         format!(
             r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
                 {{"source":"{}","start":0,"source_in":0,"duration":{},"effects":[{{"package":"{package}","params":{params}}}]}},
                 {{"source":"{}","start":{},"source_in":0,"duration":{}}}],
                 "transitions":[{{"after_clip":0,"package":"packages/gpufx/capcut/mix","duration":{}}}]}}]}}"#,
-            json_path(&a), 15 * FRAME, json_path(&b), 15 * FRAME, 30 * FRAME, 10 * FRAME
+            json_path(&a), 12 * FRAME, json_path(&b), 12 * FRAME, 30 * FRAME, 10 * FRAME
         )
     };
-    let frames = [12, 15, 17, 19];
+    let frames = [9, 12, 14, 16];
     let mut zoomed = Capture::new(&frames);
     render_with_root(&gpu, &project("{}"), &root.0, &mut zoomed).expect("render");
     let mut held = Capture::new(&frames);
@@ -278,7 +279,7 @@ fn a_zoom_in_clip_shorter_than_its_duration_keeps_the_zoom_in_its_transition() {
     for frame in frames {
         assert_eq!(zoomed.frame(frame), held.frame(frame), "frame {frame}: the zoom stays at its end, it does not jump back to scale 1");
     }
-    assert_ne!(zoomed.frame(17), plain.frame(17), "the zoom is visible past the end of the clip");
+    assert_ne!(zoomed.frame(14), plain.frame(14), "the zoom is visible past the end of the clip");
 }
 
 #[test]

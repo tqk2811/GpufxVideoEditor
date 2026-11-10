@@ -6,9 +6,9 @@ use gpufx_core::expr::Expr;
 use gpufx_core::manifest::{ParamDef, ParamType};
 use gpufx_core::Package;
 
-/// The parameter a compositor fills with the seconds since the start of the clip.
+/// The parameter a compositor fills with the seconds since the clip first became visible (the start of the transition into it, else its start).
 pub const CLIP_TIME: &str = "clip_time";
-/// The parameter a compositor fills with the length of the clip on the timeline, in seconds.
+/// The parameter a compositor fills with how long the clip is visible on the timeline, in seconds (its length plus the parts inside the transitions around it).
 pub const CLIP_DURATION: &str = "clip_duration";
 
 /// The type of a parameter, as a manifest states it.

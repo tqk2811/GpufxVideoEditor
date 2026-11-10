@@ -283,8 +283,18 @@ fn clip_clock_restarts_after_a_split() {
     assert_eq!(clock_at(&p, 9, 0), (15_000, 18_000));
 }
 
+/// The clocks `(elapsed, duration)` of both clips of the transition at `frame`.
+fn transition_clocks(p: &Project, frame: i64, track_index: usize) -> ((i64, i64), (i64, i64)) {
+    let layers = layers_at_frame(p, frame);
+    let layer = layers.iter().find(|l| l.track == track_index).expect("a layer");
+    let LayerContent::Transition { from, to, .. } = layer.content else { panic!("expected a transition at frame {frame}") };
+    ((from.clock.elapsed.ticks(), from.clock.duration.ticks()), (to.clock.elapsed.ticks(), to.clock.duration.ticks()))
+}
+
 #[test]
-fn clip_clock_is_held_inside_a_transition_window() {
+fn clip_clock_counts_from_the_moment_the_clip_becomes_visible() {
+    // Two 30000 tick clips with a 12000 tick transition: the window is 24000..36000 around the cut
+    // at 30000. Clip 0 is visible 0..36000, clip 1 is visible 24000..60000.
     let p = project(
         3000,
         vec![track(
@@ -292,12 +302,52 @@ fn clip_clock_is_held_inside_a_transition_window() {
             vec![transition(0, 12_000)],
         )],
     );
-    // The window is 24000..36000 around the cut at 30000.
-    let layers = layers_at_frame(&p, 11);
-    let LayerContent::Transition { from, to, .. } = layers[0].content else { panic!("expected a transition") };
-    assert_eq!((from.clock.elapsed, from.clock.duration), (t(30_000), t(30_000)), "past the end: held at the duration");
-    assert_eq!((to.clock.elapsed, to.clock.duration), (t(3_000), t(30_000)), "the second clip has started");
-    let early = layers_at_frame(&p, 8);
-    let LayerContent::Transition { to, .. } = early[0].content else { panic!("expected a transition") };
-    assert_eq!(to.clock.elapsed, Time::ZERO, "before the start: held at 0");
+    // Transition out of clip 0: it counts on past its own end, up to the window end.
+    assert_eq!(clock_at(&p, 7, 0), (21_000, 36_000), "before the window: the duration is the visible one");
+    let (from, to) = transition_clocks(&p, 11, 0);
+    assert_eq!(from, (33_000, 36_000), "past its own end the clip keeps counting");
+    // Transition into clip 1: it counts from the window start, not from the cut.
+    assert_eq!(to, (9_000, 36_000), "clip 1 has been visible for 9000 ticks, 3000 of them after the cut");
+    let (_, first) = transition_clocks(&p, 8, 0);
+    assert_eq!(first, (0, 36_000), "first visible frame of clip 1: 0, not clamped from a negative offset");
+    let (_, before_cut) = transition_clocks(&p, 9, 0);
+    assert_eq!(before_cut.0, 3_000, "before the cut it already counts");
+    assert_eq!(clock_at(&p, 12, 0), (12_000, 36_000), "after the window clip 1 goes on");
+    assert_eq!(clock_at(&p, 19, 0), (33_000, 36_000), "last frame of clip 1: one frame short of the visible end");
+}
+
+#[test]
+fn clip_clock_of_a_clip_without_a_transition_is_unchanged_next_to_other_clips() {
+    // Clip 2 has no transition on either side; only 0 and 1 are joined.
+    let p = project(
+        3000,
+        vec![track(
+            vec![clip("a.mp4", 0, 0, 30_000), clip("b.mp4", 30_000, 0, 30_000), clip("c.mp4", 60_000, 0, 30_000)],
+            vec![transition(0, 12_000)],
+        )],
+    );
+    assert_eq!(clock_at(&p, 20, 0), (0, 30_000));
+    assert_eq!(clock_at(&p, 25, 0), (15_000, 30_000));
+    assert_eq!(clock_at(&p, 29, 0), (27_000, 30_000));
+}
+
+#[test]
+fn clip_clock_of_a_clip_between_two_transitions_spans_both_windows() {
+    // Clips of 30000 ticks; transitions of 12000 (after clip 0) and 6000 (after clip 1).
+    // Window 0 is 24000..36000, window 1 is 57000..63000 (cut at 60000).
+    // Clip 1 is visible 24000..63000, so its clock lasts 39000.
+    let p = project(
+        3000,
+        vec![track(
+            vec![clip("a.mp4", 0, 0, 30_000), clip("b.mp4", 30_000, 0, 30_000), clip("c.mp4", 60_000, 0, 30_000)],
+            vec![transition(0, 12_000), transition(1, 6_000)],
+        )],
+    );
+    let (_, into) = transition_clocks(&p, 8, 0);
+    assert_eq!(into, (0, 39_000), "starts counting at the first window");
+    let (out_from, out_to) = transition_clocks(&p, 19, 0);
+    assert_eq!(out_from, (33_000, 39_000), "57000 - 24000");
+    assert_eq!(out_to, (0, 33_000), "clip 2 is visible from its window start 57000 to 90000");
+    let (last_from, _) = transition_clocks(&p, 20, 0);
+    assert_eq!(last_from, (36_000, 39_000), "the last frame of the second window");
 }
