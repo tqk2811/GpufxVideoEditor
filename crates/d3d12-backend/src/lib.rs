@@ -13,6 +13,7 @@
 mod audio;
 mod compositor;
 mod decoder;
+mod effect_preview;
 mod encoder;
 mod export;
 mod ffi;
@@ -26,6 +27,7 @@ mod thumbnail;
 pub use audio::{AudioFileDecoder, AudioFiles};
 pub use compositor::{D3d12Compositor, SharedImage};
 pub use decoder::{is_cancelled, DecodedFrame, PublishClock, SequentialDecoder};
+pub use effect_preview::{preview_image_files, PreviewError, PreviewLoop, PreviewRenderer, PREVIEW_FPS, PREVIEW_FRAMES, PREVIEW_SIZE};
 pub use encoder::{encoder_exists, EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
 pub use export::{overwritten_input, reserve_temporary, same_file, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;

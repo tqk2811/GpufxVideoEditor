@@ -346,3 +346,11 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Test preview bỏ khung chưa chứng minh được `LatestSlot`
 
 `crates/gpufx-editor/tests/preview_drop.rs:109`: đồng hồ giả chỉ tăng trong `produce`, nên mỗi lần render chỉ có một yêu cầu mới, thay slot bằng hàng đợi FIFO thì test vẫn xanh. Nên gửi nhiều yêu cầu trong lúc `produce` đang chặn rồi khẳng định khung giữa không được render. Ghi ngày 2026-11-10.
+
+### [Thấp] Preview effect co ảnh đầu ra chưa tốt khi package đổi kích thước
+
+`crates/d3d12-backend/src/effect_preview.rs`, hàm `resize_rgba`: nội suy chỉ lấy 2x2 điểm nên thu nhỏ mạnh bị răng cưa, output không vuông bị kéo méo, và nội suy trên alpha thẳng làm viền lem màu. Hiện chỉ package kiểu `scale` đi vào đường này. Nên dùng box filter, premultiply trước khi lọc và letterbox. Ghi ngày 2026-11-10.
+
+### [Thấp] `luma-matte` hiện trong danh sách effect nhưng không có preview
+
+`crates/gpufx-editor/src/packages.rs:21-26` xếp package 1 input vào effect mà không xét số output, còn `crates/d3d12-backend/src/effect_preview.rs` từ chối package có 2 output nên `ffmpeg/luma-matte` sẽ ra ô lỗi. Nên thống nhất: lọc ở `packages.rs`, hoặc render output 0. Chưa kiểm editor có render được package này không. Ghi ngày 2026-11-10.

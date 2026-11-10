@@ -19,7 +19,7 @@ pub struct PreviewSpec {
 }
 
 impl PreviewSpec {
-    pub const STANDARD: PreviewSpec = PreviewSpec { width: 144, height: 144, frames: 24, fps: 20 };
+    pub const STANDARD: PreviewSpec = PreviewSpec { width: d3d12_backend::PREVIEW_SIZE, height: d3d12_backend::PREVIEW_SIZE, frames: d3d12_backend::PREVIEW_FRAMES, fps: d3d12_backend::PREVIEW_FPS };
 }
 
 /// Tags that keep a directory and a zip file with the same bytes from sharing a digest.

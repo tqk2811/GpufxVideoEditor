@@ -766,6 +766,7 @@ version = "0.1.0"
 dependencies = [
  "engine",
  "gpufx-core",
+ "png",
  "pollster",
  "serde",
  "serde_json",

@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 pollster = "0.4"
+png = "0.18"
 gpufx-core = { path = "../../external/FFmpegGpuFilter/crates/gpufx-core" }
 # Must stay the wgpu major version gpufx-core uses (30).
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
