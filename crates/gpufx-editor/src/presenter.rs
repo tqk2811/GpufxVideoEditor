@@ -60,7 +60,7 @@ impl Presenter {
         surface.configure(&gpu.device, &config);
         let renderer = egui_wgpu::Renderer::new(&gpu.device, format, egui_wgpu::RendererOptions::default());
         let context = egui::Context::default();
-        let state = egui_winit::State::new(context.clone(), egui::ViewportId::ROOT, window.as_ref(), Some(window.scale_factor() as f32), None, None);
+        let state = egui_winit::State::new(context.clone(), egui::ViewportId::ROOT, window.as_ref(), Some(window.scale_factor() as f32), window.theme(), None);
         Ok(Self { window, surface, config, renderer, state, context, frame: None, frame_texture: None, wanted_size: None, retry_after: None })
     }
 
