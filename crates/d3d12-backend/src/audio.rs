@@ -12,7 +12,8 @@
 //!
 //! Containers land on a packet near the target, and the first frame after a seek is incomplete
 //! because the codec overlaps frames. A seek therefore starts ahead of the target by a preroll and
-//! decodes forward; the samples before the target are discarded.
+//! decodes forward; the samples before the target are discarded. A file the demuxer cannot seek in
+//! at all, such as a FLAC of a single frame, is reopened and decoded from its beginning instead.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -175,11 +176,25 @@ impl AudioFileDecoder {
         ffi::av_find_best_stream(self.format_context, ffi::AVMEDIA_TYPE_AUDIO, -1, -1, ptr::null_mut(), 0)
     }
 
+    /// The audio stream to decode and its decoder. The choice depends on which decoders exist, so
+    /// it can differ from [`AudioFileDecoder::best_audio_stream`].
+    unsafe fn select_audio_stream(&self) -> (i32, *const ffi::AVCodec) {
+        let mut codec: *const ffi::AVCodec = ptr::null();
+        let index = ffi::av_find_best_stream(self.format_context, ffi::AVMEDIA_TYPE_AUDIO, -1, -1, &mut codec, 0);
+        (index, codec)
+    }
+
+    /// Packets of the other streams would only be read to be thrown away.
+    unsafe fn discard_other_streams(&mut self, index: i32) {
+        for other in (0..(*self.format_context).nb_streams as usize).filter(|other| *other != index as usize) {
+            (**(*self.format_context).streams.add(other)).discard = ffi::AVDISCARD_ALL;
+        }
+    }
+
     unsafe fn initialize(&mut self, path: &CStr) -> Result<(), String> {
         self.open_input(path)?;
 
-        let mut codec: *const ffi::AVCodec = ptr::null();
-        let index = ffi::av_find_best_stream(self.format_context, ffi::AVMEDIA_TYPE_AUDIO, -1, -1, &mut codec, 0);
+        let (index, codec) = self.select_audio_stream();
         if index == ffi::AVERROR_STREAM_NOT_FOUND {
             return Ok(());
         }
@@ -192,10 +207,7 @@ impl AudioFileDecoder {
         self.time_base = (*stream).time_base;
         self.first_sample = if (*stream).start_time == ffi::NO_PTS { 0 } else { to_mix_samples((*stream).start_time, self.time_base) };
         self.origin = self.video_origin().unwrap_or(self.first_sample);
-        // Packets of the other streams would only be read to be thrown away.
-        for other in (0..(*self.format_context).nb_streams as usize).filter(|other| *other != index as usize) {
-            (**(*self.format_context).streams.add(other)).discard = ffi::AVDISCARD_ALL;
-        }
+        self.discard_other_streams(index);
 
         self.codec_context = ffi::avcodec_alloc_context3(codec);
         if self.codec_context.is_null() {
@@ -339,7 +351,8 @@ impl AudioFileDecoder {
 
     /// Seeks the demuxer to `sample`. At the start of the stream it first asks for a position before
     /// the first sample, to include the packets that prime the codec; a demuxer that refuses a
-    /// position before its first index entry gets the plain one.
+    /// position before its first index entry gets the plain one. A demuxer that refuses that too
+    /// is restarted, which lands at the start of the stream instead of at `sample`.
     unsafe fn seek_demuxer(&mut self, sample: i64) -> Result<(), String> {
         let stream_index = self.stream_index.expect("checked by the caller");
         let flags = ffi::AVSEEK_FLAG_BACKWARD as i32;
@@ -349,7 +362,43 @@ impl AudioFileDecoder {
                 return Ok(());
             }
         }
-        check(ffi::av_seek_frame(self.format_context, stream_index, from_mix_samples(sample, self.time_base), flags), "av_seek_frame")?;
+        let status = ffi::av_seek_frame(self.format_context, stream_index, from_mix_samples(sample, self.time_base), flags);
+        if status < 0 {
+            self.restart_demuxer().map_err(|e| format!("av_seek_frame failed: {}; restarting from the beginning failed: {e}", describe_error(status)))?;
+            self.seeked_to_start = true;
+        }
+        Ok(())
+    }
+
+    /// Replaces the demuxer with a fresh one positioned at the start of the file, for files it
+    /// cannot seek in. The old demuxer is kept until the new one is known good, so a failure here
+    /// leaves the decoder usable. The codec context stays: it does not refer to the demuxer.
+    unsafe fn restart_demuxer(&mut self) -> Result<(), String> {
+        let c_path = CString::new(self.path.as_str()).map_err(|_| "the path contains NUL".to_owned())?;
+        let mut previous = std::mem::replace(&mut self.format_context, ptr::null_mut());
+        let opened = self.open_input(&c_path).and_then(|()| self.check_same_audio_stream());
+        if opened.is_err() {
+            // Closes what open_input left, if anything, and puts the working demuxer back.
+            ffi::avformat_close_input(&mut self.format_context);
+            self.format_context = previous;
+            return opened;
+        }
+        ffi::avformat_close_input(&mut previous);
+        self.discard_other_streams(self.stream_index.expect("checked by the caller"));
+        Ok(())
+    }
+
+    /// Checks that the reopened input still has the stream the codec context was opened for, on the
+    /// time base every position was computed with.
+    unsafe fn check_same_audio_stream(&self) -> Result<(), String> {
+        let index = self.select_audio_stream().0;
+        if Some(index) != self.stream_index {
+            return Err(format!("the audio stream moved from {:?} to {index}", self.stream_index));
+        }
+        let time_base = (**(*self.format_context).streams.add(index as usize)).time_base;
+        if time_base.num != self.time_base.num || time_base.den != self.time_base.den {
+            return Err("the time base of the audio stream changed".to_owned());
+        }
         Ok(())
     }
 
@@ -615,6 +664,63 @@ mod tests {
                 assert_eq!(discard == ffi::AVDISCARD_ALL, index != audio, "stream {index}");
             }
         }
+    }
+
+    /// A FLAC whose whole audio is one frame, with no seek table, like the short interface sounds of
+    /// a sound library: the demuxer refuses every `av_seek_frame` on it.
+    fn unseekable_flac(name: &str) -> std::path::PathBuf {
+        let path = generated_clip(name, &["-f", "lavfi", "-i", "sine=f=440:r=48000:d=0.05:samples_per_frame=2400", "-ac", "2", "-c:a", "flac", "-frame_size", "2400"]);
+        let decoder = AudioFileDecoder::open(&path).expect("open the clip");
+        let stream_index = decoder.stream_index.expect("the clip has audio");
+        // SAFETY: the format context stays valid while the decoder lives.
+        let status = unsafe { ffi::av_seek_frame(decoder.format_context, stream_index, 0, ffi::AVSEEK_FLAG_BACKWARD as i32) };
+        assert!(status < 0, "the fixture must be refused by the demuxer, or this test proves nothing");
+        path
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0, |peak, sample| peak.max(sample.abs()))
+    }
+
+    #[test]
+    fn a_short_flac_the_demuxer_cannot_seek_reads_and_reads_again_from_the_start() {
+        let path = unseekable_flac("unseekable-replay.flac");
+        let mut decoder = AudioFileDecoder::open(&path).expect("open the clip");
+        let (stream_index, time_base) = (decoder.stream_index, decoder.time_base);
+
+        let mut first = [0.0_f32; 2 * 1024];
+        let covered = decoder.read_counted(0, &mut first).expect("the first read");
+        assert_eq!(covered, 1024);
+        assert!(peak(&first) > 0.01, "silent: {}", peak(&first));
+
+        let mut later = [0.0_f32; 2 * 512];
+        decoder.read_counted(1200, &mut later).expect("read further on");
+        assert!(peak(&later) > 0.01, "silent further on: {}", peak(&later));
+
+        let mut again = [0.0_f32; 2 * 1024];
+        let covered = decoder.read_counted(0, &mut again).expect("go back to the start");
+        assert_eq!(covered, 1024);
+        assert_eq!(first, again, "the same position must decode to the same samples");
+        assert_eq!(decoder.stream_index, stream_index);
+        assert_eq!((decoder.time_base.num, decoder.time_base.den), (time_base.num, time_base.den));
+
+        // Inside the file, past the first frames, the restart must skip to the target.
+        let mut inside = [0.0_f32; 2 * 256];
+        decoder.read_counted(600, &mut inside).expect("go back into the file");
+        assert_eq!(inside[..], first[2 * 600..2 * 856], "a restart must land on the requested sample");
+    }
+
+    #[test]
+    fn a_restart_that_cannot_reopen_the_file_reports_it_and_leaves_the_decoder_usable() {
+        let path = unseekable_flac("unseekable-missing.flac");
+        let mut decoder = AudioFileDecoder::open(&path).expect("open the clip");
+        let mut out = [0.0_f32; 2 * 256];
+        let real_path = std::mem::replace(&mut decoder.path, path.with_extension("gone").to_str().expect("UTF-8").to_owned());
+        let error = decoder.read_counted(0, &mut out).expect_err("the file cannot be reopened");
+        assert!(error.contains("av_seek_frame"), "{error}");
+        decoder.path = real_path;
+        decoder.read_counted(0, &mut out).expect("the file is back");
+        assert!(peak(&out) > 0.01, "silent: {}", peak(&out));
     }
 
     #[test]
