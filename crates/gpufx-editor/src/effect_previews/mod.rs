@@ -9,6 +9,7 @@
 pub mod child;
 pub mod disk;
 pub mod key;
+pub mod play;
 pub mod worker;
 
 pub use disk::{PreviewImage, PreviewStore, SweepReport, DISK_LIMIT};

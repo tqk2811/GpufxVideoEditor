@@ -189,6 +189,8 @@ pub struct UiState {
     pub drop_batches: VecDeque<DropBatch>,
     /// Snapping to clip edges is off. The default, false, keeps it on.
     pub snap_off: bool,
+    /// The effect picker tile the pointer stays on; cleared when the picker is not drawn.
+    pub tile_hover: crate::effect_previews::play::TileHover,
 }
 
 /// The files of one drop on the timeline and the place the next of them goes.

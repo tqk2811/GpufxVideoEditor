@@ -3,13 +3,16 @@
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
 use crate::editor::{EditorState, LeftTab};
-use crate::effect_previews::TileState;
+use crate::effect_previews::play::{loop_step, static_step, Hover, Shown, Step};
+use crate::effect_previews::{AnimationState, LoopFrames, PreviewManager, TileState};
 use crate::i18n::{Language, Message};
 use crate::layout::grid_columns;
 use crate::media::{MediaItem, MediaKind};
 use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageEntry, PackageKind};
 use crate::timecode::format_duration;
+use std::cell::RefCell;
 use std::ops::Range;
+use std::time::Duration;
 
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
 
@@ -26,6 +29,12 @@ const PICKER_FOOTER_HEIGHT: f32 = 44.0;
 const TILE_MIN: f32 = 96.0;
 const TILE_GAP: f32 = 8.0;
 const TILE_CAPTION: f32 = 22.0;
+/// The height of the activity bar on the bottom edge of a tile whose loop is being rendered.
+const BUSY_BAR_HEIGHT: f32 = 3.0;
+/// How often the activity bar moves, in seconds.
+const BUSY_REPAINT: f64 = 1.0 / 30.0;
+/// How long the bar takes to cross the tile, in seconds.
+const BUSY_SWEEP: f64 = 1.2;
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let rect = ui.max_rect();
@@ -37,8 +46,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
         return;
     }
     ui.scope_builder(UiBuilder::new().max_rect(content), |ui| match state.ui.left_tab {
-        LeftTab::Media => library(ui, state, requests, MediaKind::Video),
-        LeftTab::Audio => library(ui, state, requests, MediaKind::Audio),
+        LeftTab::Media => {
+            state.ui.tile_hover.clear();
+            library(ui, state, requests, MediaKind::Video)
+        }
+        LeftTab::Audio => {
+            state.ui.tile_hover.clear();
+            library(ui, state, requests, MediaKind::Audio)
+        }
         LeftTab::Effects | LeftTab::Transitions => picker(ui, state),
     });
 }
@@ -276,17 +291,69 @@ fn tile_tooltip(label: &str, entry: &PackageEntry, language: Language, tile: &Ti
     text
 }
 
+/// The picture a tile shows.
+#[derive(Clone)]
+enum TileImage {
+    /// The still.
+    Still,
+    /// Picture A without the effect.
+    Original(egui::TextureHandle),
+    Frame(LoopFrames, u32),
+}
+
+/// What a tile shows beyond its placeholder: the picture, and while a loop is being rendered, how far
+/// the activity bar has moved, from 0 to 1.
+#[derive(Clone)]
+struct TileView {
+    image: TileImage,
+    busy: Option<f32>,
+}
+
+impl TileView {
+    fn still() -> Self {
+        Self { image: TileImage::Still, busy: None }
+    }
+}
+
+/// Where the activity bar is `now`, from 0 to 1.
+fn busy_phase(now: f64) -> f32 {
+    ((now % BUSY_SWEEP) / BUSY_SWEEP) as f32
+}
+
+/// The activity bar along the bottom edge of `picture`: a short stretch that crosses the tile.
+fn paint_busy_bar(painter: &egui::Painter, picture: Rect, phase: f32) {
+    let track = Rect::from_min_max(egui::pos2(picture.left(), picture.bottom() - BUSY_BAR_HEIGHT), picture.right_bottom());
+    painter.rect_filled(track, 0.0, Color32::from_black_alpha(110));
+    let stretch = track.width() * 0.35;
+    let start = track.left() - stretch + (track.width() + stretch) * phase;
+    let bar = Rect::from_min_max(egui::pos2(start.max(track.left()), track.top()), egui::pos2((start + stretch).min(track.right()), track.bottom()));
+    if bar.width() > 0.0 {
+        painter.rect_filled(bar, 0.0, theme::accent());
+    }
+}
+
 /// One square tile of the picker: the preview on an opaque background, since a preview with
 /// transparent pixels must not show the panel through it, and a caption of one line below.
-fn package_tile(ui: &mut egui::Ui, side: f32, label: &str, selected: bool, tile: &TileState) -> egui::Response {
+/// `view` is told whether the pointer is on the tile and says what the picture is.
+fn package_tile(ui: &mut egui::Ui, side: f32, label: &str, selected: bool, tile: &TileState, view: impl FnOnce(bool) -> TileView) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(side, side + TILE_CAPTION), Sense::click());
+    let view = view(response.hovered());
     let painter = ui.painter_at(rect);
     let radius = CornerRadius::same(theme::CONTROL_RADIUS);
     let picture = Rect::from_min_size(rect.min, Vec2::splat(side));
     painter.rect_filled(picture, radius, theme::thumb_bg());
     match (tile_look(tile), tile) {
         (TileLook::Picture, TileState::Still(texture)) => {
-            painter.image(texture.id(), picture.shrink(1.0), Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+            let whole = Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+            let (id, uv) = match &view.image {
+                TileImage::Still => (texture.id(), whole),
+                TileImage::Original(original) => (original.id(), whole),
+                TileImage::Frame(frames, index) => (frames.texture.id(), frames.uv(*index)),
+            };
+            painter.image(id, picture.shrink(1.0), uv, Color32::WHITE);
+            if let Some(phase) = view.busy {
+                paint_busy_bar(&painter, picture.shrink(1.0), phase);
+            }
         }
         (look, _) => {
             icons::paint(&painter, Rect::from_center_size(picture.center(), Vec2::splat(28.0)), Icon::Sparkle, theme::text_dim());
@@ -311,6 +378,40 @@ fn package_tile(ui: &mut egui::Ui, side: f32, label: &str, selected: bool, tile:
     response
 }
 
+/// What `tile` shows given how the pointer stands on it, and the repaint the picture needs: only a
+/// hovered tile that animates asks for one, `next_in` seconds ahead.
+fn tile_view(ctx: &egui::Context, now: f64, kind: PackageKind, package: &str, tile: &TileState, hover: Hover, previews: &RefCell<PreviewManager>) -> TileView {
+    let elapsed = match hover {
+        Hover::Idle => return TileView::still(),
+        Hover::Waiting { remaining } => {
+            ctx.request_repaint_after(Duration::from_secs_f64(remaining));
+            return TileView::still();
+        }
+        Hover::Playing { elapsed } => elapsed,
+    };
+    if !matches!(tile, TileState::Still(_)) {
+        return TileView::still();
+    }
+    // Each borrow ends with its statement.
+    let animation = previews.borrow_mut().animation(package);
+    let (Step { shown, next_in }, frames) = match &animation {
+        AnimationState::Frames(frames) => (loop_step(kind, frames.frames, elapsed), Some(frames)),
+        AnimationState::Static => (static_step(elapsed), None),
+        AnimationState::Rendering => {
+            ctx.request_repaint_after(Duration::from_secs_f64(BUSY_REPAINT));
+            return TileView { image: TileImage::Still, busy: Some(busy_phase(now)) };
+        }
+        AnimationState::Unavailable => return TileView::still(),
+    };
+    ctx.request_repaint_after(Duration::from_secs_f64(next_in));
+    let image = match (shown, frames) {
+        (Shown::Frame(index), Some(frames)) => TileImage::Frame(frames.clone(), index),
+        (Shown::Original, _) => previews.borrow().original().map_or(TileImage::Still, TileImage::Original),
+        _ => TileImage::Still,
+    };
+    TileView { image, busy: None }
+}
+
 fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
     let language = state.language();
     let duplicates = duplicated_names(state.catalog.entries(state.picker.kind));
@@ -320,6 +421,10 @@ fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
     let list_height = (ui.available_height() - PICKER_FOOTER_HEIGHT).max(TILE_MIN);
     let mut double_clicked = None;
     let mut visible: Vec<&str> = Vec::new();
+    let kind = state.picker.kind;
+    let ctx = ui.ctx().clone();
+    let now = ctx.input(|input| input.time);
+    state.ui.tile_hover.begin_frame();
     egui::ScrollArea::vertical().id_salt("package-list").max_height(list_height).auto_shrink([false, false]).show_rows(ui, side + TILE_CAPTION, entries.len().div_ceil(columns), |ui, rows| {
         let shown = visible_tiles(rows.clone(), columns, entries.len());
         visible.extend(entries[shown].iter().map(|entry| entry.package.as_str()));
@@ -331,7 +436,9 @@ fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
                     // The borrow ends here: nothing below holds it across the drawing.
                     let tile = state.previews.borrow_mut().tile(&entry.package);
                     let label = list_label(entry, &duplicates);
-                    let response = package_tile(ui, side, &label, selected, &tile).on_hover_text(tile_tooltip(&label, entry, language, &tile));
+                    let (previews, tile_hover) = (&state.previews, &mut state.ui.tile_hover);
+                    let view = |hovered: bool| tile_view(&ctx, now, kind, &entry.package, &tile, tile_hover.observe(&entry.package, hovered, now), previews);
+                    let response = package_tile(ui, side, &label, selected, &tile, view).on_hover_text(tile_tooltip(&label, entry, language, &tile));
                     if response.clicked() {
                         state.picker.selected = Some(entry.package.clone());
                     }
@@ -342,8 +449,10 @@ fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
             });
         }
     });
-    // No hover animation yet, so no loop is asked for.
-    state.previews.borrow_mut().set_wanted(None, visible.iter().copied());
+    state.ui.tile_hover.end_frame();
+    // Only a tile that has been hovered long enough asks for its loop.
+    let playing = state.ui.tile_hover.playing().map(str::to_owned);
+    state.previews.borrow_mut().set_wanted(playing.as_deref(), visible.iter().copied());
     if let Some(package) = double_clicked {
         add_package(state, &package);
     }
