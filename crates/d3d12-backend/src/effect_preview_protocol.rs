@@ -8,7 +8,7 @@ use crate::progress::bounded_line;
 /// Changes when an existing line loses or changes a field. New fields and events do not change it.
 pub const PREVIEW_PROTOCOL: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewJobKind {
     /// A `PREVIEW_SIZE` square PNG.

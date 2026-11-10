@@ -39,6 +39,7 @@ pub enum UiRequest {
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
     theme::apply(root.ctx(), state.ui.theme);
     state.visuals.borrow_mut().begin_frame(root.ctx());
+    state.previews.borrow_mut().begin_frame(root.ctx());
     state.visuals.borrow_mut().sync_project(state.revision(), state.project());
     track_fullscreen_activity(root.ctx(), state);
     handle_shortcuts(root.ctx(), state, requests);
@@ -61,6 +62,9 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     let mut visuals = state.visuals.borrow_mut();
     visuals.set_paused(state.is_playing() || state.is_exporting());
     visuals.end_frame();
+    let mut previews = state.previews.borrow_mut();
+    previews.set_paused(state.is_playing() || state.is_exporting());
+    previews.end_frame();
 }
 
 /// Starts or restarts the time the fullscreen controls stay up. Before the shortcuts, which consume

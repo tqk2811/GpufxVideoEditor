@@ -11,6 +11,7 @@ use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_comman
 use crate::timeline::hit::ClipHit;
 use crate::timeline::snap::{snap_command, snap_onto_track, snap_points, snap_span, snap_tolerance, Snapped};
 use crate::timeline::view::TimelineView;
+use crate::effect_previews::PreviewManager;
 use crate::visuals::ClipVisuals;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
@@ -90,6 +91,8 @@ pub struct EditorState {
     pub ui: UiState,
     /// Thumbnails and level bars; drawn from `&self`, so behind a cell.
     pub visuals: RefCell<ClipVisuals>,
+    /// Previews of the effect packages; asked for while drawing, so behind a cell.
+    pub previews: RefCell<PreviewManager>,
     language: Language,
 }
 
@@ -352,6 +355,7 @@ impl EditorState {
             project_lock: None,
             ui: UiState::default(),
             visuals: RefCell::new(ClipVisuals::default()),
+            previews: RefCell::new(PreviewManager::default()),
             language: Language::default(),
         }
     }

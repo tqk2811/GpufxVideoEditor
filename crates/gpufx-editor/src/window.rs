@@ -180,6 +180,8 @@ impl Session {
         state.visuals.get_mut().set_paths(paths.clone());
         let visuals_window = session_window.clone();
         state.visuals.get_mut().set_waker(Arc::new(move || visuals_window.request_redraw()));
+        let previews_window = session_window.clone();
+        state.previews.get_mut().start_for_editor(package_roots.clone(), Arc::new(move || previews_window.request_redraw()));
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
         let (arrival_sender, arrivals) = channel();

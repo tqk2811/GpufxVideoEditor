@@ -192,7 +192,6 @@ pub enum RenderOutcome {
 
 struct Running {
     helper: Box<dyn Helper>,
-    device: String,
     /// The wall clock time just before the helper was started.
     started: SystemTime,
 }
@@ -276,6 +275,11 @@ impl PreviewSession {
     /// The adapter the helper reported, once one was started.
     pub fn device(&self) -> Option<&str> {
         self.last_device.as_deref()
+    }
+
+    /// How long the cooldown still lasts, during one.
+    pub fn cooldown_left(&self) -> Option<Duration> {
+        self.cooldown.as_ref().map(|(until, _)| until.saturating_duration_since(Instant::now()))
     }
 
     pub fn store(&self) -> &PreviewStore {
@@ -445,8 +449,8 @@ impl PreviewSession {
                         self.stopped = Some(reason.clone());
                         return Err(RenderOutcome::Stopped(reason));
                     }
-                    self.last_device = Some(device.clone());
-                    self.running = Some(Running { helper, device, started });
+                    self.last_device = Some(device);
+                    self.running = Some(Running { helper, started });
                     return Ok(());
                 }
                 Incoming::Event(PreviewEvent::Fatal { message }) => {
