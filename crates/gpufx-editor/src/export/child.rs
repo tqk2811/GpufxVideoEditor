@@ -279,7 +279,7 @@ mod tests {
     }
 
     fn project(source: &str, package: &str) -> Project {
-        let clip = Clip { source: source.into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(9000), effects: vec![Effect { package: package.into(), params: Map::new() }], gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None };
+        let clip = Clip { source: source.into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(9000), effects: vec![Effect { package: package.into(), params: Map::new(), keyframes: Default::default() }], gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default() };
         Project { version: SUPPORTED_VERSION, output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind: TrackKind::Video, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: true }] }
     }
 

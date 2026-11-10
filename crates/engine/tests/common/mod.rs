@@ -20,6 +20,7 @@ pub fn clip(source: &str, start: i64, source_in: i64, duration: i64) -> Clip {
         fade_out: Time::ZERO,
         speed: 1.0,
         placement: None,
+        motion: Default::default(),
     }
 }
 
@@ -27,6 +28,7 @@ pub fn effect(package: &str) -> Effect {
     Effect {
         package: package.to_string(),
         params: Default::default(),
+        keyframes: Default::default(),
     }
 }
 

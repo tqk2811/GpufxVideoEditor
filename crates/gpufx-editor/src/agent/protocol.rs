@@ -1,7 +1,7 @@
 //! The requests an agent can make and the errors it can get, as JSON. The same types go over the
 //! pipe to an open window.
 
-use engine::{EditError, Time, TrackKind};
+use engine::{ClipPlacement, Easing, EditError, KeyframeTarget, Time, TrackKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -47,6 +47,11 @@ pub enum AgentEdit {
     ClipSetSpeed { clip: ClipRef, speed: f64 },
     ClipSetMuted { clip: ClipRef, muted: bool },
     ClipSetFades { clip: ClipRef, fade_in: Time, fade_out: Time },
+    /// Sets the static place, opacity and rotation of a clip; `None` leaves that one alone.
+    ClipSetTransform { clip: ClipRef, placement: Option<ClipPlacement>, opacity: Option<f64>, rotation: Option<f64> },
+    /// `at` is in ticks from the start of the clip. `easing` of `None` keeps the one replaced.
+    KeyframeSet { clip: ClipRef, target: KeyframeTarget, at: Time, value: f64, easing: Option<Easing> },
+    KeyframeRemove { clip: ClipRef, target: KeyframeTarget, at: Time },
 }
 
 /// Which output frame to capture.
@@ -121,6 +126,9 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::TrackLocked { .. } => "track_locked",
         EditError::SpeedOverlap { .. } => "speed_overlap",
         EditError::SpeedOfImage { .. } => "speed_of_image",
+        EditError::KeyframeOutsideClip { .. } => "keyframe_outside_clip",
+        EditError::KeyframeNotFound { .. } => "keyframe_not_found",
+        EditError::NoPlacement { .. } => "no_placement",
         EditError::Invalid(_) => "invalid_project",
     }
 }

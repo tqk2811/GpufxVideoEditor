@@ -4,7 +4,7 @@
 use crate::editor::EditorState;
 use crate::visuals::SourceView;
 use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use engine::{set_placement, ClipKey, ClipPlacement, PlacedRect, TrackKind, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
+use engine::{ClipKey, ClipPlacement, ClipTransform, PlacedRect, TrackKind, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 
 const FRAME_WIDTH: f32 = 1.5;
 const GRIP_SIZE: f32 = 8.0;
@@ -111,21 +111,37 @@ fn handle_rect(rect: Rect, area: Rect, dragged: bool) -> Rect {
     }
 }
 
-/// The clip the frame belongs to, and the width over height of its source. Only a clip that is on
-/// screen now and may be edited has a frame.
-fn target(state: &EditorState) -> Option<(ClipKey, Option<ClipPlacement>, f64)> {
+/// The clip the frame belongs to, how it stands at the playhead, and the width over height of its
+/// source. Only a clip that is on screen now and may be edited has a frame.
+fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
     let key = state.selection()?;
     let track = state.project().tracks.get(key.track)?;
     let clip = track.clips.get(key.clip)?;
     if track.kind != TrackKind::Video || track.locked || track.hidden || state.playhead() < clip.start || state.playhead() >= clip.start.saturating_add(clip.duration) {
         return None;
     }
+    let transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
     let mut visuals = state.visuals.borrow_mut();
     let slot = visuals.slot(&clip.source);
     match visuals.view(slot) {
-        SourceView::Known(facts) if facts.has_video && facts.aspect > 0.0 => Some((key, clip.placement, f64::from(facts.aspect))),
+        SourceView::Known(facts) if facts.has_video && facts.aspect > 0.0 => Some((key, transform, f64::from(facts.aspect))),
         _ => None,
     }
+}
+
+/// The corners of `frame` turned `rotation` clockwise degrees around its middle.
+fn turned_corners(frame: Rect, rotation: f64) -> [Pos2; 4] {
+    let center = frame.center();
+    let (sine, cosine) = (rotation as f32).to_radians().sin_cos();
+    [frame.left_top(), frame.right_top(), frame.right_bottom(), frame.left_bottom()].map(|corner| {
+        let d = corner - center;
+        center + Vec2::new(cosine * d.x - sine * d.y, sine * d.x + cosine * d.y)
+    })
+}
+
+/// The smallest upright rectangle around `corners`.
+fn bounds(corners: [Pos2; 4]) -> Rect {
+    Rect::from_points(&corners)
 }
 
 /// How far the pointer has come since the press, in parts of the frame `picture`.
@@ -143,8 +159,7 @@ fn drag(ui: &egui::Ui, state: &mut EditorState, key: ClipKey, picture: Rect, res
     if response.dragged() {
         let start = ui.data(|data| data.get_temp::<PlacedRect>(id));
         if let Some((start, moved)) = start.zip(pointer_moved(ui, picture)) {
-            let wanted = placement(start, moved);
-            state.live_edit(|project| set_placement(project, key, Some(wanted)));
+            state.live_placement(key, placement(start, moved));
         }
     }
     if response.drag_stopped() {
@@ -158,22 +173,29 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, pictu
     if picture.width() < 1.0 || picture.height() < 1.0 || !visible(state.is_exporting(), state.is_playing(), own_handle_dragged(ui.ctx(), ui.scope_id())) {
         return;
     }
-    let Some((key, placement, source_aspect)) = target(state) else { return };
-    show_frame(ui, state, area, picture, key, placement, source_aspect);
+    let Some((key, transform, source_aspect)) = target(state) else { return };
+    show_frame(ui, state, area, picture, key, transform, source_aspect);
 }
 
-fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: Rect, key: ClipKey, placement: Option<ClipPlacement>, source_aspect: f64) {
+fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: Rect, key: ClipKey, transform: ClipTransform, source_aspect: f64) {
     let scope = ui.scope_id();
     let output = &state.project().output;
     let output_aspect = f64::from(output.width) / f64::from(output.height);
-    let current = PlacedRect::of(placement, output_aspect, source_aspect);
+    let current = transform.rect(output_aspect, source_aspect);
     let frame = on_screen(current, picture);
+    let corners = turned_corners(frame, transform.rotation);
     let body_id = body_id(scope);
-    let body = ui.interact(handle_rect(frame, area, in_hand(ui.ctx(), body_id)), body_id, Sense::drag());
+    let body = ui.interact(handle_rect(bounds(corners), area, in_hand(ui.ctx(), body_id)), body_id, Sense::drag());
     drag(ui, state, key, picture, &body, current, moved_placement);
     body.on_hover_and_drag_cursor(CursorIcon::Move);
     let painter = ui.painter_at(area);
-    painter.rect_stroke(frame, CornerRadius::ZERO, Stroke::new(FRAME_WIDTH, Color32::RED), StrokeKind::Middle);
+    let outline = Stroke::new(FRAME_WIDTH, Color32::RED);
+    if transform.rotation != 0.0 {
+        painter.add(egui::Shape::closed_line(corners.to_vec(), outline));
+        // The grips scale along the axes of the frame, which a turned picture does not have.
+        return;
+    }
+    painter.rect_stroke(frame, CornerRadius::ZERO, outline, StrokeKind::Middle);
     for (index, grip) in GRIPS.into_iter().enumerate() {
         let center = Pos2::new(frame.left() + grip.x as f32 * frame.width(), frame.top() + grip.y as f32 * frame.height());
         let id = grip_id(scope, index);
@@ -266,10 +288,11 @@ mod tests {
     fn pass(ctx: &egui::Context, state: &mut EditorState, area: Rect, events: Vec<egui::Event>) {
         let raw = egui::RawInput { events, screen_rect: Some(area), ..Default::default() };
         let key = ClipKey { track: 0, clip: 0 };
-        let placement = state.project().tracks[0].clips[0].placement;
+        let clip = &state.project().tracks[0].clips[0];
+        let transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
         let output = &state.project().output;
         let aspect = f64::from(output.width) / f64::from(output.height);
-        let mut output = ctx.run_ui(raw, |ui| show_frame(ui, state, area, area, key, placement, aspect));
+        let mut output = ctx.run_ui(raw, |ui| show_frame(ui, state, area, area, key, transform, aspect));
         output.textures_delta.clear();
     }
 

@@ -11,7 +11,8 @@
 use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
 use crate::stretch::StretchStates;
 use crate::audio_schedule::{sample_position, MIX_CHANNELS};
-use crate::project::{ClipPlacement, Effect, Project};
+use crate::keyframe::{effects_at, ClipTransform};
+use crate::project::{Effect, Project};
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, LayerContent, Progress, SourceSample,
 };
@@ -90,14 +91,15 @@ pub trait Compositor {
     fn open_decoder(&mut self, source: &str) -> Result<Self::Decoder, RenderError>;
 
     /// Resizes `frame` to the project size, applies the clip's `effects` to it and puts the picture
-    /// at `placement`. What the picture does not cover is transparent. `clock` is how far the clip
-    /// has played, for effects that follow it.
+    /// where `transform` says, with its opacity and rotation. What the picture does not cover is
+    /// transparent. `effects` have no keyframes left: they carry the values of this frame. `clock`
+    /// is how far the clip has played, for effects that follow it.
     fn prepare_clip(
         &mut self,
         key: ClipKey,
         frame: &mut <Self::Decoder as Decoder>::Frame,
         effects: &[Effect],
-        placement: Option<ClipPlacement>,
+        transform: ClipTransform,
         clock: ClipClock,
         at: FrameContext,
     ) -> Result<Self::Image, RenderError>;
@@ -223,8 +225,7 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(sample.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let image =
-                compositor.prepare_clip(key(sample.clip), &mut frame, sample.effects, sample.placement, sample.clock, at)?;
+            let image = compositor.prepare_clip(key(sample.clip), &mut frame, &effects_at(sample.effects, sample.offset), sample.transform, sample.clock, at)?;
             kept.0.push(frame);
             Ok(image)
         }
@@ -245,10 +246,9 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(to.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let from_image =
-                compositor.prepare_clip(key(from.clip), &mut from_frame, from.effects, from.placement, from.clock, at)?;
+            let from_image = compositor.prepare_clip(key(from.clip), &mut from_frame, &effects_at(from.effects, from.offset), from.transform, from.clock, at)?;
             let to_image =
-                match compositor.prepare_clip(key(to.clip), &mut to_frame, to.effects, to.placement, to.clock, at) {
+                match compositor.prepare_clip(key(to.clip), &mut to_frame, &effects_at(to.effects, to.offset), to.transform, to.clock, at) {
                     Ok(image) => image,
                     Err(e) => {
                         compositor.release(from_image);
@@ -468,7 +468,7 @@ mod tests {
             key: ClipKey,
             frame: &mut String,
             _effects: &[Effect],
-            _placement: Option<ClipPlacement>,
+            _transform: ClipTransform,
             _clock: ClipClock,
             at: FrameContext,
         ) -> Result<usize, RenderError> {
@@ -822,7 +822,7 @@ mod tests {
 
     #[test]
     fn clip_cache_compares_effect_lists() {
-        let effect = |package: &str| Effect { package: package.to_owned(), params: Map::new() };
+        let effect = |package: &str| Effect { package: package.to_owned(), params: Map::new(), keyframes: Default::default() };
         let mut cache: ClipCache<[Effect], i32> = ClipCache::default();
         cache.get_or_build(key(0), &[effect("blur")], || Ok::<_, ()>(1)).unwrap();
         assert_eq!(*cache.get_or_build(key(0), &[effect("sharpen")], || Ok::<_, ()>(2)).unwrap(), 2);

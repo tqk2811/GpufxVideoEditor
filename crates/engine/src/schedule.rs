@@ -35,7 +35,8 @@
 //!   at the cut. Each clip counts from its own first visible moment, also after a split. `elapsed`
 //!   is clamped to `0..=duration`.
 
-use crate::project::{Clip, ClipPlacement, Effect, Project, Track, Transition};
+use crate::keyframe::ClipTransform;
+use crate::project::{Clip, Effect, Project, Track, Transition};
 use crate::time::Time;
 use serde_json::{Map, Value};
 
@@ -82,8 +83,11 @@ pub struct SourceSample<'a> {
     pub source_time: Time,
     /// Effects to apply to this source before compositing.
     pub effects: &'a [Effect],
-    /// Where the picture sits in the frame.
-    pub placement: Option<ClipPlacement>,
+    /// Where the picture sits in the frame and how it is drawn, now.
+    pub transform: ClipTransform,
+    /// Timeline ticks since the start of the clip; negative inside the transition into it. The
+    /// time of the keyframes of its effects.
+    pub offset: Time,
     /// Where the clip is in its own playing time.
     pub clock: ClipClock,
 }
@@ -165,7 +169,8 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
         source: &c.source,
         source_time: c.source_in.saturating_add(c.source_offset(offset)).max(Time::ZERO),
         effects: &c.effects,
-        placement: c.placement,
+        transform: c.transform_at(offset),
+        offset,
         clock: ClipClock {
             elapsed: t.saturating_sub(visible_start).max(Time::ZERO).min(visible_end.saturating_sub(visible_start)),
             duration: visible_end.saturating_sub(visible_start),

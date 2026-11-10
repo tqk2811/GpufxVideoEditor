@@ -17,9 +17,9 @@ use crate::audio_library::AudioLibrary;
 use crate::sticker_install::InstalledStickerPack;
 use crate::sticker_library::StickerLibrary;
 use crate::effect_previews::PreviewManager;
-use crate::visuals::ClipVisuals;
+use crate::visuals::{ClipVisuals, SourceView};
 use engine::{
-    ClipPlacement, PlacedRect,
+    keyframe_neighbors, keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, Keyframe, remove_keyframe, set_effect_params_at, set_keyframe, set_motion_value, set_placement_at, ClipPlacement, ClipProperty, Easing, KeyframeTarget, PlacedRect,
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
     set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
@@ -166,6 +166,9 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::TrackLocked { track } => Message::EditTrackLocked(label(*track)),
         EditError::SpeedOverlap { key, end, next_start } => Message::EditSpeedOverlap { track: label(key.track), end: seconds_text(*end), next: seconds_text(*next_start) },
         EditError::SpeedOfImage { key } => Message::EditSpeedOfImage(label(key.track)),
+        EditError::KeyframeOutsideClip { key, .. } => Message::EditKeyframeOutsideClip(label(key.track)),
+        EditError::KeyframeNotFound { key, .. } => Message::EditKeyframeNotFound(label(key.track)),
+        EditError::NoPlacement { key } => Message::EditNoPlacement(label(key.track)),
         EditError::Invalid(errors) => Message::EditInvalid(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
     }
 }
@@ -338,6 +341,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         fade_out: Time::ZERO,
         speed: 1.0,
         placement: None,
+        motion: Default::default(),
     }
 }
 
@@ -1116,6 +1120,202 @@ impl EditorState {
         self.run(|project| set_placement(project, key, None));
     }
 
+    /// Ticks from the start of clip `key` to the playhead, when the playhead is on it.
+    pub fn playhead_offset(&self, key: ClipKey) -> Option<Time> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        (self.playhead >= clip.start && self.playhead < clip.start.saturating_add(clip.duration)).then(|| self.playhead.saturating_sub(clip.start))
+    }
+
+    fn output_aspect(&self) -> f64 {
+        let output = &self.project().output;
+        f64::from(output.width) / f64::from(output.height)
+    }
+
+    /// Width over height of `source`, or of the output until a probe says otherwise.
+    pub fn source_aspect(&self, source: &str) -> f64 {
+        let mut visuals = self.visuals.borrow_mut();
+        let slot = visuals.slot(source);
+        match visuals.view(slot) {
+            SourceView::Known(facts) if facts.aspect > 0.0 => f64::from(facts.aspect),
+            _ => self.output_aspect(),
+        }
+    }
+
+    /// The value of a property of clip `key` shown in the panels, at the playhead when it is on the
+    /// clip and at the start of the clip otherwise.
+    pub fn property_shown(&self, key: ClipKey, property: ClipProperty) -> Option<f64> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        let on_clip = self.playhead_offset(key);
+        let mut offset = on_clip.unwrap_or(Time::ZERO);
+        if on_clip.is_some() {
+            // On a keyframe the number shows the value of that keyframe, the one a change of it is compared with.
+            let keys = clip.keyframes_of(&KeyframeTarget::Property(property)).unwrap_or_default();
+            offset = nearest_keyframe_inside(keys, offset, self.keyframe_tolerance(), clip.duration).unwrap_or(offset);
+        }
+        Some(clip.property_at(property, offset, self.output_aspect(), self.source_aspect(&clip.source)))
+    }
+
+    /// The parameters of effect `effect` of clip `key` shown in the panels: those at the playhead,
+    /// except that a parameter with a keyframe under the playhead shows the value of that keyframe.
+    pub fn effect_params_shown(&self, key: ClipKey, effect: usize) -> Option<Map<String, Value>> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        let target = clip.effects.get(effect)?;
+        let on_clip = self.playhead_offset(key);
+        let offset = on_clip.unwrap_or(Time::ZERO);
+        let mut params = engine::effects_at(std::slice::from_ref(target), offset).first()?.params.clone();
+        if on_clip.is_some() {
+            for (name, keys) in &target.keyframes {
+                let Some(near) = nearest_keyframe_inside(keys, offset, self.keyframe_tolerance(), clip.duration) else { continue };
+                if let Some(number) = sample_keyframes(keys, near).and_then(serde_json::Number::from_f64) {
+                    params.insert(name.clone(), Value::Number(number));
+                }
+            }
+        }
+        Some(params)
+    }
+
+    /// Whether the place of clip `key` can be changed: it has one, or the probe of its source has
+    /// said what shape the picture is. Without either, the fit of the moment is that of the output,
+    /// and a place made from it would keep the wrong shape.
+    pub fn placement_ready(&self, key: ClipKey) -> bool {
+        let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return false };
+        clip.placement.is_some() || self.source_shape_known(&clip.source)
+    }
+
+    /// Whether the probe of `source` has said what shape its picture is.
+    fn source_shape_known(&self, source: &str) -> bool {
+        let mut visuals = self.visuals.borrow_mut();
+        let slot = visuals.slot(source);
+        matches!(visuals.view(slot), SourceView::Known(facts) if facts.aspect > 0.0)
+    }
+
+    /// The aspects of the output and of the source of clip `key`, width over height.
+    fn aspects_of(&self, key: ClipKey) -> (f64, f64) {
+        let output = self.output_aspect();
+        match self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) {
+            Some(clip) => (output, self.source_aspect(&clip.source)),
+            None => (output, output),
+        }
+    }
+
+    /// `project` with clip `key` given the place it has now, when it has none, so a keyframe or a
+    /// value of one number does not leave the others to the fit of the moment. Refused while the
+    /// shape of the source is not known.
+    fn with_placement(&self, project: &Project, key: ClipKey) -> Result<Project, EditError> {
+        let Some(clip) = project.tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else {
+            return Err(EditError::ClipNotFound { key });
+        };
+        if clip.placement.is_some() {
+            return Ok(project.clone());
+        }
+        if !self.source_shape_known(&clip.source) {
+            return Err(EditError::NoPlacement { key });
+        }
+        let placement = clip.transform_at(Time::ZERO).placement_now(self.output_aspect(), self.source_aspect(&clip.source));
+        set_placement(project, key, Some(placement))
+    }
+
+    /// Adds a keyframe of `target` at the playhead with the value shown, or removes the one there.
+    /// `value` is what the row shows, for a property or parameter of a clip on the screen.
+    pub fn toggle_keyframe(&mut self, key: ClipKey, target: KeyframeTarget, value: f64) {
+        let Some(at) = self.playhead_offset(key) else { return };
+        if let Some(existing) = self.keyframe_at_playhead(key, &target) {
+            self.run(|project| remove_keyframe(project, key, &target, existing.at));
+            return;
+        }
+        let needs_placement = matches!(&target, KeyframeTarget::Property(property) if property.is_placement());
+        let base = needs_placement.then(|| self.with_placement(self.project(), key));
+        self.run(|project| match base {
+            Some(Ok(placed)) => set_keyframe(&placed, key, &target, at, value, None),
+            Some(Err(error)) => Err(error),
+            None => set_keyframe(project, key, &target, at, value, None),
+        });
+    }
+
+    /// Sets how the keyframe of `target` under the playhead moves on to the next one.
+    pub fn set_keyframe_easing(&mut self, key: ClipKey, target: KeyframeTarget, easing: Easing) {
+        let Some(found) = self.keyframe_at_playhead(key, &target) else { return };
+        self.run(|project| set_keyframe(project, key, &target, found.at, found.value, Some(easing)));
+    }
+
+    /// How far from a keyframe the playhead still counts as on it.
+    pub fn keyframe_tolerance(&self) -> Time {
+        keyframe_tolerance(self.project().output.frame_duration)
+    }
+
+    /// The keyframe of `target` of clip `key` that the playhead is on, within half an output frame:
+    /// the playhead is a raw tick, and a keyframe was put where a frame was.
+    pub fn keyframe_at_playhead(&self, key: ClipKey, target: &KeyframeTarget) -> Option<Keyframe> {
+        let at = self.playhead_offset(key)?;
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        let keys = clip.keyframes_of(target)?;
+        let near = nearest_keyframe_inside(keys, at, self.keyframe_tolerance(), clip.duration)?;
+        keys.iter().find(|keyframe| keyframe.at == near).copied()
+    }
+
+    /// Ticks from the start of clip `key` to the playhead, also when it is before or after the clip.
+    pub fn playhead_position(&self, key: ClipKey) -> Option<Time> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        Some(self.playhead.saturating_sub(clip.start))
+    }
+
+    /// The ticks of the keyframes of `target` of clip `key` before and after the playhead, inside the clip.
+    pub fn keyframe_neighbors_of(&self, key: ClipKey, target: &KeyframeTarget) -> (Option<Time>, Option<Time>) {
+        let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return (None, None) };
+        let Some(keys) = clip.keyframes_of(target) else { return (None, None) };
+        keyframe_neighbors(keys, self.playhead.saturating_sub(clip.start), self.keyframe_tolerance(), clip.duration)
+    }
+
+    /// Moves the playhead onto the keyframe at `at` ticks from the start of clip `key`, when that
+    /// is inside the clip.
+    pub fn jump_to_keyframe(&mut self, key: ClipKey, at: Time) {
+        let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
+        if at >= Time::ZERO && at < clip.duration {
+            let target = clip.start.saturating_add(at);
+            self.scrub_to(target);
+            self.end_scrub();
+        }
+    }
+
+    /// Changes `property` of clip `key` to `value`, at the playhead if it has keyframes there.
+    pub fn live_motion_value(&mut self, key: ClipKey, property: ClipProperty, value: f64) {
+        let at = self.playhead_offset(key).unwrap_or(Time::ZERO);
+        // From the project the drag started from: a drag is many edits of one step, and the one that
+        // has the place already would no longer say that this one needs it.
+        let needs_placement = property.is_placement() && self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_some_and(|clip| clip.placement.is_none());
+        let base = needs_placement.then(|| self.with_placement(self.history.current(), key));
+        let (output_aspect, source_aspect) = self.aspects_of(key);
+        self.live_edit(|project| match base {
+            Some(Ok(placed)) => set_motion_value(&placed, key, property, at, value, output_aspect, source_aspect),
+            Some(Err(error)) => Err(error),
+            None => set_motion_value(project, key, property, at, value, output_aspect, source_aspect),
+        });
+    }
+
+    /// Puts clip `key` at `placement` at the playhead, see [`engine::set_placement_at`].
+    pub fn live_placement(&mut self, key: ClipKey, placement: ClipPlacement) {
+        let Some(at) = self.playhead_offset(key) else { return };
+        let (output_aspect, source_aspect) = self.aspects_of(key);
+        self.live_edit(|project| set_placement_at(project, key, at, placement, output_aspect, source_aspect));
+    }
+
+    /// Sets effect `effect` of the selected clip from the parameters shown at the playhead.
+    pub fn live_effect_params_shown(&mut self, effect: usize, params: Map<String, Value>) {
+        let Some(key) = self.selection else { return };
+        let at = self.playhead_offset(key).unwrap_or(Time::ZERO);
+        self.live_edit(|project| set_effect_params_at(project, key, effect, params, at));
+    }
+
+    /// Puts effect `effect` of the selected clip back to its defaults, keyframes included.
+    pub fn reset_effect(&mut self, effect: usize) {
+        let Some(key) = self.selected_for(ClipAction::Change) else { return };
+        self.run(|project| {
+            let mut next = set_effect_params(project, key, effect, Map::new())?;
+            next.tracks[key.track].clips[key.clip].effects[effect].keyframes.clear();
+            Ok(next)
+        });
+    }
+
     /// The source time from where clip `key` begins to the end of its stream, when a probe stated
     /// the length of that stream.
     pub fn source_remaining(&self, key: ClipKey) -> Option<Time> {
@@ -1388,7 +1588,7 @@ impl EditorState {
     /// Adds effect `package` to the selected clip with its default parameters.
     pub fn add_effect_package(&mut self, package: &str) {
         let Some(key) = self.selected_for(ClipAction::AddEffect) else { return };
-        let effect = Effect { package: package.to_owned(), params: Map::new() };
+        let effect = Effect { package: package.to_owned(), params: Map::new(), keyframes: Default::default() };
         self.run(|project| add_effect(project, key, effect));
     }
 
@@ -1520,6 +1720,183 @@ mod tests {
         assert!(state.claim_project_lock(&dir.join("P.JSON")), "the file it already holds");
         state.release_project_lock();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_keyframe_at_the_playhead_is_added_and_removed_in_one_undo_step_each() {
+        let mut state = state_with_clip();
+        state.set_playhead(seconds(1));
+        let before = state.project().clone();
+        let target = KeyframeTarget::Property(ClipProperty::Rotation);
+        state.toggle_keyframe(key(0), target.clone(), 30.0);
+        assert_eq!(state.project().tracks[0].clips[0].motion.keyframes[&ClipProperty::Rotation].len(), 1);
+        state.toggle_keyframe(key(0), target.clone(), 30.0);
+        assert!(!state.project().tracks[0].clips[0].motion.has_keyframes(ClipProperty::Rotation), "pressed again it goes");
+        state.undo();
+        assert_eq!(state.project().tracks[0].clips[0].motion.keyframes[&ClipProperty::Rotation].len(), 1);
+        state.undo();
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn nothing_happens_when_the_playhead_is_off_the_clip() {
+        let mut state = state_with_clip();
+        let end = state.project().tracks[0].clips[0].end().unwrap();
+        state.set_playhead(end);
+        let before = state.project().clone();
+        state.toggle_keyframe(key(0), KeyframeTarget::Property(ClipProperty::Rotation), 30.0);
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn keying_a_place_number_keeps_the_fit_of_the_clip_as_its_place() {
+        let mut state = state_with_clip();
+        state.visuals.borrow_mut().set_known_for_test("C:/media/a.mp4", 16.0 / 9.0);
+        state.set_playhead(seconds(1));
+        let shown = state.property_shown(key(0), ClipProperty::Y).unwrap();
+        state.toggle_keyframe(key(0), KeyframeTarget::Property(ClipProperty::X), 0.0);
+        let clip = &state.project().tracks[0].clips[0];
+        assert!(clip.placement.is_some(), "the numbers without keyframes need a value too");
+        assert_eq!(clip.transform_at(Time::ZERO).rect(16.0 / 9.0, 16.0 / 9.0).y, shown);
+    }
+
+    #[test]
+    fn a_live_value_goes_to_the_keyframe_under_the_playhead_and_commits_as_one_step() {
+        let mut state = state_with_clip();
+        state.set_playhead(seconds(2));
+        state.toggle_keyframe(key(0), KeyframeTarget::Property(ClipProperty::Opacity), 0.5);
+        let before_edit = state.project().clone();
+        state.live_motion_value(key(0), ClipProperty::Opacity, 0.25);
+        state.live_motion_value(key(0), ClipProperty::Opacity, 0.125);
+        state.commit_live();
+        assert_eq!(state.project().tracks[0].clips[0].motion.keyframes[&ClipProperty::Opacity][0].value, 0.125);
+        state.undo();
+        assert_eq!(state.project(), &before_edit);
+    }
+
+    #[test]
+    fn a_live_place_number_of_a_clip_without_a_place_works_for_every_frame_of_the_drag() {
+        let mut state = state_with_clip();
+        state.visuals.borrow_mut().set_known_for_test("C:/media/a.mp4", 16.0 / 9.0);
+        state.set_playhead(seconds(1));
+        let before = state.project().clone();
+        state.live_motion_value(key(0), ClipProperty::X, 0.1);
+        state.live_motion_value(key(0), ClipProperty::X, 0.2);
+        state.live_motion_value(key(0), ClipProperty::X, 0.3);
+        state.commit_live();
+        assert_eq!(state.project().tracks[0].clips[0].placement.map(|placement| placement.x), Some(0.3), "the last frame of the drag is the value");
+        state.undo();
+        assert_eq!(state.project().tracks[0].clips[0].placement, None);
+        assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn the_playhead_a_tick_off_a_keyframe_is_on_it() {
+        let mut state = state_with_clip();
+        let target = KeyframeTarget::Property(ClipProperty::Opacity);
+        state.run(|project| engine::set_keyframe(project, key(0), &target, Time::from_ticks(3_003), 0.5, None));
+        state.set_playhead(Time::from_ticks(3_004));
+        assert_eq!(state.keyframe_at_playhead(key(0), &target).map(|keyframe| keyframe.at), Some(Time::from_ticks(3_003)));
+        state.live_motion_value(key(0), ClipProperty::Opacity, 0.25);
+        state.commit_live();
+        let keys = &state.project().tracks[0].clips[0].motion.keyframes[&ClipProperty::Opacity];
+        assert_eq!(keys.iter().map(|keyframe| (keyframe.at, keyframe.value)).collect::<Vec<_>>(), vec![(Time::from_ticks(3_003), 0.25)], "no second keyframe beside it");
+        state.set_keyframe_easing(key(0), target.clone(), Easing::EaseIn);
+        assert_eq!(state.project().tracks[0].clips[0].motion.keyframes[&ClipProperty::Opacity][0].easing, Easing::EaseIn);
+        state.toggle_keyframe(key(0), target, 0.25);
+        assert!(!state.project().tracks[0].clips[0].motion.has_keyframes(ClipProperty::Opacity), "pressed a tick away it removes that keyframe");
+    }
+
+    #[test]
+    fn the_arrows_go_to_the_keyframes_before_and_after_and_only_inside_the_clip() {
+        let mut state = state_with_clip();
+        let target = KeyframeTarget::Property(ClipProperty::Opacity);
+        for at in [10_000, 30_000] {
+            state.run(|project| engine::set_keyframe(project, key(0), &target, Time::from_ticks(at), 0.5, None));
+        }
+        let start = state.project().tracks[0].clips[0].start;
+        state.set_playhead(start.saturating_add(Time::from_ticks(20_000)));
+        let (before, after) = state.keyframe_neighbors_of(key(0), &target);
+        assert_eq!((before, after), (Some(Time::from_ticks(10_000)), Some(Time::from_ticks(30_000))));
+        state.jump_to_keyframe(key(0), after.unwrap());
+        assert_eq!(state.playhead(), start.saturating_add(Time::from_ticks(30_000)));
+        assert_eq!(state.keyframe_neighbors_of(key(0), &target).1, None, "nothing after the last");
+        let duration = state.project().tracks[0].clips[0].duration;
+        state.jump_to_keyframe(key(0), duration);
+        assert_eq!(state.playhead(), start.saturating_add(Time::from_ticks(30_000)), "the end is not a place to go");
+    }
+
+    #[test]
+    fn jumping_to_a_keyframe_while_playing_seeks_and_while_exporting_does_nothing() {
+        let mut state = playable();
+        let start = state.project().tracks[0].clips[0].start;
+        state.toggle_playback();
+        state.take_transport();
+        state.jump_to_keyframe(key(0), Time::from_ticks(30_000));
+        let target = start.saturating_add(Time::from_ticks(30_000));
+        assert_eq!(state.playhead(), target);
+        assert_eq!(state.take_transport(), vec![TransportCommand::Seek(target)]);
+        state.jump_to_keyframe(key(0), Time::from_ticks(30_000));
+        assert_eq!(state.take_transport(), vec![TransportCommand::Seek(target)], "the press ended, so the next one seeks again");
+        state.begin_export(100);
+        state.jump_to_keyframe(key(0), Time::from_ticks(10_000));
+        assert_eq!(state.playhead(), target, "an export holds the playhead");
+    }
+
+    #[test]
+    fn a_keyframe_before_the_clip_is_not_the_one_under_the_playhead() {
+        let mut state = state_with_clip();
+        let target = KeyframeTarget::Property(ClipProperty::Opacity);
+        state.run(|project| {
+            let mut next = project.clone();
+            next.tracks[0].clips[0].motion.keyframes.insert(ClipProperty::Opacity, vec![Keyframe { at: Time::from_ticks(-10), value: 0.5, easing: Easing::Linear }]);
+            Ok(next)
+        });
+        let start = state.project().tracks[0].clips[0].start;
+        state.set_playhead(start.saturating_add(Time::from_ticks(100)));
+        assert_eq!(state.keyframe_at_playhead(key(0), &target), None);
+    }
+
+    #[test]
+    fn a_number_shows_the_value_of_the_keyframe_the_playhead_is_on() {
+        let mut state = state_with_clip();
+        let target = KeyframeTarget::Property(ClipProperty::Opacity);
+        for (at, value) in [(3_003, 0.5), (9_003, 1.0)] {
+            state.run(|project| engine::set_keyframe(project, key(0), &target, Time::from_ticks(at), value, None));
+        }
+        let start = state.project().tracks[0].clips[0].start;
+        state.set_playhead(start.saturating_add(Time::from_ticks(3_004)));
+        assert_eq!(state.property_shown(key(0), ClipProperty::Opacity), Some(0.5));
+    }
+
+    #[test]
+    fn a_place_is_not_made_before_the_probe_says_what_shape_the_picture_is() {
+        let mut state = state_with_clip();
+        assert!(!state.placement_ready(key(0)), "the source is not probed");
+        state.visuals.borrow_mut().set_known_for_test("C:/media/a.mp4", 0.0);
+        assert!(!state.placement_ready(key(0)), "a probe without a shape says nothing either");
+        state.set_playhead(seconds(1));
+        let before = state.project().clone();
+        state.toggle_keyframe(key(0), KeyframeTarget::Property(ClipProperty::X), 0.0);
+        state.live_motion_value(key(0), ClipProperty::Width, 0.5);
+        state.commit_live();
+        assert_eq!(state.project(), &before, "no place was made from the shape of the output");
+        state.visuals.borrow_mut().set_known_for_test("C:/media/a.mp4", 1.0);
+        assert!(state.placement_ready(key(0)));
+        state.toggle_keyframe(key(0), KeyframeTarget::Property(ClipProperty::X), 0.0);
+        assert!(state.project().tracks[0].clips[0].placement.is_some());
+    }
+
+    #[test]
+    fn resetting_an_effect_drops_its_keyframes() {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        state.add_effect_package("blur");
+        state.set_playhead(seconds(1));
+        state.toggle_keyframe(key(0), KeyframeTarget::EffectParam { effect: 0, param: "radius".into() }, 3.0);
+        state.reset_effect(0);
+        let effect = &state.project().tracks[0].clips[0].effects[0];
+        assert!(effect.keyframes.is_empty() && effect.params.is_empty());
     }
 
     fn state_with_clip() -> EditorState {

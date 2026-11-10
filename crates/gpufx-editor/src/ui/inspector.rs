@@ -5,12 +5,12 @@ use super::numeric::{drag_field, speed_field};
 use super::param_widgets;
 use super::theme;
 use crate::editor::{applied_to, clip_label, speed_limits, transition_duration_limits, ClipField, EditorState};
-use crate::i18n::Message;
+use crate::i18n::{Language, Message};
 use crate::packages::short_name;
 use crate::timecode::{aspect_label, format_fps, format_timecode, from_seconds, to_seconds};
 use crate::timeline::view::content_end;
 use egui::{Rect, Stroke, UiBuilder, Vec2};
-use engine::{ClipKey, Time, Transition, TrackKind};
+use engine::{ClipKey, ClipProperty, Easing, Keyframe, KeyframeTarget, Time, Transition, TrackKind, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MAX_ROTATION, MIN_PLACEMENT_WIDTH};
 use serde_json::{Map, Value};
 
 const HEADER_HEIGHT: f32 = 34.0;
@@ -139,7 +139,10 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
 
     if track_kind == TrackKind::Video {
         ui.separator();
-        ui.add_enabled_ui(editable, |ui| placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some()));
+        ui.add_enabled_ui(editable, |ui| {
+            placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some() || ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)));
+            motion_rows(ui, state, key, &clip);
+        });
         ui.separator();
         effects(ui, state, key, editable);
         transitions(ui, state, key, editable);
@@ -196,6 +199,103 @@ fn placement_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, placed
             }
         });
     });
+}
+
+/// One row of the place, opacity or rotation of a clip.
+struct MotionRow {
+    label: Message,
+    range: std::ops::RangeInclusive<f64>,
+    speed: f64,
+    suffix: &'static str,
+}
+
+fn motion_row_of(property: ClipProperty) -> MotionRow {
+    match property {
+        ClipProperty::X => MotionRow { label: Message::FieldPositionX, range: -MAX_PLACEMENT_OFFSET..=MAX_PLACEMENT_OFFSET, speed: 0.005, suffix: "" },
+        ClipProperty::Y => MotionRow { label: Message::FieldPositionY, range: -MAX_PLACEMENT_OFFSET..=MAX_PLACEMENT_OFFSET, speed: 0.005, suffix: "" },
+        ClipProperty::Width => MotionRow { label: Message::FieldWidth, range: MIN_PLACEMENT_WIDTH..=MAX_PLACEMENT_WIDTH, speed: 0.005, suffix: "" },
+        ClipProperty::Opacity => MotionRow { label: Message::FieldOpacity, range: 0.0..=1.0, speed: 0.005, suffix: "" },
+        ClipProperty::Rotation => MotionRow { label: Message::FieldRotation, range: -MAX_ROTATION..=MAX_ROTATION, speed: 0.5, suffix: "\u{b0}" },
+    }
+}
+
+/// Each animatable number of the clip: its value at the playhead, and a diamond for its keyframe.
+fn motion_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: &engine::Clip) {
+    let offset = state.playhead_offset(key);
+    for property in ClipProperty::ALL {
+        let row = motion_row_of(property);
+        let Some(mut value) = state.property_shown(key, property) else { return };
+        let target = KeyframeTarget::Property(property);
+        let keys = clip.keyframes_of(&target).unwrap_or_default();
+        let keyed = !keys.is_empty();
+        let on_keyframe = state.keyframe_at_playhead(key, &target);
+        let (before, after) = state.keyframe_neighbors_of(key, &target);
+        // Until the probe says what shape the picture is, the place of the clip would be made from
+        // the shape of the output.
+        let blocked = property.is_placement() && !state.placement_ready(key);
+        let language = state.language();
+        let mut toggled = false;
+        let mut jump = None;
+        ui.horizontal(|ui| {
+            ui.colored_label(theme::text_dim(), language.t(row.label.clone()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let (previous_tooltip, next_tooltip) = (language.t(Message::KeyframePrevious), language.t(Message::KeyframeNext));
+                if ui.add_enabled_ui(after.is_some(), |ui| icons::keyframe_step_button(ui, true, &next_tooltip).clicked()).inner {
+                    jump = after;
+                }
+                let tooltip = language.t(if on_keyframe.is_some() { Message::KeyframeRemove } else { Message::KeyframeAdd });
+                toggled = ui.add_enabled_ui(offset.is_some() && !blocked, |ui| icons::keyframe_button(ui, on_keyframe.is_some(), keyed, &tooltip).clicked()).inner;
+                if ui.add_enabled_ui(before.is_some(), |ui| icons::keyframe_step_button(ui, false, &previous_tooltip).clicked()).inner {
+                    jump = before;
+                }
+                // A value with keyframes can only be set where the playhead gives it a time.
+                ui.add_enabled_ui((offset.is_some() || !keyed) && !blocked, |ui| {
+                    if drag_field(ui, &mut value, row.range.clone(), row.speed, 3, row.suffix, None).1 {
+                        state.live_motion_value(key, property, value);
+                    }
+                });
+            });
+        });
+        if toggled {
+            state.toggle_keyframe(key, target.clone(), value);
+        }
+        if let Some(at) = jump {
+            state.jump_to_keyframe(key, at);
+        }
+        if let Some(keyframe) = on_keyframe {
+            easing_row(ui, state, language, key, target, keyframe);
+        }
+    }
+}
+
+/// How the keyframe under the playhead moves on to the next one.
+fn easing_row(ui: &mut egui::Ui, state: &mut EditorState, language: Language, key: ClipKey, target: KeyframeTarget, keyframe: Keyframe) {
+    ui.horizontal(|ui| {
+        ui.colored_label(theme::text_dim(), language.t(Message::FieldEasing));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut chosen = None;
+            egui::ComboBox::from_id_salt(("easing", &target)).selected_text(language.t(easing_label(keyframe.easing))).show_ui(ui, |ui| {
+                for easing in Easing::ALL {
+                    if ui.selectable_label(easing == keyframe.easing, language.t(easing_label(easing))).clicked() {
+                        chosen = Some(easing);
+                        ui.close();
+                    }
+                }
+            });
+            if let Some(easing) = chosen {
+                state.set_keyframe_easing(key, target.clone(), easing);
+            }
+        });
+    });
+}
+
+fn easing_label(easing: Easing) -> Message {
+    match easing {
+        Easing::Linear => Message::EasingLinear,
+        Easing::EaseIn => Message::EasingEaseIn,
+        Easing::EaseOut => Message::EasingEaseOut,
+        Easing::EaseInOut => Message::EasingEaseInOut,
+    }
 }
 
 /// The speed of the clip: a logarithmic slider and a number shown as the factor. Goes through the
@@ -287,13 +387,30 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: b
                             remove = Some(index);
                         }
                         if ui.small_button(language.t(Message::Reset)).clicked() {
-                            state.live_effect_params(index, Map::new());
+                            state.reset_effect(index);
                         }
                     });
                     match state.catalog.params_of(&effect.package).map(<[d3d12_backend::ParamInfo]>::to_vec) {
                         Some(infos) => {
-                            if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &effect.params) {
-                                state.live_effect_params(index, next);
+                            let offset = state.playhead_offset(key);
+                            let shown = state.effect_params_shown(key, index).unwrap_or_default();
+                            let mut keyframes = param_widgets::RowKeyframes {
+                                keyframes: &effect.keyframes,
+                                offset,
+                                position: state.playhead_position(key).unwrap_or(Time::ZERO),
+                                duration: clip.duration,
+                                tolerance: state.keyframe_tolerance(),
+                                toggled: None,
+                                jump: None,
+                            };
+                            if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &shown, Some(&mut keyframes)) {
+                                state.live_effect_params_shown(index, next);
+                            }
+                            if let Some((param, value)) = keyframes.toggled.take() {
+                                state.toggle_keyframe(key, KeyframeTarget::EffectParam { effect: index, param }, value);
+                            }
+                            if let Some(at) = keyframes.jump.take() {
+                                state.jump_to_keyframe(key, at);
                             }
                         }
                         None => {
@@ -355,7 +472,7 @@ fn transition_controls(ui: &mut egui::Ui, state: &mut EditorState, track: usize,
     let infos: Option<Vec<d3d12_backend::ParamInfo>> = state.catalog.params_of(&transition.package).map(<[_]>::to_vec);
     let params: Map<String, Value> = transition.params.clone();
     if let Some(infos) = infos {
-        if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &params) {
+        if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &params, None) {
             state.live_transition(track, transition.after_clip, next, transition.duration);
         }
     }

@@ -19,6 +19,7 @@ pub mod audio_clock;
 pub mod audio_mix;
 pub mod audio_schedule;
 pub mod edit;
+pub mod keyframe;
 pub mod project;
 pub mod render;
 pub mod schedule;
@@ -37,8 +38,11 @@ pub use audio_schedule::{
 };
 pub use edit::{
     add_clip, add_effect, add_track, add_transition, clip_at, delete_clip, move_clip,
-    nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain,
-    set_frame_duration, set_muted, set_output_size, set_placement, set_speed, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, EditError, EditHistory,
+    nearest_free_start, remove_effect, remove_keyframe, remove_transition, set_effect_params, set_effect_params_at, set_fades, set_gain,
+    set_frame_duration, set_keyframe, set_motion_value, set_muted, set_opacity, set_output_size, set_placement, set_placement_at, set_rotation, set_speed, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, EditError, EditHistory,
+};
+pub use keyframe::{
+    effects_at, keyframe_neighbors, keyframe_tolerance, nearest_keyframe, nearest_keyframe_inside, sample_keyframes, ClipMotion, ClipProperty, ClipTransform, Easing, Keyframe, KeyframeTarget, MAX_KEYFRAMES, MAX_KEYFRAME_TIME, MAX_ROTATION,
 };
 pub use project::{
     ClipPlacement, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH,

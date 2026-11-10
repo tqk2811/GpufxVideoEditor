@@ -4,10 +4,11 @@
 use super::numeric::drag_field;
 use super::theme;
 use crate::params::{bool_value, color_json, color_value, display_name, editable, enum_value, expression_value, number_json, number_value, vector_json, vector_value, widget_for, with_value, ParamWidget};
-use d3d12_backend::{expression_error, ParamInfo};
+use d3d12_backend::{expression_error, ParamInfo, ParamKind};
 use crate::i18n::{Language, Message};
+use engine::{keyframe_neighbors, nearest_keyframe_inside, Keyframe, Time};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const NUMBER_WIDTH: f32 = 64.0;
 const VECTOR_FIELD_WIDTH: f32 = 54.0;
@@ -52,12 +53,29 @@ pub(super) fn drop_expression_drafts(ctx: &egui::Context) -> bool {
     drafts.values().any(|draft| draft.text != draft.saved && draft.seen + 1 >= frame)
 }
 
+/// The keyframes of an effect, for the diamonds of its float parameters.
+pub struct RowKeyframes<'a> {
+    pub keyframes: &'a BTreeMap<String, Vec<Keyframe>>,
+    /// Ticks from the start of the clip to the playhead, when it is on the clip.
+    pub offset: Option<Time>,
+    /// Ticks from the start of the clip to the playhead, also when it is off the clip.
+    pub position: Time,
+    /// The length of the clip: a keyframe past it is never reached.
+    pub duration: Time,
+    /// How far from a keyframe the playhead still counts as on it.
+    pub tolerance: Time,
+    /// The parameter whose diamond was pressed, with the value it shows.
+    pub toggled: Option<(String, f64)>,
+    /// The time of the keyframe an arrow beside a diamond asked to go to.
+    pub jump: Option<Time>,
+}
+
 /// The rows of every editable parameter in `infos`, with `params` as their values.
-pub fn rows(ui: &mut egui::Ui, id: egui::Id, language: Language, infos: &[ParamInfo], params: &Map<String, Value>) -> Option<Map<String, Value>> {
+pub fn rows(ui: &mut egui::Ui, id: egui::Id, language: Language, infos: &[ParamInfo], params: &Map<String, Value>, mut keyframes: Option<&mut RowKeyframes<'_>>) -> Option<Map<String, Value>> {
     let mut changed = None;
     for info in editable(infos) {
         ui.push_id((id, info.name.as_str()), |ui| {
-            if let Some(next) = row(ui, language, info, params) {
+            if let Some(next) = row(ui, language, info, params, keyframes.as_deref_mut()) {
                 changed = Some(next);
             }
         });
@@ -65,11 +83,43 @@ pub fn rows(ui: &mut egui::Ui, id: egui::Id, language: Language, infos: &[ParamI
     changed
 }
 
-fn row(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>) -> Option<Map<String, Value>> {
-    let label = ui.label(display_name(info));
-    if !info.description.is_empty() {
-        label.on_hover_text(&info.description);
-    }
+/// The label of a row, with the keyframe diamond of a float parameter. A float with keyframes can
+/// only be changed where the playhead gives it a time, so that returns whether the row may change.
+fn row_header(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>, keyframes: Option<&mut RowKeyframes<'_>>) -> bool {
+    let mut enabled = true;
+    ui.horizontal(|ui| {
+        let label = ui.label(display_name(info));
+        if !info.description.is_empty() {
+            label.on_hover_text(&info.description);
+        }
+        let Some(keyframes) = keyframes.filter(|_| info.kind == ParamKind::Float) else { return };
+        let keys = keyframes.keyframes.get(&info.name).map_or(&[][..], Vec::as_slice);
+        let on_keyframe = keyframes.offset.is_some_and(|at| nearest_keyframe_inside(keys, at, keyframes.tolerance, keyframes.duration).is_some());
+        let (before, after) = keyframe_neighbors(keys, keyframes.position, keyframes.tolerance, keyframes.duration);
+        enabled = keyframes.offset.is_some() || keys.is_empty();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add_enabled_ui(after.is_some(), |ui| super::icons::keyframe_step_button(ui, true, &language.t(Message::KeyframeNext)).clicked()).inner {
+                keyframes.jump = after;
+            }
+            let tooltip = language.t(if on_keyframe { Message::KeyframeRemove } else { Message::KeyframeAdd });
+            let clicked = ui.add_enabled_ui(keyframes.offset.is_some(), |ui| super::icons::keyframe_button(ui, on_keyframe, !keys.is_empty(), &tooltip).clicked()).inner;
+            if clicked {
+                keyframes.toggled = Some((info.name.clone(), number_value(params, info)));
+            }
+            if ui.add_enabled_ui(before.is_some(), |ui| super::icons::keyframe_step_button(ui, false, &language.t(Message::KeyframePrevious)).clicked()).inner {
+                keyframes.jump = before;
+            }
+        });
+    });
+    enabled
+}
+
+fn row(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>, keyframes: Option<&mut RowKeyframes<'_>>) -> Option<Map<String, Value>> {
+    let enabled = row_header(ui, language, info, params, keyframes);
+    ui.add_enabled_ui(enabled, |ui| row_value(ui, language, info, params)).inner
+}
+
+fn row_value(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>) -> Option<Map<String, Value>> {
     let value = match widget_for(info) {
         ParamWidget::Slider { min, max, integer } => slider(ui, info, params, min, max, integer),
         ParamWidget::Number { min, max, integer } => number(ui, info, params, min, max, integer),
@@ -194,7 +244,6 @@ pub(super) fn has_test_draft(ctx: &egui::Context) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use d3d12_backend::ParamKind;
     use egui::{Event, Key, Modifiers, RawInput};
 
     fn expression_info() -> ParamInfo {

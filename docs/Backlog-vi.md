@@ -431,10 +431,38 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/gpufx-editor/src/params.rs:44`, `crates/gpufx-editor/src/agent/run.rs:125` và `:260` ẩn tên `clip_time`/`clip_duration` khỏi inspector và MCP bất kể vai trò của gói, nhưng `crates/d3d12-backend/src/compositor.rs:602` chỉ cấp đồng hồ cho effect của clip, không cấp cho transition, và `TransitionAdd` không lọc nên giá trị người dùng nhập vẫn được lưu và áp. Kết quả: tham số không thấy được nhưng vẫn chi phối hình. Nên lọc theo vai trò (chỉ ẩn ở effect clip), hoặc cấp đồng hồ cho transition, và để `TransitionAdd` bỏ các tên này. Ghi ngày 2026-11-10.
 
-### [Thấp] Transition ghi đè alpha giữa hai sticker khác hình dạng cho bóng đen
+### [Vừa] Transition ghi đè alpha giữa hai sticker khác hình dạng cho bóng đen, và làm mất độ mờ hoặc ra góc đen khi clip có opacity hoặc xoay
 
-`crates/d3d12-backend/src/alpha_merge.rs:45` lấy alpha kết quả là `max(a_from, a_to)`. Tại pixel một bên đục, bên kia trong suốt, màu premultiplied mờ dần nhưng alpha giữ 1, nên silhouette tối dần về đen rồi biến mất khi transition hết. Chưa thấy transition có sẵn nào ghi alpha 1, chỉ gói tự viết mới dính. Nên làm nếu có gói như vậy: chạy transition lần hai trên matte (alpha của mỗi bên đưa vào rgb) và lấy kết quả làm alpha. Ghi ngày 2026-11-10.
+`crates/d3d12-backend/src/alpha_merge.rs:48` lấy alpha kết quả là `max(a_from, a_to)`. Tại pixel một bên đục, bên kia trong suốt, màu premultiplied mờ dần nhưng alpha giữ 1, nên silhouette tối dần về đen rồi biến mất khi transition hết. Chưa thấy transition có sẵn nào ghi alpha 1, chỉ gói tự viết mới dính. Phần mở rộng: clip có opacity dưới 1 hoặc xoay (góc ảnh sau xoay trong suốt) đi qua transition ghi alpha 1 (`crates/d3d12-backend/src/compositor.rs:964`, `transition`) cũng bị mất trong suốt: độ mờ biến mất hoặc các góc sau xoay ra đen. Nên làm: chạy transition lần hai trên matte (alpha của mỗi bên đưa vào rgb) và lấy kết quả làm alpha. Không thay `max` bằng mix theo progress: sai với wipe, pixel đang hiện hẳn một bên sẽ bị nửa alpha. Ghi ngày 2026-11-10.
 
 ### [Thấp] Probe alpha là suy đoán một lần cho mỗi graph
 
-`crates/d3d12-backend/src/compositor.rs:800` (`writes_alpha`) probe trên ảnh đen trong suốt, với clock của frame dựng đầu tiên, và kết quả được cache theo khoá không chứa số. Gói bên thứ ba ghi alpha theo tham số hoặc theo thời gian, hay chỉ phủ đục một phần, sẽ bị đoán sai và vùng trong suốt thành khối đặc. Effect vừa di chuyển hình vừa ghi alpha 1 bị cắt theo hình gốc. Mỗi `ClipKey` có alpha tốn một lần probe chặn thread. Nên làm nếu gói như vậy xuất hiện hoặc timeline có hàng chục sticker: cho manifest khai báo việc giữ alpha. Ghi ngày 2026-11-10.
+`crates/d3d12-backend/src/compositor.rs:800` (`writes_alpha`) probe trên ảnh đen trong suốt, với clock của frame dựng đầu tiên, và kết quả được cache theo khoá không chứa số. Gói bên thứ ba ghi alpha theo tham số hoặc theo thời gian, hay chỉ phủ đục một phần, sẽ bị đoán sai và vùng trong suốt thành khối đặc. Effect vừa di chuyển hình vừa ghi alpha 1 bị cắt theo hình gốc. Probe dùng giá trị keyframe của frame dựng đầu tiên (độ mờ, xoay, tham số effect), không phải giá trị mặc định, nên một clip có keyframe cho ra kết quả probe tuỳ vào khung nào được dựng trước. Nên probe ở giá trị mặc định. Mỗi `ClipKey` có alpha tốn một lần probe chặn thread. Nên làm nếu gói như vậy xuất hiện hoặc timeline có hàng chục sticker: cho manifest khai báo việc giữ alpha. Ghi ngày 2026-11-10.
+
+### [Vừa] Không đặt được keyframe trong nửa cửa sổ transition nằm ngoài clip
+
+`crates/engine/src/edit.rs:739` (`inside_clip`) chỉ cho đặt keyframe trong [0, duration), còn `crates/engine/src/schedule.rs:165` (`sample_at`) cho clip chạy tiếp ngoài đó trong cửa sổ transition: clip giữ nguyên giá trị của keyframe đầu hoặc cuối. Người dùng không keyframe được phần cửa sổ ấy, nên một hiệu ứng như làm mờ dần xuyên qua transition không dựng được bằng keyframe. Nên làm nếu có người cần: cho phép `at` ngoài clip khi nằm trong cửa sổ transition của clip, và sửa `keyframe_times` cùng thanh keyframe trên timeline cho khớp. Ghi ngày 2026-11-10.
+
+### [Thấp] Keyframe tham số float mà hàm kích thước đọc làm dựng lại graph mỗi khung
+
+`crates/d3d12-backend/src/compositor.rs:940` (`needs_rebuild`): tham số float mà `gpufx_output_size` hay hàm kích thước của gói đọc, khi có keyframe thì kích thước ra đổi từng khung và graph bị dựng lại mỗi khung. Nên làm nếu có gói như vậy: tách tham số ảnh hưởng kích thước khỏi tham số được keyframe, hoặc từ chối keyframe cho chúng. Ghi ngày 2026-11-10.
+
+### [Thấp] Kiểm tra project không xét tên và kiểu tham số của keyframe trong file
+
+`crates/engine/src/validate.rs:342` chỉ kiểm thời gian, thứ tự, hữu hạn của keyframe effect; file tay sửa có thể mang keyframe cho tham số không tồn tại hoặc không phải float, và nó bị bỏ qua lặng lẽ khi render. Chỉ lối MCP (`check_keyframe_target`) kiểm tên và kiểu. Nên làm: kiểm theo catalog khi mở file và báo như tham số thường. Ghi ngày 2026-11-10.
+
+### [Thấp] Chưa keyframe được tham số Int, Vec, Color và Enum
+
+`crates/engine/src/keyframe.rs` (`KeyframeTarget::EffectParam`, giá trị `f64`) và `crates/gpufx-editor/src/agent/run.rs` (`check_keyframe_target`) chỉ cho tham số float. Màu và vector là thứ hay cần chuyển động nhất. Nên làm: khoá giá trị thành mảng số và nội suy theo thành phần, màu nội suy trong không gian tuyến tính. Ghi ngày 2026-11-10.
+
+### [Thấp] Thu nhỏ không có mipmap nên ảnh xoay nhấp nháy
+
+`crates/d3d12-backend/src/rotated_place.rs:57` lấy mẫu bilinear từ ảnh gốc. Khi thu nhỏ mạnh, mỗi pixel đích chỉ đọc 4 texel và bỏ qua phần còn lại, nên cạnh và chi tiết mảnh nhấp nháy lúc xoay. Nên làm: dựng mipmap hoặc lấy mẫu nhiều điểm theo hệ số thu nhỏ. Ghi ngày 2026-11-10.
+
+### [Thấp] Vùng kéo khung xoay là hộp bao ngoài
+
+`crates/gpufx-editor/src/ui/placement.rs:188` đặt vùng nhận kéo thân khung theo hộp bao (`bounds(corners)`) của khung đã xoay, nên bấm vào góc trống của hộp bao vẫn kéo clip. Nên làm: kiểm điểm trong tứ giác xoay thay vì hộp bao. Ghi ngày 2026-11-10.
+
+### [Thấp] Timeline sắp xếp và cấp phát danh sách keyframe mỗi khung cho mỗi clip
+
+`crates/gpufx-editor/src/ui/timeline_panel.rs:404` gọi `Clip::keyframe_times` (`crates/engine/src/keyframe.rs`), vốn gom, sắp xếp và bỏ trùng một `Vec` mới ở mỗi lần vẽ của mỗi clip. Vài clip thì không đáng kể, hàng trăm clip có keyframe thì tốn. Nên làm nếu timeline dài gây giật: cache theo revision của project hoặc chỉ tính cho clip đang trong khung nhìn. Ghi ngày 2026-11-10.

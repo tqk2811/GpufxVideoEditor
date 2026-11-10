@@ -24,6 +24,9 @@ const HEADER_WIDTH: f32 = 132.0;
 const HEADER_BUTTON: f32 = 24.0;
 const LINE_SCROLL_POINTS: f32 = 50.0;
 const CLIP_HEADER_HEIGHT: f32 = 14.0;
+const KEYFRAME_MARK_RADIUS: f32 = 3.5;
+/// How far above the bottom edge of a clip its keyframe marks sit.
+const KEYFRAME_MARK_MARGIN: f32 = 5.0;
 const CLIP_RADIUS: u8 = 4;
 const ZOOM_SLIDER_WIDTH: f32 = 130.0;
 const PLAYHEAD_MARKER: f32 = 6.0;
@@ -388,8 +391,28 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     if let Some(visuals) = paint.visuals {
         draw_clip_media(painter, paint, &mut visuals.borrow_mut(), paint.rect.with_min_y(strip.bottom()));
     }
+    if paint.kind == TrackKind::Video {
+        draw_keyframe_marks(&text, paint);
+    }
     if paint.selected {
         painter.rect_stroke(paint.rect, radius, Stroke::new(2.0, theme::selected()), StrokeKind::Inside);
+    }
+}
+
+/// A small diamond on the clip at each moment that has a keyframe.
+fn draw_keyframe_marks(painter: &egui::Painter, paint: &ClipPaint<'_>) {
+    let times = paint.clip.keyframe_times();
+    if times.is_empty() {
+        return;
+    }
+    let y = paint.rect.bottom() - KEYFRAME_MARK_MARGIN;
+    let duration = paint.clip.duration.ticks().max(1) as f32;
+    for time in times {
+        let x = paint.rect.left() + paint.rect.width() * (time.ticks() as f32 / duration);
+        let center = Pos2::new(x, y);
+        let radius = KEYFRAME_MARK_RADIUS;
+        let points = vec![center + Vec2::new(0.0, -radius), center + Vec2::new(radius, 0.0), center + Vec2::new(0.0, radius), center + Vec2::new(-radius, 0.0)];
+        painter.add(Shape::convex_polygon(points, theme::on_clip_accent().gamma_multiply(paint.opacity()), Stroke::NONE));
     }
 }
 

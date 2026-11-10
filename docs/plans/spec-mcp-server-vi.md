@@ -55,6 +55,8 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `effect_add`, `effect_remove`, `transition_add`, `transition_remove` | Hiệu ứng và transition |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
 | `clip_set_speed` | Tốc độ phát một clip, xem mục dưới |
+| `clip_set_transform` | Vị trí, độ mờ, xoay tĩnh của clip |
+| `keyframe_set`, `keyframe_remove` | Keyframe cho x, y, width, opacity, rotation và tham số float của effect, thời điểm tính bằng tick từ đầu clip |
 | `undo`, `redo` | Hoàn tác, mỗi tool sửa là một bước; `track_set_locked` không phải một bước, giống nút khoá |
 | `frame_capture` | Chụp khung đã ghép |
 | `export_start`, `export_status`, `export_cancel` | Xuất nền |
@@ -70,6 +72,8 @@ Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế đ�
 ### `clip_set_speed` và `speed` của `clip_add`
 
 `clip_set_speed` nhận `clip`, `speed` (từ 0,1 đến 10, ví dụ 2 là nhanh gấp đôi) và `expected_revision`. Nó giữ nguyên đoạn nguồn đang phát nên thời lượng trên timeline thành `đoạn nguồn / speed`, tính từ điểm đầu cũ. Lỗi: `speed_overlap` khi clip sẽ chồng lên clip kế tiếp (không tự đẩy clip khác), `transition_on_edge` khi đuôi clip đang có transition, `out_of_range` khi tốc độ ngoài khoảng, `invalid_project` khi fade hoặc transition đầu clip không còn vừa, `track_locked` trên track khoá. `clip_add` nhận thêm `speed` tuỳ chọn; thời lượng mặc định là phần nguồn còn lại chia cho `speed`. `duration` truyền tay cùng `speed` bị từ chối bằng `out_of_range` khi `source_in + duration * speed` vượt quá độ dài của stream đã biết (áp dụng cả khi `speed` là 1). `project_get` trả `speed` khi khác 1.
+
+`keyframe_set` và `keyframe_remove` nhận `clip`, `at`, `expected_revision`, và hoặc `property` (`x`, `y`, `width`, `opacity`, `rotation`) hoặc `effect` (chỉ số) cùng `param` (tham số float của effect đó). `at` là số tick từ `clip.start`, KHÁC với `clip_time` mà gói effect đọc, vốn đếm từ đầu cửa sổ transition đi vào. Phạm vi hợp lệ khi đặt là [0, `duration`): đúng `duration` bị từ chối vì không có khung hình nào ở đó. `keyframe_set` thay keyframe cùng tick, `easing` vắng thì giữ easing cũ; giá trị ngoài giới hạn của thuộc tính hoặc ngoài `min`/`max` của tham số bị từ chối. Mã lỗi: `keyframe_outside_clip` khi `at` ngoài [0, `duration`) lúc đặt, `keyframe_not_found` khi `keyframe_remove` không có keyframe đúng tick `at`. `keyframe_remove` xoá được cả keyframe nằm ngoài clip (do cắt đầu hoặc đuôi clip để lại); khi xoá xong mà thuộc tính không còn keyframe nào trong [0, `duration`), các keyframe còn lại của nó bị xoá theo và thuộc tính về giá trị tĩnh. `project_get` trả `motion` của mỗi clip (`opacity`, `rotation` tĩnh và `keyframes` theo thuộc tính) cùng `keyframes` của từng effect; clip không dùng thì hai trường này vắng.
 
 ### Xuất file
 

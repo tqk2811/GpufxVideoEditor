@@ -445,7 +445,7 @@ mod tests {
 
     fn project_of(source: &str, seconds: i64, audio: bool, clip_track: TrackKind) -> Project {
         let duration = Time::from_seconds(seconds).unwrap();
-        let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None };
+        let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default() };
         Project {
             version: SUPPORTED_VERSION,
             output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: audio.then_some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },

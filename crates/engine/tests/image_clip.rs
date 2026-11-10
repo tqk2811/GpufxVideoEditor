@@ -7,7 +7,7 @@ fn seconds(value: i64) -> Time {
 }
 
 fn clip(source: &str, start: i64, duration: i64) -> Clip {
-    Clip { source: source.to_owned(), start: seconds(start), source_in: Time::ZERO, duration: seconds(duration), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None }
+    Clip { source: source.to_owned(), start: seconds(start), source_in: Time::ZERO, duration: seconds(duration), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default() }
 }
 
 fn project(kind: TrackKind, clips: Vec<Clip>) -> Project {

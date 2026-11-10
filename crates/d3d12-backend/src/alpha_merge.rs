@@ -49,7 +49,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 "#;
 
-fn effect_of(context: &Arc<GpuContext>, manifest: &str, shader: &str) -> Result<Effect, String> {
+pub(crate) fn effect_of(context: &Arc<GpuContext>, manifest: &str, shader: &str) -> Result<Effect, String> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     for (name, text) in [("manifest.json", manifest), ("shaders/main.wgsl", shader)] {

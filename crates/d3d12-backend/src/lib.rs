@@ -24,6 +24,7 @@ mod packages;
 mod paths;
 mod probe;
 mod progress;
+mod rotated_place;
 mod still;
 mod thumbnail;
 

@@ -1,8 +1,10 @@
 //! Project model, matching the project JSON of the phase 1 and phase 2 specifications.
 
+use crate::keyframe::{ClipMotion, Keyframe};
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The newest project format version this engine understands.
@@ -112,6 +114,9 @@ pub struct Clip {
     /// Where the picture sits in the frame. Absent: as large as fits, centred, in its own shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<ClipPlacement>,
+    /// Opacity, rotation and keyframes. Left out of the file when it is all default.
+    #[serde(default, skip_serializing_if = "ClipMotion::is_default")]
+    pub motion: ClipMotion,
 }
 
 /// Where a clip sits in the output frame, in parts of the frame. The height follows from the shape
@@ -247,6 +252,9 @@ pub struct Effect {
     /// Static parameters, passed through to the package.
     #[serde(default)]
     pub params: Map<String, Value>,
+    /// Numeric parameters that change with time, by name. One of these ignores its static value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keyframes: BTreeMap<String, Vec<Keyframe>>,
 }
 
 /// A transition between clip `after_clip` and the next clip of the same track.
@@ -347,13 +355,15 @@ impl From<ProjectV1> for Project {
                             start: clip.start,
                             source_in: clip.source_in,
                             duration: clip.duration,
-                            effects: clip.effects,
+                            // Version 1 has no keyframes, whatever such a field may say.
+                            effects: clip.effects.into_iter().map(|effect| Effect { keyframes: BTreeMap::new(), ..effect }).collect(),
                             gain_db: 0.0,
                             muted: false,
                             fade_in: Time::ZERO,
                             fade_out: Time::ZERO,
                             speed: 1.0,
                             placement: None,
+                            motion: ClipMotion::default(),
                         })
                         .collect(),
                     transitions: track.transitions,
@@ -439,6 +449,16 @@ impl Clip {
     /// and at most [`SPEED_SCALE`] ticks (11 ms) otherwise.
     pub fn speed_grid(&self) -> i64 {
         SPEED_SCALE / gcd(self.speed_milli(), SPEED_SCALE)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    /// A plain clip of one second at the start of the timeline.
+    pub(crate) fn clip() -> Clip {
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default() }
     }
 }
 

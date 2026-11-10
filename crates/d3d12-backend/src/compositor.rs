@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
 use engine::schedule::{ClipClock, Progress};
-use engine::{is_image_source, ClipPlacement, Effect as ProjectEffect, PlacedRect, Time, TICKS_PER_SECOND};
+use engine::{is_image_source, ClipTransform, Effect as ProjectEffect, Time, TICKS_PER_SECOND};
 use gpufx_core::d3d12::D3d12Frame;
 use gpufx_core::{ColorInfo, Effect, EffectGraph, FrameInfo, GpuContext, Package, PixelFormat};
 use serde_json::{Map, Value};
@@ -33,6 +33,7 @@ use crate::decoder::{DecodedFrame, PublishClock, SequentialDecoder};
 use crate::gpu::Gpu;
 use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
+use crate::rotated_place::rotated_place_effect;
 use crate::still::{aligned_rows, read_still, StillPicture};
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -537,6 +538,8 @@ pub struct D3d12Compositor {
     overlay: EffectGraph,
     /// The overlay that puts a clip at its place; its numbers change clip by clip.
     placer: EffectGraph,
+    /// Draws a clip that is turned. Built the first time one is.
+    rotator: Option<EffectGraph>,
     /// A fully transparent image, only ever read. Not in the pool, whose images hold old pictures.
     transparent: Option<ImageId>,
     stills: HashMap<PathBuf, CachedStill>,
@@ -555,7 +558,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, transparent: None, stills: HashMap::new(), stills_used: 0, readback: None, abort: None, closing: None, publish_clock: Arc::default() })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, rotator: None, transparent: None, stills: HashMap::new(), stills_used: 0, readback: None, abort: None, closing: None, publish_clock: Arc::default() })
     }
 
     /// Makes `closing` stop the decoders opened from now on at once, and lets a newer request stop
@@ -677,18 +680,23 @@ impl D3d12Compositor {
         Ok(image)
     }
 
-    /// Draws `picture`, a full-frame image of a source of display aspect `source_aspect` (width over height, sample aspect ratio applied), at `placement` on a
+    /// Draws `picture`, a full-frame image of a source of display aspect `source_aspect` (width over height, sample aspect ratio applied), where `transform` says, on a
     /// transparent image. Gives `picture` back when it needs no moving, the usual case, at no cost, unless
     /// `through_alpha` says it has see-through parts, whose colours only count through their alpha.
     /// The overlay mixes with the zero colour of the transparent image, so the result is premultiplied.
-    fn place(&mut self, picture: ImageId, placement: Option<ClipPlacement>, source_aspect: f64, through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
+    fn place(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
         let (width, height) = (self.width, self.height);
-        let rect = PlacedRect::of(placement, f64::from(width) / f64::from(height), source_aspect);
-        if rect.fills_frame(width, height) && !through_alpha {
+        let rect = transform.rect(f64::from(width) / f64::from(height), source_aspect);
+        if rect.fills_frame(width, height) && !through_alpha && transform.opacity >= 1.0 && !transform.rotates {
             return Ok(picture);
         }
+        // A clip that turns at any moment takes this path at every frame, so the way it is drawn does
+        // not change at the frames where it happens to be upright.
+        if transform.rotates {
+            return self.place_rotated(picture, rect, transform, info);
+        }
         let background = self.transparent_image()?;
-        for (name, value) in [("x", rect.x), ("y", rect.y), ("scale", rect.width), ("height", rect.height)] {
+        for (name, value) in [("x", rect.x), ("y", rect.y), ("scale", rect.width), ("height", rect.height), ("opacity", transform.opacity)] {
             self.placer.set_param(name, &[value]).map_err(|e| format!("overlay.{name}: {e}"))?;
         }
         let output = self.acquire()?;
@@ -699,6 +707,29 @@ impl D3d12Compositor {
         }
         self.images[background.0].fence_value = inputs[0].fence_value;
         self.images[picture.0].fence_value = inputs[1].fence_value;
+        self.images[output.0].premultiplied = true;
+        self.release_image(picture);
+        Ok(output)
+    }
+
+    /// Draws `picture` turned around the middle of `rect`, in premultiplied colours on transparent.
+    fn place_rotated(&mut self, picture: ImageId, rect: engine::PlacedRect, transform: ClipTransform, info: &FrameInfo) -> Result<ImageId, String> {
+        let (width, height) = (self.width, self.height);
+        let rotator = match &mut self.rotator {
+            Some(rotator) => rotator,
+            empty => empty.insert(load_rotator(&self.gpu.context)?),
+        };
+        for (name, value) in [("x", rect.x), ("y", rect.y), ("width", rect.width), ("height", rect.height), ("rotation", transform.rotation), ("opacity", transform.opacity)] {
+            rotator.set_param(name, &[value]).map_err(|e| format!("rotated place.{name}: {e}"))?;
+        }
+        let output = self.acquire()?;
+        let rotator = self.rotator.as_mut().expect("built above");
+        let mut inputs = [self.images[picture.0].frame(width, height)];
+        if let Err(message) = Self::run_graph(&self.gpu, rotator, &mut inputs, &mut self.images, output, width, height, info) {
+            self.release_image(output);
+            return Err(message);
+        }
+        self.images[picture.0].fence_value = inputs[0].fence_value;
         self.images[output.0].premultiplied = true;
         self.release_image(picture);
         Ok(output)
@@ -831,6 +862,11 @@ fn load_overlay(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<Effec
     EffectGraph::parse("overlay", |_| Ok(("overlay".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("overlay graph: {e}"))
 }
 
+fn load_rotator(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
+    let mut holder = Some(rotated_place_effect(context)?);
+    EffectGraph::parse("place", |_| Ok(("place".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("rotated place graph: {e}"))
+}
+
 impl Compositor for D3d12Compositor {
     type Decoder = SourceDecoder;
     type Image = ImageId;
@@ -850,7 +886,7 @@ impl Compositor for D3d12Compositor {
         Ok(SourceDecoder::Video(decoder))
     }
 
-    fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SourceDecoder as Decoder>::Frame, effects: &[ProjectEffect], placement: Option<ClipPlacement>, clock: ClipClock, at: FrameContext) -> Result<ImageId, RenderError> {
+    fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SourceDecoder as Decoder>::Frame, effects: &[ProjectEffect], transform: ClipTransform, clock: ClipClock, at: FrameContext) -> Result<ImageId, RenderError> {
         let info = Self::info(at);
         let (input, output) = input_then_output(|| frame.input(), || self.acquire())?;
         let (width, height) = (self.width, self.height);
@@ -916,7 +952,7 @@ impl Compositor for D3d12Compositor {
             return Err(RenderError(e));
         }
         frame.raise_fence_value(inputs[0].fence_value);
-        let placed = match self.place(output, placement, source_aspect, has_alpha, &info) {
+        let placed = match self.place(output, transform, source_aspect, has_alpha, &info) {
             Ok(placed) => placed,
             Err(message) => {
                 self.release_image(output);

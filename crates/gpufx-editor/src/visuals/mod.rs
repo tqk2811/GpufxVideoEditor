@@ -283,6 +283,13 @@ impl ClipVisuals {
         slot
     }
 
+    /// Makes `source` a picture of `aspect` with no probe, for tests of what needs its shape.
+    #[cfg(test)]
+    pub fn set_known_for_test(&mut self, source: &str, aspect: f32) {
+        let slot = self.slot(source);
+        self.slots[slot].view = SourceView::Known(SourceFacts { has_video: true, has_audio: false, aspect, length: None });
+    }
+
     /// What is known of the source of `slot`, and asks for it when nothing is yet.
     pub fn view(&mut self, slot: usize) -> SourceView {
         if self.slots[slot].view == SourceView::Pending {

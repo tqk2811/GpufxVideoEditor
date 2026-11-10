@@ -48,6 +48,75 @@ impl From<ClipParam> for ClipRef {
     }
 }
 
+/// A place in the frame, in parts of the frame.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct PlacementParam {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+}
+
+impl From<PlacementParam> for engine::ClipPlacement {
+    fn from(p: PlacementParam) -> Self {
+        Self { x: p.x, y: p.y, width: p.width }
+    }
+}
+
+/// A property of a clip that can have keyframes.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipPropertyParam {
+    X,
+    Y,
+    Width,
+    Opacity,
+    Rotation,
+}
+
+impl From<ClipPropertyParam> for engine::ClipProperty {
+    fn from(property: ClipPropertyParam) -> Self {
+        match property {
+            ClipPropertyParam::X => Self::X,
+            ClipPropertyParam::Y => Self::Y,
+            ClipPropertyParam::Width => Self::Width,
+            ClipPropertyParam::Opacity => Self::Opacity,
+            ClipPropertyParam::Rotation => Self::Rotation,
+        }
+    }
+}
+
+/// How a keyframe moves on to the next one.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum EasingParam {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+}
+
+impl From<EasingParam> for engine::Easing {
+    fn from(easing: EasingParam) -> Self {
+        match easing {
+            EasingParam::Linear => Self::Linear,
+            EasingParam::EaseIn => Self::EaseIn,
+            EasingParam::EaseOut => Self::EaseOut,
+            EasingParam::EaseInOut => Self::EaseInOut,
+        }
+    }
+}
+
+/// What a keyframe call animates: exactly a property, or an effect with one of its parameters.
+fn keyframe_target(property: Option<ClipPropertyParam>, effect: Option<usize>, param: Option<String>) -> Result<engine::KeyframeTarget, AgentError> {
+    match (property, effect, param) {
+        (Some(property), None, None) => Ok(engine::KeyframeTarget::Property(property.into())),
+        (None, Some(effect), Some(param)) => Ok(engine::KeyframeTarget::EffectParam { effect, param }),
+        _ => Err(AgentError::new("invalid_params", "give either property, or both effect and param")),
+    }
+}
+
 macro_rules! params {
     ($name:ident { $($(#[$meta:meta])* $field:ident : $kind:ty),* $(,)? }) => {
         #[derive(Deserialize, JsonSchema)]
@@ -78,6 +147,9 @@ params!(GainParams { expected_revision: u64, clip: ClipParam, gain_db: f64 });
 params!(SpeedParams { expected_revision: u64, clip: ClipParam, speed: f64 });
 params!(MutedParams { expected_revision: u64, clip: ClipParam, muted: bool });
 params!(FadesParams { expected_revision: u64, clip: ClipParam, fade_in: i64, fade_out: i64 });
+params!(TransformParams { expected_revision: u64, clip: ClipParam, placement: Option<PlacementParam>, opacity: Option<f64>, rotation: Option<f64> });
+params!(KeyframeSetParams { expected_revision: u64, clip: ClipParam, property: Option<ClipPropertyParam>, effect: Option<usize>, param: Option<String>, at: i64, value: f64, easing: Option<EasingParam> });
+params!(KeyframeRemoveParams { expected_revision: u64, clip: ClipParam, property: Option<ClipPropertyParam>, effect: Option<usize>, param: Option<String>, at: i64 });
 params!(RevisionParams { expected_revision: u64 });
 params!(ExportStartParams { out: PathBuf, #[serde(default)] overwrite: bool, encoder: Option<String> });
 params!(ExportJobParams { job: Option<u64> });
@@ -174,6 +246,9 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("clip_set_gain", "Sets the gain of a clip in decibels.", GainParams, |p| edit(p.expected_revision, AgentEdit::ClipSetGain { clip: p.clip.into(), gain_db: p.gain_db })),
         tool!("clip_set_muted", "Mutes or unmutes a clip.", MutedParams, |p| edit(p.expected_revision, AgentEdit::ClipSetMuted { clip: p.clip.into(), muted: p.muted })),
         tool!("clip_set_fades", "Sets the audio fades of a clip, in ticks.", FadesParams, |p| edit(p.expected_revision, AgentEdit::ClipSetFades { clip: p.clip.into(), fade_in: ticks(p.fade_in), fade_out: ticks(p.fade_out) })),
+        tool!("clip_set_transform", "Sets the static place (x, y, width, all in parts of the frame), opacity (0 to 1) and rotation (clockwise degrees) of a clip. What is absent stays. A number with keyframes ignores its static value.", TransformParams, |p| edit(p.expected_revision, AgentEdit::ClipSetTransform { clip: p.clip.into(), placement: p.placement.map(Into::into), opacity: p.opacity, rotation: p.rotation })),
+        tool!("keyframe_set", "Sets a keyframe at `at`, ticks from the start of the clip (clip.start, not the clip_time of an effect), from 0 up to but not including the duration. Give property (x, y, width, opacity, rotation), or effect (its index) and param (a float parameter of that effect). Replaces one at the same tick; easing (linear, ease_in, ease_out, ease_in_out) is how the value moves to the next keyframe, and absent keeps the one replaced. Refused with keyframe_outside_clip.", KeyframeSetParams, |p| { let target = keyframe_target(p.property, p.effect, p.param)?; edit(p.expected_revision, AgentEdit::KeyframeSet { clip: p.clip.into(), target, at: ticks(p.at), value: p.value, easing: p.easing.map(Into::into) }) }),
+        tool!("keyframe_remove", "Removes the keyframe at `at` of a property, or of a parameter of an effect, as in keyframe_set, also one that lies outside the clip. After the last one inside the clip the static value applies again. Refused with keyframe_not_found.", KeyframeRemoveParams, |p| { let target = keyframe_target(p.property, p.effect, p.param)?; edit(p.expected_revision, AgentEdit::KeyframeRemove { clip: p.clip.into(), target, at: ticks(p.at) }) }),
         tool!("undo", "Undoes the last edit.", RevisionParams, |p| Ok(AgentRequest::Undo { expected_revision: p.expected_revision })),
         tool!("redo", "Redoes an undone edit.", RevisionParams, |p| Ok(AgentRequest::Redo { expected_revision: p.expected_revision })),
         tool!("frame_capture", "The composited frame at a time (ticks) or frame index, exactly one of them, as a PNG no wider than max_width (default 1280). A position outside the timeline is an error.", FrameCaptureParams, frame_capture),

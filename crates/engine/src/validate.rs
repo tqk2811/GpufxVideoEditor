@@ -1,6 +1,7 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
-use crate::project::{speed_in_range, Project, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
+use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
+use crate::project::{speed_in_range, Clip, Project, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;
@@ -123,6 +124,19 @@ pub enum ValidationError {
     },
     /// A clip `placement` is not finite or is out of its limits.
     InvalidPlacement { track: usize, clip: usize },
+    /// A clip `opacity` is not a number from 0 to 1.
+    InvalidOpacity { track: usize, clip: usize, opacity: f64 },
+    /// A clip `rotation` is not a number within [`MAX_ROTATION`] degrees.
+    InvalidRotation { track: usize, clip: usize, rotation: f64 },
+    /// A list of keyframes is not usable; `what` names the list and `reason` says why.
+    InvalidKeyframes {
+        track: usize,
+        clip: usize,
+        what: String,
+        reason: &'static str,
+    },
+    /// A clip on a track of kind `audio` has opacity, rotation or keyframes.
+    AudioTrackMotion { track: usize, clip: usize },
     /// A clip `speed` is not a number between [`MIN_SPEED`] and [`MAX_SPEED`].
     InvalidSpeed { track: usize, clip: usize, speed: f64 },
     /// A clip `gain_db` is infinite or not a number.
@@ -252,6 +266,18 @@ impl fmt::Display for ValidationError {
             InvalidPlacement { track, clip } => {
                 write!(f, "track {track}, clip {clip}: placement is out of its limits")
             }
+            InvalidOpacity { track, clip, opacity } => {
+                write!(f, "track {track}, clip {clip}: opacity {opacity} must be from 0 to 1")
+            }
+            InvalidRotation { track, clip, rotation } => {
+                write!(f, "track {track}, clip {clip}: rotation {rotation} must be within {MAX_ROTATION} degrees")
+            }
+            InvalidKeyframes { track, clip, what, reason } => {
+                write!(f, "track {track}, clip {clip}: keyframes of {what}: {reason}")
+            }
+            AudioTrackMotion { track, clip } => {
+                write!(f, "track {track}, clip {clip}: a clip on an audio track has no picture to animate")
+            }
             InvalidSpeed { track, clip, speed } => {
                 write!(f, "track {track}, clip {clip}: speed {speed} must be between {MIN_SPEED} and {MAX_SPEED}")
             }
@@ -294,6 +320,33 @@ impl fmt::Display for ValidationError {
 }
 
 impl std::error::Error for ValidationError {}
+
+/// Adds the problems of the opacity, rotation and keyframes of one clip to `errors`.
+fn motion_errors(clip: &Clip, track: usize, c: usize, on_audio_track: bool, errors: &mut Vec<ValidationError>) {
+    use ValidationError::*;
+    let motion = &clip.motion;
+    if !ClipProperty::Opacity.accepts(motion.opacity) {
+        errors.push(InvalidOpacity { track, clip: c, opacity: motion.opacity });
+    }
+    if !ClipProperty::Rotation.accepts(motion.rotation) {
+        errors.push(InvalidRotation { track, clip: c, rotation: motion.rotation });
+    }
+    if on_audio_track && !motion.is_default() {
+        errors.push(AudioTrackMotion { track, clip: c });
+    }
+    for (property, keys) in &motion.keyframes {
+        if let Some(reason) = keyframes_problem(keys, |value| property.accepts(value)) {
+            errors.push(InvalidKeyframes { track, clip: c, what: property.name().to_owned(), reason });
+        }
+    }
+    for (e, effect) in clip.effects.iter().enumerate() {
+        for (name, keys) in &effect.keyframes {
+            if let Some(reason) = keyframes_problem(keys, f64::is_finite) {
+                errors.push(InvalidKeyframes { track, clip: c, what: format!("effect {e} parameter {name}"), reason });
+            }
+        }
+    }
+}
 
 /// Checks `project` and returns every problem found (empty when valid).
 ///
@@ -402,6 +455,7 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             if clip.placement.is_some_and(|placement| !placement.is_valid()) {
                 errors.push(InvalidPlacement { track: t, clip: c });
             }
+            motion_errors(clip, t, c, track.is_audio(), &mut errors);
             if !speed_in_range(clip.speed) {
                 errors.push(InvalidSpeed {
                     track: t,

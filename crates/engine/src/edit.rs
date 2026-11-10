@@ -24,13 +24,19 @@
 //!   before the requested position on a trim). [`set_speed`] keeps the source range constant and
 //!   refuses what cannot follow it. Sound positions at a cut can differ by a sample at another
 //!   speed; the time stretcher starts a new grain chain there.
+//! * **Keyframes.** A keyframe stays on the source frame under it: a start trim and a source-in trim
+//!   move it back by what was cut, the second half of a split counts from the cut, a speed change
+//!   scales it, and an end trim or a move leaves it. A keyframe that lands outside the clip is kept:
+//!   the curve inside does not change, and growing the clip again brings it back. [`set_keyframe`]
+//!   and [`remove_keyframe`] only work inside the clip.
 //! * **Locked tracks.** Every command that changes the clips, effects or transitions of a locked
 //!   track is refused with [`EditError::TrackLocked`], so that every caller gets the same rule.
 //!   A move is refused when either its source track or its target track is locked. Locking and
 //!   hiding themselves stay possible, as does adding a track.
 
 use crate::audio_schedule::sample_position;
-use crate::project::{ClipPlacement, speed_in_range, speed_milli, Clip, Effect, Project, Track, TrackKind, Transition, SPEED_SCALE};
+use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, Effect, Project, Track, TrackKind, Transition, SPEED_SCALE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -73,6 +79,12 @@ pub enum EditError {
     SpeedOverlap { key: ClipKey, end: Time, next_start: Time },
     /// A still image has no playback speed to change.
     SpeedOfImage { key: ClipKey },
+    /// A keyframe time is not inside the clip.
+    KeyframeOutsideClip { key: ClipKey, at: Time },
+    /// There is no keyframe at this time.
+    KeyframeNotFound { key: ClipKey, at: Time },
+    /// A number of the place of the clip was set while the clip has no place yet.
+    NoPlacement { key: ClipKey },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -127,6 +139,9 @@ impl fmt::Display for EditError {
                 key.track, key.clip
             ),
             SpeedOfImage { key } => write!(f, "track {}, clip {}: an image has no speed", key.track, key.clip),
+            KeyframeOutsideClip { key, at } => write!(f, "track {}, clip {}: {at} is outside the clip", key.track, key.clip),
+            KeyframeNotFound { key, at } => write!(f, "track {}, clip {}: no keyframe at {at}", key.track, key.clip),
+            NoPlacement { key } => write!(f, "track {}, clip {}: the clip has no placement yet", key.track, key.clip),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
                 for error in errors {
@@ -393,6 +408,7 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     changed.start = new_start;
     changed.source_in = source_in;
     changed.duration = duration;
+    changed.shift_keyframes(Time::from_ticks(-delta.ticks()));
     sort_track(target);
     finish(next)
 }
@@ -433,6 +449,7 @@ pub fn trim_source_in(project: &Project, key: ClipKey, new_source_in: Time) -> R
     let changed = &mut next.tracks[key.track].clips[key.clip];
     changed.source_in = source_in;
     changed.duration = duration;
+    changed.shift_keyframes(Time::from_ticks(-delta.ticks()));
     finish(next)
 }
 
@@ -530,6 +547,7 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     second.source_in = clip.source_in.saturating_add(clip.source_offset(offset));
     second.duration = rest;
     second.fade_in = Time::ZERO;
+    second.shift_keyframes(Time::from_ticks(-offset.ticks()));
 
     let mut next = project.clone();
     let target = &mut next.tracks[key.track];
@@ -669,9 +687,12 @@ pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project,
         let next_start = track.clips.iter().enumerate().filter(|(i, other)| *i != key.clip && other.start >= clip.start).map(|(_, other)| other.start).min().unwrap_or(end);
         return Err(EditError::SpeedOverlap { key, end, next_start });
     }
+    let old_milli = clip.speed_milli();
     let changed = clip_mut(&mut next, key)?;
     changed.speed = milli as f64 / SPEED_SCALE as f64;
     changed.duration = duration;
+    // A keyframe stays on its source frame: that frame now plays at another time of the clip.
+    changed.scale_keyframes(old_milli, milli);
     sort_track(&mut next.tracks[key.track]);
     finish(next)
 }
@@ -684,11 +705,196 @@ pub fn set_output_size(project: &Project, width: u32, height: u32) -> Result<Pro
     finish(next)
 }
 
-/// Sets where a clip sits in the frame; `None` puts it back to fit the frame.
+/// Sets where a clip sits in the frame; `None` puts it back to fit the frame, and so also drops the
+/// keyframes of its place, which would pull it away again.
 pub fn set_placement(project: &Project, key: ClipKey, placement: Option<ClipPlacement>) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let mut next = project.clone();
-    clip_mut(&mut next, key)?.placement = placement;
+    let clip = clip_mut(&mut next, key)?;
+    clip.placement = placement;
+    if placement.is_none() {
+        clip.motion.keyframes.retain(|property, _| !property.is_placement());
+    }
+    finish(next)
+}
+
+/// Sets the static opacity of a clip, from 0 to 1. A clip with opacity keyframes ignores it.
+pub fn set_opacity(project: &Project, key: ClipKey, opacity: f64) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.motion.opacity = opacity;
+    finish(next)
+}
+
+/// Sets the static rotation of a clip, in clockwise degrees. A clip with rotation keyframes ignores it.
+pub fn set_rotation(project: &Project, key: ClipKey, rotation: f64) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.motion.rotation = rotation;
+    finish(next)
+}
+
+/// Whether `at`, in ticks from the start of the clip, is inside it. The end does not count: no
+/// frame of the clip is at its end, so a keyframe there would never show.
+fn inside_clip(clip: &Clip, at: Time) -> bool {
+    at >= Time::ZERO && at < clip.duration
+}
+
+/// The tick of the keyframe of `keys` inside the clip that is within `tolerance` of `at`, or `at`
+/// itself when there is none. The playhead is a raw tick, and a keyframe is where a frame was.
+fn snap_to_keyframe(clip: &Clip, keys: &[Keyframe], at: Time, tolerance: Time) -> Time {
+    nearest_keyframe_inside(keys, at, tolerance, clip.duration).unwrap_or(at)
+}
+
+/// Sets `value` of `target` at `at` ticks from the start of the clip, replacing a keyframe that is
+/// there. `easing` of `None` keeps the easing of the one replaced.
+pub fn set_keyframe(project: &Project, key: ClipKey, target: &KeyframeTarget, at: Time, value: f64, easing: Option<Easing>) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    let clip = clip_mut(&mut next, key)?;
+    if !inside_clip(clip, at) {
+        return Err(EditError::KeyframeOutsideClip { key, at });
+    }
+    let keys = clip.keyframes_mut(target).ok_or(not_an_effect(key, target))?;
+    upsert_keyframe(keys, at, value, easing);
+    finish(next)
+}
+
+fn not_an_effect(key: ClipKey, target: &KeyframeTarget) -> EditError {
+    let effect = match target {
+        KeyframeTarget::EffectParam { effect, .. } => *effect,
+        KeyframeTarget::Property(_) => 0,
+    };
+    EditError::EffectNotFound { key, effect }
+}
+
+/// Removes the keyframe of `target` at `at`, one outside the clip too, which an edit can leave
+/// there. After the last one the static value applies again, and so it does when the ones left are
+/// all outside the clip: they would hold a value that nothing can show or change.
+pub fn remove_keyframe(project: &Project, key: ClipKey, target: &KeyframeTarget, at: Time) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    let clip = clip_mut(&mut next, key)?;
+    let duration = clip.duration;
+    let keys = clip.keyframes_mut(target).ok_or(not_an_effect(key, target))?;
+    let index = keys.binary_search_by_key(&at, |keyframe| keyframe.at).map_err(|_| EditError::KeyframeNotFound { key, at })?;
+    keys.remove(index);
+    if !keys.iter().any(|keyframe| keyframe.at >= Time::ZERO && keyframe.at < duration) {
+        keys.clear();
+    }
+    clip.prune_keyframes();
+    finish(next)
+}
+
+/// Sets `property` of a clip to `value`: a keyframe at `at` when it has keyframes, otherwise its
+/// static value, which for a number of the place needs the clip to have a place. A keyframe within
+/// half a frame of `at` is the one set, at its own tick. `output_aspect` and `source_aspect`, width
+/// over height, give the shape of the picture: a position without keyframes moves with the middle
+/// of a picture whose width has them, and `value` is what is shown, so it is stored to match.
+pub fn set_motion_value(project: &Project, key: ClipKey, property: ClipProperty, at: Time, value: f64, output_aspect: f64, source_aspect: f64) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    let tolerance = keyframe_tolerance(project.output.frame_duration);
+    let clip = clip_mut(&mut next, key)?;
+    if clip.motion.has_keyframes(property) {
+        let at = snap_to_keyframe(clip, clip.keyframes_of(&KeyframeTarget::Property(property)).unwrap_or_default(), at, tolerance);
+        if !inside_clip(clip, at) {
+            return Err(EditError::KeyframeOutsideClip { key, at });
+        }
+        upsert_keyframe(clip.keyframes_mut(&KeyframeTarget::Property(property)).expect("a property always has a list"), at, value, None);
+        return finish(next);
+    }
+    match property {
+        ClipProperty::Opacity => clip.motion.opacity = value,
+        ClipProperty::Rotation => clip.motion.rotation = value,
+        ClipProperty::X | ClipProperty::Y | ClipProperty::Width => {
+            let current = clip.placement.ok_or(EditError::NoPlacement { key })?;
+            let grown = grown_width(clip, at, current.width);
+            let shape = PlacedRect::of(Some(current), output_aspect, source_aspect);
+            let placement = clip.placement.as_mut().expect("checked above");
+            match property {
+                ClipProperty::X => placement.x = value - grown / 2.0,
+                ClipProperty::Y => placement.y = value - grown * shape.height / shape.width / 2.0,
+                _ => placement.width = value,
+            }
+        }
+    }
+    finish(next)
+}
+
+/// Puts the clip at `placement` at `at`: each number with keyframes gets a keyframe there, the
+/// others change the static place. The drag of the frame on the player. `placement` is the picture
+/// as shown, so a position without keyframes beside a width with them is stored to give it back:
+/// see [`set_motion_value`] for the aspects. A keyframe within half a frame of `at` is set at its
+/// own tick.
+pub fn set_placement_at(project: &Project, key: ClipKey, at: Time, placement: ClipPlacement, output_aspect: f64, source_aspect: f64) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    let tolerance = keyframe_tolerance(project.output.frame_duration);
+    let clip = clip_mut(&mut next, key)?;
+    let fit = PlacedRect::of(clip.placement, output_aspect, source_aspect);
+    let mut base = clip.placement.unwrap_or(ClipPlacement { x: fit.x, y: fit.y, width: fit.width });
+    let grown = if clip.motion.has_keyframes(ClipProperty::Width) { base.width - placement.width } else { 0.0 };
+    let shifts = [grown / 2.0, grown * fit.height / fit.width / 2.0, 0.0];
+    for ((property, value, stored), shift) in [(ClipProperty::X, placement.x, &mut base.x), (ClipProperty::Y, placement.y, &mut base.y), (ClipProperty::Width, placement.width, &mut base.width)].into_iter().zip(shifts) {
+        if clip.motion.has_keyframes(property) {
+            let keys = clip.keyframes_of(&KeyframeTarget::Property(property)).unwrap_or_default();
+            let near = snap_to_keyframe(clip, keys, at, tolerance);
+            // Snapped to a keyframe the picture was not shown at: a value that is what is shown at
+            // `at` was not changed by this edit, and must not move that keyframe.
+            if near != at && sample_keyframes(keys, at).is_some_and(|shown| (shown - value).abs() <= 1e-9) {
+                continue;
+            }
+            if !inside_clip(clip, near) {
+                return Err(EditError::KeyframeOutsideClip { key, at: near });
+            }
+            upsert_keyframe(clip.motion.keyframes.entry(property).or_default(), near, value, None);
+        } else {
+            *stored = value - shift;
+        }
+    }
+    clip.placement = Some(base);
+    finish(next)
+}
+
+/// How much narrower than the static width the picture is at `at`, when the width has keyframes, so
+/// that a static position is the one that the middle of the picture moves with. At `at` itself and
+/// not at a keyframe near it: that is the time the picture is shown at.
+fn grown_width(clip: &Clip, at: Time, static_width: f64) -> f64 {
+    let keys = clip.keyframes_of(&KeyframeTarget::Property(ClipProperty::Width)).unwrap_or_default();
+    sample_keyframes(keys, at).map_or(0.0, |width| static_width - width)
+}
+
+/// Sets the parameters of an effect from what is shown at `at`: a numeric parameter with keyframes
+/// gets a keyframe there if it changed and keeps its static value, and the others are set as they are.
+pub fn set_effect_params_at(project: &Project, key: ClipKey, effect: usize, params: Map<String, Value>, at: Time) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    let clip = clip_mut(&mut next, key)?;
+    let tolerance = keyframe_tolerance(project.output.frame_duration);
+    let (duration, shown_at) = (clip.duration, at);
+    let target = clip.effects.get_mut(effect).ok_or(EditError::EffectNotFound { key, effect })?;
+    let mut merged = params;
+    for (name, keys) in &mut target.keyframes {
+        if let Some(value) = merged.get(name).and_then(Value::as_f64) {
+            let at = nearest_keyframe_inside(keys, shown_at, tolerance, duration).unwrap_or(shown_at);
+            let inside = at >= Time::ZERO && at < duration;
+            // The value shown is that of `shown_at` or, when the playhead is on a keyframe, of its
+            // tick. Either one is not a change, and must not move the keyframe.
+            let unchanged = [shown_at, at].iter().any(|time| sample_keyframes(keys, *time) == Some(value));
+            if !unchanged {
+                if !inside {
+                    return Err(EditError::KeyframeOutsideClip { key, at });
+                }
+                upsert_keyframe(keys, at, value, None);
+            }
+        }
+        match target.params.get(name) {
+            Some(value) => merged.insert(name.clone(), value.clone()),
+            None => merged.remove(name),
+        };
+    }
+    target.params = merged;
     finish(next)
 }
 

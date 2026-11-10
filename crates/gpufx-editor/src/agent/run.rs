@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 
-use d3d12_backend::{is_asset_source, overwritten_input, probe_media, read_package_info, same_file, EncoderChoice, ExportJob, MediaProbe, ProjectPaths};
-use engine::{clip_at, frame_count, frame_time, nearest_free_start, Clip, ClipKey, Effect, Project, Time, TrackKind, Transition};
+use d3d12_backend::{is_asset_source, overwritten_input, probe_media, read_package_info, same_file, EncoderChoice, ExportJob, MediaProbe, ParamKind, ProjectPaths};
+use engine::{clip_at, frame_count, frame_time, nearest_free_start, Clip, ClipKey, Effect, KeyframeTarget, Project, Time, TrackKind, Transition};
 use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
@@ -223,6 +223,26 @@ fn check_speed(speed: f64) -> Result<(), AgentError> {
     }
 }
 
+/// Only a float parameter that a package declares, and not one a clock drives, can have keyframes.
+/// A package that is not in the catalog is left to the render to judge.
+/// Refuses a keyframe of a parameter the effect has no float of, and, when `value` is given, one
+/// outside the limits the package states for it.
+fn check_keyframe_target(state: &EditorState, clip: ClipRef, target: &KeyframeTarget, value: Option<f64>) -> Result<(), AgentError> {
+    let KeyframeTarget::EffectParam { effect, param } = target else { return Ok(()) };
+    let package = state.project().tracks.get(clip.track).and_then(|track| track.clips.get(clip.clip)).and_then(|found| found.effects.get(*effect)).map(|found| found.package.as_str());
+    let Some(infos) = package.and_then(|package| state.catalog.params_of(package)) else { return Ok(()) };
+    match infos.iter().find(|info| info.name == *param) {
+        Some(info) if info.kind == ParamKind::Float && !crate::params::is_clip_clock(param) => match value {
+            Some(value) if !value.is_finite() || info.min.is_some_and(|min| value < min) || info.max.is_some_and(|max| value > max) => {
+                Err(AgentError::new("invalid_params", format!("{value} is outside the limits of parameter {param}")))
+            }
+            _ => Ok(()),
+        },
+        Some(_) => Err(AgentError::new("invalid_params", format!("parameter {param} cannot have keyframes: only float parameters can"))),
+        None => Err(AgentError::new("invalid_params", format!("the package has no parameter {param}"))),
+    }
+}
+
 fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<MediaProbe, AgentError>>) -> Result<Value, AgentError> {
     let refused = |error: engine::EditError| AgentError::from_edit(&error);
     let mut result = Map::new();
@@ -259,7 +279,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         AgentEdit::ClipDelete { clip } => state.apply_agent_command(|project| engine::delete_clip(project, clip.into())).map_err(refused)?,
         AgentEdit::EffectAdd { clip, package, params } => {
             let params = crate::params::without_clip_clock(state.catalog.params_of(&package), params);
-            state.apply_agent_command(|project| engine::add_effect(project, clip.into(), Effect { package, params })).map_err(refused)?
+            state.apply_agent_command(|project| engine::add_effect(project, clip.into(), Effect { package, params, keyframes: Default::default() })).map_err(refused)?
         }
         AgentEdit::EffectRemove { clip, effect } => state.apply_agent_command(|project| engine::remove_effect(project, clip.into(), effect)).map_err(refused)?,
         AgentEdit::TransitionAdd { track, after_clip, package, duration, params } => {
@@ -274,6 +294,29 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         AgentEdit::ClipSetGain { clip, gain_db } => state.apply_agent_command(|project| engine::set_gain(project, clip.into(), gain_db)).map_err(refused)?,
         AgentEdit::ClipSetMuted { clip, muted } => state.apply_agent_command(|project| engine::set_muted(project, clip.into(), muted)).map_err(refused)?,
         AgentEdit::ClipSetFades { clip, fade_in, fade_out } => state.apply_agent_command(|project| engine::set_fades(project, clip.into(), fade_in, fade_out)).map_err(refused)?,
+        AgentEdit::ClipSetTransform { clip, placement, opacity, rotation } => state
+            .apply_agent_command(|project| {
+                let mut next = project.clone();
+                if let Some(placement) = placement {
+                    next = engine::set_placement(&next, clip.into(), Some(placement))?;
+                }
+                if let Some(opacity) = opacity {
+                    next = engine::set_opacity(&next, clip.into(), opacity)?;
+                }
+                if let Some(rotation) = rotation {
+                    next = engine::set_rotation(&next, clip.into(), rotation)?;
+                }
+                Ok(next)
+            })
+            .map_err(refused)?,
+        AgentEdit::KeyframeSet { clip, target, at, value, easing } => {
+            check_keyframe_target(state, clip, &target, Some(value))?;
+            state.apply_agent_command(|project| engine::set_keyframe(project, clip.into(), &target, at, value, easing)).map_err(refused)?
+        }
+        // No check of the target: a keyframe of a parameter that has since changed kind must still go.
+        AgentEdit::KeyframeRemove { clip, target, at } => {
+            state.apply_agent_command(|project| engine::remove_keyframe(project, clip.into(), &target, at)).map_err(refused)?
+        }
     }
     Ok(Value::Object(result))
 }
@@ -599,6 +642,25 @@ mod tests {
         let revision = host.state.revision();
         let edit = AgentEdit::ClipSetSpeed { clip: ClipRef { track: 0, clip: 0 }, speed: 0.01 };
         assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: revision, edit })), "out_of_range");
+    }
+
+    #[test]
+    fn an_agent_sets_and_removes_a_keyframe_and_the_time_is_checked() {
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Video);
+        host.state.add_clip_from_file(0, Path::new("a.mp4"));
+        let clip = ClipRef { track: 0, clip: 0 };
+        let target = KeyframeTarget::Property(engine::ClipProperty::Opacity);
+        let revision = host.state.revision();
+        let set = AgentEdit::KeyframeSet { clip, target: target.clone(), at: Time::from_ticks(900), value: 0.5, easing: None };
+        host.run(AgentRequest::Edit { expected_revision: revision, edit: set }).expect("set");
+        assert!(host.state.project().tracks[0].clips[0].motion.has_keyframes(engine::ClipProperty::Opacity));
+        let revision = host.state.revision();
+        let outside = AgentEdit::KeyframeSet { clip, target: target.clone(), at: Time::from_ticks(i64::MAX / 2), value: 0.5, easing: None };
+        assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: revision, edit: outside })), "keyframe_outside_clip");
+        let remove = AgentEdit::KeyframeRemove { clip, target, at: Time::from_ticks(900) };
+        host.run(AgentRequest::Edit { expected_revision: revision, edit: remove }).expect("remove");
+        assert!(!host.state.project().tracks[0].clips[0].motion.has_keyframes(engine::ClipProperty::Opacity));
     }
 
     #[test]

@@ -76,6 +76,19 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         let next = engine::set_fades(&expected, key(0, 1), t(0.1), Time::ZERO).unwrap();
         step(&mut session, "clip_set_fades", json!({"clip": {"track": 0, "clip": 1}, "fade_in": 9000, "fade_out": 0}), next)
     };
+    let opacity = engine::KeyframeTarget::Property(engine::ClipProperty::Opacity);
+    expected = {
+        let next = engine::set_keyframe(&expected, key(0, 0), &opacity, Time::from_ticks(9000), 0.25, Some(engine::Easing::EaseOut)).unwrap();
+        step(&mut session, "keyframe_set", json!({"clip": clip0, "property": "opacity", "at": 9000, "value": 0.25, "easing": "ease_out"}), next)
+    };
+    expected = {
+        let next = engine::remove_keyframe(&expected, key(0, 0), &opacity, Time::from_ticks(9000)).unwrap();
+        step(&mut session, "keyframe_remove", json!({"clip": clip0, "property": "opacity", "at": 9000}), next)
+    };
+    expected = {
+        let next = engine::set_rotation(&engine::set_opacity(&expected, key(0, 0), 0.5).unwrap(), key(0, 0), 45.0).unwrap();
+        step(&mut session, "clip_set_transform", json!({"clip": clip0, "opacity": 0.5, "rotation": 45.0}), next)
+    };
     expected = {
         let next = engine::trim_end(&expected, key(0, 1), t(3.5)).unwrap();
         step(&mut session, "clip_trim_end", json!({"clip": {"track": 0, "clip": 1}, "end": 315000}), next)
@@ -85,7 +98,7 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         step(&mut session, "clip_split", json!({"clip": clip0, "at": SECOND}), next)
     };
     expected = {
-        let next = engine::add_effect(&expected, key(0, 0), Effect { package: "mix".into(), params: Map::new() }).unwrap();
+        let next = engine::add_effect(&expected, key(0, 0), Effect { package: "mix".into(), params: Map::new(), keyframes: Default::default() }).unwrap();
         step(&mut session, "effect_add", json!({"clip": clip0, "package": "mix"}), next)
     };
     expected = {

@@ -881,14 +881,14 @@ fn params(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value
 }
 
 fn with_effect() -> Project {
-    let effect = Effect { package: "blur".into(), params: params(serde_json::json!({ "radius": 2 })) };
+    let effect = Effect { package: "blur".into(), params: params(serde_json::json!({ "radius": 2 })), keyframes: Default::default() };
     add_effect(&chain(), key(0, 0), effect).unwrap()
 }
 
 #[test]
 fn effect_params_replace_only_that_effect() {
     let base = with_effect();
-    let two = add_effect(&base, key(0, 0), Effect { package: "b".into(), params: Default::default() }).unwrap();
+    let two = add_effect(&base, key(0, 0), Effect { package: "b".into(), params: Default::default(), keyframes: Default::default() }).unwrap();
     let next = set_effect_params(&two, key(0, 0), 1, params(serde_json::json!({ "x": 1.5 }))).unwrap();
     let effects = &next.tracks[0].clips[0].effects;
     assert_eq!(effects[0], two.tracks[0].clips[0].effects[0], "the other effect stays");

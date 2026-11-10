@@ -4,6 +4,46 @@ use egui::{Color32, CornerRadius, Painter, Pos2, Rect, Response, Sense, Shape, S
 
 use super::theme;
 
+/// The side of a keyframe button.
+const KEYFRAME_BUTTON_SIDE: f32 = 16.0;
+
+/// A diamond that adds or removes a keyframe: filled on a keyframe, outlined in the accent colour
+/// when the row has keyframes elsewhere, and dim otherwise.
+pub fn keyframe_button(ui: &mut egui::Ui, on_keyframe: bool, keyed: bool, tooltip: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(KEYFRAME_BUTTON_SIDE), Sense::click());
+    let center = rect.center();
+    let radius = rect.width() * 0.35;
+    let color = if !ui.is_enabled() {
+        theme::text_dim().gamma_multiply(0.5)
+    } else if on_keyframe || keyed {
+        theme::accent_text()
+    } else {
+        theme::text_dim()
+    };
+    let points = vec![center + Vec2::new(0.0, -radius), center + Vec2::new(radius, 0.0), center + Vec2::new(0.0, radius), center + Vec2::new(-radius, 0.0)];
+    let fill = if on_keyframe { color } else { Color32::TRANSPARENT };
+    ui.painter().add(Shape::convex_polygon(points, fill, Stroke::new(1.25, color)));
+    response.on_hover_text(tooltip)
+}
+
+/// A small arrow that moves the playhead to the keyframe before (`forward` false) or after the
+/// playhead. Off when there is none that way.
+pub fn keyframe_step_button(ui: &mut egui::Ui, forward: bool, tooltip: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(KEYFRAME_BUTTON_SIDE), Sense::click());
+    let color = if !ui.is_enabled() {
+        theme::text_dim().gamma_multiply(0.5)
+    } else if response.hovered() {
+        theme::accent_text()
+    } else {
+        theme::text_dim()
+    };
+    let (center, reach, half) = (rect.center(), rect.width() * 0.22, rect.height() * 0.28);
+    let direction = if forward { 1.0 } else { -1.0 };
+    let points = vec![center + Vec2::new(-reach * direction, -half), center + Vec2::new(reach * direction, 0.0), center + Vec2::new(-reach * direction, half)];
+    ui.painter().add(Shape::line(points, Stroke::new(1.5, color)));
+    response.on_hover_text(tooltip)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
     Film,
