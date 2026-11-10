@@ -1,4 +1,4 @@
-# Initialises the FFmpegGpuFilter submodule and its packages, downloads the LGPL and GPL FFmpeg builds
+# Initialises the FFmpegGpuFilter submodule and its packages and the GpufxVideoEditor-Assets submodule, downloads the LGPL and GPL FFmpeg builds
 # into third_party/ffmpeg and third_party/ffmpeg-gpl, and generates the POC test clips.
 # The clips are encoded by the ffmpeg on PATH (libx264 required). They are local test data
 # and are never distributed, so a GPL build is fine for this step only.
@@ -27,6 +27,8 @@ function Initialize-Submodules {
     & git -C $repoRoot submodule update --init external/FFmpegGpuFilter
     if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
     & git -C (Join-Path $repoRoot 'external\FFmpegGpuFilter') submodule update --init packages
+    if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
+    & git -C $repoRoot submodule update --init external/GpufxVideoEditor-Assets
     if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
 }
 

@@ -4,14 +4,17 @@ Timeline video editor built on `gpufx-core`. The plan is in `docs/plans/plan-vid
 
 `external/FFmpegGpuFilter` is a git submodule with two submodules of its own. `packages` holds the effects, and the editor and its tests need it. `external/FFmpeg` is not checked out, because the editor only needs `gpufx-core`.
 
+`external/GpufxVideoEditor-Assets` is a git submodule holding the editor's own asset packs and the script that builds their zips.
+
 Never use `--recursive` here, because it fetches the FFmpeg sources. After cloning or pulling:
 
 ```sh
 git submodule update --init external/FFmpegGpuFilter
 git -C external/FFmpegGpuFilter submodule update --init packages
+git submodule update --init external/GpufxVideoEditor-Assets
 ```
 
-`scripts/setup-poc.ps1` runs both. Tests that need effects skip themselves when `packages` is empty, so an empty folder can look like a green run. `scripts/build-variants.ps1` stops in that case.
+`scripts/setup-poc.ps1` runs all three. Tests that need effects skip themselves when `packages` is empty, so an empty folder can look like a green run. `scripts/build-variants.ps1` stops in that case.
 
 ## Working with the FFmpegGpuFilter session
 
