@@ -122,7 +122,7 @@ fn package_problem(package: &str, package_roots: &[PathBuf]) -> Option<AgentErro
 }
 
 fn entry_json(entry: &&PackageEntry) -> Value {
-    json!({"package": entry.package, "name": entry.name, "description": entry.description, "params": entry.params.iter().map(|param| &param.name).collect::<Vec<_>>()})
+    json!({"package": entry.package, "name": entry.name, "description": entry.description, "params": entry.params.iter().filter(|param| !crate::params::is_clip_clock(&param.name)).map(|param| &param.name).collect::<Vec<_>>()})
 }
 
 fn package_list(package_roots: &[PathBuf], filter: Option<&str>) -> Value {
@@ -251,7 +251,10 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             result.insert("clip".to_owned(), json!(ClipRef { track: clip.track, clip: clip.clip + 1 }));
         }
         AgentEdit::ClipDelete { clip } => state.apply_agent_command(|project| engine::delete_clip(project, clip.into())).map_err(refused)?,
-        AgentEdit::EffectAdd { clip, package, params } => state.apply_agent_command(|project| engine::add_effect(project, clip.into(), Effect { package, params })).map_err(refused)?,
+        AgentEdit::EffectAdd { clip, package, params } => {
+            let params = crate::params::without_clip_clock(state.catalog.params_of(&package), params);
+            state.apply_agent_command(|project| engine::add_effect(project, clip.into(), Effect { package, params })).map_err(refused)?
+        }
         AgentEdit::EffectRemove { clip, effect } => state.apply_agent_command(|project| engine::remove_effect(project, clip.into(), effect)).map_err(refused)?,
         AgentEdit::TransitionAdd { track, after_clip, package, duration, params } => {
             let transition = Transition { after_clip, package, duration: duration.unwrap_or(DEFAULT_TRANSITION_DURATION), params };

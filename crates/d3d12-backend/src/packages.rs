@@ -6,6 +6,11 @@ use gpufx_core::expr::Expr;
 use gpufx_core::manifest::{ParamDef, ParamType};
 use gpufx_core::Package;
 
+/// The parameter a compositor fills with the seconds since the start of the clip.
+pub const CLIP_TIME: &str = "clip_time";
+/// The parameter a compositor fills with the length of the clip on the timeline, in seconds.
+pub const CLIP_DURATION: &str = "clip_duration";
+
 /// The type of a parameter, as a manifest states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamKind {

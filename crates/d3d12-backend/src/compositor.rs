@@ -5,6 +5,7 @@
 //! Decoded frames go through a `scale|effects...` graph per clip; transitions and track compositing
 //! are graphs on those images. The CPU waits only when reading the finished image.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -12,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
-use engine::schedule::Progress;
-use engine::{ClipPlacement, Effect as ProjectEffect, PlacedRect};
+use engine::schedule::{ClipClock, Progress};
+use engine::{ClipPlacement, Effect as ProjectEffect, PlacedRect, Time, TICKS_PER_SECOND};
 use gpufx_core::d3d12::D3d12Frame;
 use gpufx_core::{ColorInfo, Effect, EffectGraph, FrameInfo, GpuContext, Package, PixelFormat};
 use serde_json::{Map, Value};
@@ -29,6 +30,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SA
 
 use crate::decoder::{DecodedFrame, PublishClock, SequentialDecoder};
 use crate::gpu::Gpu;
+use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -278,6 +280,53 @@ fn apply_params(effect: &mut Effect, package: &str, params: &Map<String, Value>,
     Ok(())
 }
 
+/// The parameters a clip's clock drives, in seconds. Only those of a package that declares them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ClockParams {
+    time: bool,
+    duration: bool,
+}
+
+/// Which clock parameters `package` declares.
+fn clock_params(package: &Package) -> ClockParams {
+    let declares = |wanted: &str| package.manifest.params.iter().any(|param| param.name == wanted);
+    ClockParams { time: declares(CLIP_TIME), duration: declares(CLIP_DURATION) }
+}
+
+impl ClockParams {
+    /// The clock parameter names this package declares, which are never taken from a project.
+    fn driven(self) -> Vec<&'static str> {
+        [(self.time, CLIP_TIME), (self.duration, CLIP_DURATION)].into_iter().filter_map(|(declared, name)| declared.then_some(name)).collect()
+    }
+
+    /// `params` without the driven ones, so a stored value is ignored as a stored `progress` is.
+    /// Borrows when nothing has to go, the usual case: this runs for every effect of every frame.
+    fn user_params<'a>(self, params: &'a Map<String, Value>) -> Cow<'a, Map<String, Value>> {
+        let driven = self.driven();
+        if !driven.iter().any(|name| params.contains_key(*name)) {
+            return Cow::Borrowed(params);
+        }
+        Cow::Owned(params.iter().filter(|(name, _)| !driven.contains(&name.as_str())).map(|(name, value)| (name.clone(), value.clone())).collect())
+    }
+}
+
+/// Timeline ticks as the seconds a shader is given.
+fn seconds(time: Time) -> f64 {
+    time.ticks() as f64 / TICKS_PER_SECOND as f64
+}
+
+/// Gives each effect of a built clip graph the clock of the clip it runs on.
+fn set_clip_clock(graph: &mut EffectGraph, clocks: &[ClockParams], effects: &[ProjectEffect], clock: ClipClock) -> Result<(), String> {
+    for (index, (declared, effect)) in clocks.iter().zip(effects).enumerate() {
+        for (is_declared, name, value) in [(declared.time, CLIP_TIME, clock.elapsed), (declared.duration, CLIP_DURATION, clock.duration)] {
+            if is_declared {
+                graph.set_param(&format!("fx{index}.{name}"), &[seconds(value)]).map_err(|e| format!("package {}: setting {name} failed: {e}", effect.package))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// What a built graph is tied to: the package, which parameters were set (one left out must go
 /// back to its default) and every text value, since an expression needs new shaders. Numbers are
 /// not part of it, so dragging a slider only updates the uniforms.
@@ -329,6 +378,8 @@ fn needs_rebuild(gpu: &Gpu, graph: &EffectGraph, pads: &[(u32, u32)]) -> bool {
 struct ClipGraph {
     graph: EffectGraph,
     applied: Vec<Map<String, Value>>,
+    /// One per effect, in order.
+    clocks: Vec<ClockParams>,
 }
 
 struct TransitionGraph {
@@ -521,23 +572,28 @@ fn open_effect(context: &Arc<GpuContext>, path: &Path, package: &str) -> Result<
     Effect::new(context.clone(), opened).map_err(|e| format!("package {package}: {e}"))
 }
 
-/// `scale` to the project size, then the clip's effects, as one graph.
-fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32, height: u32, effects: &[ProjectEffect]) -> Result<EffectGraph, String> {
+/// `scale` to the project size, then the clip's effects, as one graph, and which clock parameters
+/// each effect declares.
+fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32, height: u32, effects: &[ProjectEffect]) -> Result<(EffectGraph, Vec<ClockParams>), String> {
     let scale_package = package_path(paths, "packages/gpufx/ffmpeg/scale")?;
     let mut pending = Vec::with_capacity(effects.len() + 1);
     let mut scale = open_effect(context, &scale_package, "scale")?;
     scale.params_mut().set("w", &[f64::from(width)]).map_err(|e| format!("scale.w: {e}"))?;
     scale.params_mut().set("h", &[f64::from(height)]).map_err(|e| format!("scale.h: {e}"))?;
     pending.push(("scale".to_owned(), scale));
+    let mut clocks = Vec::with_capacity(effects.len());
     for (index, project_effect) in effects.iter().enumerate() {
         let path = package_path(paths, &project_effect.package)?;
         let mut effect = open_effect(context, &path, &project_effect.package)?;
-        apply_params(&mut effect, &project_effect.package, &project_effect.params, &[])?;
+        let clock = clock_params(effect.package());
+        apply_params(&mut effect, &project_effect.package, &project_effect.params, &clock.driven())?;
+        clocks.push(clock);
         pending.push((format!("fx{index}"), effect));
     }
     let text = (0..pending.len()).map(|i| format!("e{i}")).collect::<Vec<_>>().join("|");
     let mut pending = pending.into_iter();
-    EffectGraph::parse(&text, |_| Ok(pending.next().expect("one effect per item"))).map_err(|e| format!("building the clip graph failed: {e}"))
+    let graph = EffectGraph::parse(&text, |_| Ok(pending.next().expect("one effect per item"))).map_err(|e| format!("building the clip graph failed: {e}"))?;
+    Ok((graph, clocks))
 }
 
 fn build_transition_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, package: &str, params: &Map<String, Value>) -> Result<EffectGraph, String> {
@@ -573,7 +629,7 @@ impl Compositor for D3d12Compositor {
         Ok(decoder)
     }
 
-    fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SequentialDecoder as Decoder>::Frame, effects: &[ProjectEffect], placement: Option<ClipPlacement>, at: FrameContext) -> Result<ImageId, RenderError> {
+    fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SequentialDecoder as Decoder>::Frame, effects: &[ProjectEffect], placement: Option<ClipPlacement>, clock: ClipClock, at: FrameContext) -> Result<ImageId, RenderError> {
         let info = Self::info(at);
         let (input, output) = input_then_output(|| decoded_input(frame), || self.acquire())?;
         let (width, height) = (self.width, self.height);
@@ -581,7 +637,12 @@ impl Compositor for D3d12Compositor {
         let mut inputs = [input];
         let (gpu, paths) = (&self.gpu, &self.paths);
         let shape: Vec<String> = effects.iter().map(|effect| graph_shape(&effect.package, &effect.params)).collect();
-        let build = || build_clip_graph(&gpu.context, paths, width, height, effects).map(|graph| ClipGraph { graph, applied: effects.iter().map(|effect| effect.params.clone()).collect() });
+        let build = || {
+            build_clip_graph(&gpu.context, paths, width, height, effects).map(|(graph, clocks)| {
+                let applied = clocks.iter().zip(effects).map(|(clock, effect)| clock.user_params(&effect.params).into_owned()).collect();
+                ClipGraph { graph, applied, clocks }
+            })
+        };
         let pads = [(inputs[0].width, inputs[0].height)];
         let (clip_graphs, images) = (&mut self.clip_graphs, &mut self.images);
         let mut render = || -> Result<(), String> {
@@ -589,12 +650,13 @@ impl Compositor for D3d12Compositor {
             let mut changed = false;
             let mut failure = None;
             for (index, effect) in effects.iter().enumerate() {
-                changed |= built.applied[index] != effect.params;
-                if let Err(message) = update_graph_params(&mut built.graph, &format!("fx{index}."), &effect.package, &built.applied[index], &effect.params) {
+                let wanted = built.clocks[index].user_params(&effect.params);
+                changed |= built.applied[index] != *wanted;
+                if let Err(message) = update_graph_params(&mut built.graph, &format!("fx{index}."), &effect.package, &built.applied[index], &wanted) {
                     failure = Some(message);
                     break;
                 }
-                built.applied[index].clone_from(&effect.params);
+                built.applied[index].clone_from(&wanted);
             }
             // A failure part way may have left an earlier size parameter changed, and `applied`
             // then hides that from the next frame, so the graph goes as the transition's does.
@@ -606,6 +668,7 @@ impl Compositor for D3d12Compositor {
                 clip_graphs.retain(|entry| entry != key);
             }
             let built = clip_graphs.get_or_build(key, shape.as_slice(), &build)?;
+            set_clip_clock(&mut built.graph, &built.clocks, effects, clock)?;
             Self::run_graph(gpu, &mut built.graph, &mut inputs, images, output, width, height, &info)
         };
         let result = render();
@@ -755,6 +818,16 @@ mod tests {
         let mut inputs = [images[0].frame(16, 16)];
         let error = D3d12Compositor::run_graph(&gpu, &mut overlay, &mut inputs, &mut images, ImageId(0), 16, 16, &FrameInfo::new(0.0, 0)).expect_err("one input is refused");
         assert!(error.starts_with("computing the output size failed"), "{error}");
+    }
+
+    #[test]
+    fn a_stored_clock_value_is_dropped_only_where_the_package_declares_it() {
+        let stored = params(json!({ "clip_time": 9, "clip_duration": 9, "amp": 1 }));
+        let both = ClockParams { time: true, duration: true };
+        assert_eq!(both.user_params(&stored).into_owned(), params(json!({ "amp": 1 })));
+        let only_time = ClockParams { time: true, duration: false };
+        assert_eq!(only_time.user_params(&stored).into_owned(), params(json!({ "clip_duration": 9, "amp": 1 })));
+        assert_eq!(ClockParams::default().user_params(&stored).into_owned(), stored, "a package without a clock keeps today's behaviour");
     }
 
     #[test]

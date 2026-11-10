@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use crate::gpu::Gpu;
+use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use gpufx_core::{Effect, EffectGraph, FrameInfo, GpuContext, Image, ImageMut, Manifest, Package, StreamInfo};
 
 /// The width and height of every preview, and of the two built-in pictures.
@@ -67,6 +68,9 @@ pub struct PreviewLoop {
     pub is_static: bool,
 }
 
+/// The length of the clip a clock-driven effect is told it runs on, in seconds: the loop itself.
+const PREVIEW_CLIP_SECONDS: f64 = PREVIEW_FRAMES as f64 / PREVIEW_FPS as f64;
+
 /// How a package is driven, which is what its manifest says it takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -117,6 +121,11 @@ fn loop_sample(role: Role, k: u32) -> Sample {
         Role::ProgressEffect | Role::Transition => Some(f64::from(k) / f64::from(PREVIEW_FRAMES - 1)),
     };
     Sample { time: f64::from(k) / f64::from(PREVIEW_FPS), frame: u64::from(k), progress }
+}
+
+/// The summed absolute difference of two pictures of the same size.
+fn byte_distance(a: &[u8], b: &[u8]) -> u64 {
+    a.iter().zip(b).map(|(x, y)| u64::from(x.abs_diff(*y))).sum()
 }
 
 /// Whether every picture holds the same bytes.
@@ -268,6 +277,10 @@ struct PackageRender<'a> {
     inputs: Vec<Image<'a>>,
     output_width: u32,
     output_height: u32,
+    /// Which of [`CLIP_TIME`] and [`CLIP_DURATION`] the package declares. A clip's clock only ever
+    /// reaches effects, so a transition is left at its defaults, as in the compositor.
+    clock_time: bool,
+    clock_duration: bool,
 }
 
 impl<'a> PackageRender<'a> {
@@ -278,6 +291,8 @@ impl<'a> PackageRender<'a> {
             other => Failure::from(other.to_string()),
         })?;
         let role = role_of(&package.manifest)?;
+        let declares = |wanted: &str| role != Role::Transition && package.manifest.params.iter().any(|param| param.name == wanted);
+        let (clock_time, clock_duration) = (declares(CLIP_TIME), declares(CLIP_DURATION));
         let effect = Effect::new(context.clone(), package).map_err(|e| e.to_string())?;
         let mut holder = Some(effect);
         let graph = EffectGraph::parse(if role == Role::Transition { "transition" } else { "effect" }, |_| Ok(("preview".to_owned(), holder.take().expect("one effect")))).map_err(|e| e.to_string())?;
@@ -293,13 +308,40 @@ impl<'a> PackageRender<'a> {
         if output_width == 0 || output_height == 0 || output_width > MAX_OUTPUT_SIDE || output_height > MAX_OUTPUT_SIDE {
             return Err(format!("the output would be {output_width}x{output_height}").into());
         }
-        Ok(Self { graph, role, inputs, output_width, output_height })
+        Ok(Self { graph, role, inputs, output_width, output_height, clock_time, clock_duration })
+    }
+
+    /// Whether a clip's clock reaches this package, so what it draws depends on the moment.
+    fn follows_clip_clock(&self) -> bool {
+        self.clock_time || self.clock_duration
+    }
+
+    /// The frame of the loop furthest from the input. An effect that follows the clip's clock may
+    /// be finished long before a fixed moment, or not yet started at the first frame, so any one
+    /// moment could show the untouched picture.
+    fn most_changed_frame(&mut self) -> Result<Vec<u8>, Failure> {
+        let input = self.inputs[0].data;
+        let mut best: Option<(u64, Vec<u8>)> = None;
+        for k in (0..PREVIEW_FRAMES).step_by(2) {
+            let frame = self.render(loop_sample(self.role, k))?;
+            let distance = byte_distance(input, &frame);
+            if best.as_ref().is_none_or(|(most, _)| distance > *most) {
+                best = Some((distance, frame));
+            }
+        }
+        Ok(best.expect("at least one frame").1)
     }
 
     /// One frame, with [`PREVIEW_SIZE`] sides.
     fn render(&mut self, sample: Sample) -> Result<Vec<u8>, String> {
         if let Some(progress) = sample.progress {
             self.graph.set_param("progress", &[progress]).map_err(|e| format!("setting progress failed: {e}"))?;
+        }
+        if self.clock_time {
+            self.graph.set_param(CLIP_TIME, &[sample.time.min(PREVIEW_CLIP_SECONDS)]).map_err(|e| format!("setting {CLIP_TIME} failed: {e}"))?;
+        }
+        if self.clock_duration {
+            self.graph.set_param(CLIP_DURATION, &[PREVIEW_CLIP_SECONDS]).map_err(|e| format!("setting {CLIP_DURATION} failed: {e}"))?;
         }
         let (width, height) = (self.output_width, self.output_height);
         let mut out = vec![0u8; width as usize * height as usize * 4];
@@ -341,14 +383,20 @@ impl PreviewRenderer {
 
     /// The single picture of a package: RGBA8 with [`PREVIEW_SIZE`] sides.
     pub fn render_still(&mut self, package: &Path) -> Result<Vec<u8>, PreviewError> {
-        self.guarded(package, |render| Ok(render.render(still_sample(render.role))?))
+        self.guarded(package, |render| {
+            if render.follows_clip_clock() {
+                return render.most_changed_frame();
+            }
+            Ok(render.render(still_sample(render.role))?)
+        })
     }
 
     /// The animation of a package, played on hover. An effect that does not change over time gives
     /// one frame, found by comparing frames rendered at a few times.
     pub fn render_loop(&mut self, package: &Path) -> Result<PreviewLoop, PreviewError> {
         self.guarded(package, |render| {
-            if render.role == Role::Effect {
+            // The four probes are too sparse for a clip clock: a 0.3 s effect is at rest at all of them.
+            if render.role == Role::Effect && !render.follows_clip_clock() {
                 let mut probes = Vec::with_capacity(PROBE_TIMES.len());
                 for time in PROBE_TIMES {
                     probes.push(render.render(probe_sample(render.role, time))?);
@@ -358,7 +406,11 @@ impl PreviewRenderer {
                     return Ok(PreviewLoop { frames: probes, is_static: true });
                 }
             }
-            let frames = (0..PREVIEW_FRAMES).map(|k| render.render(loop_sample(render.role, k))).collect::<Result<Vec<_>, _>>()?;
+            let mut frames = (0..PREVIEW_FRAMES).map(|k| render.render(loop_sample(render.role, k))).collect::<Result<Vec<_>, _>>()?;
+            if render.follows_clip_clock() && all_identical(&frames) {
+                frames.truncate(1);
+                return Ok(PreviewLoop { frames, is_static: true });
+            }
             Ok(PreviewLoop { frames, is_static: false })
         })
     }
@@ -470,6 +522,12 @@ mod tests {
         assert_eq!(blame_for(false, false, Some(Validation), None), Some(Package));
         assert_eq!(blame_for(false, false, Some(Other), None), Some(Device));
         assert_eq!(blame_for(false, false, Some(Other), Some(Package)), Some(Device));
+    }
+
+    #[test]
+    fn the_distance_counts_every_channel() {
+        assert_eq!(byte_distance(&[1, 2, 3, 255], &[1, 2, 3, 255]), 0);
+        assert_eq!(byte_distance(&[0, 10, 0, 255], &[5, 0, 0, 250]), 20);
     }
 
     #[test]

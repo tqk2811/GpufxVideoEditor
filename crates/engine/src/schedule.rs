@@ -27,6 +27,10 @@
 //!   the ends of a file.
 //! * **Progress.** `elapsed = frame_time - window_start` out of `total = duration`, kept as an exact
 //!   ratio. [`Progress::parts_per_million`] floors `elapsed * 1_000_000 / total`.
+//! * **Clip clock.** `elapsed = frame_time - start` out of `duration`, in timeline ticks: the time
+//!   the viewer sees, so `speed` does not scale it (a 2x clip of 5 s on the timeline counts 0 to 5).
+//!   Each clip counts from its own start, also after a split. Inside a transition window a clip
+//!   can be drawn before its start or past its end; the clock is held at 0 or at `duration` there.
 
 use crate::project::{Clip, ClipPlacement, Effect, Project, Track, Transition};
 use crate::time::Time;
@@ -53,6 +57,15 @@ impl Progress {
     }
 }
 
+/// How far a clip has played, in timeline time (see the module rounding rules).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipClock {
+    /// Time since the start of the clip, in `0..=duration`.
+    pub elapsed: Time,
+    /// Length of the clip on the timeline.
+    pub duration: Time,
+}
+
 /// One decoded-source request: which file, at which source time, with which effects.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceSample<'a> {
@@ -66,6 +79,8 @@ pub struct SourceSample<'a> {
     pub effects: &'a [Effect],
     /// Where the picture sits in the frame.
     pub placement: Option<ClipPlacement>,
+    /// Where the clip is in its own playing time.
+    pub clock: ClipClock,
 }
 
 /// What one track contributes to one frame.
@@ -145,6 +160,7 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
         source_time: c.source_in.saturating_add(c.source_offset(offset)).max(Time::ZERO),
         effects: &c.effects,
         placement: c.placement,
+        clock: ClipClock { elapsed: offset.max(Time::ZERO).min(c.duration), duration: c.duration },
     }
 }
 

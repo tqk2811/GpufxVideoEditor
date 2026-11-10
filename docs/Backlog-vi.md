@@ -382,3 +382,15 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] `probed_duration` còn trong cache sau khi gói bị ghi đè, và mỗi lần Add thêm cả âm thanh vào danh sách phiên
 
 `crates/gpufx-editor/src/media.rs:57` (`probed_duration`) tìm theo nguồn trong danh sách phiên và không biết gói đã bị ghi đè nên giữ độ dài cũ; `crates/gpufx-editor/src/editor.rs:1289` (`place_library_audio`) và `:1308` (`add_probed_library_item`) đưa mục thư viện vào danh sách phiên mỗi lần Add, nên danh sách phiên phình lên theo số lần dùng. Nên bỏ mục cache của gói khi `AudioPackInstalled`, và không thêm âm thanh thư viện vào danh sách phiên. Ghi ngày 2026-11-10.
+
+### [Thấp] Gói đọc clip_time/clip_duration mà có `gpufx_output_size` báo lỗi render từ khung thứ hai
+
+`crates/d3d12-backend/src/compositor.rs:671` (`set_clip_clock`) chạy sau `needs_rebuild` (`:372`), còn `external/FFmpegGpuFilter/crates/gpufx-core/src/runtime.rs:869` tính lại kích thước ra từ tham số: ở khung đầu đồng hồ clip chưa được đặt, từ khung thứ hai `needs_rebuild` thấy kích thước đổi theo đồng hồ và graph dựng lại với đồng hồ cũ nên báo lỗi. Nên đặt đồng hồ clip trước `needs_rebuild`, hoặc cho `needs_rebuild` bỏ qua tham số đồng hồ. Ghi ngày 2026-11-10.
+
+### [Thấp] `clock_params` chỉ so tên tham số, không kiểm kiểu
+
+`crates/d3d12-backend/src/compositor.rs:319` (`set_clip_clock`, dùng kết quả của `clock_params` ở `:291`): gói khai báo `clip_time` hoặc `clip_duration` kiểu expr hoặc enum sẽ lỗi ở mọi khung, `max` khai báo hẹp bị kẹp âm thầm làm đồng hồ dừng sớm, kiểu int mất phần lẻ. Nên kiểm kiểu float khi đọc manifest và báo lỗi rõ khi sai, thay vì lỗi lặp lại mỗi khung hoặc sai lặng lẽ. Ghi ngày 2026-11-10.
+
+### [Thấp] Transition khai báo clip_time/clip_duration: tên bị ẩn nhưng không có đồng hồ
+
+`crates/gpufx-editor/src/params.rs:44`, `crates/gpufx-editor/src/agent/run.rs:125` và `:260` ẩn tên `clip_time`/`clip_duration` khỏi inspector và MCP bất kể vai trò của gói, nhưng `crates/d3d12-backend/src/compositor.rs:602` chỉ cấp đồng hồ cho effect của clip, không cấp cho transition, và `TransitionAdd` không lọc nên giá trị người dùng nhập vẫn được lưu và áp. Kết quả: tham số không thấy được nhưng vẫn chi phối hình. Nên lọc theo vai trò (chỉ ẩn ở effect clip), hoặc cấp đồng hồ cho transition, và để `TransitionAdd` bỏ các tên này. Ghi ngày 2026-11-10.

@@ -1,7 +1,7 @@
 //! How a package parameter is edited: which widget its manifest entry asks for, and reading and
 //! writing its value in a project's parameter map. No window here.
 
-use d3d12_backend::{ParamInfo, ParamKind};
+use d3d12_backend::{ParamInfo, ParamKind, CLIP_DURATION, CLIP_TIME};
 use serde_json::{json, Map, Value};
 
 /// The parameter a transition's clock drives; never edited by hand.
@@ -35,9 +35,23 @@ pub fn widget_for(info: &ParamInfo) -> ParamWidget {
     }
 }
 
-/// The parameters offered in the inspector: everything but the transition clock.
+/// Whether the compositor fills the parameter `name` from the clip's clock.
+pub fn is_clip_clock(name: &str) -> bool {
+    name == CLIP_TIME || name == CLIP_DURATION
+}
+
+/// The parameters offered in the inspector: everything but the clocks.
 pub fn editable(params: &[ParamInfo]) -> impl Iterator<Item = &ParamInfo> {
-    params.iter().filter(|info| info.name != PROGRESS)
+    params.iter().filter(|info| info.name != PROGRESS && !is_clip_clock(&info.name))
+}
+
+/// `params` without the clip's clock of a package that declares it, so an agent's value is not
+/// saved in the project. A package without one keeps every value, and gpufx judges them as before.
+pub fn without_clip_clock(declared: Option<&[ParamInfo]>, mut params: Map<String, Value>) -> Map<String, Value> {
+    for name in declared.unwrap_or_default().iter().map(|info| info.name.as_str()).filter(|name| is_clip_clock(name)) {
+        params.remove(name);
+    }
+    params
 }
 
 /// `value` inside the range of `info`, rounded when the parameter is an integer.
@@ -190,6 +204,26 @@ mod tests {
         let params = vec![ParamInfo { name: "progress".to_owned(), ..info(ParamKind::Float) }, ParamInfo { name: "softness".to_owned(), ..info(ParamKind::Float) }];
         let names: Vec<&str> = editable(&params).map(|param| param.name.as_str()).collect();
         assert_eq!(names, vec!["softness"]);
+    }
+
+    #[test]
+    fn a_clip_clock_is_not_offered() {
+        let params = vec![
+            ParamInfo { name: CLIP_TIME.to_owned(), ..info(ParamKind::Float) },
+            ParamInfo { name: CLIP_DURATION.to_owned(), ..info(ParamKind::Float) },
+            ParamInfo { name: "amp".to_owned(), ..info(ParamKind::Float) },
+        ];
+        let names: Vec<&str> = editable(&params).map(|param| param.name.as_str()).collect();
+        assert_eq!(names, vec!["amp"]);
+    }
+
+    #[test]
+    fn an_agent_clock_value_is_dropped_only_where_the_package_declares_it() {
+        let stored = map(json!({ "clip_time": 3, "clip_duration": 4, "amp": 1 }));
+        let declared = vec![ParamInfo { name: CLIP_TIME.to_owned(), ..info(ParamKind::Float) }];
+        assert_eq!(without_clip_clock(Some(&declared), stored.clone()), map(json!({ "clip_duration": 4, "amp": 1 })));
+        assert_eq!(without_clip_clock(Some(&[]), stored.clone()), stored, "a package without a clock is unchanged");
+        assert_eq!(without_clip_clock(None, stored.clone()), stored, "an unknown package is judged elsewhere");
     }
 
     #[test]

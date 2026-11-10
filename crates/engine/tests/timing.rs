@@ -249,3 +249,55 @@ fn transition_odd_duration_and_last_progress() {
 fn time_conversion_helpers() {
     assert_eq!(Time::from_seconds(600).unwrap().ticks(), 54_000_000);
 }
+
+/// Elapsed and duration of a clip's clock at frame `n`.
+fn clock_at(p: &Project, frame: i64, track_index: usize) -> (i64, i64) {
+    let s = clip_layer(p, frame, track_index);
+    (s.clock.elapsed.ticks(), s.clock.duration.ticks())
+}
+
+#[test]
+fn clip_clock_counts_from_the_clip_start_in_timeline_time() {
+    // A clip at timeline 1 s, 10 frames long, and a 3000 tick frame.
+    let p = project(3000, vec![track(vec![clip("a.mp4", 90_000, 6000, 30_000)], vec![])]);
+    assert_eq!(clock_at(&p, 30, 0), (0, 30_000), "first frame of the clip");
+    assert_eq!(clock_at(&p, 35, 0), (15_000, 30_000), "middle");
+    assert_eq!(clock_at(&p, 39, 0), (27_000, 30_000), "last frame: one frame short of the end");
+}
+
+#[test]
+fn clip_clock_is_not_scaled_by_speed() {
+    let mut fast = clip("a.mp4", 0, 0, 30_000);
+    fast.speed = 2.0;
+    let p = project(3000, vec![track(vec![fast], vec![])]);
+    assert_eq!(clock_at(&p, 5, 0), (15_000, 30_000), "seconds on screen, the source runs 2x");
+    assert_eq!(clip_layer(&p, 5, 0).source_time, t(30_000), "the source itself does run faster");
+}
+
+#[test]
+fn clip_clock_restarts_after_a_split() {
+    let original = project(3000, vec![track(vec![clip("a.mp4", 0, 0, 30_000)], vec![])]);
+    let p = engine::split_clip(&original, engine::ClipKey { track: 0, clip: 0 }, t(12_000)).expect("split");
+    assert_eq!(clock_at(&p, 3, 0), (9_000, 12_000), "left piece");
+    assert_eq!(clock_at(&p, 4, 0), (0, 18_000), "right piece starts its own clock");
+    assert_eq!(clock_at(&p, 9, 0), (15_000, 18_000));
+}
+
+#[test]
+fn clip_clock_is_held_inside_a_transition_window() {
+    let p = project(
+        3000,
+        vec![track(
+            vec![clip("a.mp4", 0, 0, 30_000), clip("b.mp4", 30_000, 0, 30_000)],
+            vec![transition(0, 12_000)],
+        )],
+    );
+    // The window is 24000..36000 around the cut at 30000.
+    let layers = layers_at_frame(&p, 11);
+    let LayerContent::Transition { from, to, .. } = layers[0].content else { panic!("expected a transition") };
+    assert_eq!((from.clock.elapsed, from.clock.duration), (t(30_000), t(30_000)), "past the end: held at the duration");
+    assert_eq!((to.clock.elapsed, to.clock.duration), (t(3_000), t(30_000)), "the second clip has started");
+    let early = layers_at_frame(&p, 8);
+    let LayerContent::Transition { to, .. } = early[0].content else { panic!("expected a transition") };
+    assert_eq!(to.clock.elapsed, Time::ZERO, "before the start: held at 0");
+}

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 /// Bump when a change to the renderer makes old previews look different.
-pub const PREVIEW_RENDER_VERSION: u32 = 1;
+pub const PREVIEW_RENDER_VERSION: u32 = 2;
 
 /// How big and how long a preview is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

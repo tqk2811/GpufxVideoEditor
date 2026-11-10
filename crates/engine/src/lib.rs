@@ -47,7 +47,7 @@ pub use project::{
 };
 pub use render::{ClipKey, RenderError};
 pub use schedule::{
-    frame_count, frame_time, layers_at_frame, Layer, LayerContent, Progress, SourceSample,
+    frame_count, frame_time, layers_at_frame, ClipClock, Layer, LayerContent, Progress, SourceSample,
     PROGRESS_PPM_SCALE,
 };
 pub use time::{Time, TICKS_PER_SECOND};

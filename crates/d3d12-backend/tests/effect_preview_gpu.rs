@@ -143,3 +143,70 @@ fn a_bad_package_is_an_error_and_the_renderer_goes_on() {
 
     renderer.render_still(&package("ffmpeg/invert")).expect("still after failures");
 }
+
+/// A throwaway package; `body` is the WGSL of its shader. Removed on drop.
+struct ClockPackage(PathBuf);
+
+impl ClockPackage {
+    fn new(tag: &str, body: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("gpufx-preview-clock-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("shaders")).expect("folder");
+        let manifest = r#"{"api":1,"id":"test.clock","name":"Clock","used_for":["gpufx"],"inputs":[{"name":"src"}],
+            "params":[{"name":"clip_time","type":"float","default":0},{"name":"clip_duration","type":"float","default":0}],
+            "groups":[{"passes":[{"shader":"shaders/p.wgsl"}]}]}"#;
+        std::fs::write(dir.join("manifest.json"), manifest).expect("manifest");
+        let shader = format!("@compute @workgroup_size(8, 8)\nfn main(@builtin(global_invocation_id) id: vec3u) {{\n    if (!gpufx_in_bounds(id)) {{ return; }}\n    let c = textureLoad(src, vec2i(id.xy), 0);\n    {body}\n}}\n");
+        std::fs::write(dir.join("shaders/p.wgsl"), shader).expect("shader");
+        Self(dir)
+    }
+}
+
+impl Drop for ClockPackage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// White only between 0.05 s and 0.15 s of the clip: at rest at every one of the four probes.
+const FLASH_BODY: &str = "let on = params.clip_time >= 0.05 && params.clip_time < 0.15; gpufx_write(id, select(c, vec4f(1.0), on));";
+
+#[test]
+fn a_clock_effect_that_is_at_rest_at_the_probes_still_animates() {
+    let _gpu = gpu_lock();
+    let Some(mut renderer) = renderer() else { return };
+    let flash = ClockPackage::new("flash", FLASH_BODY);
+    let looped = renderer.render_loop(&flash.0).expect("loop");
+    assert!(!looped.is_static, "four probes would have called this static");
+    assert_eq!(looped.frames.len(), PREVIEW_FRAMES as usize);
+    assert!(looped.frames[1..3].iter().all(|frame| frame.chunks_exact(4).all(|p| p[0] == 255)), "frames 1 and 2 are the flash");
+    assert_ne!(looped.frames[0], looped.frames[1]);
+}
+
+#[test]
+fn a_clock_effect_still_shows_it_moving() {
+    let _gpu = gpu_lock();
+    let Some(mut renderer) = renderer() else { return };
+    let flash = ClockPackage::new("still", FLASH_BODY);
+    let still = renderer.render_still(&flash.0).expect("still");
+    assert!(still.chunks_exact(4).all(|p| p[0] == 255), "the flash is the frame furthest from the input");
+}
+
+#[test]
+fn a_clock_effect_gets_a_duration_of_the_loop_length() {
+    let _gpu = gpu_lock();
+    let Some(mut renderer) = renderer() else { return };
+    let duration = ClockPackage::new("duration", "gpufx_write(id, vec4f(params.clip_duration / 4.0, 0.0, 0.0, 1.0));");
+    let looped = renderer.render_loop(&duration.0).expect("loop");
+    // 24 frames at 20 per second is 1.2 s, which is 77 of 255 at a quarter of the range.
+    assert!(looped.frames.iter().all(|frame| i32::from(frame[0]).abs_diff(77) <= 1), "{}", looped.frames[0][0]);
+}
+
+#[test]
+fn a_clock_effect_that_ignores_the_clock_is_still_static() {
+    let _gpu = gpu_lock();
+    let Some(mut renderer) = renderer() else { return };
+    let plain = ClockPackage::new("plain", "gpufx_write(id, vec4f(1.0 - c.rgb, c.a));");
+    let looped = renderer.render_loop(&plain.0).expect("loop");
+    assert!(looped.is_static);
+    assert_eq!(looped.frames.len(), 1);
+}
