@@ -3,23 +3,23 @@
 //! A zip has `manifest.json` at its root. A gpufx shader package has no `type` in it, since its
 //! manifest refuses unknown fields; it becomes an effect or a transition from its inputs, and is
 //! kept whole at `<user root>/packages/gpufx/user/<manifest id>.zip`, read by `Package::open`. The
-//! other packages name their `type`; the editor cannot use those yet, so nothing is installed.
-//!
-//! Nothing is unpacked, but the checks below are the ones an unpacking install needs too.
+//! other packages name their `type`: `sfx` and `music` go to [`crate::asset_install`], which uses
+//! the checks here; the editor cannot use the rest yet, so nothing is installed.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Cursor, Read, Seek, Write};
 use std::path::Path;
 
-use d3d12_backend::read_zip_package_info;
+use d3d12_backend::{check_path_part, is_safe_id, read_zip_package_info, PathPartProblem};
 use serde_json::Value;
 use zip::result::ZipError;
 use zip::ZipArchive;
 
+use crate::asset_install::{install_audio_pack, AudioPackKind, InstalledAudioPack};
 use crate::packages::{classify, PackageKind};
 
-const MIB: u64 = 1 << 20;
+pub(crate) const MIB: u64 = 1 << 20;
 /// The folder under `packages/gpufx` that imported shader packages go to.
 pub const USER_GROUP: &str = "user";
 const MANIFEST: &str = "manifest.json";
@@ -29,10 +29,8 @@ const MAX_MANIFEST_BYTES: u64 = 16 * MIB;
 const MAX_ARCHIVE_BYTES: u64 = 2048 * MIB;
 /// A shader zip is read whole: its files, within [`SHADER_LIMITS`], and the zip's own headers.
 const MAX_SHADER_ARCHIVE_BYTES: u64 = 264 * MIB;
-/// The longest manifest id used as a file name.
-const MAX_ID_LENGTH: usize = 128;
-/// The types of the packages that are not shaders.
-const NON_SHADER_TYPES: [&str; 7] = ["sticker", "sfx", "music", "font", "text-style", "text-animation", "subtitle-style"];
+/// The types of the packages that are neither shaders nor audio.
+const NON_SHADER_TYPES: [&str; 5] = ["sticker", "font", "text-style", "text-animation", "subtitle-style"];
 
 /// What a zip may declare. Sizes are as declared: what is really read is counted where it is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +80,8 @@ pub enum EntryProblem {
     /// The same path twice, or two that differ only in case, as one file on Windows.
     Duplicate,
     Encrypted,
+    /// Not a file this type of pack may hold.
+    ExtensionNotAllowed,
 }
 
 /// Why a zip was not installed.
@@ -107,12 +107,17 @@ pub enum ImportProblem {
     BadId(String),
     NoUserFolder,
     WriteFailed(String),
+    /// A file unpacked to another size than the zip declares.
+    SizeMismatch { entry: String },
+    /// A file grew by more than the limit when unpacked, as a zip bomb does.
+    RatioTooHigh { entry: String, limit: u64 },
 }
 
 /// What installing a zip came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportOutcome {
     Installed(InstalledPackage),
+    AudioInstalled(InstalledAudioPack),
     /// A package with this name is there, and overwriting was not allowed.
     AlreadyInstalled { name: String },
 }
@@ -126,31 +131,18 @@ pub struct InstalledPackage {
     pub replaced: bool,
 }
 
-fn is_device_name(part: &str) -> bool {
-    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ').to_uppercase();
-    let numbered = |prefix: &str| stem.strip_prefix(prefix).is_some_and(|rest| matches!(rest, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "\u{b9}" | "\u{b2}" | "\u{b3}"));
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT")
-}
-
 /// Checks one part of a path. An empty part, `.` and `..` are the caller's.
 fn check_part(part: &str) -> Result<(), EntryProblem> {
-    if part.contains(':') {
-        return Err(EntryProblem::Colon);
-    }
-    if part.chars().any(|c| c < ' ' || matches!(c, '<' | '>' | '"' | '|' | '?' | '*')) {
-        return Err(EntryProblem::InvalidCharacter);
-    }
-    if part.ends_with('.') || part.ends_with(' ') {
-        return Err(EntryProblem::TrailingDotOrSpace);
-    }
-    if is_device_name(part) {
-        return Err(EntryProblem::DeviceName);
-    }
-    Ok(())
+    check_path_part(part).map_err(|problem| match problem {
+        PathPartProblem::Colon => EntryProblem::Colon,
+        PathPartProblem::InvalidCharacter => EntryProblem::InvalidCharacter,
+        PathPartProblem::DeviceName => EntryProblem::DeviceName,
+        PathPartProblem::TrailingDotOrSpace => EntryProblem::TrailingDotOrSpace,
+    })
 }
 
 /// The parts of an entry name, with both kinds of slash, or why they are unsafe.
-fn name_parts(name: &str) -> Result<Vec<&str>, EntryProblem> {
+pub(crate) fn name_parts(name: &str) -> Result<Vec<&str>, EntryProblem> {
     let name = name.strip_suffix(['/', '\\']).unwrap_or(name);
     let parts: Vec<&str> = name.split(['/', '\\']).collect();
     if parts.iter().any(|part| part.is_empty() || *part == "." || *part == "..") {
@@ -207,20 +199,29 @@ pub fn validate_entries(entries: &[ZipEntry], limits: Limits) -> Result<(), Impo
     Ok(())
 }
 
-/// What the manifest declares: the id of a gpufx shader package, which has no `type`. A `type` is an
-/// error here, so that it is reported before anything is installed.
-fn shader_id(manifest: &[u8]) -> Result<Option<String>, ImportProblem> {
+/// What a manifest says the package is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Declared {
+    /// A gpufx shader package, which has no `type`, with its id.
+    Shader(Option<String>),
+    Audio(AudioPackKind),
+}
+
+/// What the manifest declares. A `type` the editor cannot use is an error here, so that it is
+/// reported before anything is installed.
+fn declared_package(manifest: &[u8]) -> Result<Declared, ImportProblem> {
     let value: Value = serde_json::from_slice(manifest).map_err(|e| ImportProblem::BadManifest(e.to_string()))?;
     let Some(object) = value.as_object() else { return Err(ImportProblem::BadManifest("it is not a JSON object".to_owned())) };
     match object.get("type") {
-        None => Ok(object.get("id").and_then(Value::as_str).map(str::to_owned)),
+        None => Ok(Declared::Shader(object.get("id").and_then(Value::as_str).map(str::to_owned))),
+        Some(Value::String(kind)) if AudioPackKind::from_name(kind).is_some() => Ok(Declared::Audio(AudioPackKind::from_name(kind).unwrap_or(AudioPackKind::Sfx))),
         Some(Value::String(kind)) if NON_SHADER_TYPES.contains(&kind.as_str()) => Err(ImportProblem::NotSupportedYet(kind.clone())),
         Some(Value::String(kind)) => Err(ImportProblem::UnknownType(kind.clone())),
         Some(_) => Err(ImportProblem::BadManifest("`type` is not a string".to_owned())),
     }
 }
 
-fn entries_of<R: Read + Seek>(zip: &mut ZipArchive<R>, limits: Limits) -> Result<Vec<ZipEntry>, ImportProblem> {
+pub(crate) fn entries_of<R: Read + Seek>(zip: &mut ZipArchive<R>, limits: Limits) -> Result<Vec<ZipEntry>, ImportProblem> {
     if zip.len() > limits.files {
         return Err(ImportProblem::TooManyFiles { limit: limits.files });
     }
@@ -243,7 +244,7 @@ fn entries_of<R: Read + Seek>(zip: &mut ZipArchive<R>, limits: Limits) -> Result
     Ok(entries)
 }
 
-fn read_manifest<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<Vec<u8>, ImportProblem> {
+pub(crate) fn read_manifest<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<Vec<u8>, ImportProblem> {
     let mut entry = match zip.by_name(MANIFEST) {
         Ok(entry) => entry,
         Err(ZipError::FileNotFound) => return Err(ImportProblem::NoManifest),
@@ -257,16 +258,11 @@ fn read_manifest<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<Vec<u8>, Imp
     Ok(bytes)
 }
 
-/// Checks a zip and gives the id its manifest declares.
-fn inspect<R: Read + Seek>(reader: R, limits: Limits) -> Result<Option<String>, ImportProblem> {
+/// Checks a zip and gives what its manifest declares.
+fn inspect<R: Read + Seek>(reader: R, limits: Limits) -> Result<Declared, ImportProblem> {
     let mut zip = ZipArchive::new(reader).map_err(|e| ImportProblem::NotAZip(e.to_string()))?;
     validate_entries(&entries_of(&mut zip, limits)?, limits)?;
-    shader_id(&read_manifest(&mut zip)?)
-}
-
-/// Whether `id` can be a file name under the package folder.
-fn safe_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= MAX_ID_LENGTH && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) && id != "." && id != ".." && check_part(id).is_ok()
+    declared_package(&read_manifest(&mut zip)?)
 }
 
 fn read_bounded(source: &Path, limit: u64) -> Result<Vec<u8>, ImportProblem> {
@@ -308,12 +304,14 @@ pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<I
     }
     let file = File::open(source).map_err(|e| ImportProblem::Unreadable(e.to_string()))?;
     // A large zip may well be an audio pack, which is told apart without reading it whole.
-    inspect(BufReader::new(file), ARCHIVE_LIMITS)?;
+    if let Declared::Audio(_) = inspect(BufReader::new(file), ARCHIVE_LIMITS)? {
+        return install_audio_pack(source, user_root, overwrite);
+    }
     let bytes = read_bounded(source, MAX_SHADER_ARCHIVE_BYTES)?;
-    let id = inspect(Cursor::new(bytes.as_slice()), SHADER_LIMITS)?;
+    let Declared::Shader(id) = inspect(Cursor::new(bytes.as_slice()), SHADER_LIMITS)? else { return Err(ImportProblem::BadManifest("it changed while it was being read".to_owned())) };
     let info = read_zip_package_info(&bytes).map_err(ImportProblem::BadPackage)?;
     let id = id.unwrap_or_default();
-    if !safe_id(&id) {
+    if !is_safe_id(&id) {
         return Err(ImportProblem::BadId(id));
     }
     let Some(kind) = classify(&info) else { return Err(ImportProblem::NotUsable { inputs: info.inputs }) };
@@ -429,24 +427,26 @@ mod tests {
 
     #[test]
     fn the_type_decides_before_anything_else_is_read() {
-        assert_eq!(shader_id(br#"{"id":"a.b"}"#), Ok(Some("a.b".to_owned())));
+        assert_eq!(declared_package(br#"{"id":"a.b"}"#), Ok(Declared::Shader(Some("a.b".to_owned()))));
         for kind in NON_SHADER_TYPES {
             let manifest = format!(r#"{{"type":"{kind}"}}"#);
-            assert_eq!(shader_id(manifest.as_bytes()), Err(ImportProblem::NotSupportedYet(kind.to_owned())));
+            assert_eq!(declared_package(manifest.as_bytes()), Err(ImportProblem::NotSupportedYet(kind.to_owned())));
         }
-        assert_eq!(shader_id(br#"{"type":"effect"}"#), Err(ImportProblem::UnknownType("effect".to_owned())), "a shader package has no type");
-        assert!(matches!(shader_id(br#"{"type":3}"#), Err(ImportProblem::BadManifest(_))));
-        assert!(matches!(shader_id(b"nope"), Err(ImportProblem::BadManifest(_))));
-        assert!(matches!(shader_id(b"[]"), Err(ImportProblem::BadManifest(_))));
+        assert_eq!(declared_package(br#"{"type":"sfx"}"#), Ok(Declared::Audio(AudioPackKind::Sfx)));
+        assert_eq!(declared_package(br#"{"type":"music"}"#), Ok(Declared::Audio(AudioPackKind::Music)));
+        assert_eq!(declared_package(br#"{"type":"effect"}"#), Err(ImportProblem::UnknownType("effect".to_owned())), "a shader package has no type");
+        assert!(matches!(declared_package(br#"{"type":3}"#), Err(ImportProblem::BadManifest(_))));
+        assert!(matches!(declared_package(b"nope"), Err(ImportProblem::BadManifest(_))));
+        assert!(matches!(declared_package(b"[]"), Err(ImportProblem::BadManifest(_))));
     }
 
     #[test]
     fn an_id_must_be_a_safe_file_name() {
         for id in ["", "../evil", "a/b", "a\\b", "con", "NUL", "a b", "a.", "."] {
-            assert!(!safe_id(id), "{id}");
+            assert!(!is_safe_id(id), "{id}");
         }
-        assert!(safe_id("io.github.tqk2811.box-blur"));
-        assert!(!safe_id(&"a".repeat(MAX_ID_LENGTH + 1)));
+        assert!(is_safe_id("io.github.tqk2811.box-blur"));
+        assert!(!is_safe_id(&"a".repeat(d3d12_backend::MAX_ASSET_ID_LENGTH + 1)));
     }
 
     /// `(name, content)`: a name ending in `/` is a directory.
@@ -582,8 +582,10 @@ mod tests {
     fn a_known_but_unsupported_type_installs_nothing_and_a_bad_zip_says_so() {
         let dir = scratch("unsupported");
         let root = dir.join("root");
+        let sticker = zip_bytes(&[("manifest.json", br#"{"type":"sticker","name":"Smile"}"#), ("smile.png", b"x")]);
+        assert_eq!(install_zip(&written(&dir, &sticker), &root, false), Err(ImportProblem::NotSupportedYet("sticker".to_owned())));
         let audio = zip_bytes(&[("manifest.json", br#"{"type":"sfx","name":"Bells"}"#), ("bell.flac", b"x")]);
-        assert_eq!(install_zip(&written(&dir, &audio), &root, false), Err(ImportProblem::NotSupportedYet("sfx".to_owned())));
+        assert!(matches!(install_zip(&written(&dir, &audio), &root, false), Err(ImportProblem::BadManifest(_))), "an audio pack goes to its own, stricter reader");
         let unknown = zip_bytes(&[("manifest.json", br#"{"type":"hologram"}"#)]);
         assert_eq!(install_zip(&written(&dir, &unknown), &root, false), Err(ImportProblem::UnknownType("hologram".to_owned())));
         let bare = zip_bytes(&[("readme.txt", b"x")]);

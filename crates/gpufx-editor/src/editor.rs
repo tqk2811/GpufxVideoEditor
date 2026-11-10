@@ -12,6 +12,8 @@ use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_comman
 use crate::timeline::hit::ClipHit;
 use crate::timeline::snap::{snap_command, snap_onto_track, snap_points, snap_span, snap_tolerance, Snapped};
 use crate::timeline::view::TimelineView;
+use crate::asset_install::InstalledAudioPack;
+use crate::audio_library::AudioLibrary;
 use crate::effect_previews::PreviewManager;
 use crate::visuals::ClipVisuals;
 use engine::{
@@ -69,6 +71,8 @@ pub struct EditorState {
     /// The name of the file a background load is reading.
     loading: Option<String>,
     pub catalog: Catalog,
+    /// The audio packs installed on this machine.
+    pub audio_library: AudioLibrary,
     pub picker: PickerState,
     pub encoders: Vec<EncoderOption>,
     pub encoder: usize,
@@ -157,6 +161,21 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
     }
 }
 
+/// Where a sound of the library goes once its real length is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryTarget {
+    Playhead,
+    /// Dropped on the timeline: on `track`, or a new one when `None`, as near `at` as the clips allow.
+    Dropped { track: Option<usize>, at: Time },
+}
+
+/// What the Audio tab wants the preview to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SoundPreviewWish {
+    Play { source: String, duration: Option<Time> },
+    Stop,
+}
+
 /// The tab of the left panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LeftTab {
@@ -190,6 +209,12 @@ pub struct UiState {
     pub drop_batches: VecDeque<DropBatch>,
     /// Snapping to clip edges is off. The default, false, keeps it on.
     pub snap_off: bool,
+    /// A library sound waiting to be measured and placed.
+    pub library_add: Option<(MediaItem, LibraryTarget)>,
+    /// What the Audio tab asked of the preview this frame.
+    pub preview_wish: Option<SoundPreviewWish>,
+    /// The source being heard, as the Audio tab shows it.
+    pub previewing: Option<String>,
     /// The effect picker tile the pointer stays on; cleared when the picker is not drawn.
     pub tile_hover: crate::effect_previews::play::TileHover,
 }
@@ -344,6 +369,7 @@ impl EditorState {
             drag: None,
             loading: None,
             catalog: Catalog::default(),
+            audio_library: AudioLibrary::default(),
             picker: PickerState::default(),
             encoders: Vec::new(),
             encoder: 0,
@@ -1250,6 +1276,44 @@ impl EditorState {
         if self.run(|project| move_clip(&add_track(project, kind)?, key, track, desired_start)) {
             self.selection = clip_at(self.project(), track, desired_start);
         }
+    }
+
+    /// Says that an audio pack is there and shows the Audio tab.
+    pub fn show_installed_audio_pack(&mut self, installed: &InstalledAudioPack) {
+        self.report_info(Message::AudioPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
+        self.ui.left_tab = LeftTab::Audio;
+    }
+
+    /// Places a sound of the library. Its manifest only gives an estimate: a sound not yet measured
+    /// is first probed off the UI thread, and only then becomes a clip of its real length.
+    pub fn place_library_audio(&mut self, item: &MediaItem, target: LibraryTarget) {
+        if let Some(length) = self.library.probed_duration(&item.source, item.kind.track_kind()) {
+            let measured = MediaItem { duration: Some(length), estimated: false, ..item.clone() };
+            self.place_measured(&measured, target);
+        } else {
+            self.ui.library_add = Some((item.clone(), target));
+        }
+    }
+
+    fn place_measured(&mut self, item: &MediaItem, target: LibraryTarget) {
+        match target {
+            LibraryTarget::Playhead => self.add_media_at_playhead(item),
+            LibraryTarget::Dropped { track, at } => {
+                self.drop_media(item, track, at);
+            }
+        }
+    }
+
+    /// Lists a measured sound of the library with its real length and places it.
+    pub fn add_probed_library_item(&mut self, item: &MediaItem, target: LibraryTarget, probe: &MediaProbe) {
+        if !probe.has_audio {
+            self.status = Status::Refused(Message::NoUsableStream(item.name.clone()));
+            return;
+        }
+        let duration = probe.audio_duration.filter(|length| *length > Time::ZERO).or(item.duration);
+        let measured = MediaItem { duration, estimated: false, ..item.clone() };
+        self.library.add(measured.clone());
+        self.place_measured(&measured, target);
     }
 
     /// Records a probed file, whether or not a clip is made from it.

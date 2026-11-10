@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use d3d12_backend::MediaProbe;
 use engine::Project;
 
-use crate::editor::{clip_label, EditorState};
+use crate::editor::{clip_label, EditorState, LibraryTarget};
 use crate::i18n::Message;
+use crate::media::MediaItem;
 use crate::package_import::{ImportOutcome, ImportProblem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,7 @@ pub enum Arrival {
     DropProbed { load: u64, path: PathBuf, result: Result<MediaProbe, String> },
     ProjectRead { load: u64, file: PathBuf, result: Result<Project, String> },
     PackageImported { load: u64, path: PathBuf, result: Result<ImportOutcome, ImportProblem> },
+    LibraryItemProbed { load: u64, item: MediaItem, target: LibraryTarget, result: Result<MediaProbe, String> },
     /// The thread of a task panicked, so it will never deliver a result.
     TaskFailed { task: TaskId, message: String },
 }
@@ -111,8 +113,12 @@ pub enum Action {
     ProbeMedia { load: u64, path: PathBuf },
     ReadProject { load: u64, file: PathBuf },
     ImportPackage { load: u64, path: PathBuf, overwrite: bool },
+    /// A sound of the library must be measured before it becomes a clip.
+    ProbeLibraryItem { load: u64, item: MediaItem, target: LibraryTarget },
     /// A package was installed: the list must be read again and what was built from it dropped.
     PackageInstalled { package: String },
+    /// An audio pack was installed: the library must be read again.
+    AudioPackInstalled,
     SaveTo(PathBuf),
     StartExport(PathBuf),
     /// The project was replaced, so playback of the old one must go.
@@ -143,6 +149,7 @@ enum Finished {
     Drop { path: PathBuf, result: Result<MediaProbe, String> },
     Project { file: PathBuf, result: Result<Project, String>, base_revision: Option<u64> },
     Package { path: PathBuf, result: Result<ImportOutcome, ImportProblem> },
+    LibraryItem { item: MediaItem, target: LibraryTarget, result: Result<MediaProbe, String> },
 }
 
 /// A zip waiting for the answer to whether it may replace the package installed under its name.
@@ -243,6 +250,23 @@ impl Tasks {
         }
     }
 
+    /// Measures a library sound before it becomes a clip; a dialog or load that is running says so.
+    pub fn begin_library_add(&mut self, state: &mut EditorState, item: MediaItem, target: LibraryTarget) -> Action {
+        if state.refuse_while_live() {
+            return Action::Nothing;
+        }
+        if self.modal.is_some() {
+            state.report_info(Message::DialogOpen);
+            return Action::Nothing;
+        }
+        if self.load.is_some() {
+            state.report_info(Message::LoadRunning);
+            return Action::Nothing;
+        }
+        let load = self.start_load(state, Path::new(&item.name), None);
+        Action::ProbeLibraryItem { load, item, target }
+    }
+
     /// Starts reading the next dropped file once nothing else is going on.
     pub fn next_file_drop(&mut self, state: &mut EditorState) -> Action {
         if self.modal.is_some() || self.load.is_some() || state.is_exporting() || state.is_holding() {
@@ -309,6 +333,10 @@ impl Tasks {
                         let load = self.start_load(state, &path, None);
                         Action::ProbeMedia { load, path }
                     }
+                    FileDialog::ImportPackage if state.is_exporting() => {
+                        state.report_refused(Message::ExportRunning);
+                        Action::Nothing
+                    }
                     FileDialog::ImportPackage => {
                         let load = self.start_load(state, &path, None);
                         Action::ImportPackage { load, path, overwrite: false }
@@ -362,6 +390,7 @@ impl Tasks {
             Arrival::MediaProbed { load, path, result } => self.load_finished(state, load, Finished::Media { path, result }),
             Arrival::DropProbed { load, path, result } => self.load_finished(state, load, Finished::Drop { path, result }),
             Arrival::PackageImported { load, path, result } => self.load_finished(state, load, Finished::Package { path, result }),
+            Arrival::LibraryItemProbed { load, item, target, result } => self.load_finished(state, load, Finished::LibraryItem { item, target, result }),
             Arrival::ProjectRead { load, file, result } => {
                 let base_revision = self.load.filter(|running| running.id == load).and_then(|running| running.base_revision);
                 self.load_finished(state, load, Finished::Project { file, result, base_revision })
@@ -432,11 +461,22 @@ impl Tasks {
                     state.show_installed_package(&installed);
                     Action::PackageInstalled { package: installed.package }
                 }
+                Ok(ImportOutcome::AudioInstalled(installed)) => {
+                    state.show_installed_audio_pack(&installed);
+                    Action::AudioPackInstalled
+                }
                 Err(problem) => {
                     state.report_refused(Message::PackageImportRefused(problem));
                     Action::Nothing
                 }
             },
+            Finished::LibraryItem { item, target, result } => {
+                match result {
+                    Ok(probe) => state.add_probed_library_item(&item, target, &probe),
+                    Err(message) => state.report_refused(Message::Technical(message)),
+                }
+                Action::Nothing
+            }
             Finished::Project { file, result, base_revision } => match result {
                 Ok(_) if base_revision.is_some_and(|base| base != state.revision()) => {
                     state.report_refused(Message::OpenCancelled);
@@ -469,6 +509,39 @@ mod tests {
             Action::ImportPackage { load, overwrite: false, .. } => load,
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn an_import_picked_while_an_export_runs_is_refused_before_it_starts() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        assert_eq!(tasks.begin(&mut state, Request::ImportPackage), Action::ShowFileDialog(FileDialog::ImportPackage));
+        state.begin_export(100);
+        assert_eq!(tasks.on_arrival(&mut state, picked(FileDialog::ImportPackage, "pack.zip")), Action::Nothing);
+        assert!(matches!(state.status(), Status::Refused(Message::ExportRunning)));
+    }
+
+    #[test]
+    fn an_installed_audio_pack_asks_for_the_library_and_shows_the_audio_tab() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let load = start_package_import(&mut tasks, &mut state);
+        let installed = crate::asset_install::InstalledAudioPack { kind: crate::asset_install::AudioPackKind::Sfx, id: "p".to_owned(), name: "P".to_owned(), replaced: false };
+        assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::AudioInstalled(installed)))), Action::AudioPackInstalled);
+        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Audio);
+    }
+
+    #[test]
+    fn a_library_sound_is_measured_then_placed_at_its_real_length() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let manifest_length = Some(engine::Time::from_ticks(9000));
+        let item = MediaItem { source: "asset:sfx/p/a.flac".to_owned(), name: "A".to_owned(), kind: crate::media::MediaKind::Audio, duration: manifest_length, estimated: true };
+        let Action::ProbeLibraryItem { load, item, target } = tasks.begin_library_add(&mut state, item, LibraryTarget::Playhead) else { panic!("it is measured first") };
+        assert_eq!(tasks.begin_library_add(&mut state, item.clone(), LibraryTarget::Playhead), Action::Nothing, "one load at a time");
+        let arrived = Arrival::LibraryItemProbed { load, item, target, result: Ok(probe(None, Some(4))) };
+        assert_eq!(tasks.on_arrival(&mut state, arrived), Action::Nothing);
+        let clips: Vec<_> = state.project().tracks.iter().filter(|track| track.is_audio()).flat_map(|track| &track.clips).collect();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].source, "asset:sfx/p/a.flac", "the clip keeps the asset source");
+        assert_eq!(clips[0].duration, seconds(4), "the probe, not the manifest");
     }
 
     fn imported(load: u64, result: Result<ImportOutcome, ImportProblem>) -> Arrival {

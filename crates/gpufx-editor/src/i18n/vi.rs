@@ -30,6 +30,7 @@ fn entry_problem(problem: EntryProblem) -> &'static str {
         EntryProblem::TrailingDotOrSpace => "tên kết thúc bằng dấu chấm hoặc dấu cách",
         EntryProblem::Duplicate => "có mục khác trùng tên, không tính hoa thường",
         EntryProblem::Encrypted => "mục này được mã hoá",
+        EntryProblem::ExtensionNotAllowed => "gói loại này không được chứa kiểu file này",
     }
 }
 
@@ -56,6 +57,8 @@ fn import_problem(problem: &ImportProblem) -> String {
         ImportProblem::NotUsable { inputs } => format!("với {inputs} đầu vào, gói này không phải hiệu ứng cũng không phải chuyển cảnh."),
         ImportProblem::KindChanged { existing, new } => format!("gói đã cài với id này là {} còn gói này là {}, thay vào sẽ làm hỏng các dự án đang dùng nó.", kind_name(*existing), kind_name(*new)),
         ImportProblem::BadId(id) => format!("id \"{id}\" không dùng làm tên file được."),
+        ImportProblem::SizeMismatch { entry } => format!("\"{entry}\" giải nén ra kích thước khác với khai báo trong zip."),
+        ImportProblem::RatioTooHigh { entry, limit } => format!("\"{entry}\" phình hơn {limit}:1 khi giải nén."),
         ImportProblem::NoUserFolder => "chưa đặt LOCALAPPDATA nên không có chỗ để cài.".to_owned(),
         ImportProblem::WriteFailed(detail) => format!("ghi gói thất bại ({detail})."),
     }
@@ -196,6 +199,17 @@ pub(super) fn text(message: &Message) -> String {
         Message::PromptOverwritePackage(name) => format!("Gói \"{name}\" đã được cài. Thay thế gói đó? Sau đó nên kiểm tra lại các clip đang dùng gói này."),
         Message::PackageInstalled { name, transition, replaced } => format!("Đã {} \"{name}\" vào {}.", if *replaced { "thay thế" } else { "cài" }, if *transition { "Chuyển cảnh" } else { "Hiệu ứng" }),
         Message::PackageImportRefused(problem) => format!("Chưa cài gói: {}", import_problem(problem)),
+        Message::AudioPackInstalled { name, replaced } => format!("Đã {} \"{name}\" vào Âm thanh.", if *replaced { "thay thế" } else { "cài" }),
+        Message::SessionAudio => "Trong phiên này".to_owned(),
+        Message::InstalledPacks => "Gói đã cài".to_owned(),
+        Message::ReadingAudioPacks => "Đang đọc các gói đã cài...".to_owned(),
+        Message::AudioLibraryEmpty => "Chưa có âm thanh nào. Hãy nhập một tệp hoặc một gói (.zip).".to_owned(),
+        Message::AudioPackProblems(count) => format!("Không đọc được {count} gói hoặc âm thanh"),
+        Message::PreviewSound => "Nghe thử".to_owned(),
+        Message::StopPreview => "Dừng".to_owned(),
+        Message::AddSound => "Thêm".to_owned(),
+        Message::AudioAddHint => "Bấm đúp hoặc nút + để thêm âm thanh vào vị trí đầu phát, hoặc kéo vào một track âm thanh.".to_owned(),
+        Message::SoundPreviewFailed(reason) => format!("Không phát được âm thanh: {reason}"),
         Message::SearchMedia => "Tìm trong phương tiện".to_owned(),
         Message::SearchAudio => "Tìm trong âm thanh".to_owned(),
         Message::SearchEffects => "Tìm hiệu ứng".to_owned(),

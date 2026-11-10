@@ -17,12 +17,15 @@ use engine::{Time, TrackKind};
 
 use crate::agent::gateway::{pipe_name, AgentGateway};
 use crate::agent::{check_export, execute, AgentError, AgentHost};
-use crate::editor::{EditorState, Status};
+use crate::audio_library::{scan_audio_packs, AudioLibrary};
+use crate::asset_install::recover_interrupted_install;
+use crate::editor::{EditorState, LeftTab, SoundPreviewWish, Status};
 use crate::export::{encoder_options, export_blocker, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
 use crate::i18n::{Language, Message};
 use crate::packages::{scan, Catalog};
 use crate::playback::device::Playback;
 use crate::playback::plan::{frames_to_ms, TransportCommand};
+use crate::playback::preview::AudioPreview;
 use crate::presenter::Presenter;
 use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, PlaybackFrames, PlaybackRun, RequestId, RequestTracker};
@@ -116,6 +119,8 @@ struct Session {
     export_out: Option<PathBuf>,
     window: Arc<Window>,
     playback: Option<Playback>,
+    /// Hears one sound of the library, outside the timeline.
+    audio_preview: AudioPreview,
     preview: PreviewWorker<D3d12Producer>,
     gpu: Arc<Gpu>,
     presenter: Presenter,
@@ -138,6 +143,7 @@ struct Session {
     /// The title now on the window.
     title: String,
     catalog: Option<Receiver<Catalog>>,
+    audio_library: Option<Receiver<AudioLibrary>>,
     tasks: Tasks,
     arrivals: Receiver<Arrival>,
     arrival_sender: Sender<Arrival>,
@@ -183,6 +189,7 @@ impl Session {
         state.visuals.get_mut().set_waker(Arc::new(move || visuals_window.request_redraw()));
         let previews_window = session_window.clone();
         state.previews.get_mut().start_for_editor(package_roots.clone(), Arc::new(move || previews_window.request_redraw()));
+        let audio_library = spawn_audio_scan(package_roots.clone(), window_for_scan.clone());
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
         let (arrival_sender, arrivals) = channel();
@@ -193,6 +200,7 @@ impl Session {
             export_out: None,
             window: session_window,
             playback: None,
+            audio_preview: AudioPreview::spawn(),
             preview,
             gpu,
             presenter,
@@ -209,6 +217,7 @@ impl Session {
             paths_file: None,
             title: String::new(),
             catalog: Some(catalog),
+            audio_library: Some(audio_library),
             tasks: Tasks::default(),
             arrivals,
             arrival_sender,
@@ -293,6 +302,43 @@ impl Session {
             self.state.catalog = catalog;
             self.catalog = None;
         }
+    }
+
+    /// Takes the installed audio packs once their scan has finished.
+    fn collect_audio_library(&mut self) {
+        if let Some(Ok(library)) = self.audio_library.as_ref().map(Receiver::try_recv) {
+            self.state.audio_library = library;
+            self.audio_library = None;
+        }
+    }
+
+    /// Follows the preview of a library sound and carries out what the Audio tab asked.
+    fn sync_audio_preview(&mut self) {
+        self.state.ui.previewing = self.audio_preview.playing();
+        // Leaving the Audio tab leaves the sound with no button to stop it.
+        if self.state.ui.left_tab != LeftTab::Audio && self.state.ui.previewing.is_some() {
+            self.audio_preview.stop();
+        }
+        if let Some(message) = self.audio_preview.take_error() {
+            self.state.report_refused(Message::SoundPreviewFailed(message));
+        }
+        match self.state.ui.preview_wish.take() {
+            Some(SoundPreviewWish::Play { source, duration }) if !self.state.is_exporting() => {
+                if self.state.is_playing() {
+                    self.state.toggle_playback();
+                }
+                self.audio_preview.play(source, duration, self.paths.clone());
+            }
+            Some(SoundPreviewWish::Stop) => self.audio_preview.stop(),
+            _ => {}
+        }
+    }
+
+    /// A library sound waiting to become a clip is measured off this thread.
+    fn start_library_add(&mut self) {
+        let Some((item, target)) = self.state.ui.library_add.take() else { return };
+        let action = self.tasks.begin_library_add(&mut self.state, item, target);
+        self.perform(action);
     }
 
     fn collect_preview(&mut self) {
@@ -390,6 +436,7 @@ impl Session {
         for command in self.state.take_transport() {
             match command {
                 TransportCommand::Play { from } => {
+                    self.audio_preview.stop();
                     if self.playback.is_none() {
                         match Playback::open(self.state.project(), self.paths.clone()) {
                             Ok(playback) => {
@@ -437,6 +484,7 @@ impl Session {
         let total = engine::frame_count(self.state.project());
         self.state.begin_export(total);
         self.playback = None;
+        self.audio_preview.stop();
         let preview_released = self.preview.suspend();
         let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: choice, hashes: None };
         let window = self.window.clone();
@@ -512,6 +560,7 @@ impl Session {
 
     fn redraw(&mut self) -> Result<(), String> {
         self.collect_catalog();
+        self.collect_audio_library();
         self.collect_arrivals();
         self.poll_export();
         self.collect_preview();
@@ -551,6 +600,8 @@ impl Session {
         for request in requests {
             self.handle(request);
         }
+        self.start_library_add();
+        self.sync_audio_preview();
         self.sync_project_paths();
         self.sync_title();
         self.sync_audio_project();
@@ -698,14 +749,36 @@ impl Session {
                     Arrival::ProjectRead { load, file, result }
                 });
             }
-            Action::ImportPackage { load, path, overwrite } => self.spawn_task("package-import", TaskId::Load(load), move || {
-                let result = user_package_root().ok_or(ImportProblem::NoUserFolder).and_then(|root| install_zip(&path, &root, overwrite));
-                Arrival::PackageImported { load, path, result }
-            }),
+            Action::ImportPackage { load, path, overwrite } => {
+                // A sound being played holds its file open, and a pack in use cannot be replaced.
+                if overwrite {
+                    self.audio_preview.stop();
+                    self.playback = None;
+                    self.state.reopen_playback();
+                }
+                self.spawn_task("package-import", TaskId::Load(load), move || {
+                    let result = user_package_root().ok_or(ImportProblem::NoUserFolder).and_then(|root| install_zip(&path, &root, overwrite));
+                    Arrival::PackageImported { load, path, result }
+                });
+            }
+            Action::ProbeLibraryItem { load, item, target } => {
+                let paths = self.paths.clone();
+                self.spawn_task("library-probe", TaskId::Load(load), move || {
+                    let result = match paths.asset_problem(&item.source) {
+                        Some(problem) => Err(problem.to_string()),
+                        None => probe_media(&paths.source_path(&item.source)),
+                    };
+                    Arrival::LibraryItemProbed { load, item, target, result }
+                });
+            }
             Action::PackageInstalled { package } => self.package_installed(&package),
+            Action::AudioPackInstalled => self.audio_pack_installed(),
             Action::SaveTo(path) => self.save_project(path),
             Action::StartExport(path) => self.start_export(path, None),
-            Action::ProjectReplaced => self.playback = None,
+            Action::ProjectReplaced => {
+                self.playback = None;
+                self.audio_preview.stop();
+            }
             Action::Exit => self.exit_accepted = true,
         }
     }
@@ -715,6 +788,15 @@ impl Session {
     fn package_installed(&mut self, package: &str) {
         self.catalog = Some(spawn_catalog_scan(self.package_roots.clone(), self.window.clone()));
         self.state.previews.get_mut().forget(package);
+        self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.state.visuals.get_mut().set_paths(self.paths.clone());
+        self.tracker = RequestTracker::default();
+        self.shown = None;
+    }
+
+    /// Reads the installed packs again and drops what still points at files of the old one.
+    fn audio_pack_installed(&mut self) {
+        self.audio_library = Some(spawn_audio_scan(self.package_roots.clone(), self.window.clone()));
         self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         self.tracker = RequestTracker::default();
@@ -868,6 +950,23 @@ fn spawn_catalog_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<Cata
     });
     if let Err(e) = scanner {
         eprintln!("gpufx-editor: the package scan could not start: {e}");
+    }
+    receiver
+}
+
+/// Reads the manifests of the installed audio packs away from the UI thread.
+fn spawn_audio_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<AudioLibrary> {
+    let (sender, receiver) = channel();
+    let scanner = std::thread::Builder::new().name("audio-packs".to_owned()).spawn(move || {
+        // Before the first read, so a pack an install that was cut off left in its backup is listed.
+        if let Some(user_root) = user_package_root() {
+            recover_interrupted_install(&user_root);
+        }
+        let _ = sender.send(scan_audio_packs(&roots));
+        window.request_redraw();
+    });
+    if let Err(e) = scanner {
+        eprintln!("gpufx-editor: the audio pack scan could not start: {e}");
     }
     receiver
 }

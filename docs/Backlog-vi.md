@@ -370,3 +370,15 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Zip có thể đổi trong lúc hộp thoại ghi đè đang mở
 
 `crates/gpufx-editor/src/tasks.rs:330` (`PromptAnswered`) và `install_zip` (`package_import.rs:304`): câu hỏi ghi đè dựa trên lần đọc đầu, còn lần cài thứ hai đọc lại file. Nếu file zip bị thay giữa hai lần thì lần cài thứ hai có thể thay một id khác mà không hỏi. Nên giữ byte đã kiểm hoặc so lại id trước khi ghi đè. Ghi ngày 2026-11-10.
+
+### [Thấp] Preview âm thanh không có waker, bấm Nghe liên tiếp xếp hàng thay vì gộp
+
+`crates/gpufx-editor/src/playback/preview.rs:98` (`run`, nhánh `Command::Play`) và `:73` (`play`): luồng preview không đánh thức cửa sổ, nên icon và lỗi chỉ hiện ở lần nhập kế tiếp; bấm Nghe nhiều lần liên tiếp xếp từng lệnh vào hàng đợi, mỗi lệnh mở lại thiết bị, thay vì chỉ giữ lệnh cuối. Nên cho luồng gọi `request_redraw` khi đổi trạng thái và gộp các `Play` đang chờ về lệnh cuối. Ghi ngày 2026-11-10.
+
+### [Thấp] Gói hỏng ở root đầu bị thư viện bỏ qua nhưng vẫn thắng khi phân giải
+
+`crates/gpufx-editor/src/audio_library.rs:123` (`scan_audio_packs`, bỏ gói hỏng, không thêm vào `seen`) và `crates/d3d12-backend/src/paths.rs:213` (`asset_path`, chỉ bỏ qua root khi thiếu `manifest.json`): gói có manifest hỏng ở root đầu không được liệt kê, nhưng với manifest còn đó thì clip vẫn phân giải vào nó. Khi gói âm thanh đi kèm app, một gói người dùng nhập cùng id sẽ bị che mà không báo. Nên để hai bên cùng một quy tắc: gói hỏng cũng che, kèm báo lỗi, hoặc cùng bỏ qua. Ghi ngày 2026-11-10.
+
+### [Thấp] `probed_duration` còn trong cache sau khi gói bị ghi đè, và mỗi lần Add thêm cả âm thanh vào danh sách phiên
+
+`crates/gpufx-editor/src/media.rs:57` (`probed_duration`) tìm theo nguồn trong danh sách phiên và không biết gói đã bị ghi đè nên giữ độ dài cũ; `crates/gpufx-editor/src/editor.rs:1289` (`place_library_audio`) và `:1308` (`add_probed_library_item`) đưa mục thư viện vào danh sách phiên mỗi lần Add, nên danh sách phiên phình lên theo số lần dùng. Nên bỏ mục cache của gói khi `AudioPackInstalled`, và không thêm âm thanh thư viện vào danh sách phiên. Ghi ngày 2026-11-10.

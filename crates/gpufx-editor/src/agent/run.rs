@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 
-use d3d12_backend::{overwritten_input, probe_media, read_package_info, same_file, EncoderChoice, ExportJob, MediaProbe, ProjectPaths};
+use d3d12_backend::{is_asset_source, overwritten_input, probe_media, read_package_info, same_file, EncoderChoice, ExportJob, MediaProbe, ProjectPaths};
 use engine::{clip_at, frame_count, frame_time, nearest_free_start, Clip, ClipKey, Effect, Project, Time, TrackKind, Transition};
 use serde_json::{json, Map, Value};
 
@@ -90,7 +90,7 @@ pub fn prepare(request: AgentRequest, package_roots: &[PathBuf]) -> Prepared {
     match &prepared.request {
         AgentRequest::ProjectOpen { path, .. } => prepared.loaded = Some(load(path, package_roots)),
         AgentRequest::PackagesList { filter } => prepared.package_list = Some(package_list(package_roots, filter.as_deref())),
-        AgentRequest::Edit { edit: AgentEdit::ClipAdd { source, .. }, .. } => prepared.probe = Some(probe(source)),
+        AgentRequest::Edit { edit: AgentEdit::ClipAdd { source, .. }, .. } => prepared.probe = Some(probe(source, package_roots)),
         AgentRequest::Edit { edit: AgentEdit::EffectAdd { package, .. } | AgentEdit::TransitionAdd { package, .. }, .. } => prepared.packages_problem = package_problem(package, package_roots),
         _ => {}
     }
@@ -102,7 +102,13 @@ fn load(path: &Path, package_roots: &[PathBuf]) -> Result<Project, AgentError> {
     load_project_file_for_agent(&file, package_roots).map_err(|message| AgentError::new("invalid_project", message))
 }
 
-fn probe(source: &Path) -> Result<MediaProbe, AgentError> {
+fn probe(source: &Path, package_roots: &[PathBuf]) -> Result<MediaProbe, AgentError> {
+    let text = source.to_string_lossy();
+    if is_asset_source(&text) {
+        let paths = ProjectPaths::roots_only(Path::new("agent.json"), package_roots.to_vec());
+        let file = paths.asset_path(&text).map_err(|problem| AgentError::new("source_not_found", problem.to_string()))?;
+        return probe_media(&file).map_err(|message| AgentError::new("invalid_source", message));
+    }
     if !source.is_file() {
         return Err(AgentError::new("source_not_found", format!("{} does not exist", source.display())));
     }
@@ -178,7 +184,8 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
     if !present {
         return Err(AgentError::new("invalid_source", format!("{} has no usable {stream} stream{}", source.display(), problem.map_or_else(String::new, |reason| format!(": {reason}")))));
     }
-    let absolute = std::path::absolute(source).map_err(|e| AgentError::new("invalid_path", e.to_string()))?;
+    let stored = source.to_string_lossy().into_owned();
+    let stored = if is_asset_source(&stored) { stored } else { std::path::absolute(source).map_err(|e| AgentError::new("invalid_path", e.to_string()))?.to_string_lossy().into_owned() };
     let source_in = source_in.unwrap_or(Time::ZERO);
     let known = stated.filter(|length| *length > Time::ZERO);
     let remaining = match known {
@@ -189,7 +196,7 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
     // What the source still holds lasts longer or shorter on the timeline at another speed.
     let speed = speed.unwrap_or(1.0);
     check_speed(speed)?;
-    let mut clip = new_clip(&absolute.to_string_lossy(), start, Time::ZERO);
+    let mut clip = new_clip(&stored, start, Time::ZERO);
     clip.source_in = source_in;
     clip.speed = engine::speed_milli(speed) as f64 / engine::SPEED_SCALE as f64;
     clip.duration = duration.or(remaining.map(|length| clip.timeline_ticks(length))).unwrap_or(DEFAULT_CLIP_DURATION);
@@ -541,6 +548,21 @@ mod tests {
         let mut state = EditorState::default();
         state.add_track(TrackKind::Video);
         added_clip(&state, 0, Path::new("a.mp4"), Time::ZERO, source_in, duration, speed, Some(Ok(probed(Time::from_ticks(9000)))))
+    }
+
+    #[test]
+    fn a_clip_add_keeps_an_asset_source_and_refuses_an_escaping_or_missing_one() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Audio);
+        let asset = Path::new("asset:sfx/p/audio/a.flac");
+        let audio = MediaProbe { has_video: false, has_audio: true, video_duration: None, audio_duration: Some(Time::from_ticks(9000)), video_problem: None, audio_problem: None };
+        let track = state.project().tracks.iter().rposition(|track| track.is_audio()).expect("an audio track was added");
+        let clip = added_clip(&state, track, asset, Time::ZERO, None, None, None, Some(Ok(audio))).unwrap();
+        assert_eq!(clip.source, "asset:sfx/p/audio/a.flac", "no absolute path in the project");
+        let escaping = probe(Path::new("asset:sfx/../../secret.flac"), &[]).unwrap_err();
+        assert_eq!(escaping.code, "source_not_found");
+        let missing = probe(Path::new("asset:sfx/nothing/audio/a.flac"), &[]).unwrap_err();
+        assert!(missing.message.contains("nothing") && missing.message.contains("not installed"), "{}", missing.message);
     }
 
     #[test]

@@ -47,6 +47,7 @@ fn entry_problem(problem: EntryProblem) -> &'static str {
         EntryProblem::TrailingDotOrSpace => "its name ends with a dot or a space",
         EntryProblem::Duplicate => "another entry has the same name, ignoring case",
         EntryProblem::Encrypted => "it is encrypted",
+        EntryProblem::ExtensionNotAllowed => "a pack of this type may not hold this kind of file",
     }
 }
 
@@ -73,6 +74,8 @@ fn import_problem(problem: &ImportProblem) -> String {
         ImportProblem::NotUsable { inputs } => format!("with {inputs} inputs it is neither an effect nor a transition."),
         ImportProblem::KindChanged { existing, new } => format!("the installed package of this id is {} and this one is {}, which would break the projects using it.", kind_name(*existing), kind_name(*new)),
         ImportProblem::BadId(id) => format!("its id \"{id}\" cannot be used as a file name."),
+        ImportProblem::SizeMismatch { entry } => format!("\"{entry}\" unpacked to another size than the zip says."),
+        ImportProblem::RatioTooHigh { entry, limit } => format!("\"{entry}\" grows by more than {limit}:1 when unpacked."),
         ImportProblem::NoUserFolder => "LOCALAPPDATA is not set, so there is nowhere to install it.".to_owned(),
         ImportProblem::WriteFailed(detail) => format!("writing it failed ({detail})."),
     }
@@ -213,6 +216,17 @@ pub(super) fn text(message: &Message) -> String {
         Message::PromptOverwritePackage(name) => format!("A package named \"{name}\" is already installed. Replace it? Clips using this package may need to be checked afterwards."),
         Message::PackageInstalled { name, transition, replaced } => format!("{} \"{name}\" in {}.", if *replaced { "Replaced" } else { "Installed" }, if *transition { "Transitions" } else { "Effects" }),
         Message::PackageImportRefused(problem) => format!("The package was not installed: {}", import_problem(problem)),
+        Message::AudioPackInstalled { name, replaced } => format!("{} \"{name}\" in Audio.", if *replaced { "Replaced" } else { "Installed" }),
+        Message::SessionAudio => "This session".to_owned(),
+        Message::InstalledPacks => "Installed packs".to_owned(),
+        Message::ReadingAudioPacks => "Reading the installed packs...".to_owned(),
+        Message::AudioLibraryEmpty => "No sounds yet. Import a file or a pack (.zip).".to_owned(),
+        Message::AudioPackProblems(count) => format!("{} could not be read", counted(*count as i64, "pack or sound")),
+        Message::PreviewSound => "Listen".to_owned(),
+        Message::StopPreview => "Stop".to_owned(),
+        Message::AddSound => "Add".to_owned(),
+        Message::AudioAddHint => "Double-click or press + to add a sound at the playhead, or drag it onto an audio track.".to_owned(),
+        Message::SoundPreviewFailed(reason) => format!("The sound cannot be played: {reason}"),
         Message::SearchMedia => "Search media".to_owned(),
         Message::SearchAudio => "Search audio".to_owned(),
         Message::SearchEffects => "Search effects".to_owned(),

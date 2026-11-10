@@ -2,7 +2,8 @@
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
-use crate::editor::{EditorState, LeftTab};
+use crate::audio_library::LibrarySound;
+use crate::editor::{EditorState, LeftTab, LibraryTarget, SoundPreviewWish};
 use crate::effect_previews::play::{loop_step, static_step, Hover, Shown, Step};
 use crate::effect_previews::{AnimationState, LoopFrames, PreviewManager, TileState};
 use crate::i18n::{Language, Message};
@@ -26,6 +27,10 @@ const CELL_GAP: f32 = 8.0;
 const CELL_CAPTION: f32 = 24.0;
 const THUMB_RATIO: f32 = 0.6;
 const PICKER_FOOTER_HEIGHT: f32 = 44.0;
+const SOUND_ROW_HEIGHT: f32 = 34.0;
+const SOUND_BUTTON: f32 = 22.0;
+/// How often the Audio tab looks whether a preview has ended.
+const PREVIEW_REPAINT: Duration = Duration::from_millis(250);
 const TILE_MIN: f32 = 96.0;
 const TILE_GAP: f32 = 8.0;
 const TILE_CAPTION: f32 = 22.0;
@@ -52,7 +57,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
         }
         LeftTab::Audio => {
             state.ui.tile_hover.clear();
-            library(ui, state, requests, MediaKind::Audio)
+            audio_tab(ui, state, requests);
         }
         LeftTab::Effects | LeftTab::Transitions => picker(ui, state, requests),
     });
@@ -132,32 +137,179 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
     let hint = language.t(if audio_only { Message::SearchAudio } else { Message::SearchMedia });
     search_box(ui, if audio_only { &mut state.ui.audio_search } else { &mut state.ui.media_search }, &hint);
     let search = if audio_only { state.ui.audio_search.clone() } else { state.ui.media_search.clone() };
-    let items: Vec<MediaItem> = state.library.visible(kind, &search).into_iter().cloned().collect();
+    let items: Vec<&MediaItem> = state.library.visible(kind, &search);
     if items.is_empty() {
         ui.add(egui::Label::new(egui::RichText::new(language.t(empty_message(&search))).color(theme::text_dim())).wrap());
         return;
     }
     ui.add(egui::Label::new(egui::RichText::new(language.t(Message::AddHint)).color(theme::text_dim())).wrap());
     let mut chosen = None;
-    egui::ScrollArea::vertical().id_salt("media-grid").auto_shrink([false, false]).show(ui, |ui| {
-        let width = ui.available_width();
-        let columns = grid_columns(width, CELL_MIN, CELL_GAP);
-        let cell_width = (width - CELL_GAP * (columns as f32 - 1.0)) / columns as f32;
-        let cell_height = cell_width * THUMB_RATIO + CELL_CAPTION;
-        for row in items.chunks(columns) {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = CELL_GAP;
-                for item in row {
-                    if media_cell(ui, state, item, Vec2::new(cell_width, cell_height), kind) {
-                        chosen = Some(item.clone());
-                    }
+    egui::ScrollArea::vertical().id_salt("media-grid").auto_shrink([false, false]).show(ui, |ui| chosen = media_grid(ui, state, &items, kind));
+    if let Some(item) = chosen {
+        state.add_media_at_playhead(&item);
+    }
+}
+
+/// The grid of `items`, and the one chosen this frame.
+fn media_grid(ui: &mut egui::Ui, state: &EditorState, items: &[&MediaItem], kind: MediaKind) -> Option<MediaItem> {
+    let mut chosen = None;
+    let width = ui.available_width();
+    let columns = grid_columns(width, CELL_MIN, CELL_GAP);
+    let cell_width = (width - CELL_GAP * (columns as f32 - 1.0)) / columns as f32;
+    let cell_height = cell_width * THUMB_RATIO + CELL_CAPTION;
+    for row in items.chunks(columns) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = CELL_GAP;
+            for item in row {
+                if media_cell(ui, state, item, Vec2::new(cell_width, cell_height), kind) {
+                    chosen = Some((*item).clone());
+                }
+            }
+        });
+    }
+    chosen
+}
+
+/// What a row of a sound was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoundAction {
+    None,
+    Listen,
+    Stop,
+    Add,
+}
+
+/// The Audio tab: what was imported in this session, then the installed packs by name.
+fn audio_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
+    let language = state.language();
+    if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportFromComputer), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
+        requests.push(UiRequest::ImportMedia { audio_only: true });
+    }
+    if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportPackage), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
+        requests.push(UiRequest::ImportPackage);
+    }
+    search_box(ui, &mut state.ui.audio_search, &language.t(Message::SearchAudio));
+    if state.ui.previewing.is_some() {
+        ui.ctx().request_repaint_after(PREVIEW_REPAINT);
+    }
+    let search = state.ui.audio_search.clone();
+    // Borrowed from the state, not copied: a pack may list thousands of sounds, drawn every frame.
+    let session: Vec<&MediaItem> = state.library.visible(MediaKind::Audio, &search);
+    let found = state.audio_library.matching(&search);
+    if session.is_empty() && found.is_empty() {
+        let message = if state.audio_library.loaded { language.t(if search.trim().is_empty() { Message::AudioLibraryEmpty } else { Message::NoSearchMatch }) } else { language.t(Message::ReadingAudioPacks) };
+        ui.add(egui::Label::new(egui::RichText::new(message).color(theme::text_dim())).wrap());
+        library_problems(ui, state);
+        return;
+    }
+    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::AudioAddHint)).color(theme::text_dim())).wrap());
+    let mut chosen = None;
+    let mut acted = None;
+    egui::ScrollArea::vertical().id_salt("audio-library").auto_shrink([false, false]).show(ui, |ui| {
+        if !session.is_empty() {
+            ui.label(egui::RichText::new(language.t(Message::SessionAudio)).strong());
+            chosen = media_grid(ui, state, &session, MediaKind::Audio);
+        }
+        if !found.is_empty() {
+            ui.label(egui::RichText::new(language.t(Message::InstalledPacks)).strong());
+        }
+        for (pack, sounds) in &found {
+            egui::CollapsingHeader::new(format!("{} ({})", pack.name, sounds.len())).id_salt(("audio-pack", pack.kind.name(), &pack.id)).default_open(true).show(ui, |ui| {
+                if let Some(done) = sound_rows(ui, state, sounds) {
+                    acted = Some(done);
                 }
             });
         }
+        library_problems(ui, state);
     });
     if let Some(item) = chosen {
         state.add_media_at_playhead(&item);
     }
+    match acted {
+        Some((sound, SoundAction::Listen)) => state.ui.preview_wish = Some(SoundPreviewWish::Play { source: sound.source, duration: sound.duration }),
+        Some((_, SoundAction::Stop)) => state.ui.preview_wish = Some(SoundPreviewWish::Stop),
+        Some((sound, SoundAction::Add)) => state.place_library_audio(&sound.media_item(), LibraryTarget::Playhead),
+        Some((_, SoundAction::None)) | None => {}
+    }
+}
+
+/// The rows of `sounds`, drawing only those in view: the rows are all one height, so the ones above
+/// and below are skipped with blank space. The first one asked for something, if any did.
+fn sound_rows(ui: &mut egui::Ui, state: &EditorState, sounds: &[&LibrarySound]) -> Option<(LibrarySound, SoundAction)> {
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let visible = visible_rows(ui.cursor().top(), ui.clip_rect().top(), ui.clip_rect().bottom(), SOUND_ROW_HEIGHT, sounds.len());
+    ui.add_space(visible.start as f32 * SOUND_ROW_HEIGHT);
+    let mut acted = None;
+    for sound in &sounds[visible.clone()] {
+        match sound_row(ui, state, sound) {
+            SoundAction::None => {}
+            action => acted = Some(((*sound).clone(), action)),
+        }
+    }
+    ui.add_space((sounds.len() - visible.end) as f32 * SOUND_ROW_HEIGHT);
+    acted
+}
+
+/// The rows of `count`, each `height` tall from `top` down, that meet the span `clip_top..clip_bottom`.
+fn visible_rows(top: f32, clip_top: f32, clip_bottom: f32, height: f32, count: usize) -> Range<usize> {
+    let first = (((clip_top - top) / height).floor().max(0.0) as usize).min(count);
+    let last = (((clip_bottom - top) / height).ceil().max(0.0) as usize).min(count).max(first);
+    first..last
+}
+
+fn library_problems(ui: &mut egui::Ui, state: &EditorState) {
+    if state.audio_library.problems.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(state.language().t(Message::AudioPackProblems(state.audio_library.problems.len()))).id_salt("audio-pack-problems").show(ui, |ui| {
+        for problem in &state.audio_library.problems {
+            ui.colored_label(theme::refused(), format!("{}: {}", problem.pack, problem.message));
+        }
+    });
+}
+
+/// One sound: a button to listen, its name and manifest length, and a button to add it. The row
+/// itself can be dragged onto a track like any media, and a double click adds it.
+fn sound_row(ui: &mut egui::Ui, state: &EditorState, sound: &LibrarySound) -> SoundAction {
+    let language = state.language();
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), SOUND_ROW_HEIGHT), Sense::click_and_drag());
+    response.dnd_set_drag_payload(sound.media_item());
+    let painter = ui.painter_at(rect);
+    if response.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(theme::CONTROL_RADIUS), theme::panel_raised());
+    }
+    let playing = state.ui.previewing.as_deref() == Some(&sound.source);
+    let listen_rect = Rect::from_center_size(egui::pos2(rect.left() + 4.0 + SOUND_BUTTON / 2.0, rect.center().y), Vec2::splat(SOUND_BUTTON));
+    let add_rect = Rect::from_center_size(egui::pos2(rect.right() - 4.0 - SOUND_BUTTON / 2.0, rect.center().y), Vec2::splat(SOUND_BUTTON));
+    let listen = ui.interact(listen_rect, ui.scope_id().with(("sound-listen", &sound.source)), Sense::click()).on_hover_text(language.t(if playing { Message::StopPreview } else { Message::PreviewSound }));
+    let add = ui.interact(add_rect, ui.scope_id().with(("sound-add", &sound.source)), Sense::click()).on_hover_text(language.t(Message::AddSound));
+    icons::paint(&painter, listen_rect.shrink(4.0), if playing { Icon::Stop } else { Icon::Play }, if listen.hovered() { theme::accent() } else { theme::text() });
+    painter.rect_filled(add_rect, CornerRadius::same(4), theme::accent());
+    icons::paint(&painter, add_rect.shrink(5.0), Icon::Plus, theme::on_accent());
+    let length = sound.duration.map_or_else(|| "--:--".to_owned(), format_duration);
+    let length_text = painter.layout_no_wrap(length, FontId::monospace(11.0), theme::text_dim());
+    let length_at = egui::pos2(add_rect.left() - 6.0 - length_text.size().x, rect.center().y - length_text.size().y / 2.0);
+    let name_rect = Rect::from_min_max(egui::pos2(listen_rect.right() + 6.0, rect.top()), egui::pos2(length_at.x - 4.0, rect.bottom()));
+    painter.galley(length_at, length_text, theme::text_dim());
+    painter.with_clip_rect(name_rect).text(name_rect.left_center(), Align2::LEFT_CENTER, &sound.name, FontId::proportional(12.0), theme::text());
+    let response = response.on_hover_text(sound_tooltip(sound));
+    if listen.clicked() {
+        if playing {
+            SoundAction::Stop
+        } else {
+            SoundAction::Listen
+        }
+    } else if add.clicked() || response.double_clicked() {
+        SoundAction::Add
+    } else {
+        SoundAction::None
+    }
+}
+
+/// The name of a sound, what it is filed under, and the source a clip would store.
+fn sound_tooltip(sound: &LibrarySound) -> String {
+    let tags = if sound.tags.is_empty() { sound.category.clone() } else { format!("{} [{}]", sound.category, sound.tags.join(", ")) };
+    format!("{}\n{tags}\n{}", sound.name, sound.source)
 }
 
 /// What an empty grid says: a filter that matches nothing is not an empty library.
@@ -475,6 +627,25 @@ fn picker_problems(ui: &mut egui::Ui, state: &EditorState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_rows_in_view_are_drawn() {
+        // 100 rows of 10 starting at y = 50; the view shows y = 200..300.
+        assert_eq!(visible_rows(50.0, 200.0, 300.0, 10.0, 100), 15..25);
+        assert_eq!(visible_rows(50.0, 205.0, 295.0, 10.0, 100), 15..25, "a row cut by the edge is drawn");
+        assert_eq!(visible_rows(50.0, -500.0, 100.0, 10.0, 100), 0..5, "above the list");
+        assert_eq!(visible_rows(50.0, 900.0, 2000.0, 10.0, 100), 85..100, "the end of the list");
+        assert_eq!(visible_rows(50.0, 5000.0, 6000.0, 10.0, 100), 100..100, "scrolled past the end");
+        assert_eq!(visible_rows(50.0, 0.0, 30.0, 10.0, 100), 0..0, "all of the list is below the view");
+        assert_eq!(visible_rows(50.0, 0.0, 1000.0, 10.0, 3), 0..3);
+    }
+
+    #[test]
+    fn a_sound_tooltip_names_its_tags_and_source() {
+        let sound = LibrarySound { source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned(), "low".to_owned()], category: "impact".to_owned(), looped: false };
+        let text = sound_tooltip(&sound);
+        assert!(text.contains("Boom") && text.contains("hit, low") && text.contains("impact") && text.ends_with("asset:sfx/p/a.flac"), "{text}");
+    }
 
     #[test]
     fn a_poster_fits_its_tile_keeping_its_shape() {

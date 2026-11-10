@@ -4,6 +4,8 @@
 #![cfg(windows)]
 
 pub mod agent;
+pub mod asset_install;
+pub mod audio_library;
 pub(crate) mod child_process;
 pub mod editor;
 pub mod effect_previews;

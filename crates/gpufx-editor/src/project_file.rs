@@ -3,12 +3,13 @@
 //! In memory every source is absolute. The file on disk holds a source under the project's folder
 //! relative to it, with forward slashes, so a folder of media and project can be moved as one.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use d3d12_backend::{reserve_temporary, ProjectPaths};
-use engine::{validate, Project, Resolver, MIN_FRAME_DURATION};
+use d3d12_backend::{is_asset_source, reserve_temporary, ProjectPaths};
+use engine::{validate, Project, Resolver, ValidationError, MIN_FRAME_DURATION};
 
 /// Names a directory holding `packages/gpufx`, for an install that keeps them elsewhere.
 pub const PACKAGE_ROOT_VARIABLE: &str = "GPUFX_PACKAGE_ROOT";
@@ -85,11 +86,15 @@ fn is_relative_source(source: &str) -> bool {
     !Path::new(source).has_root() && !matches!(Path::new(source).components().next(), Some(Component::Prefix(_)))
 }
 
-/// `project` as stored in `file`: sources under its folder become relative.
+/// `project` as stored in `file`: sources under its folder become relative. An `asset:` source is
+/// no path, and is kept as it is both ways, so a project holds no absolute path to a pack.
 pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
     let folder = file.parent().unwrap_or_else(|| Path::new("."));
     let mut stored = project.clone();
     for clip in stored.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+        if is_asset_source(&clip.source) {
+            continue;
+        }
         if let Some(relative) = relative_under(folder, Path::new(&clip.source)) {
             clip.source = relative;
         }
@@ -101,7 +106,7 @@ pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
 pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
     let folder = file.parent().unwrap_or_else(|| Path::new("."));
     for clip in project.tracks.iter_mut().flat_map(|track| &mut track.clips) {
-        if is_relative_source(&clip.source) {
+        if !is_asset_source(&clip.source) && is_relative_source(&clip.source) {
             let joined = folder.join(&clip.source);
             clip.source = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
         }
@@ -142,6 +147,12 @@ pub fn parse_project(text: &str, file: &Path, resolver: &dyn Resolver) -> Result
     let mut project = with_absolute_sources(project, file);
     limit_frame_rate(&mut project, file);
     let errors = validate(&project, resolver);
+    // A project that needs sounds of packs which are not installed says which ones, all at once,
+    // so they can be installed in one go rather than found one per attempt.
+    let unavailable: BTreeSet<&str> = errors.iter().filter_map(|error| if let ValidationError::SourceUnavailable { reason, .. } = error { Some(reason.as_str()) } else { None }).collect();
+    if !unavailable.is_empty() {
+        return Err(format!("{}: {} ({} problems in all)", file.display(), unavailable.into_iter().collect::<Vec<_>>().join("; "), errors.len()));
+    }
     if let Some(first) = errors.first() {
         return Err(format!("{}: {first} ({} problems in all)", file.display(), errors.len()));
     }
@@ -203,6 +214,47 @@ mod tests {
         let opened = with_absolute_sources(project(vec!["clips/a.mp4".to_owned(), r"E:\media\b.mp4".to_owned()]), file);
         assert_eq!(opened.tracks[0].clips[0].source, r"D:\Work\clips\a.mp4");
         assert_eq!(opened.tracks[0].clips[1].source, r"E:\media\b.mp4");
+    }
+
+    #[test]
+    fn an_asset_source_stays_as_it_is_when_saved_and_opened() {
+        let file = Path::new(r"D:\Work\p.json");
+        let asset = "asset:sfx/avs-sfx-impact/audio/boom.flac".to_owned();
+        let stored = with_relative_sources(&project(vec![asset.clone()]), file);
+        assert_eq!(stored.tracks[0].clips[0].source, asset);
+        let opened = with_absolute_sources(project(vec![asset.clone()]), file);
+        assert_eq!(opened.tracks[0].clips[0].source, asset);
+    }
+
+    #[test]
+    fn a_project_missing_two_packs_names_each_once_in_one_message() {
+        let sources = ["asset:sfx/zeta-pack/audio/a.flac", "asset:music/alpha-pack/audio/b.mp3", "asset:sfx/zeta-pack/audio/c.flac"];
+        let text = serde_json::to_string(&project(sources.iter().map(|source| (*source).to_owned()).collect())).unwrap();
+        let file = Path::new(r"D:\Work\p.json");
+        let error = parse_project(&text, file, &ProjectPaths::roots_only(file, Vec::new())).unwrap_err();
+        let (alpha, zeta) = (error.find("'alpha-pack'"), error.find("'zeta-pack'"));
+        assert!(alpha.is_some() && zeta.is_some() && alpha < zeta, "both named, sorted: {error}");
+        assert_eq!(error.matches("'zeta-pack'").count(), 1, "each once: {error}");
+        assert!(error.contains("(3 problems in all)"), "{error}");
+    }
+
+    #[test]
+    fn other_errors_still_name_the_first_problem_only() {
+        let text = serde_json::to_string(&project(vec![r"D:\Work\gone.mp4".to_owned()])).unwrap();
+        struct NothingExists;
+        impl Resolver for NothingExists {
+            fn source_exists(&self, _: &str) -> bool {
+                false
+            }
+            fn package_exists(&self, _: &str) -> bool {
+                false
+            }
+            fn source_has_audio(&self, _: &str) -> bool {
+                false
+            }
+        }
+        let error = parse_project(&text, Path::new(r"D:\Work\p.json"), &NothingExists).unwrap_err();
+        assert!(error.contains("not found") && error.contains("(1 problems in all)"), "{error}");
     }
 
     #[test]

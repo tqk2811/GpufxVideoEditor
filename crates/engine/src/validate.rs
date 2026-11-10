@@ -10,6 +10,11 @@ use std::fmt;
 pub trait Resolver {
     /// Whether the source media file exists.
     fn source_exists(&self, source: &str) -> bool;
+    /// Why a source that may not exist cannot be used, when more can be said than that it is
+    /// missing, such as the pack that must be installed. The default says nothing.
+    fn source_problem(&self, _source: &str) -> Option<String> {
+        None
+    }
     /// Whether an effect or transition package can be found.
     fn package_exists(&self, package: &str) -> bool;
     /// Whether the source has an audio stream. Asked only for existing sources of audio tracks.
@@ -64,6 +69,14 @@ pub enum ValidationError {
         track: usize,
         clip: usize,
         other_clip: usize,
+    },
+    /// A clip source exists as a name, such as a sound of an installed pack, but cannot be used;
+    /// `reason` says why.
+    SourceUnavailable {
+        track: usize,
+        clip: usize,
+        source: String,
+        reason: String,
     },
     /// A clip source file was not found.
     SourceNotFound {
@@ -201,6 +214,9 @@ impl fmt::Display for ValidationError {
             }
             SourceNotFound { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: source '{source}' not found")
+            }
+            SourceUnavailable { track, clip, reason, .. } => {
+                write!(f, "track {track}, clip {clip}: {reason}")
             }
             EffectPackageNotFound { track, clip, effect, package } => write!(
                 f,
@@ -348,6 +364,13 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             // A hidden track's file and package are not needed for the output, so one that is missing does not matter.
             if track.hidden {
                 // Its structure is still checked below.
+            } else if let Some(reason) = resolver.source_problem(&clip.source) {
+                errors.push(SourceUnavailable {
+                    track: t,
+                    clip: c,
+                    source: clip.source.clone(),
+                    reason,
+                });
             } else if !resolver.source_exists(&clip.source) {
                 errors.push(SourceNotFound {
                     track: t,

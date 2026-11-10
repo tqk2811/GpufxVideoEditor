@@ -1,12 +1,153 @@
 //! Where the project's source files and effect packages live on disk.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use engine::Resolver;
 
+/// What starts a clip source naming a file of an installed asset pack: `asset:<type>/<id>/<file>`.
+pub const ASSET_PREFIX: &str = "asset:";
+/// The pack types a clip source may name, each a folder under `<root>/packages`.
+pub const ASSET_TYPES: [&str; 2] = ["sfx", "music"];
+/// The extensions of the files of a pack a clip may play.
+pub const ASSET_AUDIO_EXTENSIONS: [&str; 2] = ["flac", "mp3"];
+/// The longest pack id, which is also a folder name.
+pub const MAX_ASSET_ID_LENGTH: usize = 128;
+/// What an asset source that cannot be resolved turns into: no file can have this name on Windows.
+const UNRESOLVED_ASSET: &str = "<unresolved asset>";
+
+/// What is wrong with one part of a path, as Windows would treat it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathPartProblem {
+    /// A `:` opens a stream of an NTFS file, or names a drive.
+    Colon,
+    InvalidCharacter,
+    /// `CON`, `NUL`, `COM1`..., whatever follows them.
+    DeviceName,
+    /// Windows drops the dot or space, so the name would mean another file.
+    TrailingDotOrSpace,
+}
+
+fn is_device_name(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or(part).trim_end_matches(' ').to_uppercase();
+    let numbered = |prefix: &str| stem.strip_prefix(prefix).is_some_and(|rest| matches!(rest, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "\u{b9}" | "\u{b2}" | "\u{b3}"));
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered("COM") || numbered("LPT")
+}
+
+/// Checks one part of a path. An empty part, `.` and `..` are the caller's.
+pub fn check_path_part(part: &str) -> Result<(), PathPartProblem> {
+    if part.contains(':') {
+        return Err(PathPartProblem::Colon);
+    }
+    if part.chars().any(|c| c < ' ' || matches!(c, '<' | '>' | '"' | '|' | '?' | '*')) {
+        return Err(PathPartProblem::InvalidCharacter);
+    }
+    if part.ends_with('.') || part.ends_with(' ') {
+        return Err(PathPartProblem::TrailingDotOrSpace);
+    }
+    if is_device_name(part) {
+        return Err(PathPartProblem::DeviceName);
+    }
+    Ok(())
+}
+
+/// Whether `id` can be a file or folder name under a package folder.
+pub fn is_safe_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_ASSET_ID_LENGTH && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) && id != "." && id != ".." && check_path_part(id).is_ok()
+}
+
+/// Whether a clip source names a file of an asset pack rather than a file on disk.
+pub fn is_asset_source(source: &str) -> bool {
+    source.starts_with(ASSET_PREFIX)
+}
+
+/// The clip source of `file`, a path with forward slashes inside the pack `id` of type `kind`.
+pub fn asset_source(kind: &str, id: &str, file: &str) -> String {
+    format!("{ASSET_PREFIX}{kind}/{}/{file}", id.to_ascii_lowercase())
+}
+
+/// Why an `asset:` source cannot be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetProblem {
+    /// Not of the form `asset:<type>/<id>/<file>`, or with a part that could leave the pack.
+    Invalid { source: String },
+    UnknownType { source: String, kind: String },
+    /// The file is not one a clip may play.
+    NotAudio { source: String },
+    /// No package root holds the pack.
+    PackMissing { kind: String, id: String },
+    FileMissing { kind: String, id: String, file: String },
+    /// The file exists, but through a link that leads out of the pack.
+    Escapes { source: String },
+}
+
+impl fmt::Display for AssetProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid { source } => write!(f, "'{source}' is not a valid asset source"),
+            Self::UnknownType { source, kind } => write!(f, "'{source}' names the unknown pack type '{kind}'"),
+            Self::NotAudio { source } => write!(f, "'{source}' is not an audio file of a pack"),
+            Self::PackMissing { kind, id } => write!(f, "the {kind} pack '{id}' is not installed"),
+            Self::FileMissing { kind, id, file } => write!(f, "the {kind} pack '{id}' has no file '{file}'"),
+            Self::Escapes { source } => write!(f, "'{source}' leads out of its pack"),
+        }
+    }
+}
+
+impl std::error::Error for AssetProblem {}
+
+/// The parts of a valid `asset:` source. The id is lower-cased, as the folder of the pack is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetRef {
+    pub kind: String,
+    pub id: String,
+    pub file: String,
+}
+
+/// Parses an `asset:` source, refusing anything that could name a place outside the pack.
+pub fn parse_asset_source(source: &str) -> Result<AssetRef, AssetProblem> {
+    let invalid = || AssetProblem::Invalid { source: source.to_owned() };
+    let rest = source.strip_prefix(ASSET_PREFIX).ok_or_else(invalid)?;
+    if rest.contains('\\') {
+        return Err(invalid());
+    }
+    let mut parts = rest.splitn(3, '/');
+    let (Some(kind), Some(id), Some(file)) = (parts.next(), parts.next(), parts.next()) else { return Err(invalid()) };
+    if !ASSET_TYPES.contains(&kind) {
+        return Err(AssetProblem::UnknownType { source: source.to_owned(), kind: kind.to_owned() });
+    }
+    if !is_safe_id(id) {
+        return Err(invalid());
+    }
+    let unsafe_part = |part: &str| part.is_empty() || part == "." || part == ".." || check_path_part(part).is_err();
+    if file.split('/').any(unsafe_part) {
+        return Err(invalid());
+    }
+    let extension = Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if !ASSET_AUDIO_EXTENSIONS.contains(&extension.as_str()) {
+        return Err(AssetProblem::NotAudio { source: source.to_owned() });
+    }
+    Ok(AssetRef { kind: kind.to_owned(), id: id.to_ascii_lowercase(), file: file.to_owned() })
+}
+
+/// The parts of `path`, lower-cased as Windows compares them.
+fn lowered_parts(path: &Path) -> Vec<String> {
+    path.components().map(|part| part.as_os_str().to_string_lossy().to_lowercase()).collect()
+}
+
+/// Whether `file`, once links are followed, is still inside `pack`, the folder `<type folder>/<id>`.
+fn stays_in_pack(type_folder: &Path, id: &str, file: &Path) -> bool {
+    let (Ok(type_folder), Ok(file)) = (type_folder.canonicalize(), file.canonicalize()) else { return false };
+    let pack = lowered_parts(&type_folder.join(id));
+    let file = lowered_parts(&file);
+    file.len() > pack.len() && file[..pack.len()] == pack[..]
+}
+
 /// Resolves the relative paths of a project.
 ///
-/// A source is relative to the project file. A package name is tried, in this order, as a path
+/// A source is relative to the project file, or names a file of an installed pack as
+/// `asset:<type>/<id>/<file>`, looked for under `<root>/packages/<type>/<id>` of each root in
+/// order. A package name is tried, in this order, as a path
 /// relative to the project file, as a path relative to each package root, and, for a bare name
 /// such as `mix`, as `<root>/packages/gpufx/<group>/<name>` with groups in alphabetical order. The
 /// name as given is tried by all of those before, for a package that became a zip, the name with
@@ -54,9 +195,39 @@ impl ProjectPaths {
         !path.has_root() && path.components().all(|part| matches!(part, std::path::Component::Normal(_) | std::path::Component::CurDir))
     }
 
-    /// The path of `source`.
+    /// The path of `source`. An `asset:` source that cannot be resolved gets a path where no file
+    /// can be; [`Self::asset_problem`] says why.
     pub fn source_path(&self, source: &str) -> PathBuf {
+        if is_asset_source(source) {
+            return self.asset_path(source).unwrap_or_else(|_| self.base.join(UNRESOLVED_ASSET));
+        }
         self.base.join(source)
+    }
+
+    /// The file an `asset:` source names, in the first root holding its pack.
+    pub fn asset_path(&self, source: &str) -> Result<PathBuf, AssetProblem> {
+        let asset = parse_asset_source(source)?;
+        for root in &self.package_roots {
+            let type_folder = root.join("packages").join(&asset.kind);
+            let pack = type_folder.join(&asset.id);
+            if !pack.join("manifest.json").is_file() {
+                continue;
+            }
+            let file = asset.file.split('/').fold(pack, |path, part| path.join(part));
+            if !file.is_file() {
+                return Err(AssetProblem::FileMissing { kind: asset.kind, id: asset.id, file: asset.file });
+            }
+            if !stays_in_pack(&type_folder, &asset.id, &file) {
+                return Err(AssetProblem::Escapes { source: source.to_owned() });
+            }
+            return Ok(file);
+        }
+        Err(AssetProblem::PackMissing { kind: asset.kind, id: asset.id })
+    }
+
+    /// Why `source` cannot be used, when it is an `asset:` source. `None` for any other source.
+    pub fn asset_problem(&self, source: &str) -> Option<AssetProblem> {
+        is_asset_source(source).then(|| self.asset_path(source).err()).flatten()
     }
 
     /// The path of `package`, or `None` when it is not found.
@@ -94,6 +265,10 @@ impl ProjectPaths {
 impl Resolver for ProjectPaths {
     fn source_exists(&self, source: &str) -> bool {
         self.source_path(source).is_file()
+    }
+
+    fn source_problem(&self, source: &str) -> Option<String> {
+        self.asset_problem(source).map(|problem| problem.to_string())
     }
 
     fn package_exists(&self, package: &str) -> bool {
@@ -179,6 +354,113 @@ mod tests {
         let paths = ProjectPaths::new(&project.join("p.json"), vec![root.clone()]);
         assert_eq!(paths.package_path("mix"), Some(folder));
         assert_eq!(paths.package_path("mix.zip"), Some(project.join("mix.zip")), "the zip name still means the zip");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    fn pack_in(root: &Path, kind: &str, id: &str, files: &[&str]) -> PathBuf {
+        let pack = root.join("packages").join(kind).join(id);
+        std::fs::create_dir_all(pack.join("audio")).unwrap();
+        std::fs::write(pack.join("manifest.json"), b"{}").unwrap();
+        for file in files {
+            std::fs::write(pack.join(file), b"x").unwrap();
+        }
+        pack
+    }
+
+    fn asset_scratch(name: &str) -> PathBuf {
+        let scratch = std::env::temp_dir().join(format!("gpufx-paths-asset-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        scratch
+    }
+
+    #[test]
+    fn an_asset_source_resolves_inside_its_pack_in_any_root_and_case_of_the_id() {
+        let scratch = asset_scratch("resolve");
+        let (first, second) = (scratch.join("shipped"), scratch.join("user"));
+        std::fs::create_dir_all(&first).unwrap();
+        let pack = pack_in(&second, "sfx", "avs-sfx-impact", &["audio/boom.flac"]);
+        let paths = ProjectPaths::new(&scratch.join("p.json"), vec![first, second]);
+        let file = pack.join("audio").join("boom.flac");
+        assert_eq!(paths.source_path("asset:sfx/avs-sfx-impact/audio/boom.flac"), file);
+        assert_eq!(paths.source_path("asset:sfx/AVS-SFX-Impact/audio/boom.flac"), file, "the id is case-insensitive");
+        assert!(paths.source_exists("asset:sfx/avs-sfx-impact/audio/boom.flac"));
+        assert_eq!(paths.source_problem("asset:sfx/avs-sfx-impact/audio/boom.flac"), None);
+        let agent = ProjectPaths::roots_only(&scratch.join("p.json"), paths.package_roots.clone());
+        assert_eq!(agent.asset_path("asset:sfx/avs-sfx-impact/audio/boom.flac"), Ok(file));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn anything_that_could_leave_the_pack_is_refused_without_touching_the_disk() {
+        let invalid = [
+            "asset:sfx/pack/../other/a.flac",
+            "asset:sfx/pack/audio/../../a.flac",
+            "asset:sfx/pack/audio/./a.flac",
+            "asset:sfx/../pack/a.flac",
+            "asset:sfx/pack/audio//a.flac",
+            "asset:sfx/pack//a.flac",
+            "asset:sfx/pack/C:/Windows/a.flac",
+            "asset:sfx/pack/a.flac:stream.flac",
+            "asset:sfx/pack/audio\\..\\..\\a.flac",
+            "asset:sfx/pack\\audio/a.flac",
+            "asset:sfx/pack/CON.flac",
+            "asset:sfx/pack/a .flac ",
+            "asset:sfx/.../a.flac",
+            "asset:sfx/pack",
+            "asset:sfx",
+            "asset:",
+        ];
+        for source in invalid {
+            assert!(matches!(parse_asset_source(source), Err(AssetProblem::Invalid { .. })), "{source}: {:?}", parse_asset_source(source));
+        }
+        assert!(matches!(parse_asset_source("asset:gpufx/pack/a.flac"), Err(AssetProblem::UnknownType { .. })), "a shader folder is no pack");
+        assert!(matches!(parse_asset_source("asset:../pack/a.flac"), Err(AssetProblem::UnknownType { .. })));
+        assert!(matches!(parse_asset_source("asset:sfx/pack/manifest.json"), Err(AssetProblem::NotAudio { .. })));
+        assert!(matches!(parse_asset_source("asset:sfx/pack/LICENSE.txt"), Err(AssetProblem::NotAudio { .. })));
+    }
+
+    #[test]
+    fn an_unresolved_asset_never_becomes_a_file_of_the_project_folder() {
+        let scratch = asset_scratch("unresolved");
+        std::fs::write(scratch.join("evil.flac"), b"x").unwrap();
+        let paths = ProjectPaths::new(&scratch.join("p.json"), vec![scratch.clone()]);
+        assert!(!paths.source_exists("asset:sfx/../../evil.flac"));
+        assert!(!paths.source_path("asset:sfx/nope/a.flac").is_file());
+        assert!(!is_asset_source("audio/asset:x.flac"), "only the start of a source counts");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_missing_pack_or_file_is_named() {
+        let scratch = asset_scratch("missing");
+        let root = scratch.join("root");
+        pack_in(&root, "music", "avs-music", &[]);
+        let paths = ProjectPaths::new(&scratch.join("p.json"), vec![root]);
+        let problem = paths.source_problem("asset:sfx/avs-sfx-ui/audio/a.flac").unwrap();
+        assert!(problem.contains("avs-sfx-ui") && problem.contains("not installed"), "{problem}");
+        assert_eq!(paths.asset_problem("asset:music/avs-music/audio/a.mp3"), Some(AssetProblem::FileMissing { kind: "music".to_owned(), id: "avs-music".to_owned(), file: "audio/a.mp3".to_owned() }));
+        assert_eq!(paths.source_problem(r"C:\media\a.flac"), None, "an ordinary source is the plain resolver's");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn a_junction_out_of_the_pack_is_refused() {
+        let scratch = asset_scratch("junction");
+        let root = scratch.join("root");
+        let pack = pack_in(&root, "sfx", "p", &[]);
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.flac"), b"x").unwrap();
+        let linked = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(pack.join("audio").join("link")).arg(&outside).output();
+        if !linked.is_ok_and(|output| output.status.success()) {
+            eprintln!("skipped: a junction could not be made");
+            return;
+        }
+        let paths = ProjectPaths::new(&scratch.join("p.json"), vec![root]);
+        assert_eq!(paths.asset_problem("asset:sfx/p/audio/link/secret.flac"), Some(AssetProblem::Escapes { source: "asset:sfx/p/audio/link/secret.flac".to_owned() }));
+        assert!(!paths.source_exists("asset:sfx/p/audio/link/secret.flac"));
+        std::fs::remove_dir(pack.join("audio").join("link")).unwrap();
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
