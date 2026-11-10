@@ -1,9 +1,7 @@
 //! Runs `gpufx-render` as a child process and follows it: the temporary project, the job object
 //! that takes the child down with the editor, the pipes, and stopping it.
 
-use std::ffi::c_void;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::windows::io::AsRawHandle;
+use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -12,12 +10,11 @@ use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use d3d12_backend::{reserve_temporary, EncoderChoice, ExportJob, ProjectPaths, CANCEL_LINE, MAX_EVENT_LINE};
+use d3d12_backend::{reserve_temporary, EncoderChoice, ExportJob, ProjectPaths, CANCEL_LINE};
 use engine::Project;
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
+use crate::child_process::{join_within, pump_lines, tail_of, KillOnClose, POLL};
 use super::machine::{is_own_partial, ChildMachine, ExportOutcome};
 use crate::i18n::Message;
 
@@ -30,12 +27,6 @@ const EXIT_GRACE: Duration = Duration::from_secs(5);
 /// How long a pipe of a child that is gone or killed may stay open, held by something it started
 /// or a process the system could not stop, before its reader is left behind.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
-/// How often the cancel flag is looked at while the child is quiet.
-const POLL: Duration = Duration::from_millis(20);
-/// Longer lines of stdout are not events. Their bytes are dropped, not kept.
-const MAX_LINE: usize = MAX_EVENT_LINE;
-/// How much of stderr is kept for the error message.
-const STDERR_TAIL: usize = 1024;
 
 /// `gpufx-render.exe` beside the running editor. Whether it exists is checked when it is run.
 pub fn sibling_render_exe() -> PathBuf {
@@ -88,93 +79,6 @@ impl Drop for TemporaryProject {
     }
 }
 
-/// A job object that kills what is in it when its last handle closes, which the system also does
-/// for a process that crashes.
-pub(super) struct KillOnClose(HANDLE);
-
-// A job handle may be used and closed from any thread.
-unsafe impl Send for KillOnClose {}
-
-impl KillOnClose {
-    pub(super) fn new() -> Result<Self, String> {
-        // SAFETY: both pointers are null or valid for the call; the handle is owned by the result.
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() {
-            return Err(format!("creating the job object failed: {}", std::io::Error::last_os_error()));
-        }
-        let job = Self(handle);
-        // SAFETY: an all-zero value is valid for this plain C struct.
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: the pointer and size describe `limits`, the class matches its type.
-        let set = unsafe { SetInformationJobObject(job.0, JobObjectExtendedLimitInformation, (&raw const limits).cast::<c_void>(), size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32) };
-        if set == 0 {
-            return Err(format!("configuring the job object failed: {}", std::io::Error::last_os_error()));
-        }
-        Ok(job)
-    }
-
-    pub(super) fn assign(&self, child: &Child) -> Result<(), String> {
-        // SAFETY: both handles are alive for the call.
-        if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle() as HANDLE) } == 0 {
-            return Err(format!("adding the export process to its job failed: {}", std::io::Error::last_os_error()));
-        }
-        Ok(())
-    }
-}
-
-impl Drop for KillOnClose {
-    fn drop(&mut self) {
-        // SAFETY: the handle is owned here and closed once.
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
-/// Calls `on_line` for each line of `reader`, without keeping more than [`MAX_LINE`] of one. An
-/// over-long line is passed on cut short, so it counts as malformed.
-fn pump_lines(reader: impl Read, mut on_line: impl FnMut(&[u8])) {
-    let mut reader = BufReader::new(reader);
-    let mut line = Vec::new();
-    let mut over = false;
-    loop {
-        let Ok(chunk) = reader.fill_buf() else { break };
-        if chunk.is_empty() {
-            break;
-        }
-        let (taken, ended) = chunk.iter().position(|&b| b == b'\n').map_or((chunk.len(), false), |at| (at + 1, true));
-        let body = &chunk[..if ended { taken - 1 } else { taken }];
-        let room = MAX_LINE.saturating_sub(line.len());
-        over |= body.len() > room;
-        line.extend_from_slice(&body[..body.len().min(room)]);
-        reader.consume(taken);
-        if ended {
-            on_line(&line);
-            line.clear();
-            over = false;
-        }
-    }
-    if !line.is_empty() || over {
-        on_line(&line);
-    }
-}
-
-/// Drains `reader`, returning the last [`STDERR_TAIL`] bytes as text.
-fn tail_of(mut reader: impl Read) -> String {
-    let mut kept: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 8192];
-    while let Ok(read) = reader.read(&mut chunk) {
-        if read == 0 {
-            break;
-        }
-        kept.extend_from_slice(&chunk[..read]);
-        if kept.len() > STDERR_TAIL * 4 {
-            kept.drain(..kept.len() - STDERR_TAIL);
-        }
-    }
-    let start = kept.len().saturating_sub(STDERR_TAIL);
-    String::from_utf8_lossy(&kept[start..]).into_owned()
-}
-
 enum Incoming {
     Line(Vec<u8>),
     Closed,
@@ -197,18 +101,6 @@ fn wait_for_exit(child: &mut Child, grace: Duration) -> Option<i32> {
             _ => return None,
         }
     }
-}
-
-/// The thread's result if it ends within `limit`; otherwise it is left running on its own.
-fn join_within<T>(handle: thread::JoinHandle<T>, limit: Duration) -> Option<T> {
-    let started = Instant::now();
-    while !handle.is_finished() {
-        if started.elapsed() >= limit {
-            return None;
-        }
-        thread::sleep(POLL);
-    }
-    handle.join().ok()
 }
 
 fn take_line(machine: &mut ChildMachine, done: &AtomicI64, line: &[u8]) {
@@ -344,7 +236,7 @@ fn run_child_with(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cance
         Ok(child) => child,
         Err(error) => return failed(format!("starting {} failed: {error}", tool.display())),
     };
-    if let Some(Err(message)) = job_object.as_ref().map(|job_object| job_object.assign(&child)) {
+    if let Some(Err(message)) = job_object.as_ref().map(|job_object| job_object.assign(&child, "the export process")) {
         let _ = child.kill();
         let _ = child.wait();
         return failed(message);
@@ -357,6 +249,7 @@ fn run_child_with(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cance
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::child_process::{MAX_LINE, STDERR_TAIL};
     use d3d12_backend::ExportJob;
     use engine::{Clip, Effect, Output, Time, Track, TrackKind, SUPPORTED_VERSION};
     use serde_json::Map;
@@ -593,7 +486,7 @@ mod tests {
         let dir = scratch("job");
         let job_object = KillOnClose::new().expect("create the job");
         let mut child = Command::new(fake_tool()).args(["project.json", "--out"]).arg(dir.join("hang.mp4")).args(["--progress", "json"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("start");
-        job_object.assign(&child).expect("assign");
+        job_object.assign(&child, "the export process").expect("assign");
         assert!(child.try_wait().expect("poll").is_none(), "the child waits forever");
         drop(job_object);
         let started = Instant::now();

@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn the_own_lock_counts_whatever_the_case_of_the_path() {
-        let dir = std::env::temp_dir().join(format!("gpufx-editor-lock-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gpufx-editor-lock-case-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut state = EditorState::default();
         assert!(state.claim_project_lock(&dir.join("p.json")));

@@ -1,3 +1,4 @@
+use super::disk::unix_nanos;
 use super::*;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -225,13 +226,79 @@ fn a_new_key_removes_the_old_keys_files_but_not_another_packages() {
 }
 
 #[test]
-fn the_attempt_count_goes_from_zero_to_one() {
+fn the_attempt_count_goes_from_zero_to_one_for_a_later_helper() {
     let store = store("attempt");
-    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef").unwrap(), 0);
-    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef").unwrap(), 1);
-    assert_eq!(store.mark_attempt("aaaaaaaa", "fedcba9876543210").unwrap(), 0);
+    let started = SystemTime::now();
+    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", started).unwrap(), Some(0));
+    let later = SystemTime::now() + Duration::from_millis(5);
+    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", later).unwrap(), Some(1));
+    assert_eq!(store.mark_attempt("aaaaaaaa", "fedcba9876543210", "GPU A", "1.0", later).unwrap(), Some(0));
     store.clear_attempt("aaaaaaaa", "0123456789abcdef");
-    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef").unwrap(), 0);
+    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", later).unwrap(), Some(0));
+}
+
+#[test]
+fn an_attempt_recorded_after_the_helper_started_is_not_a_second_one() {
+    let store = store("attempt-same-helper");
+    let started = SystemTime::now();
+    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", started).unwrap(), Some(0));
+    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", started).unwrap(), None, "the record is newer than the helper, so nothing is recorded");
+}
+
+#[test]
+fn an_attempt_of_another_adapter_or_version_or_format_or_age_counts_as_absent() {
+    let store = store("attempt-absent");
+    let later = SystemTime::now() + Duration::from_secs(1);
+    let path = store.root.join("aaaaaaaa-0123456789abcdef.attempt");
+    std::fs::create_dir_all(&store.root).unwrap();
+    let record = |adapter: &str, version: &str, age: Duration| {
+        serde_json::json!({ "count": 1, "adapter": adapter, "version": version, "at": unix_nanos(SystemTime::now() - age) }).to_string()
+    };
+    let cases = [
+        ("another adapter", record("GPU B", "1.0", Duration::from_secs(60))),
+        ("another version", record("GPU A", "2.0", Duration::from_secs(60))),
+        ("the old format", "1".to_string()),
+        ("older than seven days", record("GPU A", "1.0", Duration::from_secs(8 * 24 * 60 * 60))),
+    ];
+    for (name, text) in cases {
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", later).unwrap(), Some(0), "{name}");
+    }
+    std::fs::write(&path, record("GPU A", "1.0", Duration::from_secs(6 * 24 * 60 * 60))).unwrap();
+    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", later).unwrap(), Some(1), "six days old still counts");
+}
+
+#[test]
+fn an_attempt_dated_more_than_a_day_ahead_counts_as_absent_and_one_a_little_ahead_still_counts() {
+    let store = store("attempt-future");
+    let path = store.root.join("aaaaaaaa-0123456789abcdef.attempt");
+    std::fs::create_dir_all(&store.root).unwrap();
+    let record = |ahead: Duration| serde_json::json!({ "count": 1, "adapter": "GPU A", "version": "1.0", "at": unix_nanos(SystemTime::now() + ahead) }).to_string();
+    let started = SystemTime::now() + Duration::from_secs(3 * 24 * 60 * 60);
+    std::fs::write(&path, record(Duration::from_secs(2 * 24 * 60 * 60))).unwrap();
+    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", started).unwrap(), Some(0), "two days ahead is absent");
+    let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(stored["count"], 1, "the record starts again");
+    std::fs::write(&path, record(Duration::from_secs(60 * 60))).unwrap();
+    assert_eq!(store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", started).unwrap(), Some(1), "an hour ahead still counts");
+}
+
+#[test]
+fn writing_failed_removes_the_attempt_record() {
+    let store = store("failed-clears-attempt");
+    store.mark_attempt("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", SystemTime::now()).unwrap();
+    assert!(store.root.join("aaaaaaaa-0123456789abcdef.attempt").exists());
+    store.mark_failed_on("aaaaaaaa", "0123456789abcdef", "GPU A", "1.0", "broken").unwrap();
+    assert!(!store.root.join("aaaaaaaa-0123456789abcdef.attempt").exists());
+}
+
+#[test]
+fn temporary_paths_never_repeat_even_across_stores() {
+    let (first, second) = (store("temporary-a"), store("temporary-a"));
+    let mut paths: Vec<PathBuf> = (0..10).flat_map(|_| [first.temporary_path(), second.temporary_path()]).collect();
+    paths.sort_by_key(|path| path.file_name().map(|name| name.to_owned()));
+    paths.dedup_by_key(|path| path.file_name().map(|name| name.to_owned()));
+    assert_eq!(paths.len(), 20);
 }
 
 #[test]

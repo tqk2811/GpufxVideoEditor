@@ -4,6 +4,7 @@
 #![cfg(windows)]
 
 pub mod agent;
+pub(crate) mod child_process;
 pub mod editor;
 pub mod effect_previews;
 pub mod export;

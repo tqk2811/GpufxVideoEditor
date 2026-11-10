@@ -354,3 +354,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] `luma-matte` hiện trong danh sách effect nhưng không có preview
 
 `crates/gpufx-editor/src/packages.rs:21-26` xếp package 1 input vào effect mà không xét số output, còn `crates/d3d12-backend/src/effect_preview.rs` từ chối package có 2 output nên `ffmpeg/luma-matte` sẽ ra ô lỗi. Nên thống nhất: lọc ở `packages.rs`, hoặc render output 0. Chưa kiểm editor có render được package này không. Ghi ngày 2026-11-10.
+
+### [Thấp] Still và loop của preview dùng chung bản ghi lỗi
+
+`crates/gpufx-editor/src/effect_previews/key.rs` `preview_key` không có loại ảnh nên `.attempt` và `.failed` dùng chung cho still và loop: một lần lỗi mỗi loại tính thành hai lần, và loop hỏng chặn cả still. Nên thêm loại vào tên file hoặc nội dung bản ghi. Ghi ngày 2026-11-10.

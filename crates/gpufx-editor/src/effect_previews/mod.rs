@@ -6,6 +6,7 @@
 // Only the later steps (the renderer and the effect list) use most of this.
 #![allow(dead_code)]
 
+pub mod child;
 pub mod disk;
 pub mod key;
 
