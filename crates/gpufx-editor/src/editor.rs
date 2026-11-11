@@ -342,6 +342,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         speed: 1.0,
         placement: None,
         motion: Default::default(),
+        text: None,
     }
 }
 

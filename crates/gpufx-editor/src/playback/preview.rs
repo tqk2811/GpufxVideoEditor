@@ -26,7 +26,7 @@ pub fn preview_length(manifest: Option<Time>, probed: Option<Time>) -> Time {
 
 /// A project that plays `source` once from its start, for `duration`.
 pub fn preview_project(source: &str, duration: Option<Time>) -> Project {
-    let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration: duration.filter(|length| *length > Time::ZERO).unwrap_or(FALLBACK_LENGTH), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default() };
+    let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration: duration.filter(|length| *length > Time::ZERO).unwrap_or(FALLBACK_LENGTH), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None };
     Project {
         version: SUPPORTED_VERSION,
         output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 128_000 }) },

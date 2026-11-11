@@ -21,6 +21,7 @@ pub fn clip(source: &str, start: i64, source_in: i64, duration: i64) -> Clip {
         speed: 1.0,
         placement: None,
         motion: Default::default(),
+        text: None,
     }
 }
 

@@ -1,7 +1,7 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
-use crate::project::{speed_in_range, Clip, Project, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
+use crate::project::{speed_in_range, Clip, Project, TEXT_SOURCE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;
@@ -181,6 +181,14 @@ pub enum ValidationError {
         clip: usize,
         source: String,
     },
+    /// A text clip is on a track of kind `audio`.
+    TextOnAudioTrack { track: usize, clip: usize },
+    /// A text clip has no text, or its `source` is not [`crate::project::TEXT_SOURCE`].
+    EmptyText { track: usize, clip: usize },
+    /// A text clip `size` is zero, negative or not a number.
+    InvalidTextSize { track: usize, clip: usize, size: f32 },
+    /// A text clip `line_spacing` is zero, negative or not a number.
+    InvalidLineSpacing { track: usize, clip: usize, line_spacing: f32 },
     /// The source of a clip on a track of kind `audio` has no audio stream.
     SourceHasNoAudio {
         track: usize,
@@ -308,6 +316,10 @@ impl fmt::Display for ValidationError {
             ImageOnAudioTrack { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: the image '{source}' cannot go on an audio track")
             }
+            TextOnAudioTrack { track, clip } => write!(f, "track {track}, clip {clip}: text cannot go on an audio track"),
+            EmptyText { track, clip } => write!(f, "track {track}, clip {clip}: the text is empty or its source is not '{TEXT_SOURCE}'"),
+            InvalidTextSize { track, clip, size } => write!(f, "track {track}, clip {clip}: text size {size} must be above 0"),
+            InvalidLineSpacing { track, clip, line_spacing } => write!(f, "track {track}, clip {clip}: line spacing {line_spacing} must be above 0"),
             SourceHasNoAudio { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: source '{source}' has no audio stream")
             }
@@ -424,7 +436,21 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 ok = false;
             }
             // A hidden track's file and package are not needed for the output, so one that is missing does not matter.
-            if track.hidden {
+            if let Some(text) = &clip.text {
+                // A text clip names no file, so the resolver is not asked about it.
+                if text.content.is_empty() || clip.source != TEXT_SOURCE {
+                    errors.push(EmptyText { track: t, clip: c });
+                }
+                if !(text.size.is_finite() && text.size > 0.0) {
+                    errors.push(InvalidTextSize { track: t, clip: c, size: text.size });
+                }
+                if !(text.line_spacing.is_finite() && text.line_spacing > 0.0) {
+                    errors.push(InvalidLineSpacing { track: t, clip: c, line_spacing: text.line_spacing });
+                }
+                if track.is_audio() {
+                    errors.push(TextOnAudioTrack { track: t, clip: c });
+                }
+            } else if track.hidden {
                 // Its structure is still checked below.
             } else if let Some(reason) = resolver.source_problem(&clip.source) {
                 errors.push(SourceUnavailable {

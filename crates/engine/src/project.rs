@@ -117,6 +117,152 @@ pub struct Clip {
     /// Opacity, rotation and keyframes. Left out of the file when it is all default.
     #[serde(default, skip_serializing_if = "ClipMotion::is_default")]
     pub motion: ClipMotion,
+    /// What a text clip shows and how. Present only on text clips, whose `source` is
+    /// [`TEXT_SOURCE`]; absent on media clips, so older projects load and save unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<TextContent>,
+}
+
+/// The `source` of every text clip. It names no file and has no extension, so
+/// [`is_image_source`] never mistakes it for an image.
+pub const TEXT_SOURCE: &str = "text:";
+
+/// The content and style of a text clip. It is rasterized into a still picture, so placement,
+/// motion, keyframes and opacity work as on an image clip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextContent {
+    /// The text, with a line feed between lines. Must not be empty.
+    pub content: String,
+    /// Which font draws it.
+    #[serde(default)]
+    pub font: FontRef,
+    /// Font size, in parts of the output height. Must be above 0.
+    pub size: f32,
+    /// Fill colour.
+    #[serde(default = "white")]
+    pub color: Rgba,
+    /// Outline around each glyph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<TextOutline>,
+    /// Box drawn behind the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<TextBackground>,
+    /// Drop shadow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<TextShadow>,
+    /// Horizontal alignment of the lines.
+    #[serde(default)]
+    pub align: TextAlign,
+    /// Line height as a multiple of the font size.
+    #[serde(default = "unit_f32")]
+    pub line_spacing: f32,
+    /// Preset animations. Left out of the file when there are none.
+    #[serde(default, skip_serializing_if = "TextAnimation::is_empty")]
+    pub animation: TextAnimation,
+}
+
+impl TextContent {
+    /// Plain centred white text in the default font.
+    pub fn new(content: impl Into<String>, size: f32) -> TextContent {
+        TextContent {
+            content: content.into(),
+            font: FontRef::Default,
+            size,
+            color: white(),
+            outline: None,
+            background: None,
+            shadow: None,
+            align: TextAlign::Center,
+            line_spacing: 1.0,
+            animation: TextAnimation::default(),
+        }
+    }
+}
+
+/// A colour as `[r, g, b, a]`, each 0 to 255, not premultiplied.
+pub type Rgba = [u8; 4];
+
+fn white() -> Rgba {
+    [255, 255, 255, 255]
+}
+
+fn unit_f32() -> f32 {
+    1.0
+}
+
+/// Which font a text clip uses. More kinds, such as a font from an installed package, may follow.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum FontRef {
+    /// The font built into the editor.
+    #[default]
+    Default,
+    /// A font installed on the system, by family name.
+    System { family: String },
+}
+
+/// Horizontal alignment of text lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextAlign {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+/// An outline around each glyph.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TextOutline {
+    pub color: Rgba,
+    /// Width, in parts of the font size.
+    pub width: f32,
+}
+
+/// A box behind the text.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TextBackground {
+    pub color: Rgba,
+    /// Space between the text and the box edge, in parts of the font size.
+    pub padding: f32,
+    /// Corner radius, in parts of the font size.
+    pub radius: f32,
+}
+
+/// A drop shadow.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TextShadow {
+    pub color: Rgba,
+    /// Offset `[x, y]`, in parts of the font size.
+    pub offset: [f32; 2],
+    /// Blur radius, in parts of the font size.
+    pub blur: f32,
+}
+
+/// The preset animations of a text clip: one to enter, one to leave and one that repeats.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TextAnimation {
+    #[serde(default, rename = "in", skip_serializing_if = "Option::is_none")]
+    pub enter: Option<TextAnimationRef>,
+    #[serde(default, rename = "out", skip_serializing_if = "Option::is_none")]
+    pub exit: Option<TextAnimationRef>,
+    #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<TextAnimationRef>,
+}
+
+impl TextAnimation {
+    /// Whether no animation is set.
+    pub fn is_empty(&self) -> bool {
+        self.enter.is_none() && self.exit.is_none() && self.repeat.is_none()
+    }
+}
+
+/// One preset animation and how long one run of it lasts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextAnimationRef {
+    /// The preset id, such as `fade`.
+    pub preset: String,
+    pub duration: Time,
 }
 
 /// Where a clip sits in the output frame, in parts of the frame. The height follows from the shape
@@ -364,6 +510,7 @@ impl From<ProjectV1> for Project {
                             speed: 1.0,
                             placement: None,
                             motion: ClipMotion::default(),
+                            text: None,
                         })
                         .collect(),
                     transitions: track.transitions,
@@ -401,6 +548,11 @@ impl Clip {
     /// Whether the clip shows a still image: it has no sound and no source length to run out of.
     pub fn is_image(&self) -> bool {
         is_image_source(&self.source)
+    }
+
+    /// Whether the clip shows text, rasterized into a still picture.
+    pub fn is_text(&self) -> bool {
+        self.text.is_some()
     }
 
     /// Timeline end (exclusive), or `None` on overflow.
@@ -458,7 +610,7 @@ pub(crate) mod tests_support {
 
     /// A plain clip of one second at the start of the timeline.
     pub(crate) fn clip() -> Clip {
-        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default() }
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None }
     }
 }
 
