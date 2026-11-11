@@ -358,7 +358,8 @@ fn the_same_text_is_rasterized_once_and_a_new_colour_again() {
     let red = parse(&project_json(&text_track(2, "[255,0,0,255]")));
     let first = text_frame(&mut compositor, &red);
     let after_first = compositor.text_rasterizations();
-    assert!(after_first >= 1);
+    // The scale it needs comes from measuring, so the text is drawn once, at that scale.
+    assert_eq!(after_first, 1, "rasterized once");
     // A new renderer opens the clip again: the compositor still has the picture.
     let again = text_frame(&mut compositor, &red);
     assert_eq!(compositor.text_rasterizations(), after_first, "the same text is not rasterized again");
