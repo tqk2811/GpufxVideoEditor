@@ -1,5 +1,5 @@
 use engine::project::{FontRef, TextAlign, TextBackground, TextContent, TextOutline, TextShadow};
-use gpufx_text::{TextImage, TextRasterizer, MAX_DIMENSION, MAX_PIXELS};
+use gpufx_text::{TextImage, TextRasterizer, MAX_DIMENSION, MAX_OUTLINE_RATIO, MAX_PIXELS};
 use unicode_normalization::UnicodeNormalization;
 
 const HEIGHT: u32 = 720;
@@ -148,4 +148,79 @@ fn huge_text_is_shrunk_to_the_limits() {
     assert!(image.width <= MAX_DIMENSION && image.height <= MAX_DIMENSION);
     assert!(image.width as u64 * image.height as u64 <= MAX_PIXELS);
     assert!(covered(&image) > 0);
+}
+
+#[test]
+fn measure_gives_the_size_before_shrinking_and_draws_nothing() {
+    let mut r = rasterizer();
+    let text = TextContent::new("WWWWWWWWWWWWWWWWWWWW", 1.0);
+    let (w, h) = r.measure(&text, 4320, 1.0);
+    assert!(w > MAX_DIMENSION, "the natural width {w} is not shrunk");
+    let image = r.rasterize(&text, 4320, 1.0);
+    assert!(image.downscaled && image.width < w && image.height < h);
+    let small = TextContent::new("Hi", 0.06);
+    let image = r.rasterize(&small, HEIGHT, 1.0);
+    assert_eq!(r.measure(&small, HEIGHT, 1.0), (image.width, image.height));
+}
+
+/// Whether any pixel on the edge of the picture has ink, which means some was cut off.
+fn ink_on_edge(image: &TextImage) -> bool {
+    let (w, h) = (image.width, image.height);
+    (0..w).any(|x| alpha(image, x, 0) > 0 || alpha(image, x, h - 1) > 0) || (0..h).any(|y| alpha(image, 0, y) > 0 || alpha(image, w - 1, y) > 0)
+}
+
+#[test]
+fn stacked_marks_on_a_tight_line_spacing_are_not_cut() {
+    let mut r = rasterizer();
+    let mut text = TextContent::new("Ể Ỗ ẤỤ", 0.1);
+    let normal = r.rasterize(&text, HEIGHT, 1.0);
+    text.line_spacing = 0.3;
+    let tight = r.rasterize(&text, HEIGHT, 1.0);
+    assert!(!ink_on_edge(&normal) && !ink_on_edge(&tight));
+    let (a, b) = (covered(&normal) as f64, covered(&tight) as f64);
+    assert!((a - b).abs() < a * 0.1, "the tight lines cover {b} pixels, the normal ones {a}");
+}
+
+#[test]
+fn a_wide_outline_is_capped_and_quick() {
+    let mut r = rasterizer();
+    let mut text = TextContent::new("HI", 0.5);
+    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: MAX_OUTLINE_RATIO });
+    let capped = r.rasterize(&text, HEIGHT, 1.0);
+    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: 1.0 });
+    let started = std::time::Instant::now();
+    let wide = r.rasterize(&text, HEIGHT, 1.0);
+    let took = started.elapsed();
+    assert_eq!((wide.width, wide.height), (capped.width, capped.height), "an outline wider than the cap draws as the cap");
+    assert_eq!(wide.pixels, capped.pixels);
+    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    // The outline reaches about its width past the letters, and no further.
+    let plain = r.rasterize(&TextContent::new("HI", 0.5), HEIGHT, 1.0);
+    let font_px = 0.5 * HEIGHT as f32;
+    let grown = (font_px * MAX_OUTLINE_RATIO) as u32;
+    let (pl, pr) = ink_columns(&plain, 0, plain.height);
+    let (wl, wr) = ink_columns(&wide, 0, wide.height);
+    let (pw, ww) = (pr - pl, wr - wl);
+    assert!(ww + 4 >= pw + 2 * grown && ww <= pw + 2 * grown + 4, "ink {ww} wide, letters {pw}, outline {grown}");
+}
+
+#[test]
+fn a_blur_under_a_pixel_is_no_blur() {
+    let mut r = rasterizer();
+    let mut text = TextContent::new("Box", 0.06);
+    text.shadow = Some(TextShadow { color: [0, 0, 0, 200], offset: [0.1, 0.1], blur: 0.0 });
+    let sharp = r.rasterize(&text, HEIGHT, 1.0);
+    text.shadow = Some(TextShadow { color: [0, 0, 0, 200], offset: [0.1, 0.1], blur: 0.3 / (0.06 * HEIGHT as f32) });
+    let tiny = r.rasterize(&text, HEIGHT, 1.0);
+    assert_eq!((tiny.width, tiny.height), (sharp.width, sharp.height));
+    assert_eq!(tiny.pixels, sharp.pixels);
+}
+
+#[test]
+fn tabs_and_joiners_are_not_missing_glyphs() {
+    let mut r = rasterizer();
+    for content in ["a\tb", "a\u{200D}b", "a\u{200C}b", "a\u{FE0F}b", "a\u{200B}b"] {
+        let image = r.rasterize(&TextContent::new(content, 0.06), HEIGHT, 1.0);
+        assert_eq!(image.missing_glyphs, 0, "{content:?}");
+    }
 }
