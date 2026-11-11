@@ -29,5 +29,6 @@ pub mod timecode;
 pub mod timeline;
 pub mod ui;
 pub mod visuals;
+pub mod text_clip;
 pub mod text_shapes;
 pub mod window;

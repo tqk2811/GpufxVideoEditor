@@ -19,10 +19,11 @@ use crate::sticker_library::StickerLibrary;
 use crate::effect_previews::PreviewManager;
 use crate::visuals::{ClipVisuals, SourceView};
 use crate::text_shapes::TextShapes;
+use crate::text_clip::{default_text, natural_placement, rescaled_placement};
 use engine::{
     keyframe_neighbors, keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, Keyframe, remove_keyframe, set_effect_params_at, set_keyframe, set_motion_value, set_placement_at, ClipPlacement, ClipProperty, Easing, KeyframeTarget, PlacedRect,
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
-    set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
+    add_text_clip, set_text, TextContent, set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
 use serde_json::{Map, Value};
@@ -149,6 +150,10 @@ fn seconds_text(time: Time) -> String {
     format!("{:.2}", crate::timecode::to_seconds(time))
 }
 
+fn is_text_clip(project: &Project, key: ClipKey) -> bool {
+    project.tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_some_and(Clip::is_text)
+}
+
 /// What the status line says for a refused edit. No `_` arm: a new reason must be given a message.
 fn refusal_message(project: &Project, error: &EditError) -> Message {
     let label = |track: usize| track_label(project, track);
@@ -168,6 +173,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::SplitInsideTransition { key, at } => Message::EditSplitInsideTransition { track: label(key.track), at: seconds_text(*at) },
         EditError::TrackLocked { track } => Message::EditTrackLocked(label(*track)),
         EditError::SpeedOverlap { key, end, next_start } => Message::EditSpeedOverlap { track: label(key.track), end: seconds_text(*end), next: seconds_text(*next_start) },
+        EditError::SpeedOfImage { key } if is_text_clip(project, *key) => Message::EditSpeedOfText(label(key.track)),
         EditError::SpeedOfImage { key } => Message::EditSpeedOfImage(label(key.track)),
         EditError::KeyframeOutsideClip { key, .. } => Message::EditKeyframeOutsideClip(label(key.track)),
         EditError::KeyframeNotFound { key, .. } => Message::EditKeyframeNotFound(label(key.track)),
@@ -201,6 +207,7 @@ pub enum LeftTab {
     Effects,
     Transitions,
     Stickers,
+    Text,
 }
 
 /// What the panels remember between frames.
@@ -1120,10 +1127,13 @@ impl EditorState {
         self.finish_drag(command);
     }
 
-    /// Puts the selected clip back where it fits the frame, as one undo step.
+    /// Puts the selected clip back where it fits the frame, or a text at its natural size, as one undo step.
     pub fn reset_placement(&mut self) {
         let Some(key) = self.selected_for(ClipAction::Change) else { return };
-        self.run(|project| set_placement(project, key, None));
+        // A text goes back to its natural size in the middle, where its font size still counts.
+        let text = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.text.clone());
+        let placement = text.and_then(|text| natural_placement(self.text_pixels(&text), self.output_pixels()));
+        self.run(|project| set_placement(project, key, placement));
     }
 
     /// Ticks from the start of clip `key` to the playhead, when the playhead is on it.
@@ -1457,6 +1467,64 @@ impl EditorState {
             self.selection = clip_at(self.project(), track, start);
             self.status = Status::Info(Message::Added(item.name.clone()));
         }
+    }
+
+    /// Width and height in pixels of the picture of `text` at its natural size in the output.
+    pub fn text_pixels(&self, text: &TextContent) -> (u32, u32) {
+        self.text_shapes.borrow_mut().shape(text, self.project().output.height).pixels
+    }
+
+    fn output_pixels(&self) -> (u32, u32) {
+        let output = &self.project().output;
+        (output.width, output.height)
+    }
+
+    /// Adds a default text at the playhead, on a video track with room or a new one, placed at its
+    /// natural size in the middle of the frame and selected, as one undo step.
+    pub fn add_text_at_playhead(&mut self) {
+        if self.edits_blocked() {
+            return;
+        }
+        let text = default_text(self.language().t(Message::DefaultTextContent));
+        let placement = natural_placement(self.text_pixels(&text), self.output_pixels());
+        let (start, duration) = (self.playhead, DEFAULT_IMAGE_DURATION);
+        let choice = choose_track(self.project(), TrackKind::Video, duration, start);
+        let track = match choice {
+            TrackChoice::Existing(index) => index,
+            TrackChoice::New => self.project().tracks.len(),
+        };
+        let added = self.run(|project| {
+            let with_track = if choice == TrackChoice::New { add_track(project, TrackKind::Video)? } else { project.clone() };
+            let next = add_text_clip(&with_track, track, start, duration, text)?;
+            match (placement, clip_at(&next, track, start)) {
+                (Some(placement), Some(key)) => set_placement(&next, key, Some(placement)),
+                _ => Ok(next),
+            }
+        });
+        if added {
+            self.selection = clip_at(self.project(), track, start);
+            self.status = Status::Info(Message::TextAdded);
+        }
+    }
+
+    /// Shows the selected text clip with `text`, committed as one undo step when the control is
+    /// let go (see [`EditorState::live_edit`]). A clip with a fixed place keeps the scale the user
+    /// gave it around the same centre, so a new size or content changes the text on screen.
+    pub fn live_text(&mut self, text: TextContent) {
+        let Some(key) = self.selection else { return };
+        let Some(before) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
+        let placement = before.placement.filter(|_| !ClipProperty::ALL.into_iter().any(|property| property.is_placement() && before.motion.has_keyframes(property)));
+        let rescaled = match (placement, before.text.as_ref()) {
+            (Some(placement), Some(old)) => rescaled_placement(placement, self.text_pixels(old), self.text_pixels(&text), self.output_pixels()),
+            _ => None,
+        };
+        self.live_edit(|project| {
+            let next = set_text(project, key, text)?;
+            match rescaled {
+                Some(placement) => set_placement(&next, key, Some(placement)),
+                None => Ok(next),
+            }
+        });
     }
 
     /// Adds `item` where it was dropped: on `track`, as near `at` as the other clips allow, or on a
@@ -3536,5 +3604,73 @@ second line")), "Title…");
         file.text = None;
         file.source = "C:/media/a.mp4".into();
         assert_eq!(clip_name(&file), "a.mp4");
+    }
+
+    fn added_text_state() -> (EditorState, ClipKey) {
+        let mut state = EditorState::default();
+        state.add_text_at_playhead();
+        let key = state.selection().expect("the new text is selected");
+        (state, key)
+    }
+
+    fn centre_of(state: &EditorState, clip: &Clip) -> (f64, f64) {
+        let output = &state.project().output;
+        let rect = PlacedRect::of(clip.placement, f64::from(output.width) / f64::from(output.height), state.clip_aspect(clip));
+        (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+    }
+
+    #[test]
+    fn a_new_text_is_placed_at_its_natural_size_in_the_middle() {
+        let (state, key) = added_text_state();
+        let track = &state.project().tracks[key.track];
+        assert_eq!(track.kind, TrackKind::Video);
+        let clip = track.clips[key.clip].clone();
+        let text = clip.text.clone().expect("a text clip");
+        assert_eq!(text.content, state.language().t(Message::DefaultTextContent));
+        assert_eq!(text.size, crate::text_clip::DEFAULT_TEXT_SIZE);
+        assert_eq!(clip.duration, DEFAULT_IMAGE_DURATION);
+        let pixels = state.text_pixels(&text);
+        let placement = clip.placement.expect("a text is placed, so its size counts");
+        assert!((placement.width - f64::from(pixels.0) / f64::from(state.project().output.width)).abs() < 1e-9, "{placement:?} for {pixels:?}");
+        let (x, y) = centre_of(&state, &clip);
+        assert!((x - 0.5).abs() < 1e-6 && (y - 0.5).abs() < 1e-6, "{x} {y}");
+        assert_eq!(state.status, Status::Info(Message::TextAdded));
+    }
+
+    #[test]
+    fn a_bigger_font_draws_a_bigger_text_in_one_undo_step() {
+        let (mut state, key) = added_text_state();
+        let before = state.project().tracks[key.track].clips[key.clip].clone();
+        let mut text = before.text.clone().unwrap();
+        for size in [0.1, 0.13, 0.16] {
+            text.size = size;
+            state.live_text(text.clone());
+        }
+        state.commit_live();
+        let after = state.project().tracks[key.track].clips[key.clip].clone();
+        assert_eq!(after.text.as_ref().map(|text| text.size), Some(0.16));
+        let grown = after.placement.unwrap().width / before.placement.unwrap().width;
+        assert!(grown > 1.5, "the text grew by {grown}");
+        let (old, new) = (centre_of(&state, &before), centre_of(&state, &after));
+        assert!((old.0 - new.0).abs() < 1e-6 && (old.1 - new.1).abs() < 1e-6, "{old:?} {new:?}");
+        state.undo();
+        assert_eq!(state.project().tracks[key.track].clips[key.clip], before, "the whole drag is one step");
+    }
+
+    #[test]
+    fn resetting_the_place_of_a_text_brings_back_its_natural_size() {
+        let (mut state, key) = added_text_state();
+        let natural = state.project().tracks[key.track].clips[key.clip].placement;
+        assert!(state.run(|project| set_placement(project, key, Some(ClipPlacement { x: 0.0, y: 0.0, width: 0.9 }))));
+        state.reset_placement();
+        assert_eq!(state.project().tracks[key.track].clips[key.clip].placement, natural);
+    }
+
+    #[test]
+    fn a_text_refusing_a_speed_is_not_called_an_image() {
+        let (state, key) = added_text_state();
+        assert_eq!(refusal_message(state.project(), &EditError::SpeedOfImage { key }), Message::EditSpeedOfText(TrackLabel::Video(1)));
+        let image = state_with_clip();
+        assert_eq!(refusal_message(image.project(), &EditError::SpeedOfImage { key: ClipKey { track: 0, clip: 0 } }), Message::EditSpeedOfImage(TrackLabel::Video(1)));
     }
 }

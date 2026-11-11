@@ -49,6 +49,7 @@ pub enum Icon {
     Film,
     Music,
     Sticker,
+    Text,
     Sparkle,
     Transition,
     Upload,
@@ -113,6 +114,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             painter.circle_filled(p(-0.3, -0.2), s * 0.12, stroke.color);
             painter.circle_filled(p(0.3, -0.2), s * 0.12, stroke.color);
             line(painter, vec![p(-0.4, 0.3), p(-0.15, 0.5), p(0.15, 0.5), p(0.4, 0.3)], stroke);
+        }
+        Icon::Text => {
+            line(painter, vec![p(-0.75, -0.55), p(-0.75, -0.8), p(0.75, -0.8), p(0.75, -0.55)], stroke);
+            line(painter, vec![p(0.0, -0.8), p(0.0, 0.8)], stroke);
+            line(painter, vec![p(-0.3, 0.8), p(0.3, 0.8)], stroke);
         }
         Icon::Music => {
             painter.circle_stroke(p(-0.35, 0.55), s * 0.25, stroke);

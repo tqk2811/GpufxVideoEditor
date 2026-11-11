@@ -24,6 +24,8 @@ const HEADER_WIDTH: f32 = 132.0;
 const HEADER_BUTTON: f32 = 24.0;
 const LINE_SCROLL_POINTS: f32 = 50.0;
 const CLIP_HEADER_HEIGHT: f32 = 14.0;
+/// The side of the letter that marks a text clip in its name strip.
+const TEXT_ICON_SIDE: f32 = 10.0;
 const KEYFRAME_MARK_RADIUS: f32 = 3.5;
 /// How far above the bottom edge of a clip its keyframe marks sit.
 const KEYFRAME_MARK_MARGIN: f32 = 5.0;
@@ -370,6 +372,7 @@ impl ClipPaint<'_> {
 /// Paints a clip's body, name strip, pictures, level bars and selection.
 pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     let (body, header) = match paint.kind {
+        TrackKind::Video if paint.clip.is_text() => (theme::text_clip(), theme::text_clip_header()),
         TrackKind::Video => (theme::video_clip(), theme::video_clip_header()),
         TrackKind::Audio => (theme::audio_clip(), theme::audio_clip_header()),
     };
@@ -379,7 +382,12 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     let strip = paint.rect.with_max_y(paint.rect.top() + CLIP_HEADER_HEIGHT);
     painter.rect_filled(strip, CornerRadius { nw: CLIP_RADIUS, ne: CLIP_RADIUS, sw: 0, se: 0 }, dim(header));
     let text = painter.with_clip_rect(paint.rect.intersect(paint.clip_area));
-    text.text(strip.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_name(paint.clip), FontId::proportional(11.0), theme::on_clip());
+    let mut name_at = strip.left_center() + Vec2::new(6.0, 0.0);
+    if paint.clip.is_text() {
+        icons::paint(&text, Rect::from_min_size(name_at - Vec2::new(0.0, TEXT_ICON_SIDE / 2.0), Vec2::splat(TEXT_ICON_SIDE)), Icon::Text, theme::on_clip());
+        name_at.x += TEXT_ICON_SIDE + 4.0;
+    }
+    text.text(name_at, Align2::LEFT_CENTER, clip_name(paint.clip), FontId::proportional(11.0), theme::on_clip());
     if paint.clip.has_speed() {
         let at = strip.right_center() - Vec2::new(6.0, 0.0);
         let font = FontId::proportional(11.0);

@@ -471,10 +471,6 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/gpufx-editor/src/ui/timeline_panel.rs:404` gọi `Clip::keyframe_times` (`crates/engine/src/keyframe.rs`), vốn gom, sắp xếp và bỏ trùng một `Vec` mới ở mỗi lần vẽ của mỗi clip. Vài clip thì không đáng kể, hàng trăm clip có keyframe thì tốn. Nên làm nếu timeline dài gây giật: cache theo revision của project hoặc chỉ tính cho clip đang trong khung nhìn. Ghi ngày 2026-11-10.
 
-### [Thấp] Thông báo không đổi được tốc độ vẫn gọi clip chữ là "ảnh"
-
-`crates/gpufx-editor/src/editor.rs:171` (`refusal_message`) đổi `EditError::SpeedOfImage` thành `Message::EditSpeedOfImage`, mà `crates/gpufx-editor/src/i18n/vi.rs:202` và `en.rs:219` ghi "ảnh không có tốc độ phát". Engine trả lỗi này cho mọi clip tĩnh, kể cả clip chữ, nên người dùng đổi tốc độ clip chữ sẽ đọc thấy chữ "ảnh". Nên tách thông báo theo loại clip (hoặc đổi thành "clip tĩnh"). Ghi ngày 2026-11-11.
-
 ### [Thấp] Kéo mép đầu clip tĩnh không lùi được trước điểm bắt đầu
 
 `crates/gpufx-editor/src/timeline/drag.rs:75` (`clamp_trim`) lấy `source_limit` từ `source_in` cho mọi clip, nên mép đầu của clip ảnh/chữ không kéo lùi được trước `start` dù engine (`trim_start`) cho phép clip tĩnh dài ra phía trước. Có từ trước bước chữ. Nên bỏ giới hạn nguồn khi `clip.is_still()`. Ghi ngày 2026-11-11.
@@ -498,10 +494,6 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Cache glyph của `SwashCache` không bao giờ được dọn
 
 `crates/gpufx-text/src/lib.rs` (`draw`, `self.cache.get_image`) giữ ảnh glyph theo cỡ chữ mãi mãi; đổi cỡ chữ hay scale (mỗi bậc 2^(1/4)) thêm một bộ glyph, chữ lớn mỗi glyph tới vài MB. Nên dọn `image_cache` khi vượt một ngưỡng byte, hoặc dùng `get_image_uncached` cho cỡ lớn. Ghi ngày 2026-11-11.
-
-### [Thấp] Clip chữ chưa có vị trí mặc định theo cỡ chữ
-
-Clip chữ không có `placement` thì được dàn vừa khung như ảnh (`PlacedRect::of` ở `crates/engine/src/project.rs`), nên `size` không quyết định cỡ hiện ra; compositor còn phải rasterize ở scale trần 4 (`MAX_TEXT_SCALE`). Bước UI thêm chữ nên đặt `placement` theo cỡ tự nhiên (rộng = rộng ảnh ở scale 1 / rộng khung, căn giữa), lấy từ `crates/gpufx-editor/src/text_shapes.rs`. Ghi ngày 2026-11-11.
 
 ### [Thấp] Agent tool chưa có lệnh thêm clip chữ
 

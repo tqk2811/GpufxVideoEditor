@@ -224,6 +224,44 @@ pub enum Message {
     EditKeyframeOutsideClip(TrackLabel),
     EditKeyframeNotFound(TrackLabel),
     EditNoPlacement(TrackLabel),
+    /// The Text tab of the left panel, and the Text part of the inspector.
+    TabText,
+    AddText,
+    TextAddHint,
+    /// What a new text clip says.
+    DefaultTextContent,
+    TextAdded,
+    EditSpeedOfText(TrackLabel),
+    FieldTextContent,
+    FieldFont,
+    DefaultFont,
+    /// The font list is not read yet.
+    LoadingFonts,
+    /// The font a text asks for is not installed and the default one draws it.
+    FontMissing(String),
+    FieldTextSize,
+    FieldTextColor,
+    TextOutline,
+    TextBackground,
+    TextShadow,
+    FieldColor,
+    FieldThickness,
+    FieldPadding,
+    FieldCornerRadius,
+    FieldShadowOffset,
+    FieldBlur,
+    FieldAlign,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    FieldLineSpacing,
+    AnimationEnter,
+    AnimationExit,
+    AnimationRepeat,
+    AnimationNone,
+    FieldAnimationDuration,
+    /// The name of a text animation preset, by its id.
+    AnimationPreset(&'static str),
     TabEffects,
     Transitions,
     ImportFromComputer,
@@ -383,6 +421,40 @@ mod tests {
             Message::EditKeyframeOutsideClip(TrackLabel::Video(1)),
             Message::EditKeyframeNotFound(TrackLabel::Video(1)),
             Message::EditNoPlacement(TrackLabel::Video(1)),
+            Message::TabText,
+            Message::AddText,
+            Message::TextAddHint,
+            Message::DefaultTextContent,
+            Message::TextAdded,
+            Message::EditSpeedOfText(TrackLabel::Video(1)),
+            Message::FieldTextContent,
+            Message::FieldFont,
+            Message::DefaultFont,
+            Message::LoadingFonts,
+            Message::FontMissing(name()),
+            Message::FieldTextSize,
+            Message::FieldTextColor,
+            Message::TextOutline,
+            Message::TextBackground,
+            Message::TextShadow,
+            Message::FieldColor,
+            Message::FieldThickness,
+            Message::FieldPadding,
+            Message::FieldCornerRadius,
+            Message::FieldShadowOffset,
+            Message::FieldBlur,
+            Message::FieldAlign,
+            Message::AlignLeft,
+            Message::AlignCenter,
+            Message::AlignRight,
+            Message::FieldLineSpacing,
+            Message::AnimationEnter,
+            Message::AnimationExit,
+            Message::AnimationRepeat,
+            Message::AnimationNone,
+            Message::FieldAnimationDuration,
+            Message::AnimationPreset("fade"),
+            Message::AnimationPreset("unknown-id"),
             Message::SessionAudio,
             Message::InstalledPacks,
             Message::ReadingAudioPacks,
@@ -461,6 +533,20 @@ mod tests {
         assert!(vietnamese.t(Message::SelectClip(ClipAction::Split)).contains("tách"));
         assert!(vietnamese.t(Message::TrimBefore).contains("Cắt"));
         assert_eq!(vietnamese.t(Message::AudioGapLine(5)), "Mất tiếng: 5 ms");
+    }
+
+    #[test]
+    fn a_text_clip_is_not_called_an_image_and_presets_have_names() {
+        let vietnamese = Language::Vietnamese.t(Message::EditSpeedOfText(TrackLabel::Video(1)));
+        assert!(vietnamese.contains("chữ") && !vietnamese.contains("ảnh"), "{vietnamese}");
+        let english = Language::English.t(Message::EditSpeedOfText(TrackLabel::Video(1)));
+        assert!(english.contains("text") && !english.contains("image"), "{english}");
+        assert_eq!(Language::English.t(Message::AnimationPreset("slide-left")), "Slide left");
+        assert_eq!(Language::Vietnamese.t(Message::AnimationPreset("fade")), "Mờ dần");
+        assert_eq!(Language::English.t(Message::AnimationPreset("new-one")), "new-one", "an unknown id shows as it is");
+        for preset in engine::TEXT_ANIMATION_PRESETS {
+            assert_ne!(Language::Vietnamese.t(Message::AnimationPreset(preset.id)), preset.id, "{} has a Vietnamese name", preset.id);
+        }
     }
 
     #[test]

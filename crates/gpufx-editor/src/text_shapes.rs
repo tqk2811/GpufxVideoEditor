@@ -22,6 +22,9 @@ const RECENT: usize = 16;
 pub struct TextShape {
     /// Width over height of the picture.
     pub aspect: f64,
+    /// Width and height of the picture in pixels at its natural size, the font size it asks for
+    /// in the output height measured. Zero for a text that draws nothing.
+    pub pixels: (u32, u32),
     /// The system font family the text asked for and that is not installed, so the default font
     /// draws it; for a warning.
     pub missing_family: Option<String>,
@@ -99,7 +102,7 @@ impl TextShapes {
             _ => None,
         };
         let aspect = if width == 0 || height == 0 { 1.0 } else { f64::from(width) / f64::from(height) };
-        TextShape { aspect, missing_family }
+        TextShape { aspect, pixels: (width, height), missing_family }
     }
 }
 

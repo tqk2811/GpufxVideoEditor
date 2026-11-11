@@ -72,6 +72,8 @@ pub struct Palette {
     pub tick: Color32,
     pub video_clip: Color32,
     pub video_clip_header: Color32,
+    pub text_clip: Color32,
+    pub text_clip_header: Color32,
     pub audio_clip: Color32,
     pub audio_clip_header: Color32,
     pub selected: Color32,
@@ -113,6 +115,8 @@ pub const DARK: Palette = Palette {
     tick: Color32::from_rgb(90, 90, 108),
     video_clip: Color32::from_rgb(25, 72, 96),
     video_clip_header: Color32::from_rgb(16, 48, 66),
+    text_clip: Color32::from_rgb(104, 50, 86),
+    text_clip_header: Color32::from_rgb(74, 32, 60),
     audio_clip: Color32::from_rgb(20, 92, 88),
     audio_clip_header: Color32::from_rgb(13, 62, 60),
     selected: Color32::from_rgb(190, 176, 255),
@@ -146,6 +150,8 @@ pub const LIGHT: Palette = Palette {
     tick: Color32::from_rgb(100, 100, 118),
     video_clip: Color32::from_rgb(36, 110, 146),
     video_clip_header: Color32::from_rgb(24, 82, 112),
+    text_clip: Color32::from_rgb(146, 60, 112),
+    text_clip_header: Color32::from_rgb(112, 40, 84),
     audio_clip: Color32::from_rgb(24, 118, 112),
     audio_clip_header: Color32::from_rgb(16, 88, 84),
     selected: Color32::from_rgb(72, 44, 190),
@@ -194,7 +200,7 @@ macro_rules! colours {
 
 colours!(
     background, panel, panel_raised, border, text, text_dim, accent, accent_soft, accent_text, refused, row_even, row_odd, ruler, tick, video_clip,
-    video_clip_header, audio_clip, audio_clip_header, selected, playhead, transition, on_accent, on_clip, on_clip_accent, drop_outline, thumb_bg,
+    video_clip_header, text_clip, text_clip_header, audio_clip, audio_clip_header, selected, playhead, transition, on_accent, on_clip, on_clip_accent, drop_outline, thumb_bg,
     field_bg, hover, bars, bars_muted,
 );
 
@@ -376,11 +382,12 @@ mod tests {
                 pairs.push((format!("refused on {surface}"), c.refused, bg, 4.5));
             }
             pairs.push(("text on accent_soft".into(), c.text, c.accent_soft, 4.5));
-            for (clip, bg) in [("video", c.video_clip), ("video header", c.video_clip_header), ("audio", c.audio_clip), ("audio header", c.audio_clip_header)] {
+            for (clip, bg) in [("video", c.video_clip), ("video header", c.video_clip_header), ("text", c.text_clip), ("text header", c.text_clip_header), ("audio", c.audio_clip), ("audio header", c.audio_clip_header)] {
                 pairs.push((format!("on_clip on {clip}"), c.on_clip, bg, 4.5));
             }
             pairs.push(("on_clip_accent on video header".into(), c.on_clip_accent, c.video_clip_header, 4.5));
             pairs.push(("on_clip_accent on audio header".into(), c.on_clip_accent, c.audio_clip_header, 4.5));
+            pairs.push(("on_clip_accent on text header".into(), c.on_clip_accent, c.text_clip_header, 4.5));
             pairs.push(("on_clip on thumbnail pill".into(), c.on_clip, Color32::from_rgb(40, 40, 40), 4.5));
             let accent_minimum = if variant == Variant::Dark { 4.0 } else { 4.5 };
             pairs.push(("on_accent on accent".into(), c.on_accent, c.accent, accent_minimum));

@@ -65,6 +65,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
             state.ui.tile_hover.clear();
             sticker_tab(ui, state, requests);
         }
+        LeftTab::Text => {
+            state.ui.tile_hover.clear();
+            text_tab(ui, state);
+        }
     });
 }
 
@@ -93,6 +97,7 @@ fn rail_tabs(ui: &mut egui::Ui, state: &mut EditorState, rail: Rect) {
         (LeftTab::Effects, Icon::Sparkle, Message::TabEffects),
         (LeftTab::Transitions, Icon::Transition, Message::Transitions),
         (LeftTab::Stickers, Icon::Sticker, Message::TabStickers),
+        (LeftTab::Text, Icon::Text, Message::TabText),
     ];
     let height = rail_cell_height(rail.height(), entries.len());
     for (index, (tab, icon, label)) in entries.into_iter().enumerate() {
@@ -117,7 +122,7 @@ fn rail_tabs(ui: &mut egui::Ui, state: &mut EditorState, rail: Rect) {
             match tab {
                 LeftTab::Effects => state.picker.set_kind(PackageKind::Effect),
                 LeftTab::Transitions => state.picker.set_kind(PackageKind::Transition),
-                LeftTab::Media | LeftTab::Audio | LeftTab::Stickers => {}
+                LeftTab::Media | LeftTab::Audio | LeftTab::Stickers | LeftTab::Text => {}
             }
         }
     }
@@ -192,6 +197,16 @@ fn sticker_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
     if let Some(item) = chosen {
         state.add_media_at_playhead(&item);
     }
+}
+
+/// The Text tab: a button that adds a default text at the playhead.
+fn text_tab(ui: &mut egui::Ui, state: &mut EditorState) {
+    let language = state.language();
+    if icons::label_button(ui, Icon::Plus, &language.t(Message::AddText), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
+        state.add_text_at_playhead();
+    }
+    ui.add_space(6.0);
+    ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TextAddHint)).color(theme::text_dim())).wrap());
 }
 
 /// What the Sticker tab says when it has nothing to show.
