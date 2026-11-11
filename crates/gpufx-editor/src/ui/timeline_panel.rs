@@ -2,7 +2,7 @@
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
-use crate::editor::{clip_label, format_speed, DropBatch, EditorState};
+use crate::editor::{clip_name, format_speed, DropBatch, EditorState};
 use crate::i18n::{Language, Message};
 use crate::media::MediaItem;
 use crate::timeline::drag::DragKind;
@@ -379,7 +379,7 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     let strip = paint.rect.with_max_y(paint.rect.top() + CLIP_HEADER_HEIGHT);
     painter.rect_filled(strip, CornerRadius { nw: CLIP_RADIUS, ne: CLIP_RADIUS, sw: 0, se: 0 }, dim(header));
     let text = painter.with_clip_rect(paint.rect.intersect(paint.clip_area));
-    text.text(strip.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_label(&paint.clip.source), FontId::proportional(11.0), theme::on_clip());
+    text.text(strip.left_center() + Vec2::new(6.0, 0.0), Align2::LEFT_CENTER, clip_name(paint.clip), FontId::proportional(11.0), theme::on_clip());
     if paint.clip.has_speed() {
         let at = strip.right_center() - Vec2::new(6.0, 0.0);
         let font = FontId::proportional(11.0);
@@ -388,7 +388,8 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
         text.rect_filled(badge.expand2(Vec2::new(3.0, 1.0)), CornerRadius::same(3), dim(header));
         text.galley(badge.min, galley, theme::on_clip_accent());
     }
-    if let Some(visuals) = paint.visuals {
+    // A text clip names no file, so there is no picture or sound to probe.
+    if let Some(visuals) = paint.visuals.filter(|_| !paint.clip.is_text()) {
         draw_clip_media(painter, paint, &mut visuals.borrow_mut(), paint.rect.with_min_y(strip.bottom()));
     }
     if paint.kind == TrackKind::Video {

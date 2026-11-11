@@ -498,3 +498,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Clip chữ chưa có vị trí mặc định theo cỡ chữ
 
 Clip chữ không có `placement` thì được dàn vừa khung như ảnh (`PlacedRect::of` ở `crates/engine/src/project.rs`), nên `size` không quyết định cỡ hiện ra; compositor còn phải rasterize ở scale trần 4 (`MAX_TEXT_SCALE`). Bước UI thêm chữ nên đặt `placement` theo cỡ tự nhiên (rộng = rộng ảnh ở scale 1 / rộng khung, căn giữa), lấy từ `crates/gpufx-editor/src/text_shapes.rs`. Ghi ngày 2026-11-11.
+
+### [Thấp] Agent tool chưa có lệnh thêm clip chữ
+
+`crates/gpufx-editor/src/agent/run.rs:201` (dựng clip cho lệnh thêm clip) chỉ biết clip từ file (video, âm thanh, ảnh); agent không có lệnh nào tạo clip chữ (`source` `text:` kèm `TextContent`) hay sửa nội dung chữ, nên không tự động hoá được phụ đề hay tiêu đề qua agent. Nên thêm lệnh thêm và sửa clip chữ (gọi `engine::add_text_clip` / `set_text`) cùng mã lỗi tương ứng trong `agent/protocol.rs`. Ghi ngày 2026-11-11.

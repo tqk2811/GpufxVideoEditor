@@ -1350,6 +1350,10 @@ impl EditorState {
     pub fn source_remaining(&self, key: ClipKey) -> Option<Time> {
         let track = self.project().tracks.get(key.track)?;
         let clip = track.clips.get(key.clip)?;
+        // A text clip names no file, so there is nothing to ask the library about.
+        if clip.is_text() {
+            return None;
+        }
         let length = self.library.probed_duration(&clip.source, track.kind)?;
         Some(length.saturating_sub(clip.source_in)).filter(|left| *left > Time::ZERO)
     }
@@ -1728,6 +1732,23 @@ pub fn applied_to(project: &Project, key: ClipKey) -> (Vec<String>, Vec<(usize, 
 /// The file name of a clip source, for its label.
 pub fn clip_label(source: &str) -> &str {
     Path::new(source).file_name().and_then(|name| name.to_str()).unwrap_or(source)
+}
+
+/// The most characters of a text shown as the name of its clip.
+const TEXT_NAME_CHARS: usize = 40;
+
+/// The name shown for `clip`: the file name of its source, or for a text clip the first line of
+/// its text, cut short with an ellipsis.
+pub fn clip_name(clip: &Clip) -> std::borrow::Cow<'_, str> {
+    let Some(text) = &clip.text else { return clip_label(&clip.source).into() };
+    let line = text.content.lines().next().unwrap_or("").trim();
+    let more = line.chars().count() > TEXT_NAME_CHARS || text.content.trim_end().lines().nth(1).is_some();
+    if !more {
+        return line.to_owned().into();
+    }
+    let mut name: String = line.chars().take(TEXT_NAME_CHARS).collect();
+    name.push('…');
+    name.into()
 }
 
 #[cfg(test)]
@@ -3349,6 +3370,19 @@ mod tests {
     }
 
     #[test]
+    fn a_text_clip_has_no_source_left_even_if_the_library_knows_its_source_name() {
+        let mut state = state_with_clip();
+        let mut project = state.project().clone();
+        let clip = &mut project.tracks[0].clips[0];
+        clip.source = engine::TEXT_SOURCE.to_owned();
+        clip.source_in = Time::ZERO;
+        clip.text = Some(engine::TextContent::new("Hi", 0.1));
+        assert!(state.run(|_| Ok(project)));
+        state.library.add(crate::media::MediaItem { source: engine::TEXT_SOURCE.to_owned(), name: "t".to_owned(), kind: crate::media::MediaKind::Video, duration: Some(seconds(20)), estimated: false });
+        assert_eq!(state.source_remaining(key(0)), None);
+    }
+
+    #[test]
     fn the_source_in_field_reaches_the_first_frame_at_a_speed_off_the_grid() {
         let mut state = state_with_clip();
         state.apply_clip_field(ClipField::SourceIn(2.0));
@@ -3486,5 +3520,21 @@ mod tests {
     fn a_clip_is_labelled_by_its_file_name() {
         assert_eq!(clip_label("C:/media/a.mp4"), "a.mp4");
         assert_eq!(clip_label("b.wav"), "b.wav");
+    }
+
+    #[test]
+    fn a_text_clip_is_named_by_its_first_line() {
+        let text_clip = |content: &str| engine::Clip { source: engine::TEXT_SOURCE.to_owned(), text: Some(engine::TextContent::new(content, 0.1)), ..new_clip("x", Time::ZERO, seconds(1)) };
+        assert_eq!(clip_name(&text_clip("Hello")), "Hello");
+        assert_eq!(clip_name(&text_clip("  Title  
+second line")), "Title…");
+        assert_eq!(clip_name(&text_clip("Trailing
+")), "Trailing");
+        let long = "a".repeat(50);
+        assert_eq!(clip_name(&text_clip(&long)), format!("{}…", "a".repeat(40)));
+        let mut file = text_clip("x");
+        file.text = None;
+        file.source = "C:/media/a.mp4".into();
+        assert_eq!(clip_name(&file), "a.mp4");
     }
 }

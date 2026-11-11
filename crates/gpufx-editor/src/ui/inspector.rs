@@ -4,7 +4,7 @@ use super::icons::{self, Icon};
 use super::numeric::{drag_field, speed_field};
 use super::param_widgets;
 use super::theme;
-use crate::editor::{applied_to, clip_label, speed_limits, transition_duration_limits, ClipField, EditorState};
+use crate::editor::{applied_to, clip_name, speed_limits, transition_duration_limits, ClipField, EditorState};
 use crate::i18n::{Language, Message};
 use crate::packages::short_name;
 use crate::timecode::{aspect_label, format_fps, format_timecode, from_seconds, to_seconds};
@@ -96,13 +96,13 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     let Some(clip) = clip_of(state, key).cloned() else { return };
     let track_kind = state.project().tracks[key.track].kind;
     let editable = !state.is_track_locked(key.track);
-    ui.add(egui::Label::new(egui::RichText::new(clip_label(&clip.source)).strong()).truncate());
+    ui.add(egui::Label::new(egui::RichText::new(clip_name(&clip)).strong()).truncate());
     if !editable {
         ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::text_dim())).wrap());
     }
     ui.add_enabled_ui(editable, |ui| {
         // A still has no source to walk through and no sound.
-        if clip.is_image() {
+        if clip.is_still() {
             time_field(ui, state, &language.t(Message::FieldVideoDuration), to_seconds(clip.duration), ClipField::Duration, None);
             time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start, None);
             return;
