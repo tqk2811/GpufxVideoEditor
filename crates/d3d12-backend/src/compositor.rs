@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 
 use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
 use engine::schedule::{ClipClock, Progress};
-use engine::{is_image_source, text_raster_scale, Clip, ClipTransform, Effect as ProjectEffect, TextContent, Time, MAX_TEXT_SCALE, MIN_TEXT_SCALE, TICKS_PER_SECOND};
+use engine::{is_image_source, text_raster_scale, Clip, ClipTransform, Effect as ProjectEffect, TextContent, Time, TICKS_PER_SECOND};
 use gpufx_core::d3d12::D3d12Frame;
 use gpufx_core::{ColorInfo, Effect, EffectGraph, FrameInfo, GpuContext, Package, PixelFormat};
 use serde_json::{Map, Value};
@@ -384,19 +384,6 @@ impl Decoder for SourceDecoder {
     }
 }
 
-/// `scale` rounded up to the next step of a quarter octave (powers of 2^(1/4), about 19% apart),
-/// within [`MIN_TEXT_SCALE`] and [`MAX_TEXT_SCALE`], so dragging a text larger draws it again only
-/// at each step instead of each frame, and never smaller than asked. Both limits are steps.
-// The engine's `text_raster_scale` could round this way itself; it is done here for now.
-fn quantized_text_scale(scale: f32) -> f32 {
-    if !scale.is_finite() || scale <= 0.0 {
-        return scale;
-    }
-    // A little slack so a scale that is a step, give or take rounding, stays that step.
-    let steps = (scale.log2() * 4.0 - 1e-3).ceil();
-    2f32.powf(steps / 4.0).clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE)
-}
-
 /// What a kept still was made from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum StillKey {
@@ -728,7 +715,7 @@ impl D3d12Compositor {
     }
 
     /// The still of a text clip, rasterized sharp enough for the widest the clip is shown (see
-    /// [`engine::text_raster_scale`], rounded up by [`quantized_text_scale`]) and kept like an
+    /// [`engine::text_raster_scale`], which rounds to steps) and kept like an
     /// image, by its text, output height and scale. Only measured, not drawn, to learn the scale.
     fn load_text(&mut self, clip: &Clip, text: &TextContent) -> Result<Arc<StillImage>, String> {
         let json = serde_json::to_string(text).map_err(|e| format!("text: {e}"))?;
@@ -747,7 +734,7 @@ impl D3d12Compositor {
         };
         let source_aspect = if width == 0 || height == 0 { 1.0 } else { f64::from(width) / f64::from(height) };
         let output_aspect = f64::from(self.width) / f64::from(self.height.max(1));
-        let scale = quantized_text_scale(text_raster_scale(clip.widest(output_aspect, source_aspect), self.width, width));
+        let scale = text_raster_scale(clip.widest(output_aspect, source_aspect), self.width, width);
         let key = StillKey::Text { digest, output_height: self.height, scale: scale.to_bits() };
         self.stills_used += 1;
         if let Some(cached) = self.stills.get_mut(&key) {
@@ -1180,23 +1167,6 @@ mod tests {
     use std::cell::Cell;
     use std::sync::Barrier;
     use std::time::Instant;
-
-    #[test]
-    fn text_scales_round_up_to_quarter_octaves() {
-        assert_eq!(quantized_text_scale(1.0), 1.0);
-        assert_eq!(quantized_text_scale(2.0), 2.0);
-        assert_eq!(quantized_text_scale(MAX_TEXT_SCALE), MAX_TEXT_SCALE);
-        assert_eq!(quantized_text_scale(MIN_TEXT_SCALE), MIN_TEXT_SCALE);
-        let step = 2f32.powf(0.25);
-        // A drag through a step gives one scale, never below what was asked.
-        let dragged: Vec<f32> = (0..20).map(|i| quantized_text_scale(1.01 + i as f32 * 0.008)).collect();
-        assert!(dragged.iter().all(|&s| (s - step).abs() < 1e-5), "{dragged:?}");
-        for i in 1..400 {
-            let wanted = MIN_TEXT_SCALE + i as f32 * 0.01;
-            let got = quantized_text_scale(wanted);
-            assert!(got >= wanted.min(MAX_TEXT_SCALE) * 0.9999 && got <= wanted * step * 1.0001, "{wanted} gave {got}");
-        }
-    }
 
     fn params(value: Value) -> Map<String, Value> {
         value.as_object().unwrap().clone()

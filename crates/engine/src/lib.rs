@@ -47,7 +47,7 @@ pub use keyframe::{
 pub use project::{
     ClipPlacement, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH,
     AudioOutput, Clip, Effect, LoadError, Output, Project, Track, TrackKind, Transition,
-    FontRef, Rgba, TextAlign, TextAnimation, TextAnimationRef, TextBackground, TextContent, TextOutline, TextShadow, TEXT_SOURCE, text_raster_scale, MAX_TEXT_SCALE, MIN_TEXT_SCALE,
+    FontRef, Rgba, TextAlign, TextAnimation, TextAnimationRef, TextBackground, TextContent, TextOutline, TextShadow, TEXT_SOURCE, text_raster_scale, text_step_up, MAX_TEXT_SCALE, MIN_TEXT_SCALE,
     is_image_source, speed_in_range, speed_milli, IMAGE_EXTENSIONS, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MIN_SUPPORTED_VERSION, SPEED_SCALE, SUPPORTED_VERSION,
 };
 pub use render::{ClipKey, DecoderSpec, RenderError};

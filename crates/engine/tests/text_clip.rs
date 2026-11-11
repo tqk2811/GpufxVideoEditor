@@ -184,3 +184,22 @@ fn raster_scale_covers_the_widest_and_stays_within_limits() {
     assert_eq!(engine::text_raster_scale(0.01, 1920, 480), engine::MIN_TEXT_SCALE);
     assert_eq!(engine::text_raster_scale(1.0, 1920, 0), 1.0, "nothing drawn");
 }
+
+#[test]
+fn text_steps_round_up_to_quarter_octaves() {
+    use engine::text_step_up;
+    assert_eq!(text_step_up(1.0), 1.0);
+    assert_eq!(text_step_up(2.0), 2.0);
+    assert_eq!(text_step_up(0.5), 0.5);
+    let step = 2f64.powf(0.25);
+    // A drag through a step gives one value, never below what was asked.
+    let dragged: Vec<f64> = (0..20).map(|i| text_step_up(1.01 + i as f64 * 0.008)).collect();
+    assert!(dragged.iter().all(|&s| (s - step).abs() < 1e-9), "{dragged:?}");
+    for i in 1..400 {
+        let wanted = 0.125 + i as f64 * 0.01;
+        let got = text_step_up(wanted);
+        assert!(got >= wanted && got <= wanted * step * 1.000001, "{wanted} gave {got}");
+    }
+    // The scale only changes when the widest crosses a step.
+    assert_eq!(engine::text_raster_scale(0.45, 1920, 480), engine::text_raster_scale(0.5, 1920, 480));
+}

@@ -190,12 +190,27 @@ pub const MIN_TEXT_SCALE: f32 = 0.125;
 /// `natural_width` pixels wide at scale 1, and at its widest it covers `widest` parts of a frame
 /// `output_width` pixels wide. Kept within [`MIN_TEXT_SCALE`] and [`MAX_TEXT_SCALE`]; 1 when the
 /// numbers say nothing.
+///
+/// Both `widest` and the result are rounded up to a step (see [`text_step_up`]), so the scale
+/// depends on the widest only through its step: dragging a text wider draws it again only when the
+/// widest crosses a step, and the decoder key ([`crate::DecoderSpec`]) holds just that step.
 pub fn text_raster_scale(widest: f64, output_width: u32, natural_width: u32) -> f32 {
-    let wanted = widest * f64::from(output_width) / f64::from(natural_width);
+    let wanted = text_step_up(widest) * f64::from(output_width) / f64::from(natural_width);
     if natural_width == 0 || !wanted.is_finite() || wanted <= 0.0 {
         return 1.0;
     }
-    (wanted as f32).clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE)
+    (text_step_up(wanted) as f32).clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE)
+}
+
+/// `value` rounded up to the next step of a quarter octave (powers of 2^(1/4), about 19% apart),
+/// never smaller than given. A value that is a step, give or take rounding, stays that step.
+/// Anything that is not a positive finite number comes back as it is.
+pub fn text_step_up(value: f64) -> f64 {
+    if !value.is_finite() || value <= 0.0 {
+        return value;
+    }
+    let steps = (value.log2() * 4.0 - 1e-6).ceil();
+    2f64.powf(steps / 4.0).max(value)
 }
 
 /// A colour as `[r, g, b, a]`, each 0 to 255, not premultiplied.

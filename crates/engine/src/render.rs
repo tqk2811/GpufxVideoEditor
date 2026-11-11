@@ -12,8 +12,8 @@ use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
 use crate::stretch::StretchStates;
 use crate::audio_schedule::{sample_position, MIX_CHANNELS};
 use crate::keyframe::{effects_at, ClipTransform};
-use crate::keyframe::{ClipProperty, Keyframe};
-use crate::project::{Clip, ClipPlacement, Effect, Project, TextContent};
+use crate::keyframe::ClipProperty;
+use crate::project::{text_step_up, Clip, Effect, Project, TextContent};
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, LayerContent, Progress, SourceSample,
 };
@@ -198,8 +198,8 @@ impl<S: ToOwned + PartialEq + ?Sized, V> ClipCache<S, V> {
 }
 
 /// What a decoder was opened from. A media clip needs only its path; a text clip also its text and
-/// the widths it is shown at, which decide how sharp its picture is drawn. Anything else about the
-/// clip changing leaves the decoder alone.
+/// the step of the widest it is shown at (see [`text_step_up`]), which decide how sharp its picture
+/// is drawn. Anything else about the clip changing, such as where it sits, leaves the decoder alone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecoderSpec {
     pub source: String,
@@ -210,16 +210,19 @@ pub struct DecoderSpec {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextSpec {
     pub text: TextContent,
-    pub placement: Option<ClipPlacement>,
-    pub widths: Vec<Keyframe>,
+    /// Whether the clip is fitted to the frame (no placement), so its widest also counts the fitted
+    /// width, which follows from the text alone.
+    pub fitted: bool,
+    /// The step of the widest placed or keyframed width, `None` when there is neither.
+    pub widest_step: Option<u64>,
 }
 
 impl DecoderSpec {
     pub fn of(clip: &Clip) -> DecoderSpec {
-        let text = clip.text.as_ref().map(|text| TextSpec {
-            text: text.clone(),
-            placement: clip.placement,
-            widths: clip.motion.keyframes.get(&ClipProperty::Width).cloned().unwrap_or_default(),
+        let text = clip.text.as_ref().map(|text| {
+            let keys = clip.motion.keyframes.get(&ClipProperty::Width).map_or(&[][..], Vec::as_slice);
+            let widest = clip.placement.map(|placement| placement.width).into_iter().chain(keys.iter().map(|key| key.value)).filter(|value| value.is_finite()).reduce(f64::max);
+            TextSpec { text: text.clone(), fitted: clip.placement.is_none(), widest_step: widest.map(|value| text_step_up(value).to_bits()) }
         });
         DecoderSpec { source: clip.source.clone(), text }
     }
@@ -440,7 +443,8 @@ pub fn render_with_audio<C: Compositor, S: FrameSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::Project;
+    use crate::keyframe::Keyframe;
+    use crate::project::{ClipPlacement, Project};
     use std::cell::RefCell;
     use std::rc::Rc;
 
@@ -843,6 +847,27 @@ mod tests {
         }
         let opened: Vec<_> = journal.borrow().events.iter().filter(|e| e.starts_with("open")).cloned().collect();
         assert_eq!(opened, ["open text:Hi", "open text:Yo", "open text:Yo"]);
+    }
+
+    #[test]
+    fn moving_a_text_or_widening_it_within_a_step_keeps_its_decoder() {
+        let (mut compositor, mut renderer, journal) = single_frame_rig();
+        let mut placed = Project::from_json(TEXT).expect("valid json");
+        placed.tracks[0].clips[0].placement = Some(ClipPlacement { x: 0.1, y: 0.1, width: 0.5 });
+        let mut moved = placed.clone();
+        moved.tracks[0].clips[0].placement = Some(ClipPlacement { x: 0.3, y: 0.6, width: 0.5 });
+        let mut nudged = moved.clone();
+        // 0.5 is a step; the next one is 0.5 * 2^(1/4), about 0.595.
+        nudged.tracks[0].clips[0].placement = Some(ClipPlacement { x: 0.3, y: 0.6, width: 0.45 });
+        let mut keyed = nudged.clone();
+        keyed.tracks[0].clips[0].motion.keyframes.insert(ClipProperty::Width, vec![Keyframe { at: Time::from_ticks(0), value: 0.48, easing: Default::default() }]);
+        let mut past_step = keyed.clone();
+        past_step.tracks[0].clips[0].placement = Some(ClipPlacement { x: 0.3, y: 0.6, width: 0.55 });
+        for project in [&placed, &moved, &nudged, &keyed, &past_step] {
+            renderer.render_frame(project, &mut compositor, 0, consume_nothing).expect("frame");
+        }
+        let opened = journal.borrow().events.iter().filter(|e| e.starts_with("open")).count();
+        assert_eq!(opened, 2, "only crossing the 0.5 step reopens: {:?}", journal.borrow().events);
     }
 
     #[test]
