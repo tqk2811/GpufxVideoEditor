@@ -7,7 +7,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use d3d12_backend::MediaProbe;
-use engine::Project;
+use engine::{ClipKey, Project};
 
 use crate::editor::{clip_label, EditorState, LibraryTarget};
 use crate::i18n::Message;
@@ -17,6 +17,8 @@ use crate::package_import::{ImportOutcome, ImportProblem};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileDialog {
     PickClip { track: usize },
+    /// A font file for the text clip.
+    PickFont { clip: ClipKey },
     ImportMedia { audio_only: bool },
     ImportPackage,
     OpenProject,
@@ -65,6 +67,8 @@ pub enum Request {
     ImportMedia { audio_only: bool },
     ImportPackage,
     Export,
+    /// A font file for the text clip, through the file dialog.
+    PickFont { clip: ClipKey },
 }
 
 /// Which task a failure belongs to. A load carries the id it was started with, so the result of
@@ -248,6 +252,7 @@ impl Tasks {
             Request::ImportMedia { audio_only } => self.start_dialog(FileDialog::ImportMedia { audio_only }),
             Request::ImportPackage => self.start_dialog(FileDialog::ImportPackage),
             Request::Export => self.start_dialog(FileDialog::Export),
+            Request::PickFont { clip } => self.start_dialog(FileDialog::PickFont { clip }),
         }
     }
 
@@ -333,6 +338,10 @@ impl Tasks {
                     FileDialog::ImportMedia { .. } => {
                         let load = self.start_load(state, &path, None);
                         Action::ProbeMedia { load, path }
+                    }
+                    FileDialog::PickFont { clip } => {
+                        state.set_text_font(clip, engine::FontRef::File { path: path.to_string_lossy().into_owned() });
+                        Action::Nothing
                     }
                     FileDialog::ImportPackage if state.is_exporting() => {
                         state.report_refused(Message::ExportRunning);

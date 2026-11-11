@@ -92,6 +92,11 @@ pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
     let folder = file.parent().unwrap_or_else(|| Path::new("."));
     let mut stored = project.clone();
     for clip in stored.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+        if let Some(engine::FontRef::File { path }) = clip.text.as_mut().map(|text| &mut text.font) {
+            if let Some(relative) = relative_under(folder, Path::new(path.as_str())) {
+                *path = relative;
+            }
+        }
         if is_asset_source(&clip.source) || clip.is_text() {
             continue;
         }
@@ -106,6 +111,12 @@ pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
 pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
     let folder = file.parent().unwrap_or_else(|| Path::new("."));
     for clip in project.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+        if let Some(engine::FontRef::File { path }) = clip.text.as_mut().map(|text| &mut text.font) {
+            if Path::new(path.as_str()).is_relative() {
+                let joined = folder.join(path.as_str());
+                *path = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
+            }
+        }
         if !is_asset_source(&clip.source) && !clip.is_text() && is_relative_source(&clip.source) {
             let joined = folder.join(&clip.source);
             clip.source = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
@@ -214,6 +225,28 @@ mod tests {
         let opened = with_absolute_sources(project(vec!["clips/a.mp4".to_owned(), r"E:\media\b.mp4".to_owned()]), file);
         assert_eq!(opened.tracks[0].clips[0].source, r"D:\Work\clips\a.mp4");
         assert_eq!(opened.tracks[0].clips[1].source, r"E:\media\b.mp4");
+    }
+
+    #[test]
+    fn a_font_file_is_relative_inside_the_folder_when_saved_and_absolute_when_opened() {
+        let file = Path::new(r"D:\Work\p.json");
+        let with_font = |paths: [&str; 2]| {
+            let mut project = project(vec!["text:".to_owned(), "text:".to_owned()]);
+            for (clip, path) in project.tracks[0].clips.iter_mut().zip(paths) {
+                let mut text = engine::TextContent::new("Hi", 0.1);
+                text.font = engine::FontRef::File { path: path.to_owned() };
+                clip.text = Some(text);
+            }
+            project
+        };
+        let font = |project: &Project, clip: usize| project.tracks[0].clips[clip].text.as_ref().unwrap().font.clone();
+        let file_font = |path: &str| engine::FontRef::File { path: path.to_owned() };
+        let stored = with_relative_sources(&with_font([r"D:\Work\fonts\a.ttf", r"E:\fonts\b.ttf"]), file);
+        assert_eq!(font(&stored, 0), file_font("fonts/a.ttf"));
+        assert_eq!(font(&stored, 1), file_font(r"E:\fonts\b.ttf"));
+        let opened = with_absolute_sources(with_font(["fonts/a.ttf", r"E:\fonts\b.ttf"]), file);
+        assert_eq!(font(&opened, 0), file_font(r"D:\Work\fonts\a.ttf"));
+        assert_eq!(font(&opened, 1), file_font(r"E:\fonts\b.ttf"));
     }
 
     #[test]

@@ -228,11 +228,14 @@ fn unit_f32() -> f32 {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum FontRef {
-    /// The font built into the editor.
+    /// The system UI font (Segoe UI, else Arial, else the first installed family).
     #[default]
     Default,
     /// A font installed on the system, by family name.
     System { family: String },
+    /// The first face of a font file (.ttf, .otf, .ttc). The editor keeps it absolute in memory;
+    /// a project file stores it relative to the project folder when it lies under it.
+    File { path: String },
 }
 
 /// Horizontal alignment of text lines.

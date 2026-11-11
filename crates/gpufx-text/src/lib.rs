@@ -3,8 +3,10 @@
 //! Shaping, bidi and font fallback come from `cosmic-text`, glyph pictures from its swash cache.
 //! Outline, background box and drop shadow are drawn here on alpha masks.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use cosmic_text::{Attrs, Buffer, Command, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Wrap};
 use engine::project::{FontRef, Rgba, TextAlign, TextContent};
@@ -12,6 +14,37 @@ use engine::project::{FontRef, Rgba, TextAlign, TextContent};
 /// The installed families tried, in order, for the default font: Segoe UI on Windows (it has the
 /// Vietnamese letters), then Arial. No font ships with the editor.
 pub const DEFAULT_FAMILY_CANDIDATES: [&str; 2] = ["Segoe UI", "Arial"];
+
+/// When a font file was last written and how long it is; a new value means the file changed.
+pub type FontFileStamp = (SystemTime, u64);
+
+/// The stamp of a font file, or `None` when it cannot be read.
+pub fn font_file_stamp(path: &Path) -> Option<FontFileStamp> {
+    let meta = std::fs::metadata(path).ok().filter(|meta| meta.is_file())?;
+    Some((meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len()))
+}
+
+/// The stamp of the font file `text` uses, `None` for a font that is not a file. Goes into the
+/// keys of cached pictures, so a changed file is drawn again.
+pub fn text_font_stamp(text: &TextContent) -> Option<FontFileStamp> {
+    match &text.font {
+        FontRef::File { path } => font_file_stamp(Path::new(path)),
+        _ => None,
+    }
+}
+
+/// The family of the first face of the font file at `path`, or `None` when it is missing or not
+/// a font. Reads the file without loading it into any rasterizer.
+pub fn font_file_family(path: &Path) -> Option<String> {
+    let mut db = fontdb::Database::new();
+    let data = std::fs::read(path).ok()?;
+    let ids: Vec<fontdb::ID> = db.load_font_source(fontdb::Source::Binary(Arc::new(data))).into_iter().collect();
+    first_family(&db, &ids)
+}
+
+fn first_family(db: &fontdb::Database, ids: &[fontdb::ID]) -> Option<String> {
+    ids.iter().filter_map(|id| db.face(*id)).filter_map(|face| face.families.first()).map(|(name, _)| name.trim().to_owned()).find(|name| !name.is_empty())
+}
 
 /// The widest or tallest picture [`TextRasterizer::rasterize`] returns, in pixels. Larger text is
 /// drawn smaller so that it fits.
@@ -29,7 +62,8 @@ pub struct TextImage {
     pub height: u32,
     /// `width * height` pixels, row by row from the top, as premultiplied RGBA.
     pub pixels: Vec<u8>,
-    /// The system font family that was asked for and not found, so the default font drew it.
+    /// The system font family, or the path of a font file, that was asked for and not found or
+    /// not readable, so the default font drew it.
     pub missing_family: Option<String>,
     /// No font is loaded at all, so nothing could be drawn and the picture is empty.
     pub no_font: bool,
@@ -46,6 +80,15 @@ pub struct TextRasterizer {
     cache: SwashCache,
     /// The family [`FontRef::Default`] draws with, or `None` when no font is loaded.
     default_family: Option<String>,
+    /// Font files loaded for [`FontRef::File`], by path.
+    files: HashMap<PathBuf, LoadedFile>,
+}
+
+/// A font file as loaded: the stamp it had, its faces and its family (`None` when not a font).
+struct LoadedFile {
+    stamp: Option<FontFileStamp>,
+    ids: Vec<fontdb::ID>,
+    family: Option<String>,
 }
 
 impl Default for TextRasterizer {
@@ -94,7 +137,7 @@ impl TextRasterizer {
             None => eprintln!("gpufx-text: no font is installed; text cannot be drawn"),
         }
         let locale = sys_locale();
-        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family }
+        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new() }
     }
 
     /// The installed family [`FontRef::Default`] draws with: the first of
@@ -107,6 +150,48 @@ impl TextRasterizer {
     /// Whether a font family with this name is loaded, ignoring case.
     pub fn has_family(&self, family: &str) -> bool {
         self.font_system.db().faces().any(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
+    }
+
+    /// The family the font file at `path` gives, loading it the first time and again when it
+    /// changed. `None` when the file is missing or is not a font.
+    pub fn file_family(&mut self, path: &Path) -> Option<String> {
+        let stamp = font_file_stamp(path);
+        if let Some(loaded) = self.files.get(path) {
+            if loaded.stamp == stamp {
+                return loaded.family.clone();
+            }
+        }
+        if let Some(old) = self.files.remove(path) {
+            let db = self.font_system.db_mut();
+            for id in old.ids {
+                db.remove_face(id);
+            }
+        }
+        let data = stamp.and_then(|_| std::fs::read(path).ok());
+        let (ids, family) = match data {
+            Some(data) => {
+                let db = self.font_system.db_mut();
+                let ids: Vec<fontdb::ID> = db.load_font_source(fontdb::Source::Binary(Arc::new(data))).into_iter().collect();
+                let family = first_family(db, &ids);
+                if family.is_none() {
+                    eprintln!("gpufx-text: {} is not a font", path.display());
+                }
+                (ids, family)
+            }
+            None => (Vec::new(), None),
+        };
+        self.files.insert(path.to_owned(), LoadedFile { stamp, ids, family: family.clone() });
+        family
+    }
+
+    /// The font family or font file `text` asks for that cannot be used, so the default font
+    /// draws it; `None` for the default font or one that is there.
+    pub fn missing_font(&mut self, text: &TextContent) -> Option<String> {
+        match &text.font {
+            FontRef::Default => None,
+            FontRef::System { family } => (!self.has_family(family)).then(|| family.clone()),
+            FontRef::File { path } => self.file_family(Path::new(path)).is_none().then(|| path.clone()),
+        }
     }
 
     /// Every loaded font family once, sorted ignoring case. Empty names are left out.
@@ -148,20 +233,24 @@ impl TextRasterizer {
     /// Shapes `text` at `font_px` and places it: glyph positions and the size of the picture.
     fn layout(&mut self, text: &TextContent, font_px: f32) -> Layout {
         let mut layout = Layout::default();
-        let Some(default_family) = self.default_family.clone() else {
-            layout.no_font = true;
-            if let FontRef::System { family } = &text.font {
-                layout.missing_family = Some(family.clone());
-            }
-            return layout;
-        };
-        let family = match &text.font {
-            FontRef::System { family } if self.has_family(family) => family.clone(),
+        let asked = match &text.font {
+            FontRef::Default => None,
+            FontRef::System { family } if self.has_family(family) => Some(family.clone()),
             FontRef::System { family } => {
                 layout.missing_family = Some(family.clone());
-                default_family
+                None
             }
-            FontRef::Default => default_family,
+            FontRef::File { path } => {
+                let family = self.file_family(Path::new(path));
+                if family.is_none() {
+                    layout.missing_family = Some(path.clone());
+                }
+                family
+            }
+        };
+        let Some(family) = asked.or_else(|| self.default_family.clone()) else {
+            layout.no_font = true;
+            return layout;
         };
         if text.content.is_empty() || !font_px.is_finite() || font_px < 0.5 {
             return layout;

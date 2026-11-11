@@ -41,6 +41,10 @@ fn absolute_project(project: &Project, paths: &ProjectPaths) -> Project {
     for track in &mut stored.tracks {
         for clip in &mut track.clips {
             // A pack that cannot be found stays as it is, so the render reports which one it needs.
+            if let Some(engine::FontRef::File { path }) = clip.text.as_mut().map(|text| &mut text.font) {
+                let found = paths.source_path(path);
+                *path = std::path::absolute(&found).unwrap_or(found).to_string_lossy().into_owned();
+            }
             if !clip.is_text() && paths.asset_problem(&clip.source).is_none() {
                 let source = paths.source_path(&clip.source);
                 clip.source = std::path::absolute(&source).unwrap_or(source).to_string_lossy().into_owned();

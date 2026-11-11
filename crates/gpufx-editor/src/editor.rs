@@ -213,6 +213,8 @@ pub enum LeftTab {
 /// What the panels remember between frames.
 #[derive(Debug, Clone, Default)]
 pub struct UiState {
+    /// The text clip whose font file the inspector asked to choose; the window opens the dialog.
+    pub font_file_request: Option<ClipKey>,
     pub left_tab: LeftTab,
     pub media_search: String,
     pub audio_search: String,
@@ -1517,6 +1519,24 @@ impl EditorState {
         }
         let rescaled = self.rescaled_text_placement(key, &text);
         self.live_edit(|project| {
+            let next = set_text(project, key, text)?;
+            match rescaled {
+                Some(placement) => set_placement(&next, key, Some(placement)),
+                None => Ok(next),
+            }
+        });
+    }
+
+    /// Gives text clip `key` the font `font` as one undo step, keeping a fixed place scaled like
+    /// [`Self::live_text`] does. Nothing for a clip that is gone or is not a text.
+    pub fn set_text_font(&mut self, key: ClipKey, font: engine::FontRef) {
+        let Some(mut text) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.text.clone()) else { return };
+        if text.font == font {
+            return;
+        }
+        text.font = font;
+        let rescaled = self.rescaled_text_placement(key, &text);
+        self.run(|project| {
             let next = set_text(project, key, text)?;
             match rescaled {
                 Some(placement) => set_placement(&next, key, Some(placement)),

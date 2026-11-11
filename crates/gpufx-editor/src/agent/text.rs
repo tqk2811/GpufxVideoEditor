@@ -82,8 +82,19 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
     Ok(next)
 }
 
-/// A family the font scan has finished without is refused; while it still runs the name is taken as given.
+/// A family the font scan has finished without is refused; while it still runs the name is taken
+/// as given. A font file must be an absolute path to a file that reads as a font.
 fn check_font(font: &FontRef) -> Result<(), AgentError> {
+    if let FontRef::File { path } = font {
+        let file = std::path::Path::new(path);
+        if !file.is_absolute() {
+            return Err(invalid(format!("font file path {path} must be absolute")));
+        }
+        return match gpufx_text::font_file_family(file) {
+            Some(_) => Ok(()),
+            None => Err(invalid(format!("{path} is not a readable font file (.ttf, .otf or .ttc)"))),
+        };
+    }
     let FontRef::System { family } = font else { return Ok(()) };
     let families = available_families();
     if families.is_empty() || families.iter().any(|known| known == family) {

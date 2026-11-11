@@ -594,6 +594,9 @@ impl Session {
         })?;
         let next_drop = self.tasks.next_file_drop(&mut self.state);
         self.perform(next_drop);
+        if let Some(clip) = self.state.ui.font_file_request.take() {
+            self.begin_task(Request::PickFont { clip });
+        }
         #[cfg(debug_assertions)]
         self.record_smoke_ui(ui_time);
         #[cfg(not(debug_assertions))]
@@ -714,13 +717,14 @@ impl Session {
             FileDialog::PickClip { .. } | FileDialog::ImportMedia { audio_only: false } => base().add_filter(language.t(Message::FilterMedia), &MEDIA_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportMedia { audio_only: true } => base().add_filter(language.t(Message::FilterAudio), &AUDIO_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportPackage => base().add_filter(language.t(Message::FilterPackage), &["zip"]),
+            FileDialog::PickFont { .. } => base().add_filter(language.t(Message::FilterFont), &["ttf", "otf", "ttc"]),
             FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
             FileDialog::SaveProject => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
         };
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
-                FileDialog::PickClip { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::OpenProject => picker.pick_file(),
+                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::OpenProject => picker.pick_file(),
                 FileDialog::SaveProject | FileDialog::Export => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }

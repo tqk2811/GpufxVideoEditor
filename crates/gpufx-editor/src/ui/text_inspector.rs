@@ -46,7 +46,9 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(content) = content_box(ui, id, text, language) {
         next.content = content;
     }
-    font_combo(ui, id, &mut next, language);
+    if font_combo(ui, id, &mut next, language) {
+        state.ui.font_file_request = Some(key);
+    }
     let output_height = f64::from(state.project().output.height.max(1));
     if let Some(size) = slider_row(ui, &language.t(Message::FieldTextSize), f64::from(text.size) * output_height, (*TEXT_SIZE_RANGE.start() * output_height)..=(*TEXT_SIZE_RANGE.end() * output_height), 0, " px") {
         next.size = (size / output_height) as f32;
@@ -107,16 +109,26 @@ fn content_box(ui: &mut egui::Ui, id: egui::Id, text: &TextContent, language: La
     applied
 }
 
-fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, language: Language) {
+/// The font combo; true when "Choose a font file..." was clicked, which the window answers with
+/// the file dialog.
+fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, language: Language) -> bool {
     let default_name = language.t(Message::DefaultFont);
+    let mut choose_file = false;
     let shown = match &text.font {
         FontRef::Default => default_name.clone(),
         FontRef::System { family } => family.clone(),
+        FontRef::File { path } => font_file_label(path),
     };
     ui.horizontal(|ui| {
         ui.colored_label(theme::text_dim(), language.t(Message::FieldFont));
         egui::ComboBox::from_id_salt(id.with("font")).selected_text(shown).width(ui.available_width()).height(FONT_LIST_HEIGHT).show_ui(ui, |ui| {
             ui.selectable_value(&mut text.font, FontRef::Default, default_name);
+            if let FontRef::File { path } = &text.font {
+                let _ = ui.selectable_label(true, font_file_label(path));
+            }
+            if ui.selectable_label(false, language.t(Message::ChooseFontFile)).clicked() {
+                choose_file = true;
+            }
             let families = available_families();
             if families.is_empty() {
                 ui.colored_label(theme::text_dim(), language.t(Message::LoadingFonts));
@@ -127,6 +139,12 @@ fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, language:
             }
         });
     });
+    choose_file
+}
+
+/// A font file as the combo shows it: its file name, without reading the file on every repaint.
+fn font_file_label(path: &str) -> String {
+    std::path::Path::new(path).file_name().map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned())
 }
 
 /// A slider with a number beside it; the new value when either changed.

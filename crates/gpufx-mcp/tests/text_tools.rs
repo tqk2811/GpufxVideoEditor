@@ -169,6 +169,9 @@ fn a_text_no_text_can_be_is_refused_with_a_clear_code_and_changes_nothing() {
         ("text_set", set(json!({"size": 0})), "size 0"),
         ("text_set", set(json!({"animation": {"loop": {"preset": "fade", "duration": 9000}}})), "an in preset in the loop group"),
         ("text_set", set(json!({})), "nothing to change"),
+        ("text_set", set(json!({"font": {"kind": "file", "path": r"C:\no\such\font-123.ttf"}})), "a font file that is not there"),
+        ("text_set", set(json!({"font": {"kind": "file", "path": "fonts/a.ttf"}})), "a relative font file"),
+        ("text_add", add(json!({"style": {"font": {"kind": "file", "path": concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")}}})), "a file that is not a font"),
     ] {
         assert_eq!(call_err(&mut session, tool, arguments).code, "invalid_params", "{tool}: {why}");
     }
@@ -180,6 +183,19 @@ fn a_text_no_text_can_be_is_refused_with_a_clear_code_and_changes_nothing() {
     assert_eq!(call_err(&mut session, "text_set", set(json!({"expected_revision": current - 1, "size": 0.1}))).code, "stale_revision");
     assert_eq!(call_err(&mut session, "text_add", add(json!({"track": 0, "start": 0}))).code, "overlap");
     assert_eq!(project_of(&mut session), known, "a refusal changes nothing");
+}
+
+#[test]
+fn text_set_takes_a_font_file_that_reads() {
+    let Some(arial) = std::env::var_os("WINDIR").map(|dir| std::path::Path::new(&dir).join("Fonts").join("arial.ttf")).filter(|path| path.is_file()) else {
+        eprintln!("skipped: no arial.ttf");
+        return;
+    };
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let current = with_text(&mut session);
+    let path = arial.to_string_lossy().into_owned();
+    call_ok(&mut session, "text_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}, "font": {"kind": "file", "path": path}}));
+    assert_eq!(text_of(&mut session, 0, 0).font, FontRef::File { path });
 }
 
 #[test]

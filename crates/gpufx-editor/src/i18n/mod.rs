@@ -235,6 +235,8 @@ pub enum Message {
     FieldTextContent,
     FieldFont,
     DefaultFont,
+    ChooseFontFile,
+    FilterFont,
     /// The font list is not read yet.
     LoadingFonts,
     /// The font a text asks for is not installed and the default one draws it.
@@ -430,6 +432,8 @@ mod tests {
             Message::FieldTextContent,
             Message::FieldFont,
             Message::DefaultFont,
+            Message::ChooseFontFile,
+            Message::FilterFont,
             Message::LoadingFonts,
             Message::FontMissing(name()),
             Message::FieldTextSize,

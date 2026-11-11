@@ -718,8 +718,19 @@ impl D3d12Compositor {
     /// [`engine::text_raster_scale`], which rounds to steps) and kept like an
     /// image, by its text, output height and scale. Only measured, not drawn, to learn the scale.
     fn load_text(&mut self, clip: &Clip, text: &TextContent) -> Result<Arc<StillImage>, String> {
+        // A font file named relative to the project is read from the project folder.
+        let resolved;
+        let text = match &text.font {
+            engine::FontRef::File { path } if Path::new(path).is_relative() => {
+                resolved = TextContent { font: engine::FontRef::File { path: self.paths.source_path(path).to_string_lossy().into_owned() }, ..text.clone() };
+                &resolved
+            }
+            _ => text,
+        };
         let json = serde_json::to_string(text).map_err(|e| format!("text: {e}"))?;
-        let digest: [u8; 32] = Sha256::digest(json.as_bytes()).into();
+        // The font file's stamp is part of the key, so a changed file is drawn again.
+        let stamp = format!("{:?}", gpufx_text::text_font_stamp(text));
+        let digest: [u8; 32] = Sha256::new().chain_update(json.as_bytes()).chain_update(stamp.as_bytes()).finalize().into();
         let size_key = (digest, self.height);
         let (width, height) = match self.text_sizes.get(&size_key) {
             Some(size) => *size,

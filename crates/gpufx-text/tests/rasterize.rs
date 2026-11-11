@@ -243,6 +243,69 @@ fn tabs_and_joiners_are_not_missing_glyphs() {
     }
 }
 
+/// A font file of Windows that is not the default font, or `None` (the test is then skipped).
+fn windows_font(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(&std::env::var_os("WINDIR")?).join("Fonts").join(name);
+    if path.is_file() {
+        Some(path)
+    } else {
+        eprintln!("skipped: no {name}");
+        None
+    }
+}
+
+#[test]
+fn a_font_file_draws_with_its_own_family() {
+    let Some(mut r) = rasterizer() else { return };
+    let Some(path) = windows_font("times.ttf") else { return };
+    assert_eq!(gpufx_text::font_file_family(&path).as_deref(), Some("Times New Roman"));
+    assert_eq!(r.file_family(&path).as_deref(), Some("Times New Roman"));
+    let mut text = TextContent::new("Serif text", 0.06);
+    let default = r.rasterize(&text, HEIGHT, 1.0);
+    text.font = FontRef::File { path: path.to_string_lossy().into_owned() };
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    assert_eq!(image.missing_family, None);
+    assert!(!image.no_font && image.width > 0);
+    assert_ne!(image.pixels, default.pixels, "drawn in the file's font, not the default");
+    assert_eq!(r.missing_font(&text), None);
+    assert!(gpufx_text::text_font_stamp(&text).is_some());
+}
+
+#[test]
+fn a_missing_or_broken_font_file_falls_back_to_the_default_and_names_the_file() {
+    let Some(mut r) = rasterizer() else { return };
+    let mut text = TextContent::new("Fallback", 0.06);
+    let default = r.rasterize(&text, HEIGHT, 1.0);
+    let dir = std::env::temp_dir().join(format!("gpufx-text-font-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let broken = dir.join("broken.ttf");
+    std::fs::write(&broken, b"not a font").unwrap();
+    for path in [dir.join("absent.ttf"), broken.clone()] {
+        let name = path.to_string_lossy().into_owned();
+        text.font = FontRef::File { path: name.clone() };
+        let image = r.rasterize(&text, HEIGHT, 1.0);
+        assert_eq!(image.missing_family.as_deref(), Some(name.as_str()));
+        assert_eq!(image.pixels, default.pixels);
+        assert_eq!(r.missing_font(&text).as_deref(), Some(name.as_str()));
+        assert_eq!(gpufx_text::font_file_family(&path), None);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_font_file_that_changes_is_read_again() {
+    let Some(mut r) = rasterizer() else { return };
+    let (Some(times), Some(arial)) = (windows_font("times.ttf"), windows_font("arial.ttf")) else { return };
+    let dir = std::env::temp_dir().join(format!("gpufx-text-font-change-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("font.ttf");
+    std::fs::copy(&times, &file).unwrap();
+    assert_eq!(r.file_family(&file).as_deref(), Some("Times New Roman"));
+    std::fs::copy(&arial, &file).unwrap();
+    assert_eq!(r.file_family(&file).as_deref(), Some("Arial"), "a new length is a new stamp");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn without_any_font_text_is_empty_and_says_so() {
     let mut r = TextRasterizer::with_font_files(&[]);

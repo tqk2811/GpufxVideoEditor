@@ -5,7 +5,7 @@
 //! for the whole editor; a measure holds its lock only for the shaping, never for a drawing.
 
 use engine::TextContent;
-use gpufx_text::TextRasterizer;
+use gpufx_text::{FontFileStamp, TextRasterizer};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::Hasher;
@@ -25,8 +25,8 @@ pub struct TextShape {
     /// Width and height of the picture in pixels at its natural size, the font size it asks for
     /// in the output height measured. Zero for a text that draws nothing.
     pub pixels: (u32, u32),
-    /// The system font family the text asked for and that is not installed, so the default font
-    /// draws it; for a warning.
+    /// The system font family, or the path of a font file, the text asked for and that cannot be
+    /// used, so the default font draws it; for a warning.
     pub missing_family: Option<String>,
 }
 
@@ -36,9 +36,9 @@ pub struct TextShapes {
     /// The shared system rasterizer unless set, taken the first time a text is asked about.
     rasterizer: Option<Arc<Mutex<TextRasterizer>>>,
     /// The latest texts asked about, newest last, so a repaint neither hashes nor locks.
-    recent: Vec<(TextContent, u32, TextShape)>,
-    /// Every text measured, by a hash of its JSON and the output height.
-    known: HashMap<(u64, u32), TextShape>,
+    recent: Vec<(TextContent, u32, Option<FontFileStamp>, TextShape)>,
+    /// Every text measured, by a hash of its JSON, the output height and the stamp of its font file.
+    known: HashMap<(u64, u32, Option<FontFileStamp>), TextShape>,
 }
 
 /// Loads the system fonts of the shared rasterizer on a thread of its own, so the first text
@@ -71,10 +71,11 @@ impl TextShapes {
     /// The shape of `text` in an output `output_height` pixels tall. A text that draws nothing
     /// is as wide as tall.
     pub fn shape(&mut self, text: &TextContent, output_height: u32) -> TextShape {
-        if let Some((_, _, shape)) = self.recent.iter().rev().find(|(known, height, _)| *height == output_height && known == text) {
+        let stamp = gpufx_text::text_font_stamp(text);
+        if let Some((_, _, _, shape)) = self.recent.iter().rev().find(|(known, height, known_stamp, _)| *height == output_height && *known_stamp == stamp && known == text) {
             return shape.clone();
         }
-        let key = (text_hash(text), output_height);
+        let key = (text_hash(text), output_height, stamp);
         let shape = match self.known.get(&key) {
             Some(shape) => shape.clone(),
             None => {
@@ -89,7 +90,7 @@ impl TextShapes {
         if self.recent.len() >= RECENT {
             self.recent.remove(0);
         }
-        self.recent.push((text.clone(), output_height, shape.clone()));
+        self.recent.push((text.clone(), output_height, stamp, shape.clone()));
         shape
     }
 
@@ -97,10 +98,7 @@ impl TextShapes {
         let rasterizer = self.rasterizer.get_or_insert_with(gpufx_text::shared).clone();
         let mut rasterizer = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let (width, height) = rasterizer.measure(text, output_height, 1.0);
-        let missing_family = match &text.font {
-            engine::FontRef::System { family } if !rasterizer.has_family(family) => Some(family.clone()),
-            _ => None,
-        };
+        let missing_family = rasterizer.missing_font(text);
         let aspect = if width == 0 || height == 0 { 1.0 } else { f64::from(width) / f64::from(height) };
         TextShape { aspect, pixels: (width, height), missing_family }
     }
@@ -163,6 +161,15 @@ mod tests {
         assert_eq!(shapes.recent.len(), RECENT);
         assert_eq!(shapes.shape(&texts[0], 720), first[0]);
         assert_eq!(shapes.known.len(), texts.len(), "nothing measured twice");
+    }
+
+    #[test]
+    fn a_missing_font_file_is_reported_by_its_path() {
+        let mut shapes = TextShapes::with_rasterizer(Arc::new(Mutex::new(TextRasterizer::new())));
+        let mut text = TextContent::new("Hi", 0.1);
+        let path = std::env::temp_dir().join("gpufx-no-such-font-123.ttf").to_string_lossy().into_owned();
+        text.font = engine::FontRef::File { path: path.clone() };
+        assert_eq!(shapes.shape(&text, 720).missing_family, Some(path));
     }
 
     #[test]

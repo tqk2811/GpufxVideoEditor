@@ -113,10 +113,12 @@ impl From<EasingParam> for engine::Easing {
 #[schemars(inline)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum FontParam {
-    /// The font built into the editor.
+    /// The system UI font (Segoe UI, else Arial).
     Default,
     /// A font installed on the system, by a family font_list names.
     System { family: String },
+    /// A font file (.ttf, .otf, .ttc) by absolute path; its first face is used.
+    File { path: String },
 }
 
 impl From<FontParam> for engine::FontRef {
@@ -124,6 +126,7 @@ impl From<FontParam> for engine::FontRef {
         match font {
             FontParam::Default => Self::Default,
             FontParam::System { family } => Self::System { family },
+            FontParam::File { path } => Self::File { path },
         }
     }
 }
