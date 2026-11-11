@@ -9,12 +9,12 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
 use engine::schedule::{ClipClock, Progress};
-use engine::{is_image_source, ClipTransform, Effect as ProjectEffect, Time, TICKS_PER_SECOND};
+use engine::{is_image_source, text_raster_scale, Clip, ClipTransform, Effect as ProjectEffect, TextContent, Time, TICKS_PER_SECOND};
 use gpufx_core::d3d12::D3d12Frame;
 use gpufx_core::{ColorInfo, Effect, EffectGraph, FrameInfo, GpuContext, Package, PixelFormat};
 use serde_json::{Map, Value};
@@ -34,7 +34,8 @@ use crate::gpu::Gpu;
 use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
 use crate::rotated_place::rotated_place_effect;
-use crate::still::{aligned_rows, read_still, StillPicture};
+use crate::still::{aligned_rows, premultiplied_still, read_still, StillPicture};
+use gpufx_text::TextRasterizer;
 
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const MAX_SPARE_IMAGES: usize = 3;
@@ -380,6 +381,16 @@ impl Decoder for SourceDecoder {
     }
 }
 
+/// What a kept still was made from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum StillKey {
+    /// An image file.
+    File(PathBuf),
+    /// A text, written out as JSON, rasterized for an output this many pixels tall at this scale
+    /// (the bits of the `f32`).
+    Text { text: String, output_height: u32, scale: u32 },
+}
+
 /// A still kept for the next clip that shows the file.
 struct CachedStill {
     stamp: (u64, Option<SystemTime>),
@@ -542,8 +553,17 @@ pub struct D3d12Compositor {
     rotator: Option<EffectGraph>,
     /// A fully transparent image, only ever read. Not in the pool, whose images hold old pictures.
     transparent: Option<ImageId>,
-    stills: HashMap<PathBuf, CachedStill>,
+    stills: HashMap<StillKey, CachedStill>,
     stills_used: u64,
+    /// Draws text clips. The shared system one unless set, taken the first time text is drawn.
+    text_rasterizer: Option<Arc<Mutex<TextRasterizer>>>,
+    /// The size each text has at scale 1, so a text in the cache is found without drawing it again
+    /// to learn the scale it needs.
+    text_sizes: HashMap<StillKey, (u32, u32)>,
+    /// How many times text was rasterized.
+    text_rasterizations: u64,
+    /// The font families text asked for and did not find, so the default font drew it.
+    missing_font_families: Vec<String>,
     readback: Option<wgpu::Buffer>,
     /// Passed to every decoder this compositor opens; see [`SequentialDecoder::set_abort`].
     abort: Option<(Arc<AtomicBool>, Duration)>,
@@ -558,7 +578,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, rotator: None, transparent: None, stills: HashMap::new(), stills_used: 0, readback: None, abort: None, closing: None, publish_clock: Arc::default() })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, rotator: None, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default() })
     }
 
     /// Makes `closing` stop the decoders opened from now on at once, and lets a newer request stop
@@ -642,7 +662,7 @@ impl D3d12Compositor {
         let metadata = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let stamp = (metadata.len(), metadata.modified().ok());
         self.stills_used += 1;
-        let key = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        let key = StillKey::File(std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
         if let Some(cached) = self.stills.get_mut(&key) {
             if cached.stamp == stamp {
                 cached.last_used = self.stills_used;
@@ -650,6 +670,76 @@ impl D3d12Compositor {
             }
         }
         let picture = read_still(path)?;
+        self.insert_still(key, stamp, picture)
+    }
+
+    /// Draws text clips with `rasterizer` instead of the shared one with the system fonts.
+    pub fn set_text_rasterizer(&mut self, rasterizer: Arc<Mutex<TextRasterizer>>) {
+        self.text_rasterizer = Some(rasterizer);
+    }
+
+    /// How many times this compositor has rasterized text.
+    pub fn text_rasterizations(&self) -> u64 {
+        self.text_rasterizations
+    }
+
+    /// The font families text clips asked for that are not installed, so the default font drew
+    /// them; for a warning.
+    pub fn missing_font_families(&self) -> &[String] {
+        &self.missing_font_families
+    }
+
+    fn rasterize(&mut self, text: &TextContent, scale: f32) -> gpufx_text::TextImage {
+        let rasterizer = self.text_rasterizer.get_or_insert_with(gpufx_text::shared).clone();
+        // A panic in another user leaves the fonts as they were, so the lock is still fine to take.
+        let image = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).rasterize(text, self.height, scale);
+        self.text_rasterizations += 1;
+        if let Some(family) = &image.missing_family {
+            if !self.missing_font_families.contains(family) {
+                eprintln!("text: font family '{family}' is not installed; the default font draws it");
+                self.missing_font_families.push(family.clone());
+            }
+        }
+        image
+    }
+
+    /// The still of a text clip, rasterized sharp enough for the widest the clip is shown (see
+    /// [`engine::text_raster_scale`]) and kept like an image, by its text, output height and scale.
+    fn load_text(&mut self, clip: &Clip, text: &TextContent) -> Result<Arc<StillImage>, String> {
+        let json = serde_json::to_string(text).map_err(|e| format!("text: {e}"))?;
+        let size_key = StillKey::Text { text: json.clone(), output_height: self.height, scale: 1f32.to_bits() };
+        let mut natural = None;
+        let (width, height) = match self.text_sizes.get(&size_key) {
+            Some(size) => *size,
+            None => {
+                let image = self.rasterize(text, 1.0);
+                let size = (image.width, image.height);
+                if self.text_sizes.len() >= 4096 {
+                    self.text_sizes.clear();
+                }
+                self.text_sizes.insert(size_key, size);
+                natural = Some(image);
+                size
+            }
+        };
+        let source_aspect = if width == 0 || height == 0 { 1.0 } else { f64::from(width) / f64::from(height) };
+        let output_aspect = f64::from(self.width) / f64::from(self.height.max(1));
+        let scale = text_raster_scale(clip.widest(output_aspect, source_aspect), self.width, width);
+        let key = StillKey::Text { text: json, output_height: self.height, scale: scale.to_bits() };
+        self.stills_used += 1;
+        if let Some(cached) = self.stills.get_mut(&key) {
+            cached.last_used = self.stills_used;
+            return Ok(cached.still.clone());
+        }
+        let image = match natural {
+            Some(image) if scale == 1.0 => image,
+            _ => self.rasterize(text, scale),
+        };
+        let picture = premultiplied_still(image.width, image.height, image.pixels);
+        self.insert_still(key, (0, None), picture)
+    }
+
+    fn insert_still(&mut self, key: StillKey, stamp: (u64, Option<SystemTime>), picture: StillPicture) -> Result<Arc<StillImage>, String> {
         let image = Image::upload(&self.gpu, &picture)?;
         let bytes = u64::from(picture.width) * u64::from(picture.height) * 4;
         let still = Arc::new(StillImage { aspect: picture.aspect(), has_alpha: picture.has_alpha, fence_value: AtomicU64::new(image.fence_value), image });
@@ -871,7 +961,11 @@ impl Compositor for D3d12Compositor {
     type Decoder = SourceDecoder;
     type Image = ImageId;
 
-    fn open_decoder(&mut self, source: &str) -> Result<SourceDecoder, RenderError> {
+    fn open_decoder(&mut self, clip: &Clip) -> Result<SourceDecoder, RenderError> {
+        if let Some(text) = &clip.text {
+            return self.load_text(clip, text).map(SourceDecoder::Still).map_err(RenderError);
+        }
+        let source = clip.source.as_str();
         if is_image_source(source) {
             let path = self.paths.source_path(source);
             return self.load_still(&path).map(SourceDecoder::Still).map_err(RenderError);

@@ -12,7 +12,8 @@ use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
 use crate::stretch::StretchStates;
 use crate::audio_schedule::{sample_position, MIX_CHANNELS};
 use crate::keyframe::{effects_at, ClipTransform};
-use crate::project::{Effect, Project};
+use crate::keyframe::{ClipProperty, Keyframe};
+use crate::project::{Clip, ClipPlacement, Effect, Project, TextContent};
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, LayerContent, Progress, SourceSample,
 };
@@ -87,8 +88,9 @@ pub trait Compositor {
     /// A handle to an image of the project's output size.
     type Image: Copy;
 
-    /// Opens `source`, the path as written in the project.
-    fn open_decoder(&mut self, source: &str) -> Result<Self::Decoder, RenderError>;
+    /// Opens the source of `clip`: the file its `source` names, as written in the project, or for a
+    /// text clip its text, drawn into a still picture sharp enough for the widest the clip gets.
+    fn open_decoder(&mut self, clip: &Clip) -> Result<Self::Decoder, RenderError>;
 
     /// Resizes `frame` to the project size, applies the clip's `effects` to it and puts the picture
     /// where `transform` says, with its opacity and rotation. What the picture does not cover is
@@ -195,23 +197,51 @@ impl<S: ToOwned + PartialEq + ?Sized, V> ClipCache<S, V> {
     }
 }
 
+/// What a decoder was opened from. A media clip needs only its path; a text clip also its text and
+/// the widths it is shown at, which decide how sharp its picture is drawn. Anything else about the
+/// clip changing leaves the decoder alone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecoderSpec {
+    pub source: String,
+    pub text: Option<TextSpec>,
+}
+
+/// The part of a text clip its picture is drawn from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextSpec {
+    pub text: TextContent,
+    pub placement: Option<ClipPlacement>,
+    pub widths: Vec<Keyframe>,
+}
+
+impl DecoderSpec {
+    pub fn of(clip: &Clip) -> DecoderSpec {
+        let text = clip.text.as_ref().map(|text| TextSpec {
+            text: text.clone(),
+            placement: clip.placement,
+            widths: clip.motion.keyframes.get(&ClipProperty::Width).cloned().unwrap_or_default(),
+        });
+        DecoderSpec { source: clip.source.clone(), text }
+    }
+}
+
 /// Decoded frames kept alive until the compositor has read the output of the current frame.
 struct FrameStore<F>(Vec<F>);
 
 fn decode_sample<C: Compositor>(
     compositor: &mut C,
-    decoders: &mut ClipCache<str, C::Decoder>,
+    decoders: &mut ClipCache<DecoderSpec, C::Decoder>,
     key: ClipKey,
     sample: &SourceSample<'_>,
 ) -> Result<<C::Decoder as Decoder>::Frame, RenderError> {
-    let decoder = decoders.get_or_build(key, sample.source, || compositor.open_decoder(sample.source))?;
+    let decoder = decoders.get_or_build(key, &DecoderSpec::of(sample.model), || compositor.open_decoder(sample.model))?;
     decoder.frame_at(sample.source_time)
 }
 
 /// Decodes the one or two samples of a layer and makes the decoders idle, then prepares them.
 fn render_layer<C: Compositor>(
     compositor: &mut C,
-    decoders: &mut ClipCache<str, C::Decoder>,
+    decoders: &mut ClipCache<DecoderSpec, C::Decoder>,
     kept: &mut FrameStore<<C::Decoder as Decoder>::Frame>,
     track: usize,
     content: &LayerContent<'_>,
@@ -288,7 +318,7 @@ fn layer_clips(content: &LayerContent<'_>, track: usize) -> Vec<ClipKey> {
 /// Renders single frames of one project or of successive edits of it, reusing decoders. A failed
 /// frame keeps no image from the compositor, and the renderer stays usable.
 pub struct FrameRenderer<C: Compositor> {
-    decoders: ClipCache<str, C::Decoder>,
+    decoders: ClipCache<DecoderSpec, C::Decoder>,
 }
 
 impl<C: Compositor> Default for FrameRenderer<C> {
@@ -452,13 +482,17 @@ mod tests {
         type Decoder = FakeDecoder;
         type Image = usize;
 
-        fn open_decoder(&mut self, source: &str) -> Result<FakeDecoder, RenderError> {
+        fn open_decoder(&mut self, clip: &Clip) -> Result<FakeDecoder, RenderError> {
+            let source = match &clip.text {
+                Some(text) => format!("{}{}", clip.source, text.content),
+                None => clip.source.clone(),
+            };
             self.journal
                 .borrow_mut()
                 .events
                 .push(format!("open {source}"));
             Ok(FakeDecoder {
-                name: source.to_owned(),
+                name: source,
                 journal: self.journal.clone(),
             })
         }
@@ -778,6 +812,37 @@ mod tests {
         renderer.render_frame(&renumbered, &mut compositor, 0, consume_nothing).expect("edited frame");
         let opened: Vec<_> = journal.borrow().events.iter().filter(|e| e.starts_with("open")).cloned().collect();
         assert_eq!(opened, ["open a", "open c"]);
+    }
+
+    const TEXT: &str = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+        {"clips":[{"source":"text:","start":0,"source_in":0,"duration":300,"text":{"content":"Hi","size":0.1}}]}]}"#;
+
+    #[test]
+    fn a_text_clip_reaches_the_compositor_with_its_text() {
+        let (mut compositor, mut renderer, journal) = single_frame_rig();
+        let project = Project::from_json(TEXT).expect("valid json");
+        renderer.render_frame(&project, &mut compositor, 0, consume_nothing).expect("frame");
+        renderer.render_frame(&project, &mut compositor, 1, consume_nothing).expect("same text, same decoder");
+        let opened: Vec<_> = journal.borrow().events.iter().filter(|e| e.starts_with("open")).cloned().collect();
+        assert_eq!(opened, ["open text:Hi"]);
+        assert!(journal.borrow().events.iter().any(|e| e.starts_with("f0 clip 0:0 text:Hi@")), "{:?}", journal.borrow().events);
+    }
+
+    #[test]
+    fn new_text_or_width_reopens_but_opacity_does_not() {
+        let (mut compositor, mut renderer, journal) = single_frame_rig();
+        let base = Project::from_json(TEXT).expect("valid json");
+        let mut faded = base.clone();
+        faded.tracks[0].clips[0].motion.opacity = 0.5;
+        let mut retyped = faded.clone();
+        retyped.tracks[0].clips[0].text.as_mut().unwrap().content = "Yo".into();
+        let mut wider = retyped.clone();
+        wider.tracks[0].clips[0].placement = Some(ClipPlacement { x: 0.0, y: 0.0, width: 2.0 });
+        for project in [&base, &faded, &retyped, &wider] {
+            renderer.render_frame(project, &mut compositor, 0, consume_nothing).expect("frame");
+        }
+        let opened: Vec<_> = journal.borrow().events.iter().filter(|e| e.starts_with("open")).cloned().collect();
+        assert_eq!(opened, ["open text:Hi", "open text:Yo", "open text:Yo"]);
     }
 
     #[test]

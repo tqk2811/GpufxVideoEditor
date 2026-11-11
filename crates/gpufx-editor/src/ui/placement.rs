@@ -121,6 +121,9 @@ fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
         return None;
     }
     let transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
+    if clip.is_text() {
+        return Some((key, transform, state.clip_aspect(clip)));
+    }
     let mut visuals = state.visuals.borrow_mut();
     let slot = visuals.slot(&clip.source);
     match visuals.view(slot) {

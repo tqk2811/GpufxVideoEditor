@@ -466,3 +466,23 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Timeline sắp xếp và cấp phát danh sách keyframe mỗi khung cho mỗi clip
 
 `crates/gpufx-editor/src/ui/timeline_panel.rs:404` gọi `Clip::keyframe_times` (`crates/engine/src/keyframe.rs`), vốn gom, sắp xếp và bỏ trùng một `Vec` mới ở mỗi lần vẽ của mỗi clip. Vài clip thì không đáng kể, hàng trăm clip có keyframe thì tốn. Nên làm nếu timeline dài gây giật: cache theo revision của project hoặc chỉ tính cho clip đang trong khung nhìn. Ghi ngày 2026-11-10.
+
+### [Thấp] Thông báo không đổi được tốc độ vẫn gọi clip chữ là "ảnh"
+
+`crates/gpufx-editor/src/editor.rs:171` (`refusal_message`) đổi `EditError::SpeedOfImage` thành `Message::EditSpeedOfImage`, mà `crates/gpufx-editor/src/i18n/vi.rs:202` và `en.rs:219` ghi "ảnh không có tốc độ phát". Engine trả lỗi này cho mọi clip tĩnh, kể cả clip chữ, nên người dùng đổi tốc độ clip chữ sẽ đọc thấy chữ "ảnh". Nên tách thông báo theo loại clip (hoặc đổi thành "clip tĩnh"). Ghi ngày 2026-11-11.
+
+### [Thấp] Kéo mép đầu clip tĩnh không lùi được trước điểm bắt đầu
+
+`crates/gpufx-editor/src/timeline/drag.rs:75` (`clamp_trim`) lấy `source_limit` từ `source_in` cho mọi clip, nên mép đầu của clip ảnh/chữ không kéo lùi được trước `start` dù engine (`trim_start`) cho phép clip tĩnh dài ra phía trước. Có từ trước bước chữ. Nên bỏ giới hạn nguồn khi `clip.is_still()`. Ghi ngày 2026-11-11.
+
+### [Thấp] gpufx-text chưa tự ngắt dòng, emoji vẽ bằng màu chữ, đường font hệ thống chưa có test
+
+`crates/gpufx-text/src/lib.rs` (`rasterize_px`, `buffer.set_wrap(Wrap::None)`) chỉ xuống dòng ở ký tự xuống dòng, chưa ngắt theo độ rộng; glyph màu (emoji) được vẽ như mặt nạ nên ra một màu của chữ; test ở `crates/gpufx-text/tests/rasterize.rs` chỉ dùng `TextRasterizer::embedded_only()`, đường `TextRasterizer::new()` quét font thật chưa được kiểm. Nên thêm ngắt dòng theo độ rộng hộp, vẽ glyph màu đúng màu, và một test (có thể tự bỏ qua) cho font hệ thống. Ghi ngày 2026-11-11.
+
+### [Thấp] Clip chữ chưa có vị trí mặc định theo cỡ chữ
+
+Clip chữ không có `placement` thì được dàn vừa khung như ảnh (`PlacedRect::of` ở `crates/engine/src/project.rs`), nên `size` không quyết định cỡ hiện ra; compositor còn phải rasterize ở scale trần 4 (`MAX_TEXT_SCALE`). Bước UI thêm chữ nên đặt `placement` theo cỡ tự nhiên (rộng = rộng ảnh ở scale 1 / rộng khung, căn giữa), lấy từ `crates/gpufx-editor/src/text_shapes.rs`. Ghi ngày 2026-11-11.
+
+### [Thấp] Lần đầu đo clip chữ trên luồng UI chờ quét font hệ thống
+
+`crates/gpufx-editor/src/text_shapes.rs` (`TextShapes::shape`) gọi `gpufx_text::shared()` lần đầu ngay trên luồng UI, mà dựng rasterizer quét toàn bộ font hệ thống (~1 s), nên lần đầu chọn hoặc vẽ khung clip chữ bị khựng. Nên dựng `shared()` sẵn ở luồng nền lúc mở editor. Ghi ngày 2026-11-11.

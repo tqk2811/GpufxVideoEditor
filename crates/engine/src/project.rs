@@ -179,6 +179,25 @@ impl TextContent {
     }
 }
 
+/// The most a text clip is rasterized larger than its font size asks, however wide it is placed.
+/// Past this the glyph edges blur a little on screen, which costs less than the memory: at 4 a
+/// line of 1080p text already comes to thousands of pixels.
+pub const MAX_TEXT_SCALE: f32 = 4.0;
+/// The least a text clip is rasterized at, however small it is placed.
+pub const MIN_TEXT_SCALE: f32 = 0.125;
+
+/// The scale to rasterize a text clip at so that it is never enlarged on screen: the picture is
+/// `natural_width` pixels wide at scale 1, and at its widest it covers `widest` parts of a frame
+/// `output_width` pixels wide. Kept within [`MIN_TEXT_SCALE`] and [`MAX_TEXT_SCALE`]; 1 when the
+/// numbers say nothing.
+pub fn text_raster_scale(widest: f64, output_width: u32, natural_width: u32) -> f32 {
+    let wanted = widest * f64::from(output_width) / f64::from(natural_width);
+    if natural_width == 0 || !wanted.is_finite() || wanted <= 0.0 {
+        return 1.0;
+    }
+    (wanted as f32).clamp(MIN_TEXT_SCALE, MAX_TEXT_SCALE)
+}
+
 /// A colour as `[r, g, b, a]`, each 0 to 255, not premultiplied.
 pub type Rgba = [u8; 4];
 

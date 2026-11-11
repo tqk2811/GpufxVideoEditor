@@ -101,7 +101,8 @@ pub fn same_file(first: &Path, second: &Path) -> bool {
 /// The files a render of `project` reads, each with what a message calls it.
 fn project_inputs(project: &Project, project_file: Option<&Path>, paths: &ProjectPaths) -> Vec<(PathBuf, &'static str)> {
     let mut inputs: Vec<(PathBuf, &'static str)> = project_file.iter().map(|file| (file.to_path_buf(), "the project file")).collect();
-    for clip in project.tracks.iter().flat_map(|t| &t.clips) {
+    // A text clip reads no file.
+    for clip in project.tracks.iter().flat_map(|t| &t.clips).filter(|clip| !clip.is_text()) {
         inputs.push((paths.source_path(&clip.source), "a source of the project"));
     }
     let packages = project.tracks.iter().flat_map(|t| t.clips.iter().flat_map(|c| c.effects.iter().map(|e| &e.package)).chain(t.transitions.iter().map(|t| &t.package)));

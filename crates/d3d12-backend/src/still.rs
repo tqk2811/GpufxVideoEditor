@@ -82,6 +82,24 @@ fn decoded_rgba(path: &Path) -> Result<RgbaImage, String> {
 
 /// Bleeds before it shrinks: the filter mixes neighbouring colours whatever their alpha, so shrinking
 /// first would pull the junk colour of transparent texels into the edge of what is visible.
+/// A still of a picture drawn in premultiplied RGBA, such as rasterized text, turned into the
+/// straight colours every still has. An empty picture gives one transparent pixel.
+pub(crate) fn premultiplied_still(width: u32, height: u32, mut pixels: Vec<u8>) -> StillPicture {
+    if width == 0 || height == 0 || pixels.len() != width as usize * height as usize * 4 {
+        return StillPicture { width: 1, height: 1, rgba: vec![0; 4], has_alpha: true };
+    }
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        if alpha != 0 && alpha != 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+    let picture = RgbaImage::from_raw(width, height, pixels).expect("length checked above");
+    finished_picture(picture)
+}
+
 fn finished_picture(mut picture: RgbaImage) -> StillPicture {
     let has_alpha = picture.pixels().any(|pixel| pixel[3] != 255);
     if has_alpha {

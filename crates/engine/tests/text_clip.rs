@@ -144,9 +144,43 @@ fn trimming_the_start_of_text_keeps_no_source_offset() {
 }
 
 #[test]
-fn text_clip_gives_no_sound_and_no_layer_yet() {
+fn text_clip_gives_a_layer_but_no_sound() {
     let mut p = project_with(vec![text_clip("A", 0, 30030)]);
     p.output.audio = Some(engine::AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 128_000 });
     assert!(audio_segments(&p, 0, 4800).is_empty());
-    assert!(layers_at_frame(&p, 0).is_empty());
+    let layers = layers_at_frame(&p, 0);
+    assert_eq!(layers.len(), 1);
+    let engine::LayerContent::Clip(sample) = &layers[0].content else { panic!("one clip: {layers:?}") };
+    assert_eq!(sample.model.text.as_ref().map(|text| text.content.as_str()), Some("A"));
+}
+
+#[test]
+fn text_clip_takes_part_in_a_transition() {
+    let mut p = project_with(vec![text_clip("A", 0, 30030), text_clip("B", 30030, 30030)]);
+    p.tracks[0].transitions.push(engine::Transition { after_clip: 0, package: "mix".into(), params: Default::default(), duration: Time::from_ticks(9009) });
+    let at = engine::frame_count(&p) / 2;
+    let layers = layers_at_frame(&p, at);
+    assert_eq!(layers.len(), 1);
+    let engine::LayerContent::Transition { from, to, .. } = &layers[0].content else { panic!("a transition: {layers:?}") };
+    assert_eq!((from.model.text.as_ref().unwrap().content.as_str(), to.model.text.as_ref().unwrap().content.as_str()), ("A", "B"));
+}
+
+#[test]
+fn widest_takes_the_largest_width_keyframe() {
+    let mut clip = text_clip("A", 0, 9000);
+    assert_eq!(clip.widest(16.0 / 9.0, 4.0), 1.0, "unplaced text as wide as the frame");
+    clip.placement = Some(engine::ClipPlacement { x: 0.0, y: 0.0, width: 0.3 });
+    assert_eq!(clip.widest(16.0 / 9.0, 4.0), 0.3);
+    clip.motion.keyframes.insert(engine::ClipProperty::Width, vec![engine::Keyframe { at: Time::ZERO, value: 0.2, easing: Default::default() }, engine::Keyframe { at: t(3000), value: 1.5, easing: Default::default() }]);
+    assert_eq!(clip.widest(16.0 / 9.0, 4.0), 1.5);
+}
+
+#[test]
+fn raster_scale_covers_the_widest_and_stays_within_limits() {
+    // 1920 px wide frame, text 480 px wide at scale 1.
+    assert_eq!(engine::text_raster_scale(0.25, 1920, 480), 1.0);
+    assert_eq!(engine::text_raster_scale(0.5, 1920, 480), 2.0);
+    assert_eq!(engine::text_raster_scale(8.0, 1920, 480), engine::MAX_TEXT_SCALE);
+    assert_eq!(engine::text_raster_scale(0.01, 1920, 480), engine::MIN_TEXT_SCALE);
+    assert_eq!(engine::text_raster_scale(1.0, 1920, 0), 1.0, "nothing drawn");
 }

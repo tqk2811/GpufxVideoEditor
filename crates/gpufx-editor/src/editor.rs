@@ -18,6 +18,7 @@ use crate::sticker_install::InstalledStickerPack;
 use crate::sticker_library::StickerLibrary;
 use crate::effect_previews::PreviewManager;
 use crate::visuals::{ClipVisuals, SourceView};
+use crate::text_shapes::TextShapes;
 use engine::{
     keyframe_neighbors, keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, Keyframe, remove_keyframe, set_effect_params_at, set_keyframe, set_motion_value, set_placement_at, ClipPlacement, ClipProperty, Easing, KeyframeTarget, PlacedRect,
     add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
@@ -106,6 +107,8 @@ pub struct EditorState {
     pub visuals: RefCell<ClipVisuals>,
     /// Previews of the effect packages; asked for while drawing, so behind a cell.
     pub previews: RefCell<PreviewManager>,
+    /// The shapes of the pictures of text clips; asked for while drawing, so behind a cell.
+    pub text_shapes: RefCell<TextShapes>,
     language: Language,
 }
 
@@ -405,6 +408,7 @@ impl EditorState {
             ui: UiState::default(),
             visuals: RefCell::new(ClipVisuals::default()),
             previews: RefCell::new(PreviewManager::default()),
+            text_shapes: RefCell::new(TextShapes::default()),
             language: Language::default(),
         }
     }
@@ -1143,6 +1147,29 @@ impl EditorState {
         }
     }
 
+    /// Width over height of the picture of `clip`: that of its rasterized text for a text clip,
+    /// else that of its source.
+    pub fn clip_aspect(&self, clip: &Clip) -> f64 {
+        match &clip.text {
+            Some(text) => self.text_shapes.borrow_mut().shape(text, self.project().output.height).aspect,
+            None => self.source_aspect(&clip.source),
+        }
+    }
+
+    /// The font family text clip `key` asks for that is not installed, so the default font draws
+    /// it; for a warning. `None` for a media clip or a font that is there.
+    pub fn missing_font(&self, key: ClipKey) -> Option<String> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        let text = clip.text.as_ref()?;
+        self.text_shapes.borrow_mut().shape(text, self.project().output.height).missing_family
+    }
+
+    /// Whether the shape of the picture of `clip` is known: always for text, which is measured on
+    /// the spot, and for media once the probe has said.
+    fn clip_shape_known(&self, clip: &Clip) -> bool {
+        clip.is_text() || self.source_shape_known(&clip.source)
+    }
+
     /// The value of a property of clip `key` shown in the panels, at the playhead when it is on the
     /// clip and at the start of the clip otherwise.
     pub fn property_shown(&self, key: ClipKey, property: ClipProperty) -> Option<f64> {
@@ -1154,7 +1181,7 @@ impl EditorState {
             let keys = clip.keyframes_of(&KeyframeTarget::Property(property)).unwrap_or_default();
             offset = nearest_keyframe_inside(keys, offset, self.keyframe_tolerance(), clip.duration).unwrap_or(offset);
         }
-        Some(clip.property_at(property, offset, self.output_aspect(), self.source_aspect(&clip.source)))
+        Some(clip.property_at(property, offset, self.output_aspect(), self.clip_aspect(clip)))
     }
 
     /// The parameters of effect `effect` of clip `key` shown in the panels: those at the playhead,
@@ -1181,7 +1208,7 @@ impl EditorState {
     /// and a place made from it would keep the wrong shape.
     pub fn placement_ready(&self, key: ClipKey) -> bool {
         let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return false };
-        clip.placement.is_some() || self.source_shape_known(&clip.source)
+        clip.placement.is_some() || self.clip_shape_known(clip)
     }
 
     /// Whether the probe of `source` has said what shape its picture is.
@@ -1195,7 +1222,7 @@ impl EditorState {
     fn aspects_of(&self, key: ClipKey) -> (f64, f64) {
         let output = self.output_aspect();
         match self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) {
-            Some(clip) => (output, self.source_aspect(&clip.source)),
+            Some(clip) => (output, self.clip_aspect(clip)),
             None => (output, output),
         }
     }
@@ -1210,10 +1237,10 @@ impl EditorState {
         if clip.placement.is_some() {
             return Ok(project.clone());
         }
-        if !self.source_shape_known(&clip.source) {
+        if !self.clip_shape_known(clip) {
             return Err(EditError::NoPlacement { key });
         }
-        let placement = clip.transform_at(Time::ZERO).placement_now(self.output_aspect(), self.source_aspect(&clip.source));
+        let placement = clip.transform_at(Time::ZERO).placement_now(self.output_aspect(), self.clip_aspect(clip));
         set_placement(project, key, Some(placement))
     }
 

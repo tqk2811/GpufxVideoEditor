@@ -3,7 +3,7 @@
 //! Shaping, bidi and font fallback come from `cosmic-text`, glyph pictures from its swash cache.
 //! Outline, background box and drop shadow are drawn here on alpha masks.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Wrap};
 use engine::project::{FontRef, Rgba, TextAlign, TextContent};
@@ -46,6 +46,13 @@ impl Default for TextRasterizer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The rasterizer with the system fonts, built the first time it is asked for and then shared by
+/// everyone, since building one scans every installed font.
+pub fn shared() -> Arc<Mutex<TextRasterizer>> {
+    static SHARED: OnceLock<Arc<Mutex<TextRasterizer>>> = OnceLock::new();
+    SHARED.get_or_init(|| Arc::new(Mutex::new(TextRasterizer::new()))).clone()
 }
 
 impl TextRasterizer {

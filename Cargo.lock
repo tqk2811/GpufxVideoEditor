@@ -799,6 +799,7 @@ version = "0.1.0"
 dependencies = [
  "engine",
  "gpufx-core",
+ "gpufx-text",
  "image",
  "png",
  "pollster",
@@ -1455,6 +1456,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "engine",
+ "gpufx-text",
  "png",
  "rfd",
  "serde",
@@ -1490,6 +1492,7 @@ dependencies = [
  "d3d12-backend",
  "engine",
  "gpufx-editor",
+ "gpufx-text",
  "png",
  "serde_json",
  "sha2 0.10.9",

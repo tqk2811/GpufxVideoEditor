@@ -4,11 +4,11 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use common::*;
 use d3d12_backend::{D3d12Compositor, Gpu, ProjectPaths};
-use engine::render::{render, FrameSink, RenderError};
+use engine::render::{render, Compositor, FrameRenderer, FrameSink, RenderError};
 use engine::{trim_start, validate, ClipKey, Project, Time};
 
 const WIDTH: u32 = 64;
@@ -309,4 +309,61 @@ fn a_trim_keeps_what_each_frame_of_the_timeline_looks_like() {
     for index in 3..9 {
         assert_eq!(pixel(cut.frame(index), WIDTH / 2, HEIGHT / 2), pixel(whole.frame(index), WIDTH / 2, HEIGHT / 2), "frame {index}");
     }
+}
+
+fn text_track(frames: i64, color: &str) -> String {
+    format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HI","size":0.5,"color":{color}}}}}]}}"#, frames * FRAME)
+}
+
+/// A compositor that draws text with the built-in font alone, so the result is the same on any machine.
+fn text_compositor(gpu: &Arc<Gpu>) -> D3d12Compositor {
+    let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
+    let mut compositor = D3d12Compositor::new(gpu.clone(), paths, WIDTH, HEIGHT).expect("compositor");
+    compositor.set_text_rasterizer(Arc::new(Mutex::new(gpufx_text::TextRasterizer::embedded_only())));
+    compositor
+}
+
+fn text_frame(compositor: &mut D3d12Compositor, project: &Project) -> Vec<u8> {
+    let errors = validate(project, &engine::AcceptAll);
+    assert!(errors.is_empty(), "invalid project: {errors:?}");
+    let mut renderer = FrameRenderer::default();
+    renderer
+        .render_frame(project, compositor, 0, |compositor, image| {
+            let mut rgba = Vec::new();
+            compositor.read(image, &mut rgba)?;
+            Ok(rgba)
+        })
+        .expect("frame")
+}
+
+#[test]
+fn a_text_clip_draws_its_text_in_its_colour() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    let mut compositor = text_compositor(&gpu);
+    let frame = text_frame(&mut compositor, &parse(&project_json(&text_track(2, "[255,0,0,255]"))));
+    let lit: Vec<[i32; 3]> = (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| (x, y))).map(|(x, y)| pixel(&frame, x, y)).filter(|p| p.iter().any(|&c| c > 32)).collect();
+    assert!(lit.len() > 40, "the text lights up pixels: {}", lit.len());
+    assert!(lit.len() < (WIDTH * HEIGHT) as usize * 3 / 4, "and not the whole frame");
+    assert!(lit.iter().all(|p| p[0] >= p[1] && p[0] >= p[2]), "red text: {:?}", &lit[..lit.len().min(8)]);
+    assert!(lit.iter().any(|p| p[0] > 200 && p[1] < 40), "some pixel is fully red");
+    assert_near(pixel(&frame, 0, 0), [0; 3], 4, "a corner stays black");
+}
+
+#[test]
+fn the_same_text_is_rasterized_once_and_a_new_colour_again() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    let mut compositor = text_compositor(&gpu);
+    let red = parse(&project_json(&text_track(2, "[255,0,0,255]")));
+    let first = text_frame(&mut compositor, &red);
+    let after_first = compositor.text_rasterizations();
+    assert!(after_first >= 1);
+    // A new renderer opens the clip again: the compositor still has the picture.
+    let again = text_frame(&mut compositor, &red);
+    assert_eq!(compositor.text_rasterizations(), after_first, "the same text is not rasterized again");
+    assert_eq!(first, again);
+    let green = text_frame(&mut compositor, &parse(&project_json(&text_track(2, "[0,255,0,255]"))));
+    assert!(compositor.text_rasterizations() > after_first, "a new colour is rasterized again");
+    assert_ne!(first, green);
 }

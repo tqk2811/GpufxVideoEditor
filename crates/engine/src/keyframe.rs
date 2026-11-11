@@ -296,6 +296,14 @@ impl Clip {
         }
     }
 
+    /// The widest the picture ever is, in parts of the frame width, for a source of
+    /// `source_aspect`: its static place or the largest of its width keyframes.
+    pub fn widest(&self, output_aspect: f64, source_aspect: f64) -> f64 {
+        let base = PlacedRect::of(self.placement, output_aspect, source_aspect).width;
+        let keys = self.motion.keyframes.get(&ClipProperty::Width).map_or(&[][..], Vec::as_slice);
+        keys.iter().map(|key| key.value).filter(|value| value.is_finite()).fold(base, f64::max)
+    }
+
     /// The value of a property `offset` ticks after the start of the clip, for a source of `source_aspect`.
     pub fn property_at(&self, property: ClipProperty, offset: Time, output_aspect: f64, source_aspect: f64) -> f64 {
         let transform = self.transform_at(offset);

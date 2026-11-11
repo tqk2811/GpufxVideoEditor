@@ -77,6 +77,9 @@ pub struct ClipClock {
 pub struct SourceSample<'a> {
     /// Index of the clip in its track.
     pub clip: usize,
+    /// The clip itself, for what the source path alone does not say, such as the text of a
+    /// text clip.
+    pub model: &'a Clip,
     /// Source media path.
     pub source: &'a str,
     /// Time inside the source to show.
@@ -156,17 +159,8 @@ pub fn layers_at_frame(project: &Project, frame: i64) -> Vec<Layer<'_>> {
         .iter()
         .enumerate()
         .filter(|(_, track)| !track.is_audio() && !track.hidden)
-        // Text is not rasterized yet, so a text clip gives no layer for now.
-        .filter_map(|(i, track)| content_at(track, t).filter(|content| !shows_text(track, content)).map(|content| Layer { track: i, content }))
+        .filter_map(|(i, track)| content_at(track, t).map(|content| Layer { track: i, content }))
         .collect()
-}
-
-fn shows_text(track: &Track, content: &LayerContent<'_>) -> bool {
-    let is_text = |sample: &SourceSample<'_>| track.clips[sample.clip].is_text();
-    match content {
-        LayerContent::Clip(sample) => is_text(sample),
-        LayerContent::Transition { from, to, .. } => is_text(from) || is_text(to),
-    }
 }
 
 fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
@@ -175,6 +169,7 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
     let (visible_start, visible_end) = visible_span(track, clip);
     SourceSample {
         clip,
+        model: c,
         source: &c.source,
         source_time: c.source_in.saturating_add(c.source_offset(offset)).max(Time::ZERO),
         effects: &c.effects,
