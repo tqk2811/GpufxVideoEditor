@@ -2,7 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::project::{speed_in_range, Clip, Project, TEXT_SOURCE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
-use crate::text_animation::{find_preset, AnimationGroup};
+use crate::text_animation::{find_preset, AnimationGroup, TEXT_ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;
@@ -326,7 +326,16 @@ impl fmt::Display for ValidationError {
             EmptyText { track, clip } => write!(f, "track {track}, clip {clip}: the text is empty or its source is not '{TEXT_SOURCE}'"),
             InvalidTextSize { track, clip, size } => write!(f, "track {track}, clip {clip}: text size {size} must be above 0"),
             InvalidLineSpacing { track, clip, line_spacing } => write!(f, "track {track}, clip {clip}: line spacing {line_spacing} must be above 0"),
-            UnknownTextAnimation { track, clip, group, preset } => write!(f, "track {track}, clip {clip}: there is no '{group}' text animation '{preset}'"),
+            UnknownTextAnimation { track, clip, group, preset } => {
+                write!(f, "track {track}, clip {clip}: there is no '{group}' text animation '{preset}'")?;
+                // A preset of another group is most likely in the wrong place.
+                let groups: Vec<&str> = TEXT_ANIMATION_PRESETS.iter().filter(|p| p.id == preset.as_str() && p.group.name() != *group).map(|p| p.group.name()).collect();
+                if groups.is_empty() {
+                    Ok(())
+                } else {
+                    write!(f, " (it is a '{}' animation)", groups.join("' or '"))
+                }
+            }
             InvalidTextAnimationDuration { track, clip, group, duration } => write!(f, "track {track}, clip {clip}: the '{group}' text animation lasts {duration}, which must be above 0"),
             SourceHasNoAudio { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: source '{source}' has no audio stream")

@@ -120,6 +120,8 @@ fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
     if track.kind != TrackKind::Video || track.locked || track.hidden || state.playhead() < clip.start || state.playhead() >= clip.start.saturating_add(clip.duration) {
         return None;
     }
+    // The resting place, without the text animation's pose: dragging edits the clip's own placement,
+    // so the frame stays put while the text moves through its preset.
     let transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
     if clip.is_text() {
         return Some((key, transform, state.clip_aspect(clip)));
@@ -292,6 +294,7 @@ mod tests {
         let raw = egui::RawInput { events, screen_rect: Some(area), ..Default::default() };
         let key = ClipKey { track: 0, clip: 0 };
         let clip = &state.project().tracks[0].clips[0];
+        // The resting place, as `target` gives it: the animation's pose is never dragged.
         let transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
         let output = &state.project().output;
         let aspect = f64::from(output.width) / f64::from(output.height);

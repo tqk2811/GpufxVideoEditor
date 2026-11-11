@@ -93,6 +93,11 @@ Giai đoạn 0 là cửa quyết định, không đạt thì dừng hoặc đổ
 - Tiếng: WSOLA tự viết trong `crates/engine/src/stretch.rs`, không dùng `atempo` (không phải phụ thuộc thêm vào libavfilter ở bản LGPL, không phải dựng lại filter graph sau mỗi lần tua). Kết quả chỉ phụ thuộc nguồn và clip, không phụ thuộc cách chia khối hay tua, nên preview và file xuất giống hệt nhau. Tốc độ 1 không đi qua bộ này.
 - Đổi tốc độ trong app giữ nguyên đoạn nguồn; clip sẽ đè clip sau thì bị từ chối thay vì đẩy clip khác. Dùng được từ ô Tốc độ ở inspector và tool `clip_set_speed`.
 
+## Hiệu ứng vào/ra của clip chữ
+
+- Tách clip chữ thì mỗi nửa chạy lại hiệu ứng vào/ra của nó (giống CapCut), vì đồng hồ hiệu ứng đếm theo thời gian từng clip hiện trên màn hình.
+- Clip có preset xoay (`spin`) luôn đi đường vẽ xoay suốt clip, kể cả lúc đứng thẳng, để cách vẽ không đổi giữa các khung; chấp nhận chi phí thêm một pass.
+
 ## Rủi ro giấy phép và pháp lý
 
 Đây là hiểu biết chung, không phải tư vấn pháp lý.

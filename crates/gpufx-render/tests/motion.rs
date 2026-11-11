@@ -398,3 +398,29 @@ fn a_text_fading_in_is_part_way_clear_halfway_and_drawn_once() {
     assert!(brightest.windows(2).all(|pair| pair[1] > pair[0]), "{brightest:?}");
     assert_eq!(compositor.text_rasterizations(), 1, "the fade only changes how the picture is drawn");
 }
+
+/// A text clip zooming, spinning or popping in has no size at its first frame, and zooming out none
+/// at the end: the frame stays black there, with no garbage from a zero-sized rectangle.
+#[test]
+fn a_text_with_no_size_yet_draws_nothing() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    let mut compositor = text_compositor(&gpu);
+    let mut renderer = FrameRenderer::default();
+    for preset in ["zoom", "spin", "pop"] {
+        let span = 4 * FRAME;
+        let track = format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HI","size":0.5,"color":[255,255,255,255],"animation":{{"in":{{"preset":"{preset}","duration":{span}}},"out":{{"preset":"{preset}","duration":{span}}}}}}}}}]}}"#, 8 * FRAME);
+        let project = parse(&project_json(&track));
+        let errors = validate(&project, &engine::AcceptAll);
+        assert!(errors.is_empty(), "invalid project: {errors:?}");
+        let rgba = renderer
+            .render_frame(&project, &mut compositor, 0, |compositor, image| {
+                let mut rgba = Vec::new();
+                compositor.read(image, &mut rgba)?;
+                Ok(rgba)
+            })
+            .expect("frame");
+        let brightest = (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| (x, y))).map(|(x, y)| pixel(&rgba, x, y).into_iter().max().unwrap()).max().unwrap();
+        assert!(brightest <= 4, "{preset}: nothing drawn at the first frame, brightest {brightest}");
+    }
+}

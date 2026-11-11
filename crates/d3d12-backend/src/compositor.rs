@@ -783,7 +783,15 @@ impl D3d12Compositor {
     /// The overlay mixes with the zero colour of the transparent image, so the result is premultiplied.
     fn place(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
         let (width, height) = (self.width, self.height);
-        let rect = transform.rect(f64::from(width) / f64::from(height), source_aspect);
+        let mut rect = transform.rect(f64::from(width) / f64::from(height), source_aspect);
+        let mut transform = transform;
+        // A picture with no size (a zoom at its first frame) or no opacity draws nothing. The shaders
+        // divide by the size, so it is drawn as a full-frame picture at no opacity instead.
+        if !(rect.width > 0.0 && rect.height > 0.0 && transform.opacity > 0.0) {
+            rect = engine::PlacedRect { x: 0.0, y: 0.0, width: 1.0, height: 1.0 };
+            transform.opacity = 0.0;
+            transform.rotates = false;
+        }
         if rect.fills_frame(width, height) && !through_alpha && transform.opacity >= 1.0 && !transform.rotates {
             return Ok(picture);
         }

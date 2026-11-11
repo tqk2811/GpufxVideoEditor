@@ -114,6 +114,10 @@ fn an_unknown_preset_does_nothing_and_validation_names_it() {
     let errors = validate(&p, &AcceptAll);
     assert!(errors.iter().any(|e| matches!(e, ValidationError::UnknownTextAnimation { group: "in", preset, .. } if preset == "wobble")), "{errors:?}");
     assert!(errors.iter().any(|e| matches!(e, ValidationError::UnknownTextAnimation { group: "loop", preset, .. } if preset == "fade")), "fade does not loop: {errors:?}");
+    let misplaced = errors.iter().find(|e| matches!(e, ValidationError::UnknownTextAnimation { group: "loop", .. })).unwrap().to_string();
+    assert!(misplaced.ends_with("(it is a 'in' or 'out' animation)"), "names the groups it belongs to: {misplaced}");
+    let unknown = errors.iter().find(|e| matches!(e, ValidationError::UnknownTextAnimation { group: "in", .. })).unwrap().to_string();
+    assert!(!unknown.contains("(it is"), "{unknown}");
     assert!(errors.iter().any(|e| matches!(e, ValidationError::InvalidTextAnimationDuration { group: "out", .. })), "{errors:?}");
     let fine = project_with(vec![animated(0, 90_000, TextAnimation { enter: reference("pop", 9000), exit: reference("spin", 9000), repeat: reference("pulse", 9000) })]);
     assert_eq!(validate(&fine, &AcceptAll), Vec::new());
@@ -155,4 +159,27 @@ fn the_widest_counts_the_largest_scale_of_the_presets() {
     assert!(close(popping.widest(ASPECT, 2.0), base * peak));
     let fading = animated(0, 90_000, TextAnimation { enter: reference("fade", 9000), ..Default::default() });
     assert!(close(fading.widest(ASPECT, 2.0), base));
+}
+
+#[test]
+fn a_text_fading_in_through_a_transition_starts_with_the_window() {
+    let video = clip("a.mp4", 0, 0, 12 * FRAME);
+    let text = animated(12 * FRAME, 30 * FRAME, TextAnimation { enter: reference("fade", 6 * FRAME), ..Default::default() });
+    let mut p = project_with(vec![video, text]);
+    p.tracks[0].transitions.push(transition(0, 6 * FRAME));
+    // The window is frames 9 to 15, so the text is visible from frame 9 and its fade runs to frame 15.
+    let to_at = |frame| {
+        let layers = layers_at_frame(&p, frame);
+        let LayerContent::Transition { to, .. } = &layers[0].content else { panic!("a transition at {frame}: {layers:?}") };
+        (to.transform.opacity, to.clock)
+    };
+    let (opacity, clock) = to_at(9);
+    assert!(close(opacity, 0.0), "clear as the window opens: {opacity}");
+    assert_eq!(clock.elapsed, t(0));
+    assert_eq!(clock.duration, t(33 * FRAME), "half the window before the clip, then the clip");
+    for frame in 10..15 {
+        let (opacity, _) = to_at(frame);
+        assert!(close(opacity, (frame - 9) as f64 / 6.0), "frame {frame}: {opacity}");
+    }
+    assert!(close(transform_at_frame(&p, 15).opacity, 1.0), "settled as the window closes");
 }
