@@ -117,7 +117,8 @@ pub enum FontParam {
     Default,
     /// A font installed on the system, by a family font_list names.
     System { family: String },
-    /// A font file (.ttf, .otf, .ttc) by absolute path; its first face is used.
+    /// A font file (.ttf, .otf, .ttc) by absolute path on a local disk (not a network share), at
+    /// most 50 MiB; its first face is used.
     File { path: String },
 }
 

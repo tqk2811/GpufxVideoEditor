@@ -82,13 +82,34 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
     Ok(next)
 }
 
+/// Whether `path` names a network share or a device (`\\server\share`, `//server/share`,
+/// `\\?\UNC\...`, `\\.\...`) rather than a local disk. Opening one can reach out to another
+/// machine, so an agent may not name one.
+fn is_network_or_device_path(path: &str) -> bool {
+    use std::path::{Component, Prefix};
+    if let Some(Component::Prefix(prefix)) = std::path::Path::new(path).components().next() {
+        return !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_));
+    }
+    // Off Windows there is no prefix, but both spellings still start a share there.
+    path.starts_with(r"\\") || path.starts_with("//")
+}
+
 /// A family the font scan has finished without is refused; while it still runs the name is taken
-/// as given. A font file must be an absolute path to a file that reads as a font.
+/// as given. A font file must be an absolute path on a local disk to a file no larger than
+/// [`gpufx_text::MAX_FONT_FILE_BYTES`] that reads as a font; the size is checked before reading.
 fn check_font(font: &FontRef) -> Result<(), AgentError> {
     if let FontRef::File { path } = font {
+        if is_network_or_device_path(path) {
+            return Err(invalid(format!("font file path {path} is on a network share or a device; give a file on a local disk")));
+        }
         let file = std::path::Path::new(path);
         if !file.is_absolute() {
             return Err(invalid(format!("font file path {path} must be absolute")));
+        }
+        if let Some((_, len)) = gpufx_text::font_file_stamp(file) {
+            if len > gpufx_text::MAX_FONT_FILE_BYTES {
+                return Err(invalid(format!("font file {path} is {len} bytes, more than the {} a font may have", gpufx_text::MAX_FONT_FILE_BYTES)));
+            }
         }
         return match gpufx_text::font_file_family(file) {
             Some(_) => Ok(()),
@@ -152,4 +173,46 @@ pub fn animation_list() -> Value {
         groups.insert(group.name().to_owned(), json!(presets(group)));
     }
     Value::Object(groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str) -> FontRef {
+        FontRef::File { path: path.to_owned() }
+    }
+
+    #[test]
+    fn a_font_file_on_a_network_share_or_device_is_refused_without_opening_it() {
+        for path in [r"\\server\share\font.ttf", "//server/share/font.ttf", r"\\?\UNC\server\share\font.ttf", r"\\.\pipe\font", r"\\?\GLOBALROOT\Device\font.ttf"] {
+            let error = check_font(&file(path)).expect_err(path);
+            assert_eq!(error.code, "invalid_params", "{path}");
+            assert!(error.message.contains("network share"), "{path}: {}", error.message);
+        }
+        assert!(!is_network_or_device_path(r"C:\Windows\Fonts\arial.ttf"));
+        assert!(!is_network_or_device_path(r"\\?\C:\Windows\Fonts\arial.ttf"), "a verbatim local path is a local disk");
+    }
+
+    #[test]
+    fn a_font_file_larger_than_the_limit_is_refused_before_it_is_read() {
+        let Some(arial) = std::env::var_os("WINDIR").map(|dir| std::path::Path::new(&dir).join("Fonts").join("arial.ttf")).filter(|path| path.is_file()) else {
+            eprintln!("skipped: no arial.ttf");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("gpufx-agent-font-size-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A real font with zeros after it reads as a font, so only the size refuses it. The
+        // zeros are added by setting the length, which writes nothing.
+        let big = dir.join("big.ttf");
+        std::fs::copy(&arial, &big).unwrap();
+        let path = big.to_string_lossy().into_owned();
+        assert!(check_font(&file(&path)).is_ok(), "the copy itself is a font");
+        std::fs::OpenOptions::new().write(true).open(&big).unwrap().set_len(gpufx_text::MAX_FONT_FILE_BYTES + 1).unwrap();
+        let error = check_font(&file(&path)).expect_err("too large");
+        assert_eq!(error.code, "invalid_params");
+        assert!(error.message.contains("bytes"), "{}", error.message);
+        assert_eq!(gpufx_text::font_file_family(&big), None, "the rasterizer side does not read it either");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

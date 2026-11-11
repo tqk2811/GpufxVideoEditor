@@ -33,11 +33,27 @@ pub fn text_font_stamp(text: &TextContent) -> Option<FontFileStamp> {
     }
 }
 
-/// The family of the first face of the font file at `path`, or `None` when it is missing or not
-/// a font. Reads the file without loading it into any rasterizer.
+/// The largest font file read, in bytes; a larger one is taken as not a font. Real fonts, even
+/// large CJK collections, stay well below it.
+pub const MAX_FONT_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
+/// The bytes of the font file at `path`, or `None` when it cannot be read or is larger than
+/// [`MAX_FONT_FILE_BYTES`], which is checked before reading.
+fn read_font_file(path: &Path) -> Option<Vec<u8>> {
+    let (_, len) = font_file_stamp(path)?;
+    if len > MAX_FONT_FILE_BYTES {
+        eprintln!("gpufx-text: {} is larger than {MAX_FONT_FILE_BYTES} bytes, not read as a font", path.display());
+        return None;
+    }
+    std::fs::read(path).ok()
+}
+
+/// The family of the first face of the font file at `path`, or `None` when it is missing, larger
+/// than [`MAX_FONT_FILE_BYTES`] or not a font. Reads the file without loading it into any
+/// rasterizer.
 pub fn font_file_family(path: &Path) -> Option<String> {
     let mut db = fontdb::Database::new();
-    let data = std::fs::read(path).ok()?;
+    let data = read_font_file(path)?;
     let ids: Vec<fontdb::ID> = db.load_font_source(fontdb::Source::Binary(Arc::new(data))).into_iter().collect();
     first_family(&db, &ids)
 }
@@ -212,7 +228,7 @@ impl TextRasterizer {
         // A fresh name per load, so a font match cosmic-text cached for an older load of the
         // file is never reused.
         let select_name = format!("{FILE_FAMILY_PREFIX}{}", self.file_loads);
-        let data = stamp.and_then(|_| std::fs::read(path).ok());
+        let data = stamp.and_then(|_| read_font_file(path));
         let (ids, family) = match data {
             Some(data) => {
                 let db = self.font_system.db_mut();

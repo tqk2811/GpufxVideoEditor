@@ -171,6 +171,7 @@ fn a_text_no_text_can_be_is_refused_with_a_clear_code_and_changes_nothing() {
         ("text_set", set(json!({})), "nothing to change"),
         ("text_set", set(json!({"font": {"kind": "file", "path": r"C:\no\such\font-123.ttf"}})), "a font file that is not there"),
         ("text_set", set(json!({"font": {"kind": "file", "path": "fonts/a.ttf"}})), "a relative font file"),
+        ("text_set", set(json!({"font": {"kind": "file", "path": "//server/share/a.ttf"}})), "a font file on a network share"),
         ("text_add", add(json!({"style": {"font": {"kind": "file", "path": concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")}}})), "a file that is not a font"),
     ] {
         assert_eq!(call_err(&mut session, tool, arguments).code, "invalid_params", "{tool}: {why}");
