@@ -502,3 +502,23 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Chưa kéo thả clip chữ từ thư viện lên timeline
 
 Clip chữ chỉ thêm bằng nút "Thêm chữ" ở tab Chữ (`EditorState::add_text_at_playhead`, `crates/gpufx-editor/src/editor.rs`), đặt ở playhead; ảnh, nhạc và sticker thì kéo thả được lên track (`drop_media`). Nên cho kéo mục chữ mặc định từ tab Chữ thả lên track hoặc vùng trống của timeline, dùng chung đường thêm chữ với nút (chọn track, vị trí đặt theo chỗ thả). Ghi ngày 2026-11-11.
+
+### [Thấp] Dấu file font đọc hai lần và bỏ sót file đổi mà giữ mtime, cùng cỡ
+
+`crates/d3d12-backend/src/compositor.rs:732` lấy `text_font_stamp` làm khoá cache ảnh chữ, rồi `crates/gpufx-text/src/lib.rs:216` (`load_file`) đọc lại dấu đó lần nữa trước khi nạp font. File đổi giữa hai lần đọc (TOCTOU) thì ảnh vẽ bằng font mới bị cất dưới khoá của bản cũ. Dấu chỉ gồm mtime và cỡ, nên chép đè một font khác cùng cỡ mà giữ mtime (vd `robocopy`/`cp -p`) không bị nhận ra. Nên lấy dấu một lần rồi truyền xuống, và cân nhắc thêm hash phần đầu file. Ghi ngày 2026-11-11.
+
+### [Thấp] Face cũ của file font đã đổi không được giải phóng khỏi cache glyph và cache Font
+
+`crates/gpufx-text/src/lib.rs:216` (`load_file`) gỡ face cũ khỏi fontdb khi file đổi, nhưng `FontSystem` của cosmic-text vẫn giữ `Font` đã nạp (theo ID) và `SwashCache` vẫn giữ ảnh glyph của nó; sửa file font nhiều lần trong một phiên làm bộ nhớ chỉ tăng. Tên family riêng theo từng lần nạp đã tránh được việc dùng nhầm match cũ, chỉ còn chuyện bộ nhớ. Nên dựng lại `SwashCache` và gọi cách xoá cache font của cosmic-text (nếu có) khi gỡ face. Ghi ngày 2026-11-11.
+
+### [Thấp] Cờ `no_font` (máy không có font nào) chưa hiện ra UI hay MCP
+
+`crates/gpufx-text/src/lib.rs` `TextImage::no_font` được đặt khi không nạp được font nào, nhưng compositor (`crates/d3d12-backend/src/compositor.rs` `rasterize`) chỉ ghi nhận `missing_family`; inspector và MCP không báo gì, người dùng chỉ thấy chữ biến mất. Nên đưa cờ này lên dòng trạng thái và vào kết quả của `font_list`. Ghi ngày 2026-11-11.
+
+### [Thấp] Font chọn từ file không có trong `font_list`, combo chỉ hiện tên file
+
+`crates/gpufx-editor/src/agent/text.rs:159` (`font_list`) chỉ liệt kê font hệ thống, nên agent không thấy các file font project đang dùng. `crates/gpufx-editor/src/ui/text_inspector.rs:120` hiện file font bằng tên file, không có family thật (`gpufx_text::font_file_family`), nên hai file khó phân biệt. Nên thêm các file đang dùng vào `font_list` (kind `file`) và hiện "Family (tên file)" trong combo. Ghi ngày 2026-11-11.
+
+### [Thấp] Hộp thoại chọn file clip dùng chỉ số track lấy lúc mở
+
+`crates/gpufx-editor/src/tasks.rs:335` (`FileDialog::PickClip { track }`) giữ chỉ số track lấy lúc bấm, rồi còn qua bước probe chạy nền. Project đổi trong lúc đó (agent thêm/xoá track, undo) thì clip có thể vào nhầm track. Hộp thoại chọn font đã được chặn bằng revision; PickClip chưa sửa vì chặn theo revision sẽ bỏ cả lần thêm khi agent chỉ sửa chỗ khác, cần so khớp track theo định danh ổn định thay vì chỉ số. Ghi ngày 2026-11-11.
