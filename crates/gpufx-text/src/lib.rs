@@ -54,8 +54,14 @@ impl Default for TextRasterizer {
 /// The rasterizer with the system fonts, built the first time it is asked for and then shared by
 /// everyone, since building one scans every installed font.
 pub fn shared() -> Arc<Mutex<TextRasterizer>> {
-    static SHARED: OnceLock<Arc<Mutex<TextRasterizer>>> = OnceLock::new();
     SHARED.get_or_init(|| Arc::new(Mutex::new(TextRasterizer::new()))).clone()
+}
+
+static SHARED: OnceLock<Arc<Mutex<TextRasterizer>>> = OnceLock::new();
+
+/// The shared rasterizer if [`shared`] has finished building it, without waiting for the font scan.
+pub fn shared_if_ready() -> Option<Arc<Mutex<TextRasterizer>>> {
+    SHARED.get().cloned()
 }
 
 impl TextRasterizer {
@@ -81,6 +87,21 @@ impl TextRasterizer {
     /// Whether a font family with this name is loaded, ignoring case.
     pub fn has_family(&self, family: &str) -> bool {
         self.font_system.db().faces().any(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
+    }
+
+    /// Every loaded font family once, with the built-in [`DEFAULT_FAMILY`] first and the rest
+    /// sorted ignoring case. Empty names are left out.
+    pub fn families(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for (name, _) in self.font_system.db().faces().flat_map(|face| face.families.iter()) {
+            let name = name.trim();
+            if !name.is_empty() && !name.eq_ignore_ascii_case(DEFAULT_FAMILY) && !names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+                names.push(name.to_owned());
+            }
+        }
+        names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
+        names.insert(0, DEFAULT_FAMILY.to_owned());
+        names
     }
 
     /// Draws `text` for an output `output_height_px` pixels tall, `scale` times as large (such as

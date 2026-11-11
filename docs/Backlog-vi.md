@@ -479,9 +479,9 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/gpufx-editor/src/timeline/drag.rs:75` (`clamp_trim`) lấy `source_limit` từ `source_in` cho mọi clip, nên mép đầu của clip ảnh/chữ không kéo lùi được trước `start` dù engine (`trim_start`) cho phép clip tĩnh dài ra phía trước. Có từ trước bước chữ. Nên bỏ giới hạn nguồn khi `clip.is_still()`. Ghi ngày 2026-11-11.
 
-### [Thấp] gpufx-text chưa tự ngắt dòng, emoji vẽ bằng màu chữ, đường font hệ thống chưa có test
+### [Thấp] gpufx-text chưa tự ngắt dòng, emoji vẽ bằng màu chữ
 
-`crates/gpufx-text/src/lib.rs` (`layout`, `buffer.set_wrap(Wrap::None)`) chỉ xuống dòng ở ký tự xuống dòng, chưa ngắt theo độ rộng; glyph màu (emoji, `SwashContent::Color`) và `SwashContent::SubpixelMask` ở `draw` chỉ lấy kênh cuối làm độ phủ nên emoji ra một màu của chữ, còn mặt nạ subpixel (ba kênh độ phủ, không có alpha) bị đọc sai kênh; test ở `crates/gpufx-text/tests/rasterize.rs` chỉ dùng `TextRasterizer::embedded_only()`, đường `TextRasterizer::new()` quét font thật chưa được kiểm. Nên thêm ngắt dòng theo độ rộng hộp, vẽ glyph màu đúng màu, và một test (có thể tự bỏ qua) cho font hệ thống. Ghi ngày 2026-11-11.
+`crates/gpufx-text/src/lib.rs` (`layout`, `buffer.set_wrap(Wrap::None)`) chỉ xuống dòng ở ký tự xuống dòng, chưa ngắt theo độ rộng; glyph màu (emoji, `SwashContent::Color`) và `SwashContent::SubpixelMask` ở `draw` chỉ lấy kênh cuối làm độ phủ nên emoji ra một màu của chữ, còn mặt nạ subpixel (ba kênh độ phủ, không có alpha) bị đọc sai kênh; Nên thêm ngắt dòng theo độ rộng hộp và vẽ glyph màu đúng màu. Ghi ngày 2026-11-11.
 
 ### [Thấp] Locale của gpufx-text lấy từ `LANG` nên trên Windows gần như luôn là en-US
 

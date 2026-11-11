@@ -9,7 +9,7 @@ use gpufx_text::TextRasterizer;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::Hasher;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// How many texts to remember; past this the memory starts over.
 const MAX_REMEMBERED: usize = 1024;
@@ -44,6 +44,19 @@ pub fn warm_up_shared() {
     let _ = std::thread::Builder::new().name("font-scan".to_owned()).spawn(|| {
         gpufx_text::shared();
     });
+}
+
+/// The font families to offer for a text, the built-in one first, or empty while the font scan of
+/// [`warm_up_shared`] is still running. Never waits for the scan or for a text being drawn; the
+/// list is made once and kept.
+pub fn available_families() -> Arc<Vec<String>> {
+    static LIST: OnceLock<Arc<Vec<String>>> = OnceLock::new();
+    if let Some(list) = LIST.get() {
+        return list.clone();
+    }
+    let Some(shared) = gpufx_text::shared_if_ready() else { return Arc::default() };
+    let Ok(rasterizer) = shared.try_lock() else { return Arc::default() };
+    LIST.get_or_init(|| Arc::new(rasterizer.families())).clone()
 }
 
 impl TextShapes {
@@ -110,6 +123,12 @@ fn text_hash(text: &TextContent) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn available_families_never_waits_and_leads_with_the_built_in_font() {
+        let list = available_families();
+        assert!(list.is_empty() || list[0] == gpufx_text::DEFAULT_FAMILY, "{list:?}");
+    }
 
     #[test]
     fn a_line_of_text_is_wider_than_tall_and_is_measured_once() {

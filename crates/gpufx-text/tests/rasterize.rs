@@ -236,3 +236,27 @@ fn tabs_and_joiners_are_not_missing_glyphs() {
         assert_eq!(image.missing_glyphs, 0, "{content:?}");
     }
 }
+
+#[test]
+fn embedded_families_list_the_built_in_font_once_and_sorted() {
+    let families = rasterizer().families();
+    assert_eq!(families, vec!["Be Vietnam Pro".to_owned()]);
+}
+
+#[test]
+fn system_rasterizer_lists_the_built_in_font_first_without_duplicates() {
+    let system = TextRasterizer::new();
+    assert!(system.has_family(gpufx_text::DEFAULT_FAMILY));
+    let families = system.families();
+    assert_eq!(families[0], gpufx_text::DEFAULT_FAMILY);
+    assert!(families.iter().all(|name| !name.trim().is_empty()));
+    let rest: Vec<String> = families[1..].iter().map(|name| name.to_lowercase()).collect();
+    let mut sorted = rest.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(rest, sorted, "sorted ignoring case, no duplicates");
+    assert!(!rest.contains(&gpufx_text::DEFAULT_FAMILY.to_lowercase()));
+    let mut text = engine::project::TextContent::new("Hello", 0.1);
+    text.font = FontRef::System { family: families.last().unwrap().clone() };
+    let _ = TextRasterizer::new().rasterize(&text, 360, 1.0);
+}
