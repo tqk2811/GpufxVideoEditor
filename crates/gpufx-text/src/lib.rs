@@ -82,6 +82,8 @@ pub struct TextRasterizer {
     default_family: Option<String>,
     /// Font files loaded for [`FontRef::File`], by path.
     files: HashMap<PathBuf, LoadedFile>,
+    /// How many font files have been loaded, which numbers their [`LoadedFile::select_name`].
+    file_loads: u64,
 }
 
 /// A font file as loaded: the stamp it had, its faces and its family (`None` when not a font).
@@ -89,6 +91,31 @@ struct LoadedFile {
     stamp: Option<FontFileStamp>,
     ids: Vec<fontdb::ID>,
     family: Option<String>,
+    /// The family name its faces are renamed to in the font database, unique to this load, so
+    /// that a system font or another file with the same family is never picked in its place.
+    select_name: String,
+}
+
+/// A family to shape with, and the weight, style and stretch to ask for.
+struct FaceChoice {
+    name: String,
+    weight: cosmic_text::Weight,
+    style: cosmic_text::Style,
+    stretch: cosmic_text::Stretch,
+}
+
+impl FaceChoice {
+    /// A family at the normal weight, style and stretch.
+    fn family(name: String) -> FaceChoice {
+        FaceChoice { name, weight: cosmic_text::Weight::NORMAL, style: cosmic_text::Style::Normal, stretch: cosmic_text::Stretch::Normal }
+    }
+}
+
+/// Starts the family name a loaded font file's faces get, see [`LoadedFile::select_name`].
+const FILE_FAMILY_PREFIX: &str = "gpufx-file:";
+
+fn is_file_family(name: &str) -> bool {
+    name.starts_with(FILE_FAMILY_PREFIX)
 }
 
 impl Default for TextRasterizer {
@@ -137,7 +164,7 @@ impl TextRasterizer {
             None => eprintln!("gpufx-text: no font is installed; text cannot be drawn"),
         }
         let locale = sys_locale();
-        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new() }
+        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0 }
     }
 
     /// The installed family [`FontRef::Default`] draws with: the first of
@@ -149,17 +176,31 @@ impl TextRasterizer {
 
     /// Whether a font family with this name is loaded, ignoring case.
     pub fn has_family(&self, family: &str) -> bool {
-        self.font_system.db().faces().any(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
+        !is_file_family(family) && self.font_system.db().faces().any(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
     }
 
     /// The family the font file at `path` gives, loading it the first time and again when it
     /// changed. `None` when the file is missing or is not a font.
     pub fn file_family(&mut self, path: &Path) -> Option<String> {
+        self.load_file(path).family.clone()
+    }
+
+    /// What selects the first face of the font file at `path` and nothing else: its unique
+    /// family name with that face's weight, style and stretch (cosmic-text skips a face whose
+    /// weight differs from the one asked for). `None` when it is missing or not a font.
+    fn file_face(&mut self, path: &Path) -> Option<FaceChoice> {
+        let loaded = self.load_file(path);
+        loaded.family.as_ref()?;
+        let (name, id) = (loaded.select_name.clone(), *loaded.ids.first()?);
+        let face = self.font_system.db().face(id)?;
+        Some(FaceChoice { name, weight: face.weight, style: face.style, stretch: face.stretch })
+    }
+
+    /// The font file at `path` as loaded, loading it the first time and again when it changed.
+    fn load_file(&mut self, path: &Path) -> &LoadedFile {
         let stamp = font_file_stamp(path);
-        if let Some(loaded) = self.files.get(path) {
-            if loaded.stamp == stamp {
-                return loaded.family.clone();
-            }
+        if self.files.get(path).is_some_and(|loaded| loaded.stamp == stamp) {
+            return &self.files[path];
         }
         if let Some(old) = self.files.remove(path) {
             let db = self.font_system.db_mut();
@@ -167,21 +208,35 @@ impl TextRasterizer {
                 db.remove_face(id);
             }
         }
+        self.file_loads += 1;
+        // A fresh name per load, so a font match cosmic-text cached for an older load of the
+        // file is never reused.
+        let select_name = format!("{FILE_FAMILY_PREFIX}{}", self.file_loads);
         let data = stamp.and_then(|_| std::fs::read(path).ok());
         let (ids, family) = match data {
             Some(data) => {
                 let db = self.font_system.db_mut();
-                let ids: Vec<fontdb::ID> = db.load_font_source(fontdb::Source::Binary(Arc::new(data))).into_iter().collect();
-                let family = first_family(db, &ids);
+                let loaded: Vec<fontdb::ID> = db.load_font_source(fontdb::Source::Binary(Arc::new(data))).into_iter().collect();
+                let family = first_family(db, &loaded);
                 if family.is_none() {
                     eprintln!("gpufx-text: {} is not a font", path.display());
+                }
+                // fontdb has no way to change a face in place, so each face goes back in under
+                // the unique name.
+                let mut ids = Vec::with_capacity(loaded.len());
+                for id in loaded {
+                    let Some(mut info) = db.face(id).cloned() else { continue };
+                    db.remove_face(id);
+                    info.families = vec![(select_name.clone(), fontdb::Language::English_UnitedStates)];
+                    info.id = fontdb::ID::dummy();
+                    ids.push(db.push_face_info(info));
                 }
                 (ids, family)
             }
             None => (Vec::new(), None),
         };
-        self.files.insert(path.to_owned(), LoadedFile { stamp, ids, family: family.clone() });
-        family
+        self.files.insert(path.to_owned(), LoadedFile { stamp, ids, family, select_name });
+        &self.files[path]
     }
 
     /// The font family or font file `text` asks for that cannot be used, so the default font
@@ -235,20 +290,20 @@ impl TextRasterizer {
         let mut layout = Layout::default();
         let asked = match &text.font {
             FontRef::Default => None,
-            FontRef::System { family } if self.has_family(family) => Some(family.clone()),
+            FontRef::System { family } if self.has_family(family) => Some(FaceChoice::family(family.clone())),
             FontRef::System { family } => {
                 layout.missing_family = Some(family.clone());
                 None
             }
             FontRef::File { path } => {
-                let family = self.file_family(Path::new(path));
-                if family.is_none() {
+                let face = self.file_face(Path::new(path));
+                if face.is_none() {
                     layout.missing_family = Some(path.clone());
                 }
-                family
+                face
             }
         };
-        let Some(family) = asked.or_else(|| self.default_family.clone()) else {
+        let Some(face) = asked.or_else(|| self.default_family.clone().map(FaceChoice::family)) else {
             layout.no_font = true;
             return layout;
         };
@@ -263,7 +318,7 @@ impl TextRasterizer {
         let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(font_px, line_height));
         buffer.set_wrap(Wrap::None);
         buffer.set_size(None, None);
-        let attrs = Attrs::new().family(Family::Name(&family));
+        let attrs = Attrs::new().family(Family::Name(&face.name)).weight(face.weight).style(face.style).stretch(face.stretch);
         buffer.set_text(&text.content, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -452,7 +507,7 @@ fn sorted_families(db: &fontdb::Database) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for (name, _) in db.faces().flat_map(|face| face.families.iter()) {
         let name = name.trim();
-        if !name.is_empty() && !names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+        if !name.is_empty() && !is_file_family(name) && !names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
             names.push(name.to_owned());
         }
     }

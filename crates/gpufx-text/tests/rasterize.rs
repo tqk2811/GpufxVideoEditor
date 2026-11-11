@@ -351,3 +351,70 @@ fn system_rasterizer_lists_every_family_once_sorted_with_the_default_among_them(
     text.font = FontRef::System { family: families.last().unwrap().clone() };
     let _ = TextRasterizer::new().rasterize(&text, 360, 1.0);
 }
+
+#[test]
+fn a_font_file_draws_its_own_face_even_when_another_face_has_the_same_family() {
+    // arialbd.ttf says its family is "Arial", like the installed regular Arial and arial.ttf.
+    let (Some(regular), Some(bold)) = (windows_font("arial.ttf"), windows_font("arialbd.ttf")) else { return };
+    assert_eq!(gpufx_text::font_file_family(&bold).as_deref(), Some("Arial"));
+    let reference = |file: &std::path::Path| TextRasterizer::with_font_files(&[file.to_owned()]).rasterize(&TextContent::new("Same family", 0.06), HEIGHT, 1.0).pixels;
+    let (regular_pixels, bold_pixels) = (reference(&regular), reference(&bold));
+    assert!(regular_pixels != bold_pixels);
+    let clip = |file: &std::path::Path| {
+        let mut text = TextContent::new("Same family", 0.06);
+        text.font = FontRef::File { path: file.to_string_lossy().into_owned() };
+        text
+    };
+    // Next to the installed fonts, and next to another file of the same family loaded first.
+    let mut system = TextRasterizer::new();
+    assert!(system.rasterize(&clip(&bold), HEIGHT, 1.0).pixels == bold_pixels, "beside the system Arial");
+    let mut files = TextRasterizer::with_font_files(&[]);
+    assert!(files.rasterize(&clip(&regular), HEIGHT, 1.0).pixels == regular_pixels);
+    assert!(files.rasterize(&clip(&bold), HEIGHT, 1.0).pixels == bold_pixels, "beside arial.ttf");
+    assert!(files.rasterize(&clip(&regular), HEIGHT, 1.0).pixels == regular_pixels);
+    // The renamed faces stay out of the family list.
+    assert!(files.families().is_empty());
+    assert!(!system.families().iter().any(|name| name.starts_with("gpufx-file:")));
+}
+
+/// A copy of `source` in a new folder with every `from` in its name table, in UTF-16 and in
+/// ASCII, replaced by `to` of the same length, so the copy claims another family.
+fn renamed_font_copy(source: &std::path::Path, from: &str, to: &str, folder: &str) -> std::path::PathBuf {
+    assert_eq!(from.len(), to.len());
+    let mut data = std::fs::read(source).unwrap();
+    let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+    for (old, new) in [(utf16(from), utf16(to)), (from.as_bytes().to_vec(), to.as_bytes().to_vec())] {
+        let mut i = 0;
+        while i + old.len() <= data.len() {
+            if data[i..i + old.len()] == old[..] {
+                data[i..i + old.len()].copy_from_slice(&new);
+                i += old.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("{folder}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("renamed.ttf");
+    std::fs::write(&path, data).unwrap();
+    path
+}
+
+#[test]
+fn a_font_file_with_the_family_and_weight_of_an_installed_font_draws_its_own_glyphs() {
+    let Some(mut r) = rasterizer() else { return };
+    let (Some(georgia), Some(_)) = (windows_font("georgia.ttf"), windows_font("verdana.ttf")) else { return };
+    let file = renamed_font_copy(&georgia, "Georgia", "Verdana", "gpufx-text-font-clash");
+    assert_eq!(gpufx_text::font_file_family(&file).as_deref(), Some("Verdana"), "the copy claims the installed family");
+    let mut text = TextContent::new("Same family", 0.06);
+    let georgia_pixels = TextRasterizer::with_font_files(&[georgia]).rasterize(&text, HEIGHT, 1.0).pixels;
+    text.font = FontRef::System { family: "Verdana".into() };
+    let verdana_pixels = r.rasterize(&text, HEIGHT, 1.0).pixels;
+    assert!(georgia_pixels != verdana_pixels);
+    text.font = FontRef::File { path: file.to_string_lossy().into_owned() };
+    assert!(r.rasterize(&text, HEIGHT, 1.0).pixels == georgia_pixels, "drawn with the file, not the installed Verdana");
+    text.font = FontRef::System { family: "Verdana".into() };
+    assert!(r.rasterize(&text, HEIGHT, 1.0).pixels == verdana_pixels, "the installed Verdana is not replaced by the file");
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
