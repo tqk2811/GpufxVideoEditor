@@ -477,7 +477,23 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Thấp] gpufx-text chưa tự ngắt dòng, emoji vẽ bằng màu chữ, đường font hệ thống chưa có test
 
-`crates/gpufx-text/src/lib.rs` (`rasterize_px`, `buffer.set_wrap(Wrap::None)`) chỉ xuống dòng ở ký tự xuống dòng, chưa ngắt theo độ rộng; glyph màu (emoji) được vẽ như mặt nạ nên ra một màu của chữ; test ở `crates/gpufx-text/tests/rasterize.rs` chỉ dùng `TextRasterizer::embedded_only()`, đường `TextRasterizer::new()` quét font thật chưa được kiểm. Nên thêm ngắt dòng theo độ rộng hộp, vẽ glyph màu đúng màu, và một test (có thể tự bỏ qua) cho font hệ thống. Ghi ngày 2026-11-11.
+`crates/gpufx-text/src/lib.rs` (`layout`, `buffer.set_wrap(Wrap::None)`) chỉ xuống dòng ở ký tự xuống dòng, chưa ngắt theo độ rộng; glyph màu (emoji, `SwashContent::Color`) và `SwashContent::SubpixelMask` ở `draw` chỉ lấy kênh cuối làm độ phủ nên emoji ra một màu của chữ, còn mặt nạ subpixel (ba kênh độ phủ, không có alpha) bị đọc sai kênh; test ở `crates/gpufx-text/tests/rasterize.rs` chỉ dùng `TextRasterizer::embedded_only()`, đường `TextRasterizer::new()` quét font thật chưa được kiểm. Nên thêm ngắt dòng theo độ rộng hộp, vẽ glyph màu đúng màu, và một test (có thể tự bỏ qua) cho font hệ thống. Ghi ngày 2026-11-11.
+
+### [Thấp] Locale của gpufx-text lấy từ `LANG` nên trên Windows gần như luôn là en-US
+
+`crates/gpufx-text/src/lib.rs` (`sys_locale`) chỉ đọc biến `LANG`, mà Windows thường không đặt, nên `FontSystem` luôn nhận `en-US`. cosmic-text dùng locale để chọn font fallback, nên chữ Hán có thể rơi vào font Nhật hoặc Hàn (tự hình khác) thay vì font Trung trên máy người dùng Trung, và ngược lại. Nên đọc locale hệ thống (`GetUserDefaultLocaleName` hoặc crate `sys-locale`), hoặc cho clip chữ khai báo ngôn ngữ. Ghi ngày 2026-11-11.
+
+### [Thấp] Ảnh chữ đi vòng premultiplied → straight u8 → premultiply nên mất chính xác ở alpha thấp
+
+`crates/d3d12-backend/src/still.rs` (`premultiplied_still`) chia màu cho alpha ở u8 để thành straight, rồi GPU nhân lại; ở alpha thấp (mép chữ, bóng mờ) phép chia làm tròn thô nên mép có thể lệch màu hoặc sọc, cộng thêm việc gpufx-text trộn trong không gian sRGB chứ không tuyến tính. Nên upload thẳng ảnh premultiplied (đánh dấu still là premultiplied) và cân nhắc trộn tuyến tính. Ghi ngày 2026-11-11.
+
+### [Thấp] Một `Mutex` toàn cục quanh `FontSystem` làm export và preview vẽ chữ tuần tự
+
+`crates/gpufx-text/src/lib.rs` (`shared`) trả một `Arc<Mutex<TextRasterizer>>` cho mọi compositor, nên preview và export cùng lúc phải chờ nhau mỗi lần đo hoặc vẽ chữ (vẽ chữ lớn tốn hàng trăm ms). Nên tách phần vẽ (mặt nạ, viền, bóng) ra ngoài khoá, hoặc cho mỗi compositor một `FontSystem` dùng chung `fontdb::Database`. Ghi ngày 2026-11-11.
+
+### [Thấp] Cache glyph của `SwashCache` không bao giờ được dọn
+
+`crates/gpufx-text/src/lib.rs` (`draw`, `self.cache.get_image`) giữ ảnh glyph theo cỡ chữ mãi mãi; đổi cỡ chữ hay scale (mỗi bậc 2^(1/4)) thêm một bộ glyph, chữ lớn mỗi glyph tới vài MB. Nên dọn `image_cache` khi vượt một ngưỡng byte, hoặc dùng `get_image_uncached` cho cỡ lớn. Ghi ngày 2026-11-11.
 
 ### [Thấp] Clip chữ chưa có vị trí mặc định theo cỡ chữ
 
