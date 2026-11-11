@@ -17,6 +17,7 @@
 //!   static value is what the property goes back to when its last keyframe is removed.
 
 use crate::project::{Clip, ClipPlacement, Effect, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
+use crate::text_animation::{animation_max_scale, animation_rotates, AnimationPose};
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -232,7 +233,7 @@ impl ClipMotion {
 }
 
 /// What a clip looks like at one moment: where it sits and how it is drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClipTransform {
     /// The static place of the clip. Absent: as large as fits, centred, in its own shape.
     pub placement: Option<ClipPlacement>,
@@ -245,12 +246,32 @@ pub struct ClipTransform {
     /// Whether the clip turns at any moment, not only at this one: a clip with keyframes of
     /// rotation is drawn the same way at the frames where it happens to be upright.
     pub rotates: bool,
+    /// Shift of the picture after everything above, in parts of the frame width and height (from
+    /// a preset animation of a text clip, see [`crate::text_animation`]).
+    pub shift: [f64; 2],
+    /// Scale of the picture around its middle, after everything above.
+    pub zoom: f64,
+}
+
+impl Default for ClipTransform {
+    fn default() -> Self {
+        Self::still(None)
+    }
 }
 
 impl ClipTransform {
     /// A clip with no motion at all at `placement`.
     pub fn still(placement: Option<ClipPlacement>) -> Self {
-        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false }
+        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0 }
+    }
+
+    /// This transform with `pose` of a preset animation on top.
+    pub fn with_pose(mut self, pose: AnimationPose) -> Self {
+        self.shift = [self.shift[0] + pose.dx, self.shift[1] + pose.dy];
+        self.zoom *= pose.scale;
+        self.rotation += pose.rotation;
+        self.opacity *= pose.opacity;
+        self
     }
 
     /// The rectangle of the picture before rotation, for a frame of `output_aspect` and a source of
@@ -271,6 +292,15 @@ impl ClipTransform {
         }
         rect.x = self.x.unwrap_or(rect.x);
         rect.y = self.y.unwrap_or(rect.y);
+        if self.zoom != 1.0 {
+            let (middle_x, middle_y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+            rect.width *= self.zoom;
+            rect.height *= self.zoom;
+            rect.x = middle_x - rect.width / 2.0;
+            rect.y = middle_y - rect.height / 2.0;
+        }
+        rect.x += self.shift[0];
+        rect.y += self.shift[1];
         rect
     }
 
@@ -292,16 +322,20 @@ impl Clip {
             width: motion.value_at(ClipProperty::Width, offset),
             opacity: motion.value_at(ClipProperty::Opacity, offset).unwrap_or(motion.opacity),
             rotation: motion.value_at(ClipProperty::Rotation, offset).unwrap_or(motion.rotation),
-            rotates: motion.has_keyframes(ClipProperty::Rotation) || motion.rotation != 0.0,
+            rotates: motion.has_keyframes(ClipProperty::Rotation) || motion.rotation != 0.0 || self.text.as_ref().is_some_and(|text| animation_rotates(&text.animation)),
+            shift: [0.0, 0.0],
+            zoom: 1.0,
         }
     }
 
     /// The widest the picture ever is, in parts of the frame width, for a source of
-    /// `source_aspect`: its static place or the largest of its width keyframes.
+    /// `source_aspect`: its static place or the largest of its width keyframes, times the largest
+    /// scale of the preset animations of a text clip.
     pub fn widest(&self, output_aspect: f64, source_aspect: f64) -> f64 {
         let base = PlacedRect::of(self.placement, output_aspect, source_aspect).width;
         let keys = self.motion.keyframes.get(&ClipProperty::Width).map_or(&[][..], Vec::as_slice);
-        keys.iter().map(|key| key.value).filter(|value| value.is_finite()).fold(base, f64::max)
+        let widest = keys.iter().map(|key| key.value).filter(|value| value.is_finite()).fold(base, f64::max);
+        widest * self.text.as_ref().map_or(1.0, |text| animation_max_scale(&text.animation))
     }
 
     /// The value of a property `offset` ticks after the start of the clip, for a source of `source_aspect`.

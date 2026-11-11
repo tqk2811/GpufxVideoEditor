@@ -2,6 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::project::{speed_in_range, Clip, Project, TEXT_SOURCE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
+use crate::text_animation::{find_preset, AnimationGroup};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;
@@ -189,6 +190,11 @@ pub enum ValidationError {
     InvalidTextSize { track: usize, clip: usize, size: f32 },
     /// A text clip `line_spacing` is zero, negative or not a number.
     InvalidLineSpacing { track: usize, clip: usize, line_spacing: f32 },
+    /// A text clip names a preset animation that is not in [`crate::TEXT_ANIMATION_PRESETS`] for
+    /// its group (`in`, `out` or `loop`). It is left out when drawing.
+    UnknownTextAnimation { track: usize, clip: usize, group: &'static str, preset: String },
+    /// A preset animation of a text clip lasts zero ticks or less.
+    InvalidTextAnimationDuration { track: usize, clip: usize, group: &'static str, duration: Time },
     /// The source of a clip on a track of kind `audio` has no audio stream.
     SourceHasNoAudio {
         track: usize,
@@ -320,6 +326,8 @@ impl fmt::Display for ValidationError {
             EmptyText { track, clip } => write!(f, "track {track}, clip {clip}: the text is empty or its source is not '{TEXT_SOURCE}'"),
             InvalidTextSize { track, clip, size } => write!(f, "track {track}, clip {clip}: text size {size} must be above 0"),
             InvalidLineSpacing { track, clip, line_spacing } => write!(f, "track {track}, clip {clip}: line spacing {line_spacing} must be above 0"),
+            UnknownTextAnimation { track, clip, group, preset } => write!(f, "track {track}, clip {clip}: there is no '{group}' text animation '{preset}'"),
+            InvalidTextAnimationDuration { track, clip, group, duration } => write!(f, "track {track}, clip {clip}: the '{group}' text animation lasts {duration}, which must be above 0"),
             SourceHasNoAudio { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: source '{source}' has no audio stream")
             }
@@ -449,6 +457,16 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 }
                 if track.is_audio() {
                     errors.push(TextOnAudioTrack { track: t, clip: c });
+                }
+                let animation = &text.animation;
+                for (group, reference) in [(AnimationGroup::Enter, &animation.enter), (AnimationGroup::Exit, &animation.exit), (AnimationGroup::Repeat, &animation.repeat)] {
+                    let Some(reference) = reference else { continue };
+                    if find_preset(group, &reference.preset).is_none() {
+                        errors.push(UnknownTextAnimation { track: t, clip: c, group: group.name(), preset: reference.preset.clone() });
+                    }
+                    if reference.duration <= Time::ZERO {
+                        errors.push(InvalidTextAnimationDuration { track: t, clip: c, group: group.name(), duration: reference.duration });
+                    }
                 }
             } else if clip.source == TEXT_SOURCE {
                 // A text source without its text: nothing to draw, and no file to ask the resolver about.

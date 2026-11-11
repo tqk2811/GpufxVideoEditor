@@ -24,6 +24,7 @@ pub mod project;
 pub mod render;
 pub mod schedule;
 pub mod stretch;
+pub mod text_animation;
 pub mod time;
 pub mod validate;
 
@@ -55,5 +56,6 @@ pub use schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, Layer, LayerContent, Progress, SourceSample,
     PROGRESS_PPM_SCALE,
 };
+pub use text_animation::{animation_max_scale, animation_pose, animation_rotates, find_preset, preset_pose, AnimationGroup, AnimationPose, AnimationPreset, TEXT_ANIMATION_PRESETS};
 pub use time::{Time, TICKS_PER_SECOND};
 pub use validate::{validate, AcceptAll, Resolver, ValidationError};

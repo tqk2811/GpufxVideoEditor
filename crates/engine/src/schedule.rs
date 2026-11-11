@@ -37,6 +37,7 @@
 
 use crate::keyframe::ClipTransform;
 use crate::project::{Clip, Effect, Project, Track, Transition};
+use crate::text_animation::animation_pose;
 use crate::time::Time;
 use serde_json::{Map, Value};
 
@@ -167,18 +168,25 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
     let c = &track.clips[clip];
     let offset = t.saturating_sub(c.start);
     let (visible_start, visible_end) = visible_span(track, clip);
+    let clock = ClipClock {
+        elapsed: t.saturating_sub(visible_start).max(Time::ZERO).min(visible_end.saturating_sub(visible_start)),
+        duration: visible_end.saturating_sub(visible_start),
+    };
+    let mut transform = c.transform_at(offset);
+    // The preset animations of a text clip only move the picture it was drawn into, on the clock of
+    // the time it is visible.
+    if let Some(text) = c.text.as_ref().filter(|text| !text.animation.is_empty()) {
+        transform = transform.with_pose(animation_pose(&text.animation, clock));
+    }
     SourceSample {
         clip,
         model: c,
         source: &c.source,
         source_time: c.source_in.saturating_add(c.source_offset(offset)).max(Time::ZERO),
         effects: &c.effects,
-        transform: c.transform_at(offset),
+        transform,
         offset,
-        clock: ClipClock {
-            elapsed: t.saturating_sub(visible_start).max(Time::ZERO).min(visible_end.saturating_sub(visible_start)),
-            duration: visible_end.saturating_sub(visible_start),
-        },
+        clock,
     }
 }
 

@@ -368,3 +368,33 @@ fn the_same_text_is_rasterized_once_and_a_new_colour_again() {
     assert!(compositor.text_rasterizations() > after_first, "a new colour is rasterized again");
     assert_ne!(first, green);
 }
+
+#[test]
+fn a_text_fading_in_is_part_way_clear_halfway_and_drawn_once() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    let mut compositor = text_compositor(&gpu);
+    let fade = 4 * FRAME;
+    let track = format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HI","size":0.5,"color":[255,255,255,255],"animation":{{"in":{{"preset":"fade","duration":{fade}}}}}}}}}]}}"#, 8 * FRAME);
+    let project = parse(&project_json(&track));
+    let errors = validate(&project, &engine::AcceptAll);
+    assert!(errors.is_empty(), "invalid project: {errors:?}");
+    let mut renderer = FrameRenderer::default();
+    let brightest: Vec<i32> = (0..=4)
+        .map(|index| {
+            let rgba = renderer
+                .render_frame(&project, &mut compositor, index, |compositor, image| {
+                    let mut rgba = Vec::new();
+                    compositor.read(image, &mut rgba)?;
+                    Ok(rgba)
+                })
+                .expect("frame");
+            (0..HEIGHT).flat_map(|y| (0..WIDTH).map(move |x| (x, y))).map(|(x, y)| pixel(&rgba, x, y)[0]).max().unwrap()
+        })
+        .collect();
+    assert!(brightest[0] <= 4, "clear at the start: {brightest:?}");
+    assert!(brightest[4] >= 250, "opaque once the fade is over: {brightest:?}");
+    assert!((brightest[2] - 128).abs() <= 10, "half way at the middle of the fade: {brightest:?}");
+    assert!(brightest.windows(2).all(|pair| pair[1] > pair[0]), "{brightest:?}");
+    assert_eq!(compositor.text_rasterizations(), 1, "the fade only changes how the picture is drawn");
+}

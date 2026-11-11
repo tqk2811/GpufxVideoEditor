@@ -28,6 +28,10 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 
 `crates/gpufx-editor/src/asset_install.rs:364` (`recover_interrupted_install`) khôi phục thư mục cài dở lúc khởi động mà có thể chạy cùng một lượt cài ở tiến trình editor khác. Nên giữ cùng lock cài đặt suốt lúc khôi phục. Ghi ngày 2026-11-10.
 
+### [Thấp] `ink_bounds` vẽ thừa glyph chỉ để lấy khung mực
+
+`crates/gpufx-text/src/lib.rs:202` (`ink_bounds`) gọi `get_outline_commands_uncached`, rồi `get_image_uncached` (dòng 227) cho từng glyph ở mỗi lần layout, mà một lần đo có thể layout tới 8 vòng co chữ. Emoji và font bitmap bị vẽ hẳn ra ảnh chỉ để lấy khung. Kết quả không sai, chỉ đo chậm với chữ dài hoặc nhiều emoji. Nên nhớ khung mực theo `CacheKey` qua các vòng co. Ghi ngày 2026-11-11.
+
 ### [Thấp] Trần cache ảnh 1 GiB tính riêng từng compositor
 
 `crates/d3d12-backend/src/compositor.rs` `STILL_CACHE_BYTES` áp cho từng `D3d12Compositor`, nên preview và export chạy cùng lúc có thể giữ gấp đôi. Nên dùng chung bộ đếm theo `Gpu` nếu số lượng compositor tăng. Ghi ngày 2026-11-10.
