@@ -69,8 +69,11 @@ impl TextShapes {
     }
 
     /// The shape of `text` in an output `output_height` pixels tall. A text that draws nothing
-    /// is as wide as tall.
+    /// is as wide as tall. A font file must be named by an absolute path: the editor holds them so
+    /// once a project is opened (`project_file::with_absolute_sources`), and a relative one would
+    /// be read from the working folder instead of the project folder the compositor reads it from.
     pub fn shape(&mut self, text: &TextContent, output_height: u32) -> TextShape {
+        debug_assert!(!matches!(&text.font, engine::FontRef::File { path } if std::path::Path::new(path).is_relative()), "font file {:?} is not absolute", text.font);
         let stamp = gpufx_text::text_font_stamp(text);
         if let Some((_, _, _, shape)) = self.recent.iter().rev().find(|(known, height, known_stamp, _)| *height == output_height && *known_stamp == stamp && known == text) {
             return shape.clone();
