@@ -78,12 +78,6 @@ pub fn choose_preset(animation: &TextAnimation, group: AnimationGroup, id: Optio
     with_animation(animation, group, id.map(|id| TextAnimationRef { preset: id.to_owned(), duration }))
 }
 
-/// The system families of a list made by [`crate::text_shapes::available_families`], which puts
-/// the built-in family first: the font combo offers that one as the default font instead.
-pub fn system_families(available: &[String]) -> &[String] {
-    available.get(1..).unwrap_or(&[])
-}
-
 /// The outline a text gets when it is turned on: black, a twentieth of the font size.
 pub fn default_outline() -> TextOutline {
     TextOutline { color: [0, 0, 0, 255], width: 0.05 }
@@ -155,13 +149,6 @@ mod tests {
         let same = rescaled_placement(before, (480, 108), (480, 108), output).unwrap();
         assert!((same.x - before.x).abs() < 1e-12 && (same.y - before.y).abs() < 1e-12 && (same.width - before.width).abs() < 1e-12);
         assert_eq!(rescaled_placement(placed, (0, 0), (960, 216), output), None);
-    }
-
-    #[test]
-    fn the_font_combo_leaves_the_built_in_family_to_the_default_entry() {
-        let list = vec!["Built-in".to_owned(), "Arial".to_owned(), "Times".to_owned()];
-        assert_eq!(system_families(&list), ["Arial".to_owned(), "Times".to_owned()]);
-        assert!(system_families(&[]).is_empty(), "still scanning");
     }
 
     #[test]

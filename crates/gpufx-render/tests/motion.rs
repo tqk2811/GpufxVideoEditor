@@ -315,11 +315,11 @@ fn text_track(frames: i64, color: &str) -> String {
     format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HI","size":0.5,"color":{color}}}}}]}}"#, frames * FRAME)
 }
 
-/// A compositor that draws text with the built-in font alone, so the result is the same on any machine.
+/// A compositor that draws text with the system fonts, so `HI` comes out in the default font.
 fn text_compositor(gpu: &Arc<Gpu>) -> D3d12Compositor {
     let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
     let mut compositor = D3d12Compositor::new(gpu.clone(), paths, WIDTH, HEIGHT).expect("compositor");
-    compositor.set_text_rasterizer(Arc::new(Mutex::new(gpufx_text::TextRasterizer::embedded_only())));
+    compositor.set_text_rasterizer(Arc::new(Mutex::new(gpufx_text::TextRasterizer::new())));
     compositor
 }
 

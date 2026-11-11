@@ -6,7 +6,7 @@ use super::numeric::drag_field;
 use super::theme;
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
-use crate::text_clip::{choose_preset, default_background, default_outline, default_shadow, presets_of, system_families, with_animation, TEXT_SIZE_RANGE};
+use crate::text_clip::{choose_preset, default_background, default_outline, default_shadow, presets_of, with_animation, TEXT_SIZE_RANGE};
 use crate::text_shapes::available_families;
 use crate::timecode::{from_seconds, to_seconds};
 use egui::{Rect, Vec2};
@@ -117,13 +117,12 @@ fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, language:
         ui.colored_label(theme::text_dim(), language.t(Message::FieldFont));
         egui::ComboBox::from_id_salt(id.with("font")).selected_text(shown).width(ui.available_width()).height(FONT_LIST_HEIGHT).show_ui(ui, |ui| {
             ui.selectable_value(&mut text.font, FontRef::Default, default_name);
-            let available = available_families();
-            let families = system_families(&available);
-            if available.is_empty() {
+            let families = available_families();
+            if families.is_empty() {
                 ui.colored_label(theme::text_dim(), language.t(Message::LoadingFonts));
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
             }
-            for family in families {
+            for family in families.iter() {
                 ui.selectable_value(&mut text.font, FontRef::System { family: family.clone() }, family);
             }
         });

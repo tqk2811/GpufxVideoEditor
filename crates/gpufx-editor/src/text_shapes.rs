@@ -49,7 +49,7 @@ pub fn warm_up_shared() {
     });
 }
 
-/// The font families to offer for a text, the built-in one first, or empty while the font scan of
+/// The installed font families to offer for a text, sorted, or empty while the font scan of
 /// [`warm_up_shared`] is still running. Never waits for the scan or for a text being drawn; the
 /// list is made once and kept.
 pub fn available_families() -> Arc<Vec<String>> {
@@ -128,14 +128,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn available_families_never_waits_and_leads_with_the_built_in_font() {
+    fn available_families_never_waits_and_is_sorted() {
         let list = available_families();
-        assert!(list.is_empty() || list[0] == gpufx_text::DEFAULT_FAMILY, "{list:?}");
+        assert!(list.windows(2).all(|pair| pair[0].to_lowercase() <= pair[1].to_lowercase()), "{list:?}");
     }
 
     #[test]
     fn a_line_of_text_is_wider_than_tall_and_is_measured_once() {
-        let rasterizer = Arc::new(Mutex::new(TextRasterizer::embedded_only()));
+        let rasterizer = Arc::new(Mutex::new(TextRasterizer::new()));
         let mut shapes = TextShapes::with_rasterizer(rasterizer);
         let text = TextContent::new("Hello world", 0.1);
         let shape = shapes.shape(&text, 1080);
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn the_measured_shape_matches_the_drawn_picture() {
-        let rasterizer = Arc::new(Mutex::new(TextRasterizer::embedded_only()));
+        let rasterizer = Arc::new(Mutex::new(TextRasterizer::new()));
         let mut shapes = TextShapes::with_rasterizer(rasterizer.clone());
         let text = TextContent::new("Two\nlines here", 0.1);
         let image = rasterizer.lock().unwrap().rasterize(&text, 720, 1.0);
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn texts_past_the_recent_ones_are_found_by_hash() {
-        let mut shapes = TextShapes::with_rasterizer(Arc::new(Mutex::new(TextRasterizer::embedded_only())));
+        let mut shapes = TextShapes::with_rasterizer(Arc::new(Mutex::new(TextRasterizer::new())));
         let texts: Vec<_> = (0..RECENT + 4).map(|i| TextContent::new(&format!("text {i}"), 0.1)).collect();
         let first: Vec<_> = texts.iter().map(|text| shapes.shape(text, 720)).collect();
         assert_eq!(shapes.recent.len(), RECENT);
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn a_missing_font_is_reported() {
-        let mut shapes = TextShapes::with_rasterizer(Arc::new(Mutex::new(TextRasterizer::embedded_only())));
+        let mut shapes = TextShapes::with_rasterizer(Arc::new(Mutex::new(TextRasterizer::new())));
         let mut text = TextContent::new("Hi", 0.1);
         text.font = engine::FontRef::System { family: "No Such Font 123".into() };
         assert_eq!(shapes.shape(&text, 720).missing_family.as_deref(), Some("No Such Font 123"));

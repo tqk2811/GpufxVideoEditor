@@ -3,16 +3,15 @@
 //! Shaping, bidi and font fallback come from `cosmic-text`, glyph pictures from its swash cache.
 //! Outline, background box and drop shadow are drawn here on alpha masks.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cosmic_text::{Attrs, Buffer, Command, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Wrap};
 use engine::project::{FontRef, Rgba, TextAlign, TextContent};
 
-/// The font built into the editor: Be Vietnam Pro Regular, under the SIL Open Font License 1.1
-/// (see `fonts/OFL.txt`).
-pub const DEFAULT_FONT: &[u8] = include_bytes!("../fonts/BeVietnamPro-Regular.ttf");
-/// The family name of [`DEFAULT_FONT`].
-pub const DEFAULT_FAMILY: &str = "Be Vietnam Pro";
+/// The installed families tried, in order, for the default font: Segoe UI on Windows (it has the
+/// Vietnamese letters), then Arial. No font ships with the editor.
+pub const DEFAULT_FAMILY_CANDIDATES: [&str; 2] = ["Segoe UI", "Arial"];
 
 /// The widest or tallest picture [`TextRasterizer::rasterize`] returns, in pixels. Larger text is
 /// drawn smaller so that it fits.
@@ -32,6 +31,8 @@ pub struct TextImage {
     pub pixels: Vec<u8>,
     /// The system font family that was asked for and not found, so the default font drew it.
     pub missing_family: Option<String>,
+    /// No font is loaded at all, so nothing could be drawn and the picture is empty.
+    pub no_font: bool,
     /// How many glyphs no loaded font could draw (shown as the font's "missing" box).
     pub missing_glyphs: usize,
     /// Whether the text was drawn smaller than asked to stay within [`MAX_DIMENSION`] and
@@ -43,6 +44,8 @@ pub struct TextImage {
 pub struct TextRasterizer {
     font_system: FontSystem,
     cache: SwashCache,
+    /// The family [`FontRef::Default`] draws with, or `None` when no font is loaded.
+    default_family: Option<String>,
 }
 
 impl Default for TextRasterizer {
@@ -65,23 +68,40 @@ pub fn shared_if_ready() -> Option<Arc<Mutex<TextRasterizer>>> {
 }
 
 impl TextRasterizer {
-    /// The built-in font plus every font installed on the system.
+    /// Every font installed on the system; the default font is one of them (see [`Self::default_family`]).
     pub fn new() -> TextRasterizer {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
         Self::with_db(db)
     }
 
-    /// Only the built-in font, so the result does not depend on the machine. For tests.
-    pub fn embedded_only() -> TextRasterizer {
-        Self::with_db(fontdb::Database::new())
+    /// Only the fonts in these files, without the system ones. An empty list loads no font, so
+    /// every text comes out empty with [`TextImage::no_font`] set.
+    pub fn with_font_files(files: &[PathBuf]) -> TextRasterizer {
+        let mut db = fontdb::Database::new();
+        for file in files {
+            if let Err(error) = db.load_font_file(file) {
+                eprintln!("gpufx-text: cannot load font {}: {error}", file.display());
+            }
+        }
+        Self::with_db(db)
     }
 
     fn with_db(mut db: fontdb::Database) -> TextRasterizer {
-        db.load_font_source(fontdb::Source::Binary(Arc::new(DEFAULT_FONT)));
-        db.set_sans_serif_family(DEFAULT_FAMILY);
+        let default_family = choose_default_family(&db);
+        match &default_family {
+            Some(family) => db.set_sans_serif_family(family.clone()),
+            None => eprintln!("gpufx-text: no font is installed; text cannot be drawn"),
+        }
         let locale = sys_locale();
-        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new() }
+        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family }
+    }
+
+    /// The installed family [`FontRef::Default`] draws with: the first of
+    /// [`DEFAULT_FAMILY_CANDIDATES`] that is installed, else the first family in name order.
+    /// `None` when no font is loaded.
+    pub fn default_family(&self) -> Option<&str> {
+        self.default_family.as_deref()
     }
 
     /// Whether a font family with this name is loaded, ignoring case.
@@ -89,19 +109,9 @@ impl TextRasterizer {
         self.font_system.db().faces().any(|face| face.families.iter().any(|(name, _)| name.eq_ignore_ascii_case(family)))
     }
 
-    /// Every loaded font family once, with the built-in [`DEFAULT_FAMILY`] first and the rest
-    /// sorted ignoring case. Empty names are left out.
+    /// Every loaded font family once, sorted ignoring case. Empty names are left out.
     pub fn families(&self) -> Vec<String> {
-        let mut names: Vec<String> = Vec::new();
-        for (name, _) in self.font_system.db().faces().flat_map(|face| face.families.iter()) {
-            let name = name.trim();
-            if !name.is_empty() && !name.eq_ignore_ascii_case(DEFAULT_FAMILY) && !names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
-                names.push(name.to_owned());
-            }
-        }
-        names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
-        names.insert(0, DEFAULT_FAMILY.to_owned());
-        names
+        sorted_families(self.font_system.db())
     }
 
     /// Draws `text` for an output `output_height_px` pixels tall, `scale` times as large (such as
@@ -138,13 +148,20 @@ impl TextRasterizer {
     /// Shapes `text` at `font_px` and places it: glyph positions and the size of the picture.
     fn layout(&mut self, text: &TextContent, font_px: f32) -> Layout {
         let mut layout = Layout::default();
+        let Some(default_family) = self.default_family.clone() else {
+            layout.no_font = true;
+            if let FontRef::System { family } = &text.font {
+                layout.missing_family = Some(family.clone());
+            }
+            return layout;
+        };
         let family = match &text.font {
             FontRef::System { family } if self.has_family(family) => family.clone(),
             FontRef::System { family } => {
                 layout.missing_family = Some(family.clone());
-                DEFAULT_FAMILY.to_string()
+                default_family
             }
-            FontRef::Default => DEFAULT_FAMILY.to_string(),
+            FontRef::Default => default_family,
         };
         if text.content.is_empty() || !font_px.is_finite() || font_px < 0.5 {
             return layout;
@@ -252,7 +269,7 @@ impl TextRasterizer {
 
     /// Draws a layout from [`Self::layout`]. One over the limits draws nothing.
     fn draw(&mut self, text: &TextContent, layout: &Layout) -> TextImage {
-        let mut image = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), missing_glyphs: layout.missing_glyphs, downscaled: false };
+        let mut image = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, downscaled: false };
         let (width, height) = (layout.width as usize, layout.height as usize);
         if width == 0 || height == 0 {
             return image;
@@ -338,7 +355,29 @@ struct Layout {
     /// Shadow offset x, y and blur, in pixels.
     shadow: (f32, f32, f32),
     missing_family: Option<String>,
+    no_font: bool,
     missing_glyphs: usize,
+}
+
+fn sorted_families(db: &fontdb::Database) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in db.faces().flat_map(|face| face.families.iter()) {
+        let name = name.trim();
+        if !name.is_empty() && !names.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+            names.push(name.to_owned());
+        }
+    }
+    names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
+    names
+}
+
+fn choose_default_family(db: &fontdb::Database) -> Option<String> {
+    let names = sorted_families(db);
+    DEFAULT_FAMILY_CANDIDATES
+        .iter()
+        .find_map(|wanted| names.iter().find(|name| name.eq_ignore_ascii_case(wanted)))
+        .or_else(|| names.first())
+        .cloned()
 }
 
 fn sys_locale() -> String {

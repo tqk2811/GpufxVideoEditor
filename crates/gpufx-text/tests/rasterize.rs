@@ -1,11 +1,19 @@
 use engine::project::{FontRef, TextAlign, TextBackground, TextContent, TextOutline, TextShadow};
-use gpufx_text::{TextImage, TextRasterizer, MAX_DIMENSION, MAX_OUTLINE_RATIO, MAX_PIXELS};
+use gpufx_text::{TextImage, TextRasterizer, DEFAULT_FAMILY_CANDIDATES, MAX_DIMENSION, MAX_OUTLINE_RATIO, MAX_PIXELS};
 use unicode_normalization::UnicodeNormalization;
 
 const HEIGHT: u32 = 720;
 
-fn rasterizer() -> TextRasterizer {
-    TextRasterizer::embedded_only()
+/// The system rasterizer when its default font is one of [`DEFAULT_FAMILY_CANDIDATES`], so the
+/// checks below run on a known font; otherwise the test is skipped with a note.
+fn rasterizer() -> Option<TextRasterizer> {
+    let r = TextRasterizer::new();
+    if r.default_family().is_some_and(|family| DEFAULT_FAMILY_CANDIDATES.iter().any(|known| known.eq_ignore_ascii_case(family))) {
+        Some(r)
+    } else {
+        eprintln!("skipped: none of {DEFAULT_FAMILY_CANDIDATES:?} is installed (default is {:?})", r.default_family());
+        None
+    }
 }
 
 fn alpha(image: &TextImage, x: u32, y: u32) -> u8 {
@@ -32,7 +40,7 @@ fn ink_columns(image: &TextImage, y0: u32, y1: u32) -> (u32, u32) {
 
 #[test]
 fn larger_size_gives_a_larger_picture() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let small = r.rasterize(&TextContent::new("Hello", 0.05), HEIGHT, 1.0);
     let large = r.rasterize(&TextContent::new("Hello", 0.1), HEIGHT, 1.0);
     assert!(large.width > small.width * 3 / 2 && large.height > small.height * 3 / 2, "{}x{} vs {}x{}", small.width, small.height, large.width, large.height);
@@ -43,7 +51,7 @@ fn larger_size_gives_a_larger_picture() {
 
 #[test]
 fn alignment_moves_the_short_line() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("I\nIIIIIIIIIIII", 0.08);
     let mut first_line = |align| {
         text.align = align;
@@ -62,7 +70,7 @@ fn alignment_moves_the_short_line() {
 
 #[test]
 fn outline_covers_more_pixels() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Outline", 0.08);
     let plain = r.rasterize(&text, HEIGHT, 1.0);
     text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: 0.08 });
@@ -74,7 +82,7 @@ fn outline_covers_more_pixels() {
 #[test]
 fn tiny_letters_still_get_an_outline() {
     let ink = |image: &TextImage| image.pixels.chunks(4).map(|p| p[3] as u64).sum::<u64>();
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("i", 8.0 / HEIGHT as f32);
     let plain = r.rasterize(&text, HEIGHT, 1.0);
     text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: MAX_OUTLINE_RATIO });
@@ -84,7 +92,7 @@ fn tiny_letters_still_get_an_outline() {
 
 #[test]
 fn line_feed_makes_more_lines() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let one = r.rasterize(&TextContent::new("Line", 0.06), HEIGHT, 1.0);
     let three = r.rasterize(&TextContent::new("Line\nLine\nLine", 0.06), HEIGHT, 1.0);
     assert!(three.height > one.height * 2, "{} vs {}", three.height, one.height);
@@ -95,7 +103,7 @@ fn line_feed_makes_more_lines() {
 
 #[test]
 fn vietnamese_nfc_and_nfd_draw_alike_with_no_missing_glyph() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let source = "Tiếng Việt: ăâđêôơư ẮẰẲẴẶ ỹỵ";
     let nfc: String = source.nfc().collect();
     let nfd: String = source.nfd().collect();
@@ -108,13 +116,11 @@ fn vietnamese_nfc_and_nfd_draw_alike_with_no_missing_glyph() {
     let diff: u64 = a.pixels.iter().zip(&b.pixels).map(|(x, y)| x.abs_diff(*y) as u64).sum();
     let mean = diff as f64 / a.pixels.len() as f64;
     assert!(mean < 2.0, "mean difference {mean}");
-    // The check can fail: the built-in font has no Han glyphs.
-    assert!(r.rasterize(&TextContent::new("中文", 0.06), HEIGHT, 1.0).missing_glyphs > 0);
 }
 
 #[test]
 fn unknown_family_falls_back_to_the_default_and_reports_it() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Fallback", 0.06);
     let default = r.rasterize(&text, HEIGHT, 1.0);
     assert_eq!(default.missing_family, None);
@@ -122,13 +128,13 @@ fn unknown_family_falls_back_to_the_default_and_reports_it() {
     let fallback = r.rasterize(&text, HEIGHT, 1.0);
     assert_eq!(fallback.missing_family.as_deref(), Some("No Such Font Family 1234"));
     assert_eq!(fallback.pixels, default.pixels);
-    text.font = FontRef::System { family: "be vietnam pro".into() };
+    text.font = FontRef::System { family: r.default_family().unwrap().to_lowercase() };
     assert_eq!(r.rasterize(&text, HEIGHT, 1.0).missing_family, None);
 }
 
 #[test]
 fn empty_text_gives_an_empty_picture() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let image = r.rasterize(&TextContent::new("", 0.06), HEIGHT, 1.0);
     assert_eq!((image.width, image.height, image.pixels.len()), (0, 0, 0));
     let zero = r.rasterize(&TextContent::new("x", 0.0), HEIGHT, 1.0);
@@ -139,7 +145,7 @@ fn empty_text_gives_an_empty_picture() {
 
 #[test]
 fn background_and_shadow_are_drawn_premultiplied() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Box", 0.06);
     text.background = Some(TextBackground { color: [0, 0, 255, 128], padding: 0.3, radius: 0.2 });
     text.shadow = Some(TextShadow { color: [0, 0, 0, 200], offset: [0.1, 0.1], blur: 0.1 });
@@ -154,7 +160,7 @@ fn background_and_shadow_are_drawn_premultiplied() {
 
 #[test]
 fn huge_text_is_shrunk_to_the_limits() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let image = r.rasterize(&TextContent::new("WWWWWWWWWWWWWWWWWWWW", 1.0), 4320, 1.0);
     assert!(image.downscaled);
     assert!(image.width <= MAX_DIMENSION && image.height <= MAX_DIMENSION);
@@ -164,7 +170,7 @@ fn huge_text_is_shrunk_to_the_limits() {
 
 #[test]
 fn measure_gives_the_size_before_shrinking_and_draws_nothing() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let text = TextContent::new("WWWWWWWWWWWWWWWWWWWW", 1.0);
     let (w, h) = r.measure(&text, 4320, 1.0);
     assert!(w > MAX_DIMENSION, "the natural width {w} is not shrunk");
@@ -183,7 +189,7 @@ fn ink_on_edge(image: &TextImage) -> bool {
 
 #[test]
 fn stacked_marks_on_a_tight_line_spacing_are_not_cut() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Ể Ỗ ẤỤ", 0.1);
     let normal = r.rasterize(&text, HEIGHT, 1.0);
     text.line_spacing = 0.3;
@@ -195,7 +201,7 @@ fn stacked_marks_on_a_tight_line_spacing_are_not_cut() {
 
 #[test]
 fn a_wide_outline_is_capped_and_quick() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("HI", 0.5);
     text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: MAX_OUTLINE_RATIO });
     let capped = r.rasterize(&text, HEIGHT, 1.0);
@@ -218,7 +224,7 @@ fn a_wide_outline_is_capped_and_quick() {
 
 #[test]
 fn a_blur_under_a_pixel_is_no_blur() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Box", 0.06);
     text.shadow = Some(TextShadow { color: [0, 0, 0, 200], offset: [0.1, 0.1], blur: 0.0 });
     let sharp = r.rasterize(&text, HEIGHT, 1.0);
@@ -230,7 +236,7 @@ fn a_blur_under_a_pixel_is_no_blur() {
 
 #[test]
 fn tabs_and_joiners_are_not_missing_glyphs() {
-    let mut r = rasterizer();
+    let Some(mut r) = rasterizer() else { return };
     for content in ["a\tb", "a\u{200D}b", "a\u{200C}b", "a\u{FE0F}b", "a\u{200B}b"] {
         let image = r.rasterize(&TextContent::new(content, 0.06), HEIGHT, 1.0);
         assert_eq!(image.missing_glyphs, 0, "{content:?}");
@@ -238,24 +244,46 @@ fn tabs_and_joiners_are_not_missing_glyphs() {
 }
 
 #[test]
-fn embedded_families_list_the_built_in_font_once_and_sorted() {
-    let families = rasterizer().families();
-    assert_eq!(families, vec!["Be Vietnam Pro".to_owned()]);
+fn without_any_font_text_is_empty_and_says_so() {
+    let mut r = TextRasterizer::with_font_files(&[]);
+    assert_eq!(r.default_family(), None);
+    assert!(r.families().is_empty());
+    let image = r.rasterize(&TextContent::new("Hello", 0.06), HEIGHT, 1.0);
+    assert!(image.no_font);
+    assert_eq!((image.width, image.height, image.pixels.len()), (0, 0, 0));
+    let mut text = TextContent::new("Hello", 0.06);
+    text.font = FontRef::System { family: "Arial".into() };
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    assert!(image.no_font);
+    assert_eq!(image.missing_family.as_deref(), Some("Arial"));
 }
 
 #[test]
-fn system_rasterizer_lists_the_built_in_font_first_without_duplicates() {
-    let system = TextRasterizer::new();
-    assert!(system.has_family(gpufx_text::DEFAULT_FAMILY));
+fn a_font_file_that_is_not_a_candidate_becomes_the_default() {
+    let Some(path) = std::env::var_os("WINDIR").map(|dir| std::path::Path::new(&dir).join("Fonts").join("times.ttf")).filter(|path| path.is_file()) else {
+        eprintln!("skipped: no times.ttf");
+        return;
+    };
+    let mut r = TextRasterizer::with_font_files(&[path]);
+    assert_eq!(r.default_family(), Some("Times New Roman"));
+    let image = r.rasterize(&TextContent::new("Hello", 0.06), HEIGHT, 1.0);
+    assert!(!image.no_font && image.width > 0);
+}
+
+#[test]
+fn system_rasterizer_lists_every_family_once_sorted_with_the_default_among_them() {
+    let Some(system) = rasterizer() else { return };
+    let default = system.default_family().unwrap().to_owned();
+    let first_installed = DEFAULT_FAMILY_CANDIDATES.iter().find(|family| system.has_family(family)).unwrap();
+    assert!(default.eq_ignore_ascii_case(first_installed), "the first installed candidate wins");
     let families = system.families();
-    assert_eq!(families[0], gpufx_text::DEFAULT_FAMILY);
+    assert!(families.contains(&default));
     assert!(families.iter().all(|name| !name.trim().is_empty()));
-    let rest: Vec<String> = families[1..].iter().map(|name| name.to_lowercase()).collect();
-    let mut sorted = rest.clone();
+    let lower: Vec<String> = families.iter().map(|name| name.to_lowercase()).collect();
+    let mut sorted = lower.clone();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(rest, sorted, "sorted ignoring case, no duplicates");
-    assert!(!rest.contains(&gpufx_text::DEFAULT_FAMILY.to_lowercase()));
+    assert_eq!(lower, sorted, "sorted ignoring case, no duplicates");
     let mut text = engine::project::TextContent::new("Hello", 0.1);
     text.font = FontRef::System { family: families.last().unwrap().clone() };
     let _ = TextRasterizer::new().rasterize(&text, 360, 1.0);

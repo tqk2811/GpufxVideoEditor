@@ -122,14 +122,14 @@ fn presets(group: AnimationGroup) -> Vec<&'static str> {
     TEXT_ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id).collect()
 }
 
-/// The fonts a text can name, each as the `font` value to use: the built-in one first. While the
+/// The fonts a text can name, each as the `font` value to use: the system default first. While the
 /// scan of the installed fonts has not finished only that one is listed, and the state says so.
 pub fn font_list() -> Value {
     let families = available_families();
     if families.is_empty() {
         warm_up_shared();
     }
-    let system = families.get(1..).unwrap_or(&[]).iter().map(|family| json!({"kind": "system", "family": family}));
+    let system = families.iter().map(|family| json!({"kind": "system", "family": family}));
     let fonts: Vec<Value> = std::iter::once(json!({"kind": "default"})).chain(system).collect();
     json!({"state": if families.is_empty() { "loading" } else { "ready" }, "fonts": fonts})
 }
