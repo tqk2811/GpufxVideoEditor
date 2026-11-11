@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use engine::{validate, AcceptAll, Clip, FontRef, Project, TextAlign, TextAnimationRef, TextContent, TextOutline, TextShadow, Track, TrackKind, ValidationError, TEXT_SOURCE};
+use engine::{add_text_clip, audio_segments, layers_at_frame, set_speed, set_text, trim_start, ClipKey, EditError, EditHistory, Time, validate, AcceptAll, Clip, FontRef, Project, TextAlign, TextAnimationRef, TextContent, TextOutline, TextShadow, Track, TrackKind, ValidationError, TEXT_SOURCE};
 
 pub fn text_clip(content: &str, start: i64, duration: i64) -> Clip {
     Clip { source: TEXT_SOURCE.to_owned(), text: Some(TextContent::new(content, 0.08)), ..clip(TEXT_SOURCE, start, 0, duration) }
@@ -81,4 +81,72 @@ fn validate_rejects_text_on_an_audio_track() {
     let mut p = project_with(vec![text_clip("Hi", 0, 9000)]);
     p.tracks[0].kind = TrackKind::Audio;
     assert_eq!(validate(&p, &AcceptAll), vec![ValidationError::TextOnAudioTrack { track: 0, clip: 0 }]);
+}
+
+const KEY: ClipKey = ClipKey { track: 0, clip: 0 };
+
+#[test]
+fn add_text_clip_is_one_undo_step() {
+    let base = project_with(vec![]);
+    let mut history = EditHistory::new(base.clone(), 10);
+    history.apply(|p| add_text_clip(p, 0, t(9000), t(18000), TextContent::new("Hi", 0.1))).unwrap();
+    let added = history.current().tracks[0].clips[0].clone();
+    assert!(added.is_text());
+    assert_eq!(added.source, TEXT_SOURCE);
+    assert_eq!((added.start, added.duration), (t(9000), t(18000)));
+    assert!(history.undo());
+    assert_eq!(history.current(), &base);
+    assert!(history.redo());
+    assert_eq!(history.current().tracks[0].clips[0], added);
+}
+
+#[test]
+fn add_text_clip_refuses_an_overlap_and_empty_text() {
+    let base = project_with(vec![text_clip("A", 0, 9000)]);
+    assert!(matches!(add_text_clip(&base, 0, t(3000), t(9000), TextContent::new("B", 0.1)), Err(EditError::Overlap { .. })));
+    assert!(matches!(add_text_clip(&base, 0, t(9000), t(9000), TextContent::new("", 0.1)), Err(EditError::Invalid(_))));
+}
+
+#[test]
+fn set_text_changes_style_but_not_time_and_undoes() {
+    let base = project_with(vec![text_clip("A", 9000, 18000)]);
+    let mut history = EditHistory::new(base.clone(), 10);
+    let mut style = TextContent::new("Bigger", 0.2);
+    style.align = TextAlign::Left;
+    history.apply(|p| set_text(p, KEY, style.clone())).unwrap();
+    let changed = &history.current().tracks[0].clips[0];
+    assert_eq!(changed.text.as_ref(), Some(&style));
+    assert_eq!((changed.start, changed.duration, changed.source_in), (t(9000), t(18000), Time::ZERO));
+    assert!(history.undo());
+    assert_eq!(history.current(), &base);
+}
+
+#[test]
+fn set_text_refuses_a_media_clip_and_bad_text() {
+    let media = project_with(vec![clip("a.mp4", 0, 0, 9000)]);
+    assert!(matches!(set_text(&media, KEY, TextContent::new("A", 0.1)), Err(EditError::NotText { .. })));
+    let text = project_with(vec![text_clip("A", 0, 9000)]);
+    assert!(matches!(set_text(&text, KEY, TextContent::new("A", -1.0)), Err(EditError::Invalid(_))));
+}
+
+#[test]
+fn text_clip_has_no_speed() {
+    let base = project_with(vec![text_clip("A", 0, 9000)]);
+    assert!(matches!(set_speed(&base, KEY, 2.0), Err(EditError::SpeedOfImage { .. })));
+}
+
+#[test]
+fn trimming_the_start_of_text_keeps_no_source_offset() {
+    let base = project_with(vec![text_clip("A", 9000, 9000)]);
+    let earlier = trim_start(&base, KEY, t(0)).unwrap();
+    let clip = &earlier.tracks[0].clips[0];
+    assert_eq!((clip.start, clip.duration, clip.source_in), (t(0), t(18000), Time::ZERO));
+}
+
+#[test]
+fn text_clip_gives_no_sound_and_no_layer_yet() {
+    let mut p = project_with(vec![text_clip("A", 0, 30030)]);
+    p.output.audio = Some(engine::AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 128_000 });
+    assert!(audio_segments(&p, 0, 4800).is_empty());
+    assert!(layers_at_frame(&p, 0).is_empty());
 }

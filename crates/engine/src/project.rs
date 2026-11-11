@@ -555,6 +555,12 @@ impl Clip {
         self.text.is_some()
     }
 
+    /// Whether the clip shows the same picture all the time, an image or text: it has no sound,
+    /// no speed and no source length to run out of.
+    pub fn is_still(&self) -> bool {
+        self.is_image() || self.is_text()
+    }
+
     /// Timeline end (exclusive), or `None` on overflow.
     pub fn end(&self) -> Option<Time> {
         self.start.checked_add(self.duration)

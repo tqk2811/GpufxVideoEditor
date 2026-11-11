@@ -129,6 +129,7 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::KeyframeOutsideClip { .. } => "keyframe_outside_clip",
         EditError::KeyframeNotFound { .. } => "keyframe_not_found",
         EditError::NoPlacement { .. } => "no_placement",
+        EditError::NotText { .. } => "not_text",
         EditError::Invalid(_) => "invalid_project",
     }
 }

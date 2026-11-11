@@ -92,7 +92,7 @@ pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
     let folder = file.parent().unwrap_or_else(|| Path::new("."));
     let mut stored = project.clone();
     for clip in stored.tracks.iter_mut().flat_map(|track| &mut track.clips) {
-        if is_asset_source(&clip.source) {
+        if is_asset_source(&clip.source) || clip.is_text() {
             continue;
         }
         if let Some(relative) = relative_under(folder, Path::new(&clip.source)) {
@@ -106,7 +106,7 @@ pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
 pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
     let folder = file.parent().unwrap_or_else(|| Path::new("."));
     for clip in project.tracks.iter_mut().flat_map(|track| &mut track.clips) {
-        if !is_asset_source(&clip.source) && is_relative_source(&clip.source) {
+        if !is_asset_source(&clip.source) && !clip.is_text() && is_relative_source(&clip.source) {
             let joined = folder.join(&clip.source);
             clip.source = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
         }

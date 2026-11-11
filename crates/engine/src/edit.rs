@@ -36,7 +36,8 @@
 
 use crate::audio_schedule::sample_position;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
-use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, Effect, Project, Track, TrackKind, Transition, SPEED_SCALE};
+use crate::keyframe::ClipMotion;
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, Effect, Project, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -77,7 +78,7 @@ pub enum EditError {
     TrackLocked { track: usize },
     /// At this speed the clip would need to last past the start of the next clip.
     SpeedOverlap { key: ClipKey, end: Time, next_start: Time },
-    /// A still image has no playback speed to change.
+    /// A still image or a text clip has no playback speed to change.
     SpeedOfImage { key: ClipKey },
     /// A keyframe time is not inside the clip.
     KeyframeOutsideClip { key: ClipKey, at: Time },
@@ -85,6 +86,8 @@ pub enum EditError {
     KeyframeNotFound { key: ClipKey, at: Time },
     /// A number of the place of the clip was set while the clip has no place yet.
     NoPlacement { key: ClipKey },
+    /// The clip is no text clip, so it has no text to change.
+    NotText { key: ClipKey },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -142,6 +145,7 @@ impl fmt::Display for EditError {
             KeyframeOutsideClip { key, at } => write!(f, "track {}, clip {}: {at} is outside the clip", key.track, key.clip),
             KeyframeNotFound { key, at } => write!(f, "track {}, clip {}: no keyframe at {at}", key.track, key.clip),
             NoPlacement { key } => write!(f, "track {}, clip {}: the clip has no placement yet", key.track, key.clip),
+            NotText { key } => write!(f, "track {}, clip {}: the clip shows no text", key.track, key.clip),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
                 for error in errors {
@@ -330,6 +334,38 @@ pub fn add_clip(project: &Project, track: usize, clip: Clip) -> Result<Project, 
     finish(next)
 }
 
+/// Adds a text clip showing `text` to `track`, from `start` for `duration`. Refused like
+/// [`add_clip`] where another clip is, and as invalid on an audio track or with bad text.
+pub fn add_text_clip(project: &Project, track: usize, start: Time, duration: Time, text: TextContent) -> Result<Project, EditError> {
+    let clip = Clip {
+        source: TEXT_SOURCE.to_owned(),
+        start,
+        source_in: Time::ZERO,
+        duration,
+        effects: Vec::new(),
+        gain_db: 0.0,
+        muted: false,
+        fade_in: Time::ZERO,
+        fade_out: Time::ZERO,
+        speed: 1.0,
+        placement: None,
+        motion: ClipMotion::default(),
+        text: Some(text),
+    };
+    add_clip(project, track, clip)
+}
+
+/// Replaces the content and style of a text clip. Its time on the timeline does not change.
+pub fn set_text(project: &Project, key: ClipKey, text: TextContent) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    if !clip_of(project, key)?.is_text() {
+        return Err(EditError::NotText { key });
+    }
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.text = Some(text);
+    finish(next)
+}
+
 /// Moves a clip to `target_track`, as close to `desired_start` as the other clips allow. A move
 /// that ends where the clip already is returns an equal project and keeps its transitions.
 pub fn move_clip(
@@ -390,7 +426,7 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
         return finish(project.clone());
     }
     // A still has the same picture at every time, so its edge can go anywhere and it keeps no offset.
-    let source_in = if clip.is_image() { Time::ZERO } else { clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())? };
+    let source_in = if clip.is_still() { Time::ZERO } else { clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())? };
     if source_in < Time::ZERO {
         return Err(EditError::BeforeSourceStart { key, source_in });
     }
@@ -666,7 +702,7 @@ pub fn set_fades(
 pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
-    if clip.is_image() {
+    if clip.is_still() {
         return Err(EditError::SpeedOfImage { key });
     }
     let mut next = project.clone();

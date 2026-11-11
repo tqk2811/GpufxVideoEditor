@@ -143,8 +143,8 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
     let mut segments = Vec::new();
     for (t, track) in project.tracks.iter().enumerate().filter(|(_, track)| !track.hidden) {
         for (c, clip) in track.clips.iter().enumerate() {
-            // A still image has nothing to play, and its file is no audio source to open.
-            if clip.muted || clip.is_image() {
+            // A still image or text has nothing to play, and its source is no audio file to open.
+            if clip.muted || clip.is_still() {
                 continue;
             }
             let crossfade_in = c

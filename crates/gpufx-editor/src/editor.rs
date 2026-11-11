@@ -169,6 +169,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::KeyframeOutsideClip { key, .. } => Message::EditKeyframeOutsideClip(label(key.track)),
         EditError::KeyframeNotFound { key, .. } => Message::EditKeyframeNotFound(label(key.track)),
         EditError::NoPlacement { key } => Message::EditNoPlacement(label(key.track)),
+        EditError::NotText { .. } => Message::EditInvalid(error.to_string()),
         EditError::Invalid(errors) => Message::EditInvalid(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
     }
 }

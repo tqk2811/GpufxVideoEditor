@@ -156,8 +156,17 @@ pub fn layers_at_frame(project: &Project, frame: i64) -> Vec<Layer<'_>> {
         .iter()
         .enumerate()
         .filter(|(_, track)| !track.is_audio() && !track.hidden)
-        .filter_map(|(i, track)| content_at(track, t).map(|content| Layer { track: i, content }))
+        // Text is not rasterized yet, so a text clip gives no layer for now.
+        .filter_map(|(i, track)| content_at(track, t).filter(|content| !shows_text(track, content)).map(|content| Layer { track: i, content }))
         .collect()
+}
+
+fn shows_text(track: &Track, content: &LayerContent<'_>) -> bool {
+    let is_text = |sample: &SourceSample<'_>| track.clips[sample.clip].is_text();
+    match content {
+        LayerContent::Clip(sample) => is_text(sample),
+        LayerContent::Transition { from, to, .. } => is_text(from) || is_text(to),
+    }
 }
 
 fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
