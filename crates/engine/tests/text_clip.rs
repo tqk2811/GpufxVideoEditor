@@ -203,3 +203,36 @@ fn text_steps_round_up_to_quarter_octaves() {
     // The scale only changes when the widest crosses a step.
     assert_eq!(engine::text_raster_scale(0.45, 1920, 480), engine::text_raster_scale(0.5, 1920, 480));
 }
+
+#[test]
+fn a_text_source_without_its_text_is_empty_text_not_a_missing_file() {
+    struct NoFiles;
+    impl engine::Resolver for NoFiles {
+        fn source_exists(&self, _: &str) -> bool { false }
+        fn package_exists(&self, _: &str) -> bool { true }
+    }
+    let mut c = text_clip("Hi", 0, 9000);
+    c.text = None;
+    assert_eq!(validate(&project_with(vec![c]), &NoFiles), vec![ValidationError::EmptyText { track: 0, clip: 0 }]);
+}
+
+#[test]
+fn trimming_the_source_in_of_a_still_keeps_it_at_zero() {
+    for still in [text_clip("Hi", 0, 9000), clip("a.png", 0, 0, 9000)] {
+        let base = project_with(vec![still]);
+        let after = engine::trim_source_in(&base, KEY, t(3000)).unwrap();
+        assert_eq!(after, base, "a still has no source position to trim");
+    }
+}
+
+#[test]
+fn the_second_half_of_a_split_still_starts_at_source_zero() {
+    for still in [text_clip("Hi", 0, 9000), clip("a.png", 0, 0, 9000)] {
+        let base = project_with(vec![still]);
+        let after = engine::split_clip(&base, KEY, t(3003)).unwrap();
+        let clips = &after.tracks[0].clips;
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[1].source_in, Time::ZERO, "{}", clips[1].source);
+        assert_eq!(clips[1].start, t(3003));
+    }
+}

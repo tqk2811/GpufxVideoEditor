@@ -457,6 +457,12 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
 pub fn trim_source_in(project: &Project, key: ClipKey, new_source_in: Time) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
+    // A still has no position in its source: its source_in stays 0 and the clip keeps its length.
+    if clip.is_still() {
+        let mut next = project.clone();
+        next.tracks[key.track].clips[key.clip].source_in = Time::ZERO;
+        return finish(next);
+    }
     let overflow = EditError::TimeOverflow { key };
     let to_first_frame = new_source_in == Time::ZERO;
     let wanted = if to_first_frame { -clip.timeline_ticks(clip.source_in).ticks() } else { clip.timeline_ticks(new_source_in.checked_sub(clip.source_in).ok_or(overflow.clone())?).ticks() };
@@ -580,7 +586,8 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
 
     let mut second = clip.clone();
     second.start = clip.start.saturating_add(offset);
-    second.source_in = clip.source_in.saturating_add(clip.source_offset(offset));
+    // A still keeps no offset, as in trim_start.
+    second.source_in = if clip.is_still() { Time::ZERO } else { clip.source_in.saturating_add(clip.source_offset(offset)) };
     second.duration = rest;
     second.fade_in = Time::ZERO;
     second.shift_keyframes(Time::from_ticks(-offset.ticks()));

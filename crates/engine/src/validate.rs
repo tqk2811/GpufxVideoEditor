@@ -450,6 +450,9 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 if track.is_audio() {
                     errors.push(TextOnAudioTrack { track: t, clip: c });
                 }
+            } else if clip.source == TEXT_SOURCE {
+                // A text source without its text: nothing to draw, and no file to ask the resolver about.
+                errors.push(EmptyText { track: t, clip: c });
             } else if track.hidden {
                 // Its structure is still checked below.
             } else if let Some(reason) = resolver.source_problem(&clip.source) {
