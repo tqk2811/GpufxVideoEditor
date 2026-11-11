@@ -17,8 +17,9 @@ use crate::package_import::{ImportOutcome, ImportProblem};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileDialog {
     PickClip { track: usize },
-    /// A font file for the text clip.
-    PickFont { clip: ClipKey },
+    /// A font file for the text clip, while the project is still at `revision`: a clip key names
+    /// a clip of one project only, so a change while the dialog is up drops the choice.
+    PickFont { clip: ClipKey, revision: u64 },
     ImportMedia { audio_only: bool },
     ImportPackage,
     OpenProject,
@@ -252,7 +253,7 @@ impl Tasks {
             Request::ImportMedia { audio_only } => self.start_dialog(FileDialog::ImportMedia { audio_only }),
             Request::ImportPackage => self.start_dialog(FileDialog::ImportPackage),
             Request::Export => self.start_dialog(FileDialog::Export),
-            Request::PickFont { clip } => self.start_dialog(FileDialog::PickFont { clip }),
+            Request::PickFont { clip } => self.start_dialog(FileDialog::PickFont { clip, revision: state.revision() }),
         }
     }
 
@@ -339,7 +340,11 @@ impl Tasks {
                         let load = self.start_load(state, &path, None);
                         Action::ProbeMedia { load, path }
                     }
-                    FileDialog::PickFont { clip } => {
+                    FileDialog::PickFont { revision, .. } if revision != state.revision() => {
+                        state.report_info(Message::FontTargetChanged);
+                        Action::Nothing
+                    }
+                    FileDialog::PickFont { clip, .. } => {
                         state.set_text_font(clip, engine::FontRef::File { path: path.to_string_lossy().into_owned() });
                         Action::Nothing
                     }
@@ -1107,5 +1112,40 @@ mod tests {
         let fine = run_guarded("prompt", TaskId::Modal, || Arrival::FilePicked { dialog: FileDialog::Export, path: None });
         assert!(matches!(fine, Arrival::FilePicked { .. }), "{fine:?}");
     }
-}
 
+    /// A state with a text clip, selected, and the key of that clip.
+    fn with_text_clip() -> (EditorState, ClipKey) {
+        let mut state = with_tracks();
+        state.add_text_at_playhead();
+        let key = state.selection().expect("the new text clip is selected");
+        (state, key)
+    }
+
+    fn font_of(state: &EditorState, key: ClipKey) -> engine::FontRef {
+        state.project().tracks[key.track].clips[key.clip].text.as_ref().unwrap().font.clone()
+    }
+
+    #[test]
+    fn a_font_file_chosen_while_the_project_stays_the_same_goes_to_the_clip() {
+        let (mut state, key) = with_text_clip();
+        let mut tasks = Tasks::default();
+        let dialog = FileDialog::PickFont { clip: key, revision: state.revision() };
+        assert_eq!(tasks.begin(&mut state, Request::PickFont { clip: key }), Action::ShowFileDialog(dialog));
+        assert_eq!(tasks.on_arrival(&mut state, picked(dialog, "C:/fonts/a.ttf")), Action::Nothing);
+        assert_eq!(font_of(&state, key), engine::FontRef::File { path: "C:/fonts/a.ttf".to_owned() });
+    }
+
+    #[test]
+    fn a_font_file_chosen_after_the_project_changed_is_not_applied() {
+        let (mut state, key) = with_text_clip();
+        let mut tasks = Tasks::default();
+        let Action::ShowFileDialog(dialog) = tasks.begin(&mut state, Request::PickFont { clip: key }) else { panic!("no dialog") };
+        // An agent edits the project while the dialog is up: the key may now name another clip.
+        state.add_track(TrackKind::Video);
+        let before = state.project().clone();
+        assert_eq!(tasks.on_arrival(&mut state, picked(dialog, "C:/fonts/a.ttf")), Action::Nothing);
+        assert_eq!(state.project(), &before, "nothing is changed");
+        assert_eq!(state.status(), &Status::Info(Message::FontTargetChanged));
+        assert!(tasks.is_idle());
+    }
+}

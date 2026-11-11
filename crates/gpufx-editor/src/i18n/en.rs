@@ -231,6 +231,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::DefaultFont => "Default font".to_owned(),
         Message::ChooseFontFile => "Choose a font file...".to_owned(),
         Message::FilterFont => "Font".to_owned(),
+        Message::FontTargetChanged => "The project changed while the font file was being chosen, so it was not applied; choose it again.".to_owned(),
         Message::LoadingFonts => "Loading fonts...".to_owned(),
         Message::FontMissing(family) => format!("The font \"{family}\" is not installed or cannot be read; the default font draws this text."),
         Message::FieldTextSize => "Size".to_owned(),

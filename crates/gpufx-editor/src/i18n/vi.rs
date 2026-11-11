@@ -214,6 +214,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::DefaultFont => "Font mặc định".to_owned(),
         Message::ChooseFontFile => "Chọn file font...".to_owned(),
         Message::FilterFont => "Font".to_owned(),
+        Message::FontTargetChanged => "Project đã đổi trong lúc chọn file font nên font chưa được áp dụng; hãy chọn lại.".to_owned(),
         Message::LoadingFonts => "Đang nạp font...".to_owned(),
         Message::FontMissing(family) => format!("Không có hoặc không đọc được font \"{family}\", chữ đang vẽ bằng font mặc định."),
         Message::FieldTextSize => "Cỡ chữ".to_owned(),

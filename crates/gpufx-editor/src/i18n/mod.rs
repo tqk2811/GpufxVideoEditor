@@ -241,6 +241,8 @@ pub enum Message {
     LoadingFonts,
     /// The font a text asks for is not installed and the default one draws it.
     FontMissing(String),
+    /// The project changed while the font file dialog was up, so the file chosen is not used.
+    FontTargetChanged,
     FieldTextSize,
     FieldTextColor,
     TextOutline,
@@ -436,6 +438,7 @@ mod tests {
             Message::FilterFont,
             Message::LoadingFonts,
             Message::FontMissing(name()),
+            Message::FontTargetChanged,
             Message::FieldTextSize,
             Message::FieldTextColor,
             Message::TextOutline,
