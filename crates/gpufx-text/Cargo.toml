@@ -1,0 +1,13 @@
+[package]
+name = "gpufx-text"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+engine = { path = "../engine" }
+cosmic-text = "=0.19.0"
+fontdb = { version = "0.23", default-features = false, features = ["std", "fs"] }
+
+[dev-dependencies]
+unicode-normalization = "0.1"
