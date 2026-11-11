@@ -498,7 +498,3 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Clip chữ chưa có vị trí mặc định theo cỡ chữ
 
 Clip chữ không có `placement` thì được dàn vừa khung như ảnh (`PlacedRect::of` ở `crates/engine/src/project.rs`), nên `size` không quyết định cỡ hiện ra; compositor còn phải rasterize ở scale trần 4 (`MAX_TEXT_SCALE`). Bước UI thêm chữ nên đặt `placement` theo cỡ tự nhiên (rộng = rộng ảnh ở scale 1 / rộng khung, căn giữa), lấy từ `crates/gpufx-editor/src/text_shapes.rs`. Ghi ngày 2026-11-11.
-
-### [Thấp] Lần đầu đo clip chữ trên luồng UI chờ quét font hệ thống
-
-`crates/gpufx-editor/src/text_shapes.rs` (`TextShapes::shape`) gọi `gpufx_text::shared()` lần đầu ngay trên luồng UI, mà dựng rasterizer quét toàn bộ font hệ thống (~1 s), nên lần đầu chọn hoặc vẽ khung clip chữ bị khựng. Nên dựng `shared()` sẵn ở luồng nền lúc mở editor. Ghi ngày 2026-11-11.

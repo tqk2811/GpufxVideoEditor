@@ -165,6 +165,7 @@ impl Session {
         let window_for_scan = window.clone();
         let session_window = window.clone();
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
+        crate::text_shapes::warm_up_shared();
         let mut state = EditorState::default();
         state.set_language(crate::settings::startup_language());
         state.ui.panel_sizes = crate::settings::startup_panel_sizes();
