@@ -53,6 +53,8 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `track_set_locked`, `track_set_hidden` | Khoá hoặc ẩn track. Sửa track đang khoá bị từ chối với lỗi `track_locked` |
 | `clip_add`, `clip_move`, `clip_trim_start`, `clip_trim_end`, `clip_split`, `clip_delete` | Sửa clip |
 | `effect_add`, `effect_remove`, `transition_add`, `transition_remove` | Hiệu ứng và transition |
+| `text_add`, `text_set` | Thêm và sửa clip chữ, xem mục `Chữ` |
+| `font_list`, `text_animation_list` | Danh sách font và danh sách preset hiệu ứng chữ theo nhóm `in`, `out`, `loop` |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
 | `clip_set_speed` | Tốc độ phát một clip, xem mục dưới |
 | `clip_set_transform` | Vị trí, độ mờ, xoay tĩnh của clip |
@@ -74,6 +76,20 @@ Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế đ�
 `clip_set_speed` nhận `clip`, `speed` (từ 0,1 đến 10, ví dụ 2 là nhanh gấp đôi) và `expected_revision`. Nó giữ nguyên đoạn nguồn đang phát nên thời lượng trên timeline thành `đoạn nguồn / speed`, tính từ điểm đầu cũ. Lỗi: `speed_overlap` khi clip sẽ chồng lên clip kế tiếp (không tự đẩy clip khác), `transition_on_edge` khi đuôi clip đang có transition, `out_of_range` khi tốc độ ngoài khoảng, `invalid_project` khi fade hoặc transition đầu clip không còn vừa, `track_locked` trên track khoá. `clip_add` nhận thêm `speed` tuỳ chọn; thời lượng mặc định là phần nguồn còn lại chia cho `speed`. `duration` truyền tay cùng `speed` bị từ chối bằng `out_of_range` khi `source_in + duration * speed` vượt quá độ dài của stream đã biết (áp dụng cả khi `speed` là 1). `project_get` trả `speed` khi khác 1.
 
 `keyframe_set` và `keyframe_remove` nhận `clip`, `at`, `expected_revision`, và hoặc `property` (`x`, `y`, `width`, `opacity`, `rotation`) hoặc `effect` (chỉ số) cùng `param` (tham số float của effect đó). `at` là số tick từ `clip.start`, KHÁC với `clip_time` mà gói effect đọc, vốn đếm từ đầu cửa sổ transition đi vào. Phạm vi hợp lệ khi đặt là [0, `duration`): đúng `duration` bị từ chối vì không có khung hình nào ở đó. `keyframe_set` thay keyframe cùng tick, `easing` vắng thì giữ easing cũ; giá trị ngoài giới hạn của thuộc tính hoặc ngoài `min`/`max` của tham số bị từ chối. Mã lỗi: `keyframe_outside_clip` khi `at` ngoài [0, `duration`) lúc đặt, `keyframe_not_found` khi `keyframe_remove` không có keyframe đúng tick `at`. `keyframe_remove` xoá được cả keyframe nằm ngoài clip (do cắt đầu hoặc đuôi clip để lại); khi xoá xong mà thuộc tính không còn keyframe nào trong [0, `duration`), các keyframe còn lại của nó bị xoá theo và thuộc tính về giá trị tĩnh. `project_get` trả `motion` của mỗi clip (`opacity`, `rotation` tĩnh và `keyframes` theo thuộc tính) cùng `keyframes` của từng effect; clip không dùng thì hai trường này vắng.
+
+### Chữ
+
+Clip chữ là clip có `source` `text:` và trường `text` (`TextContent`); `project_get` trả cả trường này nên agent đọc được nội dung và kiểu chữ qua tool đó, không cần tool đọc riêng. Mọi tool sửa đi qua `engine::add_text_clip` và `set_text`, nên mỗi lần là một bước undo.
+
+`text_add` nhận `start`, `duration` (tick), `content`, `expected_revision`, và tuỳ chọn `track`, `style`. `track` vắng thì dùng track video đầu tiên còn chỗ tại `start`, không có thì thêm track mới, giống nút "Thêm chữ". `style` có các trường `font`, `size`, `color`, `outline`, `background`, `shadow`, `align`, `line_spacing`, `animation`, tên và nghĩa giống `TextContent` trong project; trường vắng lấy giá trị của nút "Thêm chữ" (trắng, canh giữa, font dựng sẵn, `size` 0,08 phần chiều cao khung). Clip được đặt ở cỡ tự nhiên giữa khung; trả về `clip`.
+
+`text_set` nhận `clip`, `expected_revision`, `content` và các trường của `style`, ghi phẳng cùng cấp. Trường vắng giữ nguyên; `null` ở `outline`, `background`, `shadow` hoặc một nhóm của `animation` (`in`, `out`, `loop`) thì gỡ phần đó. Đổi `size` hoặc `content` thì vị trí của clip co giãn quanh tâm cũ như khi sửa trong inspector (`rescaled_placement`), clip có keyframe vị trí thì giữ nguyên vị trí. Clip không phải chữ bị từ chối với `not_text`.
+
+`font_list` trả `{state, fonts}`. Mỗi phần tử của `fonts` là giá trị dùng được ngay cho `font`: `{"kind": "default"}` đứng đầu, rồi `{"kind": "system", "family": ...}`. Lần quét font hệ thống chưa xong thì `state` là `loading` và chỉ có font mặc định; gọi lại sau, `state` thành `ready`. Khi đã `ready`, một family không có trong danh sách bị từ chối; còn `loading` thì tên được nhận như đã cho.
+
+`text_animation_list` trả `{"in": [...], "out": [...], "loop": [...]}`, mỗi nhóm là các id preset. Preset chỉ được dùng đúng nhóm của nó, `duration` của một preset tính bằng tick và phải lớn hơn 0.
+
+Giá trị không hợp lệ bị từ chối với `invalid_params` và nói rõ trường nào: `content` rỗng, `size` hay `line_spacing` không lớn hơn 0, độ rộng viền, `padding`, `radius` hay `blur` âm, preset không có hoặc sai nhóm, `duration` không dương, `text_set` không có trường nào để đổi.
 
 ### Xuất file
 
@@ -105,7 +121,7 @@ Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế đ�
 
 ## Lỗi
 
-Kết quả lỗi có `code`, `message` và dữ liệu kèm theo. `EditError` đổi sang code ổn định, ví dụ `overlap`, `clip_not_found`, `no_room`, `invalid_project`. Thêm `stale_revision`, `busy` (đang kéo hoặc đang xuất), `no_app` (chế độ live không tìm thấy app), `gpu_unavailable`, `invalid_params`, `out_of_range`, `unsaved_changes` (`project_new`, `project_open` trên project chưa lưu mà thiếu `discard_changes`; ở chế độ live luôn trả lỗi này, vì agent không được bỏ việc chưa lưu của user), `project_locked`, `source_not_found`, `invalid_source`, `package_not_found`, `file_exists`, `job_not_found`, `capture_failed`. Lỗi không làm chết server. GPU hỏng thì báo lỗi rõ và phải khởi động lại phiên.
+Kết quả lỗi có `code`, `message` và dữ liệu kèm theo. `EditError` đổi sang code ổn định, ví dụ `overlap`, `clip_not_found`, `no_room`, `invalid_project`. Thêm `stale_revision`, `busy` (đang kéo hoặc đang xuất), `no_app` (chế độ live không tìm thấy app), `gpu_unavailable`, `invalid_params`, `out_of_range`, `unsaved_changes` (`project_new`, `project_open` trên project chưa lưu mà thiếu `discard_changes`; ở chế độ live luôn trả lỗi này, vì agent không được bỏ việc chưa lưu của user), `project_locked`, `source_not_found`, `invalid_source`, `package_not_found`, `file_exists`, `job_not_found`, `capture_failed`, `not_text` (`text_set` trên clip không phải chữ). Lỗi không làm chết server. GPU hỏng thì báo lỗi rõ và phải khởi động lại phiên.
 
 ## An toàn
 

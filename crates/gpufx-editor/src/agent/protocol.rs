@@ -1,8 +1,8 @@
 //! The requests an agent can make and the errors it can get, as JSON. The same types go over the
 //! pipe to an open window.
 
-use engine::{ClipPlacement, Easing, EditError, KeyframeTarget, Time, TrackKind};
-use serde::{Deserialize, Serialize};
+use engine::{ClipPlacement, Easing, EditError, FontRef, KeyframeTarget, Rgba, TextAlign, TextAnimationRef, TextBackground, TextOutline, TextShadow, Time, TrackKind};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
 
@@ -25,6 +25,62 @@ impl From<engine::ClipKey> for ClipRef {
     }
 }
 
+/// Reads a field where absent, `null` and a value mean different things: absent is `None`, `null`
+/// is `Some(None)` and a value is `Some(Some(value))`.
+pub fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+/// What to change of a text. A field that is absent stays; `null` takes off an outline, a box, a
+/// shadow or an animation.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<FontRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Rgba>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub outline: Option<Option<TextOutline>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub background: Option<Option<TextBackground>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<Option<TextShadow>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<TextAlign>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_spacing: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<TextAnimationPatch>,
+}
+
+impl TextPatch {
+    /// Whether the patch changes nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == TextPatch::default()
+    }
+}
+
+/// What to change of the animation of a text, one group at a time, like [`TextPatch`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextAnimationPatch {
+    #[serde(default, rename = "in", deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub enter: Option<Option<TextAnimationRef>>,
+    #[serde(default, rename = "out", deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub exit: Option<Option<TextAnimationRef>>,
+    #[serde(default, rename = "loop", deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<Option<TextAnimationRef>>,
+}
+
 /// A change of the timeline; each is one undo step, except locking.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "edit", rename_all = "snake_case")]
@@ -34,6 +90,11 @@ pub enum AgentEdit {
     TrackSetHidden { track: usize, hidden: bool },
     /// `duration` defaults to the length of the stream the track plays.
     ClipAdd { track: usize, source: PathBuf, start: Time, source_in: Option<Time>, duration: Option<Time>, speed: Option<f64> },
+    /// A text clip with `content` in the style of `style` on top of a new text. `track` of `None`
+    /// takes the first video track with room at `start`, or a new one.
+    TextAdd { track: Option<usize>, start: Time, duration: Time, content: String, style: TextPatch },
+    /// Changes the text of a text clip; its place follows the size of the picture.
+    TextSet { clip: ClipRef, patch: TextPatch },
     ClipMove { clip: ClipRef, track: usize, start: Time },
     ClipTrimStart { clip: ClipRef, start: Time },
     ClipTrimEnd { clip: ClipRef, end: Time },
@@ -72,6 +133,10 @@ pub enum AgentRequest {
     ProjectSave { path: Option<PathBuf>, overwrite: bool },
     ProjectGet,
     PackagesList { filter: Option<String> },
+    /// The font families a text can name.
+    FontList,
+    /// The ids of the preset animations of a text, by group.
+    TextAnimationList,
     Edit { expected_revision: u64, edit: AgentEdit },
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },

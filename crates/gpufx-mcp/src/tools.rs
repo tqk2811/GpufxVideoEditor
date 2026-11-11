@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engine::Time;
-use gpufx_editor::agent::protocol::ClipRef;
+use gpufx_editor::agent::protocol::{double_option, ClipRef, TextAnimationPatch, TextPatch};
 use gpufx_editor::agent::{AgentEdit, AgentError, AgentRequest, CaptureTarget};
 use rmcp::model::{JsonObject, Tool};
 use schemars::JsonSchema;
@@ -108,6 +108,164 @@ impl From<EasingParam> for engine::Easing {
     }
 }
 
+/// Which font a text uses.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum FontParam {
+    /// The font built into the editor.
+    Default,
+    /// A font installed on the system, by a family font_list names.
+    System { family: String },
+}
+
+impl From<FontParam> for engine::FontRef {
+    fn from(font: FontParam) -> Self {
+        match font {
+            FontParam::Default => Self::Default,
+            FontParam::System { family } => Self::System { family },
+        }
+    }
+}
+
+/// Horizontal alignment of the lines of a text.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum AlignParam {
+    Left,
+    Center,
+    Right,
+}
+
+impl From<AlignParam> for engine::TextAlign {
+    fn from(align: AlignParam) -> Self {
+        match align {
+            AlignParam::Left => Self::Left,
+            AlignParam::Center => Self::Center,
+            AlignParam::Right => Self::Right,
+        }
+    }
+}
+
+/// An outline around each glyph.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct OutlineParam {
+    /// [r, g, b, a], each 0 to 255.
+    pub color: [u8; 4],
+    /// In parts of the font size, 0 or more.
+    pub width: f32,
+}
+
+/// A box behind the text.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct BackgroundParam {
+    /// [r, g, b, a], each 0 to 255.
+    pub color: [u8; 4],
+    /// Space between the text and the edge of the box, in parts of the font size, 0 or more.
+    pub padding: f32,
+    /// Corner radius, in parts of the font size, 0 or more.
+    pub radius: f32,
+}
+
+/// A drop shadow.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowParam {
+    /// [r, g, b, a], each 0 to 255.
+    pub color: [u8; 4],
+    /// [x, y], in parts of the font size.
+    pub offset: [f32; 2],
+    /// Blur radius, in parts of the font size, 0 or more.
+    pub blur: f32,
+}
+
+/// One preset animation of a text.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct AnimationRefParam {
+    /// An id text_animation_list names for this group.
+    pub preset: String,
+    /// How long one run lasts, in ticks, above 0.
+    pub duration: i64,
+}
+
+impl From<AnimationRefParam> for engine::TextAnimationRef {
+    fn from(animation: AnimationRefParam) -> Self {
+        Self { preset: animation.preset, duration: ticks(animation.duration) }
+    }
+}
+
+/// The animations of a text. A group that is absent stays as it is; null takes its animation off.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct AnimationParam {
+    /// Plays as the clip appears.
+    #[serde(default, rename = "in", deserialize_with = "double_option")]
+    pub enter: Option<Option<AnimationRefParam>>,
+    /// Plays as the clip goes away.
+    #[serde(default, rename = "out", deserialize_with = "double_option")]
+    pub exit: Option<Option<AnimationRefParam>>,
+    /// Repeats the whole time the clip shows.
+    #[serde(default, rename = "loop", deserialize_with = "double_option")]
+    pub repeat: Option<Option<AnimationRefParam>>,
+}
+
+impl From<AnimationParam> for TextAnimationPatch {
+    fn from(animation: AnimationParam) -> Self {
+        let group = |value: Option<Option<AnimationRefParam>>| value.map(|value| value.map(Into::into));
+        Self { enter: group(animation.enter), exit: group(animation.exit), repeat: group(animation.repeat) }
+    }
+}
+
+/// The style of a text. Every field is optional.
+#[derive(Deserialize, JsonSchema, Clone, Default)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct TextStyleParam {
+    pub font: Option<FontParam>,
+    /// Font size in parts of the output height (a new text has 0.08), above 0.
+    pub size: Option<f32>,
+    /// [r, g, b, a], each 0 to 255; white by default.
+    pub color: Option<[u8; 4]>,
+    /// null takes the outline off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub outline: Option<Option<OutlineParam>>,
+    /// null takes the box off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub background: Option<Option<BackgroundParam>>,
+    /// null takes the shadow off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub shadow: Option<Option<ShadowParam>>,
+    pub align: Option<AlignParam>,
+    /// Line height as a multiple of the font size, above 0.
+    pub line_spacing: Option<f32>,
+    pub animation: Option<AnimationParam>,
+}
+
+impl TextStyleParam {
+    fn patch(self, content: Option<String>) -> TextPatch {
+        TextPatch {
+            content,
+            font: self.font.map(Into::into),
+            size: self.size,
+            color: self.color,
+            outline: self.outline.map(|value| value.map(|v| engine::TextOutline { color: v.color, width: v.width })),
+            background: self.background.map(|value| value.map(|v| engine::TextBackground { color: v.color, padding: v.padding, radius: v.radius })),
+            shadow: self.shadow.map(|value| value.map(|v| engine::TextShadow { color: v.color, offset: v.offset, blur: v.blur })),
+            align: self.align.map(Into::into),
+            line_spacing: self.line_spacing,
+            animation: self.animation.map(Into::into),
+        }
+    }
+}
+
 /// What a keyframe call animates: exactly a property, or an effect with one of its parameters.
 fn keyframe_target(property: Option<ClipPropertyParam>, effect: Option<usize>, param: Option<String>) -> Result<engine::KeyframeTarget, AgentError> {
     match (property, effect, param) {
@@ -134,6 +292,24 @@ params!(TrackAddParams { expected_revision: u64, kind: TrackKindParam });
 params!(TrackLockedParams { expected_revision: u64, track: usize, locked: bool });
 params!(TrackHiddenParams { expected_revision: u64, track: usize, hidden: bool });
 params!(ClipAddParams { expected_revision: u64, track: usize, source: PathBuf, start: i64, source_in: Option<i64>, duration: Option<i64>, speed: Option<f64> });
+params!(TextAddParams { expected_revision: u64, track: Option<usize>, start: i64, duration: i64, content: String, style: Option<TextStyleParam> });
+params!(TextSetParams {
+    expected_revision: u64,
+    clip: ClipParam,
+    content: Option<String>,
+    font: Option<FontParam>,
+    size: Option<f32>,
+    color: Option<[u8; 4]>,
+    #[serde(default, deserialize_with = "double_option")]
+    outline: Option<Option<OutlineParam>>,
+    #[serde(default, deserialize_with = "double_option")]
+    background: Option<Option<BackgroundParam>>,
+    #[serde(default, deserialize_with = "double_option")]
+    shadow: Option<Option<ShadowParam>>,
+    align: Option<AlignParam>,
+    line_spacing: Option<f32>,
+    animation: Option<AnimationParam>,
+});
 params!(ClipMoveParams { expected_revision: u64, clip: ClipParam, track: usize, start: i64 });
 params!(ClipTrimStartParams { expected_revision: u64, clip: ClipParam, start: i64 });
 params!(ClipTrimEndParams { expected_revision: u64, clip: ClipParam, end: i64 });
@@ -204,6 +380,16 @@ fn edit(expected_revision: u64, edit: AgentEdit) -> Result<AgentRequest, AgentEr
     Ok(AgentRequest::Edit { expected_revision, edit })
 }
 
+fn text_add(p: TextAddParams) -> Result<AgentRequest, AgentError> {
+    let style = p.style.unwrap_or_default().patch(None);
+    edit(p.expected_revision, AgentEdit::TextAdd { track: p.track, start: ticks(p.start), duration: ticks(p.duration), content: p.content, style })
+}
+
+fn text_set(p: TextSetParams) -> Result<AgentRequest, AgentError> {
+    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, align: p.align, line_spacing: p.line_spacing, animation: p.animation };
+    edit(p.expected_revision, AgentEdit::TextSet { clip: p.clip.into(), patch: style.patch(p.content) })
+}
+
 /// Width a capture is limited to unless the call says otherwise.
 const DEFAULT_MAX_WIDTH: u32 = 1280;
 
@@ -233,6 +419,10 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("track_set_locked", "Locks or unlocks a track. Edits of a locked track fail with track_locked.", TrackLockedParams, |p| edit(p.expected_revision, AgentEdit::TrackSetLocked { track: p.track, locked: p.locked })),
         tool!("track_set_hidden", "Hides or shows a track in picture and sound.", TrackHiddenParams, |p| edit(p.expected_revision, AgentEdit::TrackSetHidden { track: p.track, hidden: p.hidden })),
         tool!("clip_add", "Adds a source file, a still image (png, jpg, webp, on a video track only), or a file of an installed pack as asset:<type>/<id>/<file> (type sfx, music or sticker), as a clip at start (ticks). duration defaults to what the stream the track plays still holds at that speed, and to 5 seconds for an image, whose end can be set freely. speed defaults to 1, between 0.1 and 10, and does not apply to an image. Returns the new clip.", ClipAddParams, |p| edit(p.expected_revision, AgentEdit::ClipAdd { track: p.track, source: p.source, start: ticks(p.start), source_in: p.source_in.map(ticks), duration: p.duration.map(ticks), speed: p.speed })),
+        tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track or, when track is absent, on the first video track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, align, line_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the built-in font. It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
+        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow or an animation group off. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
+        tool!("font_list", "The fonts a text can name, each as the font value to give: the built-in font first, then the installed families. state is loading while the installed fonts are still being read; ask again then.", NoParams, |_| Ok(AgentRequest::FontList)),
+        tool!("text_animation_list", "The preset animation ids a text can name, by group: in, out and loop. Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::TextAnimationList)),
         tool!("clip_move", "Moves a clip to a track, as near start as the other clips allow. Returns where it landed.", ClipMoveParams, |p| edit(p.expected_revision, AgentEdit::ClipMove { clip: p.clip.into(), track: p.track, start: ticks(p.start) })),
         tool!("clip_trim_start", "Moves the start edge of a clip, keeping the frames under the end edge.", ClipTrimStartParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimStart { clip: p.clip.into(), start: ticks(p.start) })),
         tool!("clip_trim_end", "Moves the end edge of a clip.", ClipTrimEndParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimEnd { clip: p.clip.into(), end: ticks(p.end) })),

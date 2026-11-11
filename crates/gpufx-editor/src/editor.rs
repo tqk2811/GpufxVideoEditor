@@ -1474,7 +1474,7 @@ impl EditorState {
         self.text_shapes.borrow_mut().shape(text, self.project().output.height).pixels
     }
 
-    fn output_pixels(&self) -> (u32, u32) {
+    pub(crate) fn output_pixels(&self) -> (u32, u32) {
         let output = &self.project().output;
         (output.width, output.height)
     }
@@ -1512,12 +1512,10 @@ impl EditorState {
     /// gave it around the same centre, so a new size or content changes the text on screen.
     pub fn live_text(&mut self, text: TextContent) {
         let Some(key) = self.selection else { return };
-        let Some(before) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
-        let placement = before.placement.filter(|_| !ClipProperty::ALL.into_iter().any(|property| property.is_placement() && before.motion.has_keyframes(property)));
-        let rescaled = match (placement, before.text.as_ref()) {
-            (Some(placement), Some(old)) => rescaled_placement(placement, self.text_pixels(old), self.text_pixels(&text), self.output_pixels()),
-            _ => None,
-        };
+        if self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_none() {
+            return;
+        }
+        let rescaled = self.rescaled_text_placement(key, &text);
         self.live_edit(|project| {
             let next = set_text(project, key, text)?;
             match rescaled {
@@ -1525,6 +1523,15 @@ impl EditorState {
                 None => Ok(next),
             }
         });
+    }
+
+    /// The place the text clip `key` takes when it shows `text`: its place scaled as the user gave
+    /// it around the same centre. `None` when it has no fixed place, keyframes of its place, or
+    /// when the picture of either text is empty, which leave the place as it is.
+    pub fn rescaled_text_placement(&self, key: ClipKey, text: &TextContent) -> Option<ClipPlacement> {
+        let before = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip))?;
+        let placement = before.placement.filter(|_| !ClipProperty::ALL.into_iter().any(|property| property.is_placement() && before.motion.has_keyframes(property)))?;
+        rescaled_placement(placement, self.text_pixels(before.text.as_ref()?), self.text_pixels(text), self.output_pixels())
     }
 
     /// Adds `item` where it was dropped: on `track`, as near `at` as the other clips allow, or on a

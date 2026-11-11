@@ -13,10 +13,13 @@ use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
+use super::text::{animation_list, apply_patch, font_list};
 use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_IMAGE_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::export::{export_blocker, ExportOutcome};
 use crate::i18n::Language;
+use crate::media::{choose_track, TrackChoice};
 use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
+use crate::text_clip::{default_text, natural_placement};
 use crate::project_file::{load_project_file_for_agent, save_project_file};
 use crate::preview::plan::frame_index;
 use crate::project_lock;
@@ -258,6 +261,51 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             state.apply_agent_command(|project| engine::add_clip(project, track, clip)).map_err(refused)?;
             result.insert("clip".to_owned(), clip_json(clip_at(state.project(), track, start)));
         }
+        AgentEdit::TextAdd { track, start, duration, content, style } => {
+            if duration <= Time::ZERO {
+                return Err(AgentError::new("invalid_params", "duration must be above 0"));
+            }
+            let text = apply_patch(&default_text(String::new()), &super::protocol::TextPatch { content: Some(content), ..style })?;
+            let placement = natural_placement(state.text_pixels(&text), state.output_pixels());
+            let (track, new_track) = match track {
+                Some(track) => (track, false),
+                None => match choose_track(state.project(), TrackKind::Video, duration, start) {
+                    TrackChoice::Existing(track) => (track, false),
+                    TrackChoice::New => (state.project().tracks.len(), true),
+                },
+            };
+            state
+                .apply_agent_command(|project| {
+                    let with_track = if new_track { engine::add_track(project, TrackKind::Video)? } else { project.clone() };
+                    let next = engine::add_text_clip(&with_track, track, start, duration, text)?;
+                    match (placement, clip_at(&next, track, start)) {
+                        (Some(placement), Some(key)) => engine::set_placement(&next, key, Some(placement)),
+                        _ => Ok(next),
+                    }
+                })
+                .map_err(refused)?;
+            result.insert("clip".to_owned(), clip_json(clip_at(state.project(), track, start)));
+        }
+        AgentEdit::TextSet { clip, patch } => {
+            if patch.is_empty() {
+                return Err(AgentError::new("invalid_params", "give at least one field to change"));
+            }
+            let key = ClipKey::from(clip);
+            let found = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).and_then(|track| track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key })).map_err(|error| AgentError::from_edit(&error))?;
+            let Some(old) = found.text.as_ref() else { return Err(AgentError::from_edit(&engine::EditError::NotText { key })) };
+            let text = apply_patch(old, &patch)?;
+            let placement = state.rescaled_text_placement(key, &text);
+            state
+                .apply_agent_command(|project| {
+                    let next = engine::set_text(project, key, text)?;
+                    match placement {
+                        Some(placement) => engine::set_placement(&next, key, Some(placement)),
+                        None => Ok(next),
+                    }
+                })
+                .map_err(refused)?;
+            result.insert("clip".to_owned(), json!(clip));
+        }
         AgentEdit::ClipMove { clip, track, start } => {
             let landing = landing_start(state.project(), clip, track, start);
             state.apply_agent_command(|project| engine::move_clip(project, clip.into(), track, start)).map_err(refused)?;
@@ -492,6 +540,8 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::ProjectSave { path, overwrite } => project_save(host, path.as_deref(), overwrite),
         AgentRequest::ProjectGet => Ok(project_summary(host.state().project())),
         AgentRequest::PackagesList { .. } => Ok(package_list.unwrap_or_default()),
+        AgentRequest::FontList => Ok(font_list()),
+        AgentRequest::TextAnimationList => Ok(animation_list()),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
             None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe)),
