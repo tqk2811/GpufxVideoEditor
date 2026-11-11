@@ -16,6 +16,8 @@ git submodule update --init external/GpufxVideoEditor-Assets
 
 `scripts/setup-poc.ps1` runs all three. Tests that need effects skip themselves when `packages` is empty, so an empty folder can look like a green run. `scripts/build-variants.ps1` stops in that case.
 
+The font tests of `gpufx-text` skip themselves when Segoe UI or Arial, or a Windows font file they draw with, is not installed. Set `GPUFX_REQUIRE_FONTS=1` to make them fail instead, on a machine that must have those fonts.
+
 ## Working with the FFmpegGpuFilter session
 
 Another Claude session may be working in `D:\IT\Github\tqk2811\FFmpegGpuFilter`. Run `ListAgents` and look for a session whose name starts with `ffmpeggpufilter`. Message it with `SendMessage`.

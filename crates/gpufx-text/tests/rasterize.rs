@@ -4,6 +4,15 @@ use unicode_normalization::UnicodeNormalization;
 
 const HEIGHT: u32 = 720;
 
+/// Notes that a test is skipped for want of a font, or fails when `GPUFX_REQUIRE_FONTS=1`, so a
+/// machine that must have the fonts cannot pass by skipping.
+fn skip(reason: String) {
+    if std::env::var("GPUFX_REQUIRE_FONTS").is_ok_and(|value| value == "1") {
+        panic!("GPUFX_REQUIRE_FONTS=1 but {reason}");
+    }
+    eprintln!("skipped: {reason}");
+}
+
 /// The system rasterizer when its default font is one of [`DEFAULT_FAMILY_CANDIDATES`], so the
 /// checks below run on a known font; otherwise the test is skipped with a note.
 fn rasterizer() -> Option<TextRasterizer> {
@@ -11,7 +20,7 @@ fn rasterizer() -> Option<TextRasterizer> {
     if r.default_family().is_some_and(|family| DEFAULT_FAMILY_CANDIDATES.iter().any(|known| known.eq_ignore_ascii_case(family))) {
         Some(r)
     } else {
-        eprintln!("skipped: none of {DEFAULT_FAMILY_CANDIDATES:?} is installed (default is {:?})", r.default_family());
+        skip(format!("none of {DEFAULT_FAMILY_CANDIDATES:?} is installed (default is {:?})", r.default_family()));
         None
     }
 }
@@ -249,7 +258,7 @@ fn windows_font(name: &str) -> Option<std::path::PathBuf> {
     if path.is_file() {
         Some(path)
     } else {
-        eprintln!("skipped: no {name}");
+        skip(format!("no {name}"));
         None
     }
 }
@@ -322,11 +331,17 @@ fn without_any_font_text_is_empty_and_says_so() {
 }
 
 #[test]
+fn glyphs_no_loaded_font_has_are_counted_as_missing() {
+    // Only arial.ttf is loaded, so nothing falls back to a font with Han letters.
+    let Some(arial) = windows_font("arial.ttf") else { return };
+    let mut r = TextRasterizer::with_font_files(&[arial]);
+    assert_eq!(r.rasterize(&TextContent::new("中文", 0.06), HEIGHT, 1.0).missing_glyphs, 2);
+    assert_eq!(r.rasterize(&TextContent::new("Latin", 0.06), HEIGHT, 1.0).missing_glyphs, 0);
+}
+
+#[test]
 fn a_font_file_that_is_not_a_candidate_becomes_the_default() {
-    let Some(path) = std::env::var_os("WINDIR").map(|dir| std::path::Path::new(&dir).join("Fonts").join("times.ttf")).filter(|path| path.is_file()) else {
-        eprintln!("skipped: no times.ttf");
-        return;
-    };
+    let Some(path) = windows_font("times.ttf") else { return };
     let mut r = TextRasterizer::with_font_files(&[path]);
     assert_eq!(r.default_family(), Some("Times New Roman"));
     let image = r.rasterize(&TextContent::new("Hello", 0.06), HEIGHT, 1.0);
