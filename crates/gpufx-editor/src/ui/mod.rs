@@ -7,6 +7,7 @@ mod left_panel;
 mod numeric;
 mod param_widgets;
 mod placement;
+mod text_inspector;
 mod player;
 pub mod theme;
 mod timeline_panel;

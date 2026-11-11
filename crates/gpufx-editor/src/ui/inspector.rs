@@ -137,6 +137,12 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         fade_row(ui, state, &language.t(Message::FadeOut), clip.fade_out, clip.duration.saturating_sub(clip.fade_in), !has_after, |state, value| state.live_fades(clip.fade_in, value));
     });
 
+    if let Some(text) = &clip.text {
+        ui.separator();
+        let id = ui.scope_id().with(("text-inspector", clip_identity(key, &clip)));
+        ui.add_enabled_ui(editable, |ui| super::text_inspector::show(ui, state, key, id, text));
+    }
+
     if track_kind == TrackKind::Video {
         ui.separator();
         ui.add_enabled_ui(editable, |ui| {
