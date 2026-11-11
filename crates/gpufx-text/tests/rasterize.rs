@@ -70,6 +70,18 @@ fn outline_covers_more_pixels() {
     assert!(covered(&outlined) > covered(&plain) * 5 / 4, "{} vs {}", covered(&outlined), covered(&plain));
 }
 
+/// Small letters have hairlines with no pixel half covered; their outline must still show.
+#[test]
+fn tiny_letters_still_get_an_outline() {
+    let ink = |image: &TextImage| image.pixels.chunks(4).map(|p| p[3] as u64).sum::<u64>();
+    let mut r = rasterizer();
+    let mut text = TextContent::new("i", 8.0 / HEIGHT as f32);
+    let plain = r.rasterize(&text, HEIGHT, 1.0);
+    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: MAX_OUTLINE_RATIO });
+    let outlined = r.rasterize(&text, HEIGHT, 1.0);
+    assert!(ink(&outlined) > ink(&plain) * 3, "{} vs {}", ink(&outlined), ink(&plain));
+}
+
 #[test]
 fn line_feed_makes_more_lines() {
     let mut r = rasterizer();

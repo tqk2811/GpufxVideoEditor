@@ -226,6 +226,18 @@ fn trimming_the_source_in_of_a_still_keeps_it_at_zero() {
 }
 
 #[test]
+fn trimming_the_source_in_of_a_still_resets_a_stale_one_to_zero() {
+    let base = project_with(vec![clip("a.png", 9000, 6000, 18000)]);
+    let mut history = EditHistory::new(base.clone(), 10);
+    history.apply(|p| engine::trim_source_in(p, KEY, t(3000))).unwrap();
+    let trimmed = &history.current().tracks[0].clips[0];
+    assert_eq!((trimmed.source_in, trimmed.start, trimmed.duration), (Time::ZERO, t(9000), t(18000)));
+    assert!(history.undo());
+    assert_eq!(history.current(), &base);
+    assert_eq!(history.current().tracks[0].clips[0].source_in, t(6000));
+}
+
+#[test]
 fn the_second_half_of_a_split_still_starts_at_source_zero() {
     for still in [text_clip("Hi", 0, 9000), clip("a.png", 0, 0, 9000)] {
         let base = project_with(vec![still]);

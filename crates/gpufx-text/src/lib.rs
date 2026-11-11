@@ -398,11 +398,23 @@ impl Mask {
     }
 
     /// The glyphs grown by `radius` pixels: each pixel is covered by how far it is from the
-    /// nearest pixel at least half covered, through an exact Euclidean distance transform, so the
-    /// cost does not grow with the radius. Never less than the coverage itself.
+    /// nearest covered pixel, through an exact Euclidean distance transform, so the cost does not
+    /// grow with the radius. A pixel under half covered starts that far short of the edge, so thin
+    /// strokes with no pixel half covered still grow. Never less than the coverage itself.
     fn dilate(&self, radius: f32) -> Mask {
         let (w, h) = (self.width, self.height);
-        let mut squared: Vec<f64> = self.data.iter().map(|&a| if a >= 0.5 { 0.0 } else { FAR }).collect();
+        let mut squared: Vec<f64> = self
+            .data
+            .iter()
+            .map(|&a| {
+                if a > 0.0 {
+                    let short = (0.5 - a as f64).max(0.0);
+                    short * short
+                } else {
+                    FAR
+                }
+            })
+            .collect();
         let mut scratch = DistanceScratch::new(w.max(h));
         let mut column = std::mem::take(&mut scratch.line);
         column.truncate(h);
