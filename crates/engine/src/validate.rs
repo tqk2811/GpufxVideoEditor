@@ -2,7 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::project::{speed_in_range, Clip, Project, TEXT_SOURCE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
-use crate::text_animation::{find_preset, AnimationGroup, TEXT_ANIMATION_PRESETS};
+use crate::clip_animation::{find_preset, AnimationGroup, TEXT_ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;

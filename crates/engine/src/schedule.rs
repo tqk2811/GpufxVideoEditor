@@ -37,7 +37,7 @@
 
 use crate::keyframe::ClipTransform;
 use crate::project::{Clip, Effect, Project, Track, Transition};
-use crate::text_animation::animation_pose;
+use crate::clip_animation::animation_pose;
 use crate::time::Time;
 use serde_json::{Map, Value};
 

@@ -17,7 +17,7 @@
 //!   static value is what the property goes back to when its last keyframe is removed.
 
 use crate::project::{Clip, ClipPlacement, Effect, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
-use crate::text_animation::{animation_max_scale, animation_rotates, AnimationPose};
+use crate::clip_animation::{animation_max_scale, animation_rotates, AnimationPose};
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -247,10 +247,12 @@ pub struct ClipTransform {
     /// rotation is drawn the same way at the frames where it happens to be upright.
     pub rotates: bool,
     /// Shift of the picture after everything above, in parts of the frame width and height (from
-    /// a preset animation of a text clip, see [`crate::text_animation`]).
+    /// a preset animation of a text clip, see [`crate::clip_animation`]).
     pub shift: [f64; 2],
     /// Scale of the picture around its middle, after everything above.
     pub zoom: f64,
+    /// Scale of the width and the height alone, on top of `zoom`.
+    pub stretch: [f64; 2],
 }
 
 impl Default for ClipTransform {
@@ -262,13 +264,14 @@ impl Default for ClipTransform {
 impl ClipTransform {
     /// A clip with no motion at all at `placement`.
     pub fn still(placement: Option<ClipPlacement>) -> Self {
-        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0 }
+        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0, stretch: [1.0, 1.0] }
     }
 
     /// This transform with `pose` of a preset animation on top.
     pub fn with_pose(mut self, pose: AnimationPose) -> Self {
         self.shift = [self.shift[0] + pose.dx, self.shift[1] + pose.dy];
         self.zoom *= pose.scale;
+        self.stretch = [self.stretch[0] * pose.scale_x, self.stretch[1] * pose.scale_y];
         self.rotation += pose.rotation;
         self.opacity *= pose.opacity;
         self
@@ -292,10 +295,10 @@ impl ClipTransform {
         }
         rect.x = self.x.unwrap_or(rect.x);
         rect.y = self.y.unwrap_or(rect.y);
-        if self.zoom != 1.0 {
+        if self.zoom != 1.0 || self.stretch != [1.0, 1.0] {
             let (middle_x, middle_y) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
-            rect.width *= self.zoom;
-            rect.height *= self.zoom;
+            rect.width *= self.zoom * self.stretch[0];
+            rect.height *= self.zoom * self.stretch[1];
             rect.x = middle_x - rect.width / 2.0;
             rect.y = middle_y - rect.height / 2.0;
         }
@@ -325,6 +328,7 @@ impl Clip {
             rotates: motion.has_keyframes(ClipProperty::Rotation) || motion.rotation != 0.0 || self.text.as_ref().is_some_and(|text| animation_rotates(&text.animation)),
             shift: [0.0, 0.0],
             zoom: 1.0,
+            stretch: [1.0, 1.0],
         }
     }
 

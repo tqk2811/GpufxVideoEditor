@@ -154,8 +154,8 @@ fn the_widest_counts_the_largest_scale_of_the_presets() {
     let plain = animated(0, 90_000, TextAnimation::default());
     let popping = animated(0, 90_000, TextAnimation { enter: reference("pop", 9000), repeat: reference("pulse", 9000), ..Default::default() });
     let base = plain.widest(ASPECT, 2.0);
-    let peak = TEXT_ANIMATION_PRESETS.iter().find(|p| p.id == "pop" && p.group == AnimationGroup::Enter).unwrap().max_scale
-        * TEXT_ANIMATION_PRESETS.iter().find(|p| p.id == "pulse").unwrap().max_scale;
+    let peak = TEXT_ANIMATION_PRESETS.iter().find(|p| p.id == "pop" && p.group == AnimationGroup::Enter).unwrap().max_scale()
+        * TEXT_ANIMATION_PRESETS.iter().find(|p| p.id == "pulse").unwrap().max_scale();
     assert!(close(popping.widest(ASPECT, 2.0), base * peak));
     let fading = animated(0, 90_000, TextAnimation { enter: reference("fade", 9000), ..Default::default() });
     assert!(close(fading.widest(ASPECT, 2.0), base));
