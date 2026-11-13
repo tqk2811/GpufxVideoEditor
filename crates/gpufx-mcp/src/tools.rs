@@ -298,6 +298,10 @@ pub struct TextStyleParam {
     /// Extra space after each character, in parts of the font size, -2 to 2; 0 by default.
     pub letter_spacing: Option<f32>,
     pub animation: Option<AnimationParam>,
+    /// A style of an installed text or subtitle style pack, as text_style_list names it
+    /// ("<pack>/<item>"): its values are copied into the text first, and the other fields here
+    /// override them. A subtitle style also moves the text where its layout says.
+    pub style_id: Option<String>,
 }
 
 impl TextStyleParam {
@@ -318,6 +322,7 @@ impl TextStyleParam {
             transform: self.transform.map(Into::into),
             letter_spacing: self.letter_spacing,
             animation: self.animation.map(Into::into),
+            style_id: self.style_id,
         }
     }
 }
@@ -371,6 +376,20 @@ params!(TextSetParams {
     transform: Option<TransformParam>,
     letter_spacing: Option<f32>,
     animation: Option<AnimationParam>,
+    /// A style text_style_list names, applied before the other fields, which override it.
+    style_id: Option<String>,
+});
+/// Which styles text_style_list names.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum StyleTypeParam {
+    Text,
+    Subtitle,
+}
+params!(TextStyleListParams {
+    /// text or subtitle; both when absent.
+    #[serde(rename = "type")]
+    kind: Option<StyleTypeParam>,
 });
 params!(ClipMoveParams { expected_revision: u64, clip: ClipParam, track: usize, start: i64 });
 params!(ClipTrimStartParams { expected_revision: u64, clip: ClipParam, start: i64 });
@@ -474,7 +493,7 @@ fn text_add(p: TextAddParams) -> Result<AgentRequest, AgentError> {
 }
 
 fn text_set(p: TextSetParams) -> Result<AgentRequest, AgentError> {
-    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, glow: p.glow, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation };
+    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, glow: p.glow, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation, style_id: p.style_id };
     edit(p.expected_revision, AgentEdit::TextSet { clip: p.clip.into(), patch: style.patch(p.content) })
 }
 
@@ -511,6 +530,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow, glow or an animation group off. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
         tool!("font_list", "The fonts a text can name, each as the font value to give: the default font first (the system UI font, such as Segoe UI), then the installed families. state is loading while the installed fonts are still being read; ask again then.", NoParams, |_| Ok(AgentRequest::FontList)),
         tool!("clip_animation_list", "The preset animations a clip with a picture (video, image, sticker or text) can name: each with its id, its group (in, out or loop) and default_duration in ticks (for loop, one cycle). Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::ClipAnimationList)),
+        tool!("text_style_list", "The styles of the installed text style and subtitle style packs, filtered by type (text or subtitle; both when absent): each with its id to give as style_id to text_add (in style) or text_set, its name, type, category, preview_text, pack, the style values it copies into a text (absent ones are as on a new text; an absent size keeps the text's), its animations (durations in ticks) and, for a subtitle style, its layout (anchor_y and max_width in parts of the frame). font_hint names fonts used when installed. state is loading while the packs are still being read.", TextStyleListParams, |p| Ok(AgentRequest::TextStyleList { kind: p.kind.map(|kind| match kind { StyleTypeParam::Text => "text".to_owned(), StyleTypeParam::Subtitle => "subtitle".to_owned() }) })),
         tool!("clip_animation_set", "Sets the preset animations of a clip with a picture (video, image, sticker or text): in plays as it appears, out as it goes away, loop the whole time it shows. Each is {preset, duration in ticks}, with a preset clip_animation_list names for that group; a group that is absent stays, and null takes its animation off. Refused with invalid_params for a clip on an audio track.", ClipAnimationSetParams, clip_animation_set),
         tool!("clip_move", "Moves a clip to a track, as near start as the other clips allow. Returns where it landed.", ClipMoveParams, |p| edit(p.expected_revision, AgentEdit::ClipMove { clip: p.clip.into(), track: p.track, start: ticks(p.start) })),
         tool!("clip_trim_start", "Moves the start edge of a clip, keeping the frames under the end edge.", ClipTrimStartParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimStart { clip: p.clip.into(), start: ticks(p.start) })),

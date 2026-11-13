@@ -13,7 +13,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use engine::Rgba;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
 use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, Unpacked, MANIFEST};
@@ -66,7 +66,7 @@ pub struct SubtitleStyleManifestItem {
 }
 
 /// Where a subtitle sits in the frame.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubtitleLayout {
     /// The middle of the text, in parts of the frame height from the top, 0 to 1.

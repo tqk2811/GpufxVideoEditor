@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
-use super::text::{animation_list, apply_animation_patch, apply_patch, font_list, patched_animation};
+use super::text::{animation_list, apply_animation_patch, apply_patch, font_list, patched_animation, styled_base};
 use crate::clip_animation_library::AnimatedClipKind;
 use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_IMAGE_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::export::{export_blocker, ExportOutcome};
@@ -21,6 +21,7 @@ use crate::i18n::Language;
 use crate::media::{choose_track, TrackChoice};
 use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
 use crate::text_clip::{default_text, natural_placement};
+use crate::text_style_library::subtitle_placement;
 use crate::project_file::{load_project_file_for_agent, save_project_file};
 use crate::preview::plan::frame_index;
 use crate::project_lock;
@@ -267,9 +268,14 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 return Err(AgentError::new("invalid_params", "duration must be above 0"));
             }
             let patch = super::protocol::TextPatch { content: Some(content), ..style };
-            let text = apply_patch(&default_text(String::new()), &patch)?;
-            let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::Text, &engine::ClipAnimation::default(), &patch)?;
-            let placement = natural_placement(state.text_pixels(&text), state.output_pixels());
+            let styled = styled_base(&state.text_style_library, patch.style_id.as_deref(), &default_text(String::new()), &engine::ClipAnimation::default())?;
+            let text = apply_patch(&styled.text, &patch)?;
+            let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::Text, &styled.animation, &patch)?.unwrap_or(styled.animation);
+            let animation = Some(animation).filter(|animation| !animation.is_empty());
+            let placement = match styled.layout {
+                Some(layout) => subtitle_placement(state.text_pixels(&text), state.output_pixels(), &layout),
+                None => natural_placement(state.text_pixels(&text), state.output_pixels()),
+            };
             let (track, new_track) = match track {
                 Some(track) => (track, false),
                 None => match choose_track(state.project(), TrackKind::Video, duration, start) {
@@ -301,9 +307,14 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             let key = ClipKey::from(clip);
             let found = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).and_then(|track| track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key })).map_err(|error| AgentError::from_edit(&error))?;
             let Some(old) = found.text.as_ref() else { return Err(AgentError::from_edit(&engine::EditError::NotText { key })) };
-            let text = apply_patch(old, &patch)?;
-            let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::of(found), &found.animation, &patch)?;
-            let placement = state.rescaled_text_placement(key, &text);
+            let styled = styled_base(&state.text_style_library, patch.style_id.as_deref(), old, &found.animation)?;
+            let text = apply_patch(&styled.text, &patch)?;
+            let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::of(found), &styled.animation, &patch)?.unwrap_or(styled.animation);
+            let animation = Some(animation).filter(|animation| *animation != found.animation);
+            let placement = match styled.layout {
+                Some(layout) => subtitle_placement(state.text_pixels(&text), state.output_pixels(), &layout),
+                None => state.rescaled_text_placement(key, &text),
+            };
             state
                 .apply_agent_command(|project| {
                     let next = engine::set_text(project, key, text)?;
@@ -566,6 +577,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::PackagesList { .. } => Ok(package_list.unwrap_or_default()),
         AgentRequest::FontList => Ok(font_list()),
         AgentRequest::ClipAnimationList => Ok(animation_list(&host.state().clip_animation_library)),
+        AgentRequest::TextStyleList { kind } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref()),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
             None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe)),

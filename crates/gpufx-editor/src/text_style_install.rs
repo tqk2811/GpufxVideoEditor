@@ -16,7 +16,7 @@ use std::path::Path;
 
 use d3d12_backend::is_safe_id;
 use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextContent, TextGlow, TextOutline, TextShadow, TextTransform};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
 use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
@@ -77,39 +77,39 @@ pub struct TextStyleManifestItem {
 /// absent is as on a new text, except `size`, which then stays as the clip has it. A font is only
 /// hinted at: the first family of `font_hint` installed on the machine draws it, else the clip keeps
 /// its font. No font is shipped in a pack.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackTextStyle {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<Rgba>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline: Option<PackOutline>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<PackBackground>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<PackShadow>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glow: Option<PackGlow>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<TextAlign>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_spacing: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<u16>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub italic: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transform: Option<TextTransform>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub letter_spacing: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub font_hint: Vec<String>,
 }
 
 /// [`TextOutline`], with no other field allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackOutline {
     pub color: Rgba,
@@ -117,7 +117,7 @@ pub struct PackOutline {
 }
 
 /// [`TextBackground`], with no other field allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackBackground {
     pub color: Rgba,
@@ -126,7 +126,7 @@ pub struct PackBackground {
 }
 
 /// [`TextShadow`], with no other field allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackShadow {
     pub color: Rgba,
@@ -135,7 +135,7 @@ pub struct PackShadow {
 }
 
 /// [`TextGlow`], with no other field allowed; `intensity` and `falloff` default as in a project.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackGlow {
     pub color: Rgba,

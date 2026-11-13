@@ -70,6 +70,10 @@ pub struct TextPatch {
     pub letter_spacing: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<TextAnimationPatch>,
+    /// A style of an installed text or subtitle style pack, `"<pack id>/<item id>"`, applied
+    /// before the other fields, which override it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style_id: Option<String>,
 }
 
 impl TextPatch {
@@ -149,6 +153,9 @@ pub enum AgentRequest {
     FontList,
     /// The preset animations a clip with a picture can name: id, group and default duration.
     ClipAnimationList,
+    /// The styles of the installed text (`text`) or subtitle (`subtitle`) style packs; both when
+    /// `kind` is `None`.
+    TextStyleList { kind: Option<String> },
     Edit { expected_revision: u64, edit: AgentEdit },
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },

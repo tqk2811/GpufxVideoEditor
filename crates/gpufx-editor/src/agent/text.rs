@@ -4,6 +4,8 @@
 use engine::{AnimationGroup, FontRef, ClipAnimation, AnimationRef, TextContent, ANIMATION_PRESETS};
 
 use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary};
+use crate::subtitle_style_install::SubtitleLayout;
+use crate::text_style_library::{StyleKind, TextStyleLibrary};
 use serde_json::{json, Value};
 
 use super::protocol::{AgentError, TextAnimationPatch, TextPatch};
@@ -201,6 +203,45 @@ fn check_animation(library: &ClipAnimationLibrary, kind: AnimatedClipKind, group
 fn presets(library: &ClipAnimationLibrary, group: AnimationGroup) -> Vec<String> {
     let built_in = ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id.to_owned());
     built_in.chain(library.packs.iter().flat_map(|pack| &pack.animations).filter(|animation| animation.group == group).map(|animation| animation.reference.clone())).collect()
+}
+
+/// What a text and its animations start from before the fields of a patch: `text` and `animation`
+/// as they are, or in the style `style_id` of `library`, with the layout of a subtitle style.
+pub struct StyledBase {
+    pub text: TextContent,
+    pub animation: ClipAnimation,
+    pub layout: Option<SubtitleLayout>,
+}
+
+/// The [`StyledBase`] of `text` and `animation` for a patch naming `style_id`. A style that is not
+/// installed is refused, or said to be still loading while the packs are being read.
+pub fn styled_base(library: &TextStyleLibrary, style_id: Option<&str>, text: &TextContent, animation: &ClipAnimation) -> Result<StyledBase, AgentError> {
+    let Some(style_id) = style_id else { return Ok(StyledBase { text: text.clone(), animation: animation.clone(), layout: None }) };
+    match library.find(style_id) {
+        Some(style) => Ok(StyledBase { text: style.apply(text, &available_families()), animation: style.animation_for(animation), layout: style.layout }),
+        None if !library.loaded => Err(invalid(format!("'{style_id}' may be a style of an installed pack, but the packs are still loading; try again in a moment"))),
+        None => Err(invalid(format!("no style '{style_id}': text_style_list names the installed styles"))),
+    }
+}
+
+/// The styles of the installed packs of `kind` (`text` or `subtitle`, both when absent): each with
+/// its id to give as `style_id`, its name, type, category, preview text, pack, the style values it
+/// copies into a text, its animations and, for a subtitle style, its layout. `state` is `loading`
+/// while the packs are still being read.
+pub fn text_style_list(library: &TextStyleLibrary, kind: Option<&str>) -> Result<Value, AgentError> {
+    let kind = match kind {
+        None => None,
+        Some(name) => Some(StyleKind::from_name(name).ok_or_else(|| invalid(format!("type must be text or subtitle, not '{name}'")))?),
+    };
+    let styles: Vec<Value> = library
+        .styles(kind)
+        .map(|(pack, style)| {
+            let animation = style.animation.as_ref().map(|animation| serde_json::to_value(animation).unwrap_or(Value::Null));
+            json!({"id": style.reference, "name": style.name, "type": style.kind.name(), "category": style.category, "preview_text": style.preview_text, "pack": {"id": pack.id, "name": pack.name}, "style": style.style, "animation": animation, "layout": style.layout})
+        })
+        .collect();
+    let problems: Vec<Value> = library.problems.iter().map(|problem| json!({"pack": problem.pack, "message": problem.message})).collect();
+    Ok(json!({"state": if library.loaded { "ready" } else { "loading" }, "styles": styles, "problems": problems}))
 }
 
 /// The fonts a text can name, each as the `font` value to use: the system default first. While the

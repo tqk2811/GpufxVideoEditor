@@ -355,12 +355,69 @@ fn clip_animation_set_refuses_a_pack_preset_that_is_not_for_the_kind_of_clip() {
     assert_eq!(animation_of(&mut session, 0, 0).enter.map(|value| value.preset), Some("kinds/video-ok".to_owned()));
 }
 
+/// A root with a text style pack `styles` (item `bold`) and a subtitle style pack `subs` (item
+/// `low`, anchored at 0.85 of the frame height).
+fn style_root() -> std::path::PathBuf {
+    let root = scratch("text-styles");
+    let write = |kind: &str, id: &str, items: &str| {
+        let folder = root.join("packages").join(kind).join(id);
+        std::fs::create_dir_all(&folder).unwrap();
+        let manifest = format!(r#"{{"format":1,"type":"{kind}","id":"{id}","name":"{id}","version":"1.0.0","license":{{"spdx":"MIT","files":["LICENSE.txt"]}},"items":[{items}]}}"#);
+        std::fs::write(folder.join("manifest.json"), manifest).unwrap();
+    };
+    write("text-style", "styles", r#"{"id":"bold","name":"Bold","preview_text":"Bold!","style":{"size":0.1,"color":[255,0,0,255],"weight":800,"outline":{"color":[0,0,0,255],"width":0.1}},"animation":{"in":{"preset":"pop","duration":0.5}}}"#);
+    write("subtitle-style", "subs", r#"{"id":"low","name":"Low","style":{"size":0.05,"background":{"color":[0,0,0,160],"padding":0.2,"radius":0.1}},"layout":{"anchor_y":0.85,"max_width":0.9,"max_lines":2}}"#);
+    root
+}
+
+#[test]
+fn text_style_list_names_the_installed_styles_by_type() {
+    let mut session = FileSession::with_roots(vec![style_root()]);
+    let all = call_ok(&mut session, "text_style_list", json!({}));
+    assert_eq!(all["state"], "ready");
+    let ids: Vec<&str> = all["styles"].as_array().unwrap().iter().map(|style| style["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["styles/bold", "subs/low"]);
+    let bold = &all["styles"][0];
+    assert_eq!((bold["type"].as_str(), bold["preview_text"].as_str(), bold["style"]["weight"].as_u64()), (Some("text"), Some("Bold!"), Some(800)));
+    assert_eq!(bold["animation"]["in"]["preset"], "pop");
+    assert_eq!(bold["animation"]["in"]["duration"], json!(SECOND / 2), "in ticks");
+    let subtitles = call_ok(&mut session, "text_style_list", json!({"type": "subtitle"}));
+    assert_eq!(subtitles["styles"].as_array().unwrap().len(), 1);
+    assert_eq!(subtitles["styles"][0]["layout"]["anchor_y"], json!(0.85));
+    assert_eq!(call_err(&mut session, "text_style_list", json!({"type": "poster"})).code, "invalid_params");
+}
+
+#[test]
+fn a_style_id_copies_the_style_and_the_other_fields_override_it() {
+    let mut session = FileSession::with_roots(vec![style_root()]);
+    let added = call_ok(&mut session, "text_add", json!({"expected_revision": 0, "start": 0, "duration": 2 * SECOND, "content": "Hi", "style": {"style_id": "styles/bold", "size": 0.2}}));
+    let text = text_of(&mut session, 0, 0);
+    assert_eq!((text.content.as_str(), text.size, text.weight, text.color), ("Hi", 0.2, 800, [255, 0, 0, 255]), "size given overrides the style's");
+    assert!(text.outline.is_some());
+    assert_eq!(animation_of(&mut session, 0, 0).enter.map(|value| value.preset), Some("pop".to_owned()));
+
+    let set = call_ok(&mut session, "text_set", json!({"expected_revision": revision(&added), "clip": {"track": 0, "clip": 0}, "style_id": "subs/low"}));
+    let text = text_of(&mut session, 0, 0);
+    assert_eq!((text.content.as_str(), text.size, text.weight), ("Hi", 0.05, 400), "the whole style is copied");
+    assert!(text.outline.is_none() && text.background.is_some());
+    assert_eq!(animation_of(&mut session, 0, 0).enter.map(|value| value.preset), Some("pop".to_owned()), "a style without animations keeps the clip's");
+    let placement = placement_of(&mut session, 0, 0);
+    // Its middle is at the anchor: it starts a little above it, centred across.
+    assert!(placement.y > 0.7 && placement.y < 0.85, "a subtitle style moves the text to its anchor: {placement:?}");
+    assert!((placement.x + placement.width / 2.0 - 0.5).abs() < 1e-6, "{placement:?}");
+
+    let refused = call_err(&mut session, "text_set", json!({"expected_revision": revision(&set), "clip": {"track": 0, "clip": 0}, "style_id": "styles/gone"}));
+    assert_eq!(refused.code, "invalid_params");
+    assert!(refused.message.contains("text_style_list"), "{}", refused.message);
+    assert_eq!(text_of(&mut session, 0, 0), text, "a refused call changes nothing");
+}
+
 #[test]
 fn the_schemas_of_the_text_tools_name_every_field_an_agent_may_give() {
     let tools = gpufx_mcp::tools::all_tools();
     let schema = |name: &str| Value::Object(tools.iter().find(|tool| tool.name == name).unwrap().tool().input_schema.as_ref().clone());
     let set = schema("text_set");
-    for field in ["expected_revision", "clip", "content", "font", "size", "color", "outline", "background", "shadow", "glow", "align", "line_spacing", "weight", "italic", "transform", "letter_spacing", "animation"] {
+    for field in ["expected_revision", "clip", "content", "font", "size", "color", "outline", "background", "shadow", "glow", "align", "line_spacing", "weight", "italic", "transform", "letter_spacing", "animation", "style_id"] {
         assert!(set["properties"][field].is_object(), "text_set has no {field}: {set}");
     }
     let add = schema("text_add");
