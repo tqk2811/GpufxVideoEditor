@@ -295,6 +295,7 @@ fn render_layer<C: Compositor>(
     track: usize,
     content: &LayerContent<'_>,
     at: FrameContext,
+    frame_duration: Time,
 ) -> Result<C::Image, RenderError> {
     let key = |clip| ClipKey { track, clip };
     match content {
@@ -304,7 +305,7 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(sample.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let image = compositor.prepare_clip(key(sample.clip), &mut frame, &effects_with_animation(sample), sample.transform, sample.clock, at)?;
+            let image = compositor.prepare_clip(key(sample.clip), &mut frame, &effects_with_animation(sample, frame_duration), sample.transform, sample.clock, at)?;
             kept.0.push(frame);
             Ok(image)
         }
@@ -325,9 +326,9 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(to.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let from_image = compositor.prepare_clip(key(from.clip), &mut from_frame, &effects_with_animation(from), from.transform, from.clock, at)?;
+            let from_image = compositor.prepare_clip(key(from.clip), &mut from_frame, &effects_with_animation(from, frame_duration), from.transform, from.clock, at)?;
             let to_image =
-                match compositor.prepare_clip(key(to.clip), &mut to_frame, &effects_with_animation(to), to.transform, to.clock, at) {
+                match compositor.prepare_clip(key(to.clip), &mut to_frame, &effects_with_animation(to, frame_duration), to.transform, to.clock, at) {
                     Ok(image) => image,
                     Err(e) => {
                         compositor.release(from_image);
@@ -396,7 +397,7 @@ impl<C: Compositor> FrameRenderer<C> {
         for layer in &layers {
             used.extend(layer_clips(&layer.content, layer.track));
             let failed = |e: RenderError| RenderError(format!("frame {index}, track {}: {e}", layer.track));
-            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at) {
+            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project.output.frame_duration) {
                 Ok(image) => image,
                 Err(e) => {
                     if let Some(base) = canvas {
