@@ -11,7 +11,8 @@
 use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
 use crate::stretch::StretchStates;
 use crate::audio_schedule::{sample_position, MIX_CHANNELS};
-use crate::keyframe::{effects_at, ClipTransform};
+use crate::clip_animation::effects_with_animation;
+use crate::keyframe::ClipTransform;
 use crate::keyframe::ClipProperty;
 use crate::project::{text_step_up, Clip, Effect, Project, TextContent};
 use crate::schedule::{
@@ -279,7 +280,7 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(sample.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let image = compositor.prepare_clip(key(sample.clip), &mut frame, &effects_at(sample.effects, sample.offset), sample.transform, sample.clock, at)?;
+            let image = compositor.prepare_clip(key(sample.clip), &mut frame, &effects_with_animation(sample), sample.transform, sample.clock, at)?;
             kept.0.push(frame);
             Ok(image)
         }
@@ -300,9 +301,9 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(to.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let from_image = compositor.prepare_clip(key(from.clip), &mut from_frame, &effects_at(from.effects, from.offset), from.transform, from.clock, at)?;
+            let from_image = compositor.prepare_clip(key(from.clip), &mut from_frame, &effects_with_animation(from), from.transform, from.clock, at)?;
             let to_image =
-                match compositor.prepare_clip(key(to.clip), &mut to_frame, &effects_at(to.effects, to.offset), to.transform, to.clock, at) {
+                match compositor.prepare_clip(key(to.clip), &mut to_frame, &effects_with_animation(to), to.transform, to.clock, at) {
                     Ok(image) => image,
                     Err(e) => {
                         compositor.release(from_image);

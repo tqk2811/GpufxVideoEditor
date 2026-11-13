@@ -59,7 +59,7 @@ pub use schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, Layer, LayerContent, Progress, SourceSample,
     PROGRESS_PPM_SCALE,
 };
-pub use clip_animation::{animation_max_scale, check_curve, animation_pose, animation_rotates, find_preset, is_pack_preset, pack_presets, preset_pose, set_pack_presets, PackPreset, PackPresets, PACK_PRESET_SEPARATOR, AnimationCurve, AnimationGroup, CurveKey, CurveProperty, Ease, AnimationPose, AnimationPreset, ANIMATION_PRESETS};
+pub use clip_animation::{animation_effects, animation_max_scale, check_curve, animation_pose, effects_with_animation, PresetEffect, animation_rotates, find_preset, is_pack_preset, pack_presets, preset_pose, set_pack_presets, PackPreset, PackPresets, PACK_PRESET_SEPARATOR, AnimationCurve, AnimationGroup, CurveKey, CurveProperty, Ease, AnimationPose, AnimationPreset, ANIMATION_PRESETS};
 pub use srt::{format_timestamp, parse_srt, strip_tags, write_srt, SrtCue, SrtDocument, SrtWarning, SrtWarningKind};
 pub use time::{Time, TICKS_PER_SECOND};
 pub use validate::{text_style_problems, validate, AcceptAll, Resolver, TextStyleProblem, ValidationError};

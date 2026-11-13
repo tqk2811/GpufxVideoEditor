@@ -20,6 +20,20 @@
 //! with [`set_pack_presets`], one table for the whole process (as the fonts of the system are). A
 //! pack preset that is not in the table is left out like an unknown id, but is not a validation
 //! error, so a project opens and renders, without that animation, where its pack is missing.
+//!
+//! Effects of pack presets: a pack preset may also carry a [`PresetEffect`], a gpufx effect
+//! package the reader of the packs found installed. While the preset runs, [`animation_effects`]
+//! gives that effect, with its `progress` parameter set, and the renderer appends it after the
+//! clip's own effects (see [`effects_with_animation`]). It never enters the `effects` of the clip,
+//! so it is not saved and not undone. The order on a picture is: the clip's place and keyframes,
+//! then the pose of the presets, then their effects. `progress`, over the same windows as the pose:
+//! - enter: `p`, rising from 0 at the first visible frame towards 1;
+//! - exit: `1 - p`, falling from 1 towards 0 at the last visible moment, so a package written for
+//!   an enter (0 = not shown yet, 1 = settled) plays backwards as the exit;
+//! - repeat: the phase of the cycle, 0 up to (not including) 1.
+//!
+//! Outside its window a preset gives no effect at all. Enter, exit and repeat effects come in that
+//! order.
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
@@ -27,7 +41,11 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::project::{ClipAnimation, AnimationRef};
+use std::borrow::Cow;
+
+use crate::keyframe::effects_at;
+use crate::project::{ClipAnimation, AnimationRef, Effect};
+use crate::schedule::SourceSample;
 use crate::schedule::ClipClock;
 use crate::time::{Time, TICKS_PER_SECOND};
 
@@ -376,14 +394,42 @@ pub struct PackPreset {
     pub reference: String,
     pub group: AnimationGroup,
     pub curve: AnimationCurve,
+    /// The effect the preset runs on top of its curve, when its package is installed.
+    pub effect: Option<PresetEffect>,
     rotates: bool,
     max_scale: f64,
+}
+
+/// A gpufx effect a pack preset runs while it plays (see the module notes).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresetEffect {
+    /// The package as an effect of a project names it.
+    pub package: String,
+    /// The parameter given the progress of the preset.
+    pub progress: String,
+    /// Static parameters.
+    pub params: serde_json::Map<String, serde_json::Value>,
+}
+
+impl PresetEffect {
+    /// The effect with its progress parameter at `progress`.
+    pub fn at(&self, progress: f64) -> Effect {
+        let mut params = self.params.clone();
+        params.insert(self.progress.clone(), serde_json::Value::from(progress));
+        Effect { package: self.package.clone(), params, keyframes: BTreeMap::new() }
+    }
 }
 
 impl PackPreset {
     pub fn new(reference: String, group: AnimationGroup, curve: AnimationCurve) -> Self {
         let (rotates, max_scale) = measure(&curve);
-        PackPreset { reference, group, curve, rotates, max_scale }
+        PackPreset { reference, group, curve, effect: None, rotates, max_scale }
+    }
+
+    /// The preset with `effect` run on top of its curve.
+    pub fn with_effect(mut self, effect: Option<PresetEffect>) -> Self {
+        self.effect = effect;
+        self
     }
 
     /// Whether the preset turns the picture.
@@ -665,39 +711,84 @@ fn usable<'a>(group: AnimationGroup, reference: &Option<AnimationRef>, packs: &'
     resolve(group, &reference.preset, packs).map(|preset| (preset, ticks as f64))
 }
 
-/// The pose of `animation` at `clock` (see the module timing rules).
-pub fn animation_pose(animation: &ClipAnimation, clock: ClipClock) -> AnimationPose {
+/// The presets of `animation` that run at `clock`, enter, exit then repeat, each with how far it
+/// has played: 0 to 1 for enter and exit, cycles for repeat (see the module timing rules).
+fn running<'a>(animation: &'a ClipAnimation, clock: ClipClock, packs: &PackPresets) -> Vec<(AnimationGroup, &'a str, f64)> {
     let elapsed = clock.elapsed.ticks() as f64;
     let total = clock.duration.ticks().max(0) as f64;
-    let packs = pack_presets();
-    let enter = usable(AnimationGroup::Enter, &animation.enter, &packs);
-    let exit = usable(AnimationGroup::Exit, &animation.exit, &packs);
-    let both = enter.map_or(0.0, |(_, d)| d) + exit.map_or(0.0, |(_, d)| d);
+    let name = |reference: &'a Option<AnimationRef>| reference.as_ref().map_or("", |reference| reference.preset.as_str());
+    let enter = usable(AnimationGroup::Enter, &animation.enter, packs).map(|(_, d)| d);
+    let exit = usable(AnimationGroup::Exit, &animation.exit, packs).map(|(_, d)| d);
+    let both = enter.unwrap_or(0.0) + exit.unwrap_or(0.0);
     let shrink = if both > total { total / both } else { 1.0 };
-    let mut pose = AnimationPose::IDENTITY;
-    let mut add = |group, preset: Resolved, progress| {
-        pose = pose.then(curve_pose(group, preset.curve, progress));
-    };
-    if let Some((preset, duration)) = enter {
+    let mut runs = Vec::new();
+    if let Some(duration) = enter {
         let duration = duration * shrink;
         if duration > 0.0 && elapsed < duration {
-            add(AnimationGroup::Enter, preset, elapsed / duration);
+            runs.push((AnimationGroup::Enter, name(&animation.enter), elapsed / duration));
         } else if duration <= 0.0 {
             // Nothing visible to play over: keep the first pose rather than a settled one.
-            add(AnimationGroup::Enter, preset, 0.0);
+            runs.push((AnimationGroup::Enter, name(&animation.enter), 0.0));
         }
     }
-    if let Some((preset, duration)) = exit {
+    if let Some(duration) = exit {
         let duration = duration * shrink;
         let from = total - duration;
         if duration > 0.0 && elapsed > from {
-            add(AnimationGroup::Exit, preset, (elapsed - from) / duration);
+            runs.push((AnimationGroup::Exit, name(&animation.exit), (elapsed - from) / duration));
         }
     }
-    if let Some((preset, period)) = usable(AnimationGroup::Repeat, &animation.repeat, &packs) {
-        add(AnimationGroup::Repeat, preset, elapsed / period);
+    if let Some((_, period)) = usable(AnimationGroup::Repeat, &animation.repeat, packs) {
+        runs.push((AnimationGroup::Repeat, name(&animation.repeat), elapsed / period));
+    }
+    runs
+}
+
+/// The pose of `animation` at `clock` (see the module timing rules).
+pub fn animation_pose(animation: &ClipAnimation, clock: ClipClock) -> AnimationPose {
+    let packs = pack_presets();
+    let mut pose = AnimationPose::IDENTITY;
+    for (group, id, progress) in running(animation, clock, &packs) {
+        if let Some(preset) = resolve(group, id, &packs) {
+            pose = pose.then(curve_pose(group, preset.curve, progress));
+        }
     }
     pose
+}
+
+/// The effects the presets of `animation` run at `clock`, each with its progress parameter set
+/// (see the module notes for the progress of each group). Empty outside every window and for
+/// presets without an effect.
+pub fn animation_effects(animation: &ClipAnimation, clock: ClipClock) -> Vec<Effect> {
+    if animation.is_empty() {
+        return Vec::new();
+    }
+    let packs = pack_presets();
+    running(animation, clock, &packs)
+        .into_iter()
+        .filter_map(|(group, id, progress)| {
+            let effect = packs.find(group, id)?.effect.as_ref()?;
+            let value = match group {
+                AnimationGroup::Enter => progress.clamp(0.0, 1.0),
+                AnimationGroup::Exit => 1.0 - progress.clamp(0.0, 1.0),
+                AnimationGroup::Repeat => progress.rem_euclid(1.0),
+            };
+            Some(effect.at(value))
+        })
+        .collect()
+}
+
+/// The effects a sample is drawn with: the clip's own, their keyframes applied, then those of its
+/// preset animations (see [`animation_effects`]).
+pub fn effects_with_animation<'a>(sample: &SourceSample<'a>) -> Cow<'a, [Effect]> {
+    let own = effects_at(sample.effects, sample.offset);
+    let added = animation_effects(&sample.model.animation, sample.clock);
+    if added.is_empty() {
+        return own;
+    }
+    let mut all = own.into_owned();
+    all.extend(added);
+    Cow::Owned(all)
 }
 
 fn presets_of<'a>(animation: &'a ClipAnimation, packs: &'a PackPresets) -> impl Iterator<Item = (AnimationGroup, Resolved<'a>)> + 'a {
@@ -756,6 +847,51 @@ mod tests {
         let missing = named("gone-pack/rise");
         assert_eq!(animation_pose(&missing, clock(5000)), AnimationPose::IDENTITY);
         assert!(is_pack_preset("gone-pack/rise") && !is_pack_preset("fade"));
+
+        preset_effects_play_in_their_windows();
+    }
+
+    /// Part of the test above, which owns the pack table.
+    fn preset_effects_play_in_their_windows() {
+        let effect = |package: &str| {
+            let mut params = serde_json::Map::new();
+            params.insert("amount".to_owned(), serde_json::Value::from(2.0));
+            Some(PresetEffect { package: package.to_owned(), progress: "t".to_owned(), params })
+        };
+        let opacity = AnimationCurve::default().with(CurveProperty::Opacity, vec![key(0.0, 1.0, Ease::Linear)]);
+        set_pack_presets(PackPresets::new(vec![
+            PackPreset::new("p/in".to_owned(), AnimationGroup::Enter, opacity.clone()).with_effect(effect("fx-in")),
+            PackPreset::new("p/out".to_owned(), AnimationGroup::Exit, opacity.clone()).with_effect(effect("fx-out")),
+            PackPreset::new("p/loop".to_owned(), AnimationGroup::Repeat, opacity.clone()).with_effect(effect("fx-loop")),
+            // A preset whose package was not installed keeps its curve and has no effect.
+            PackPreset::new("p/bare".to_owned(), AnimationGroup::Enter, opacity),
+        ]));
+        let slot = |preset: &str, ticks| Some(AnimationRef { preset: preset.to_owned(), duration: Time::from_ticks(ticks) });
+        let clock = |elapsed| ClipClock { elapsed: Time::from_ticks(elapsed), duration: Time::from_ticks(1000) };
+        let progress = |effects: &[Effect], package: &str| effects.iter().find(|e| e.package == package).map(|e| e.params["t"].as_f64().unwrap());
+
+        let both = ClipAnimation { enter: slot("p/in", 200), exit: slot("p/out", 400), ..ClipAnimation::default() };
+        let at = |elapsed| animation_effects(&both, clock(elapsed));
+        assert_eq!(progress(&at(0), "fx-in"), Some(0.0), "enter starts at 0");
+        assert_eq!(progress(&at(100), "fx-in"), Some(0.5));
+        assert_eq!(at(100)[0].params["amount"], serde_json::Value::from(2.0), "static parameters kept");
+        assert!(at(200).is_empty() && at(600).is_empty(), "nothing between the windows, and at their edges");
+        assert_eq!(progress(&at(601), "fx-out"), Some(1.0 - 1.0 / 400.0), "exit falls from 1");
+        assert_eq!(progress(&at(800), "fx-out"), Some(0.5));
+        assert_eq!(progress(&at(1000), "fx-out"), Some(0.0), "exit ends at 0 on the last moment");
+        assert_eq!(at(800).len(), 1);
+
+        let looped = ClipAnimation { enter: slot("p/in", 200), repeat: slot("p/loop", 300), ..ClipAnimation::default() };
+        let effects = animation_effects(&looped, clock(150));
+        assert_eq!(effects.iter().map(|e| e.package.as_str()).collect::<Vec<_>>(), vec!["fx-in", "fx-loop"], "enter before repeat");
+        assert_eq!(progress(&effects, "fx-loop"), Some(0.5));
+        assert_eq!(progress(&animation_effects(&looped, clock(300)), "fx-loop"), Some(0.0), "a new cycle starts at 0");
+        assert_eq!(progress(&animation_effects(&looped, clock(750)), "fx-loop"), Some(0.5));
+
+        let bare = ClipAnimation { enter: slot("p/bare", 200), ..ClipAnimation::default() };
+        assert!(animation_effects(&bare, clock(50)).is_empty());
+        assert_eq!(animation_pose(&bare, clock(50)).opacity, 1.0);
+        assert!(animation_effects(&ClipAnimation { enter: slot("fade", 200), ..ClipAnimation::default() }, clock(50)).is_empty(), "built-in presets have no effect");
     }
 
     /// The hard-coded presets the curves replaced, kept to show the curves give the same poses.
