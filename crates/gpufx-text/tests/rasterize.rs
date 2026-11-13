@@ -540,3 +540,55 @@ fn a_glow_blends_to_its_outer_colour_and_stays_under_the_shadow_room() {
     let glow_side = (image.width - r.rasterize(&TextContent::new("I", 0.2), HEIGHT, 1.0).width) / 2;
     assert_eq!(both.width, shadow_only.width + glow_side, "right side from the shadow, left side from the glow");
 }
+
+#[test]
+fn a_glow_too_wide_for_the_picture_is_cut_back_and_never_hides_the_text() {
+    let Some(mut r) = rasterizer() else { return };
+    // About 2500 px tall letters: the picture fits with no glow, not with a glow of two font sizes.
+    let mut text = TextContent::new("W", 2500.0 / 4320.0);
+    let (w, h) = r.measure(&text, 4320, 1.0);
+    assert!(w <= MAX_DIMENSION && h <= MAX_DIMENSION && w as u64 * h as u64 <= MAX_PIXELS, "{w}x{h} must fit with no glow");
+    let plain = r.rasterize(&text, 4320, 1.0);
+    text.glow = Some(glow(2.0, 1.0));
+    let (gw, gh) = r.measure(&text, 4320, 1.0);
+    assert!(gw <= MAX_DIMENSION && gh <= MAX_DIMENSION && gw as u64 * gh as u64 <= MAX_PIXELS, "{gw}x{gh} is cut back to the limits");
+    let image = r.rasterize(&text, 4320, 1.0);
+    assert!(!image.downscaled, "the glow gives way, not the text size");
+    assert!(image.width > 0 && covered(&image) > 0, "the glyphs are still drawn");
+    assert!(image.width >= plain.width);
+}
+
+#[test]
+fn italic_of_a_font_with_no_italic_face_is_not_cut_on_the_right() {
+    let Some(mut r) = rasterizer() else { return };
+    let Some(path) = windows_font("impact.ttf") else { return };
+    let mut text = TextContent::new("IIIIIIIIII", 0.1);
+    text.font = FontRef::File { path: path.to_string_lossy().into_owned() };
+    text.italic = true;
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    assert!(image.width > 0 && covered(&image) > 0);
+    assert!(!ink_on_edge(&image), "the slanted top of the last letter fits in the picture");
+    text.italic = false;
+    let upright = r.rasterize(&text, HEIGHT, 1.0);
+    assert_ne!(image.pixels, upright.pixels, "the font file is slanted");
+}
+
+#[test]
+fn letter_spacing_leaves_the_end_of_a_line_out_of_the_alignment() {
+    let Some(mut r) = rasterizer() else { return };
+    let mut text = TextContent::new("I\nIIIIIIIIIIII", 0.08);
+    text.letter_spacing = 0.5;
+    let mut last_line = |align| {
+        text.align = align;
+        let image = r.rasterize(&text, HEIGHT, 1.0);
+        let (l, h) = ink_columns(&image, image.height / 2, image.height);
+        (l, h, image.width)
+    };
+    let (_, _, w) = last_line(TextAlign::Left);
+    let (cl, ch, _) = last_line(TextAlign::Center);
+    let (_, rh, _) = last_line(TextAlign::Right);
+    // The 12 letters are the widest line, so they fill the picture; a trailing gap of half a font
+    // size (about 29 px) would show as an offset.
+    assert!(((cl + ch) / 2).abs_diff(w / 2) <= 5, "centre: {cl}..{ch} of {w}");
+    assert!(w - rh <= 14, "right: ends at {rh} of {w}");
+}

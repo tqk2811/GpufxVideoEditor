@@ -212,6 +212,10 @@ impl TextContent {
 pub const NORMAL_WEIGHT: u16 = 400;
 /// The lightest and heaviest font weights a text may ask for.
 pub const TEXT_WEIGHT_RANGE: std::ops::RangeInclusive<u16> = 100..=900;
+/// The most letter spacing, either way, as a part of the font size.
+pub const MAX_LETTER_SPACING: f32 = 2.0;
+/// The farthest a glow may reach past the ink, as a part of the font size.
+pub const MAX_GLOW_RADIUS: f32 = 2.0;
 
 fn normal_weight() -> u16 {
     NORMAL_WEIGHT

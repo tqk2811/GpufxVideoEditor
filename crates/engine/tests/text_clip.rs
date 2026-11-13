@@ -90,6 +90,41 @@ fn validate_rejects_empty_text_and_bad_size() {
 }
 
 #[test]
+fn validate_rejects_bad_weight_letter_spacing_and_glow() {
+    let glow = engine::TextGlow { color: [0, 255, 255, 255], outer_color: None, radius: 0.5, intensity: 1.0, falloff: 2.0 };
+    let mut good = text_clip("Hi", 0, 9000);
+    {
+        let t = good.text.as_mut().unwrap();
+        t.weight = 700;
+        t.letter_spacing = -0.5;
+        t.glow = Some(glow);
+    }
+    assert_eq!(validate(&project_with(vec![good]), &AcceptAll), vec![]);
+
+    let fields = |edit: &dyn Fn(&mut engine::TextContent)| -> Vec<&'static str> {
+        let mut c = text_clip("Hi", 0, 9000);
+        edit(c.text.as_mut().unwrap());
+        validate(&project_with(vec![c]), &AcceptAll)
+            .into_iter()
+            .map(|e| match e {
+                ValidationError::InvalidTextStyle { field, .. } => field,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(fields(&|t| t.weight = 50), vec!["weight"]);
+    assert_eq!(fields(&|t| t.weight = 1000), vec!["weight"]);
+    assert_eq!(fields(&|t| t.letter_spacing = f32::NAN), vec!["letter_spacing"]);
+    assert_eq!(fields(&|t| t.letter_spacing = 2.5), vec!["letter_spacing"]);
+    assert_eq!(fields(&|t| t.glow = Some(engine::TextGlow { radius: -1.0, ..glow })), vec!["glow.radius"]);
+    assert_eq!(fields(&|t| t.glow = Some(engine::TextGlow { radius: f32::INFINITY, ..glow })), vec!["glow.radius"]);
+    assert_eq!(fields(&|t| t.glow = Some(engine::TextGlow { intensity: 5.0, ..glow })), vec!["glow.intensity"]);
+    assert_eq!(fields(&|t| t.glow = Some(engine::TextGlow { falloff: f32::NAN, ..glow })), vec!["glow.falloff"]);
+    let message = validate(&project_with(vec![{ let mut c = text_clip("Hi", 0, 9000); c.text.as_mut().unwrap().weight = 50; c }]), &AcceptAll)[0].to_string();
+    assert!(message.contains("weight") && message.contains("100"), "{message}");
+}
+
+#[test]
 fn validate_rejects_text_on_an_audio_track() {
     let mut p = project_with(vec![text_clip("Hi", 0, 9000)]);
     p.tracks[0].kind = TrackKind::Audio;

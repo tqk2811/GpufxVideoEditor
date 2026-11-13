@@ -76,9 +76,9 @@ pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 /// the room around the text grows with it.
 pub const MAX_OUTLINE_RATIO: f32 = 0.25;
 /// The farthest a glow may reach past the ink, as a part of the font size.
-pub const MAX_GLOW_RATIO: f32 = 2.0;
+pub const MAX_GLOW_RATIO: f32 = engine::MAX_GLOW_RADIUS;
 /// The most letter spacing, either way, as a part of the font size.
-pub const MAX_LETTER_SPACING: f32 = 2.0;
+pub use engine::MAX_LETTER_SPACING;
 
 /// A rasterized text picture.
 #[derive(Debug, Clone, PartialEq)]
@@ -357,9 +357,12 @@ impl TextRasterizer {
         let mut text_h = 0f32;
         let mut lines = Vec::new();
         for run in buffer.layout_runs() {
-            text_w = text_w.max(run.line_w);
+            // cosmic-text adds the spacing after every glyph, the last of a line too; that gap is
+            // no part of the line, so it must not shift centred or right aligned text.
+            let line_w = if run.glyphs.is_empty() { run.line_w } else { run.line_w - letter_spacing * font_px };
+            text_w = text_w.max(line_w);
             text_h = text_h.max(run.line_top + run.line_height);
-            lines.push((run.line_w, run.line_y, run.glyphs.to_vec()));
+            lines.push((line_w, run.line_y, run.glyphs.to_vec()));
         }
         // The ink may leave the line boxes (marks stacked above a letter on a tight line spacing,
         // a glyph that starts left of its origin), so the picture holds both.
@@ -393,16 +396,42 @@ impl TextRasterizer {
         // A blur too small to move a pixel is no blur, and needs no room.
         let shadow_blur = if blur_half(shadow_blur) == 0 { 0.0 } else { shadow_blur };
         let blur_room = if text.shadow.is_some() { shadow_blur.ceil() * 2.0 } else { 0.0 };
-        let glow_px = glow_reach(text, font_px);
+        let mut glow_px = glow_reach(text, font_px);
         let (x0, y0, x1, y1) = (x0.floor(), y0.floor(), x1.ceil(), y1.ceil());
         let base = outline_px.max(pad_px).ceil() + 1.0;
-        // The glow spreads evenly past the outline, the shadow to one side: each side takes the
-        // larger of the two.
-        let glow_room = (outline_px + glow_px).ceil() + 1.0 - base;
-        let left = base + ((-shadow_dx).max(0.0).ceil() + blur_room).max(glow_room);
-        let right = base + (shadow_dx.max(0.0).ceil() + blur_room).max(glow_room);
-        let top = base + ((-shadow_dy).max(0.0).ceil() + blur_room).max(glow_room);
-        let bottom = base + (shadow_dy.max(0.0).ceil() + blur_room).max(glow_room);
+        // The picture's margins for a glow reaching `glow` pixels. The glow spreads evenly past the
+        // outline, the shadow to one side: each side takes the larger of the two.
+        let margins = |glow: f32| {
+            let glow_room = (outline_px + glow).ceil() + 1.0 - base;
+            (
+                base + ((-shadow_dx).max(0.0).ceil() + blur_room).max(glow_room),
+                base + (shadow_dx.max(0.0).ceil() + blur_room).max(glow_room),
+                base + ((-shadow_dy).max(0.0).ceil() + blur_room).max(glow_room),
+                base + (shadow_dy.max(0.0).ceil() + blur_room).max(glow_room),
+            )
+        };
+        let size = |glow: f32| {
+            let (left, right, top, bottom) = margins(glow);
+            ((left + (x1 - x0) + right) as u64, (top + (y1 - y0) + bottom) as u64)
+        };
+        let fits = |(w, h): (u64, u64)| w <= MAX_DIMENSION as u64 && h <= MAX_DIMENSION as u64 && w * h <= MAX_PIXELS;
+        // A glow must never make the text vanish: when the picture with the whole glow is over the
+        // limits but one with no glow fits, the glow reaches only as far as the picture allows.
+        // (When even no glow fits, `rasterize` shrinks the font instead.)
+        if glow_px > 0.0 && !fits(size(glow_px)) && fits(size(0.0)) {
+            let (mut low, mut high) = (0.0f32, glow_px);
+            for _ in 0..24 {
+                let mid = (low + high) / 2.0;
+                if fits(size(mid)) {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            // A reach under half a pixel would not show, as in `glow_reach`.
+            glow_px = if low < 0.5 { 0.0 } else { low };
+        }
+        let (left, right, top, bottom) = margins(glow_px);
         layout.width = (left + (x1 - x0) + right) as u32;
         layout.height = (top + (y1 - y0) + bottom) as u32;
         layout.origin = (left - x0, top - y0);

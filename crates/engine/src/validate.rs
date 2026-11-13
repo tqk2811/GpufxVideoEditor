@@ -1,7 +1,7 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
-use crate::project::{speed_in_range, Clip, Project, TEXT_SOURCE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
+use crate::project::{speed_in_range, Clip, Project, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
 use crate::clip_animation::{find_preset, is_pack_preset, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -190,6 +190,9 @@ pub enum ValidationError {
     InvalidTextSize { track: usize, clip: usize, size: f32 },
     /// A text clip `line_spacing` is zero, negative or not a number.
     InvalidLineSpacing { track: usize, clip: usize, line_spacing: f32 },
+    /// A text clip `weight`, `letter_spacing` or glow value (`glow.radius`, `glow.intensity`,
+    /// `glow.falloff`) is not a number or outside `allowed`.
+    InvalidTextStyle { track: usize, clip: usize, field: &'static str, value: f32, allowed: String },
     /// A clip names a preset animation that is not in [`crate::ANIMATION_PRESETS`] for
     /// its group (`in`, `out` or `loop`). It is left out when drawing.
     UnknownAnimation { track: usize, clip: usize, group: &'static str, preset: String },
@@ -328,6 +331,7 @@ impl fmt::Display for ValidationError {
             EmptyText { track, clip } => write!(f, "track {track}, clip {clip}: the text is empty or its source is not '{TEXT_SOURCE}'"),
             InvalidTextSize { track, clip, size } => write!(f, "track {track}, clip {clip}: text size {size} must be above 0"),
             InvalidLineSpacing { track, clip, line_spacing } => write!(f, "track {track}, clip {clip}: line spacing {line_spacing} must be above 0"),
+            InvalidTextStyle { track, clip, field, value, allowed } => write!(f, "track {track}, clip {clip}: text {field} {value} must be {allowed}"),
             UnknownAnimation { track, clip, group, preset } => {
                 write!(f, "track {track}, clip {clip}: there is no '{group}' animation '{preset}'")?;
                 // A preset of another group is most likely in the wrong place.
@@ -480,6 +484,18 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 }
                 if !(text.line_spacing.is_finite() && text.line_spacing > 0.0) {
                     errors.push(InvalidLineSpacing { track: t, clip: c, line_spacing: text.line_spacing });
+                }
+                let mut style = |field: &'static str, value: f32, ok: bool, allowed: String| {
+                    if !ok {
+                        errors.push(InvalidTextStyle { track: t, clip: c, field, value, allowed });
+                    }
+                };
+                style("weight", text.weight as f32, TEXT_WEIGHT_RANGE.contains(&text.weight), format!("from {} to {}", TEXT_WEIGHT_RANGE.start(), TEXT_WEIGHT_RANGE.end()));
+                style("letter_spacing", text.letter_spacing, text.letter_spacing.is_finite() && text.letter_spacing.abs() <= MAX_LETTER_SPACING, format!("from -{MAX_LETTER_SPACING} to {MAX_LETTER_SPACING}"));
+                if let Some(glow) = &text.glow {
+                    style("glow.radius", glow.radius, glow.radius.is_finite() && (0.0..=MAX_GLOW_RADIUS).contains(&glow.radius), format!("from 0 to {MAX_GLOW_RADIUS}"));
+                    style("glow.intensity", glow.intensity, glow.intensity.is_finite() && (0.0..=MAX_GLOW_INTENSITY).contains(&glow.intensity), format!("from 0 to {MAX_GLOW_INTENSITY}"));
+                    style("glow.falloff", glow.falloff, glow.falloff.is_finite() && GLOW_FALLOFF_RANGE.contains(&glow.falloff), format!("from {} to {}", GLOW_FALLOFF_RANGE.start(), GLOW_FALLOFF_RANGE.end()));
                 }
                 if track.is_audio() {
                     errors.push(TextOnAudioTrack { track: t, clip: c });

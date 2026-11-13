@@ -526,3 +526,7 @@ Clip chữ chỉ thêm bằng nút "Thêm chữ" ở tab Chữ (`EditorState::ad
 ### [Thấp] Animation chưa lật gương được (scale âm)
 
 `crates/engine/src/keyframe.rs:301-306` nhân thẳng `rect.width *= zoom * stretch[0]`, nên `scaleX`/`scaleY` âm của animation cho bề ngang âm và compositor bỏ không vẽ (`crates/d3d12-backend/src/compositor.rs:978-980`): clip biến mất thay vì lật. Gói CapCut "Flip II" vì vậy dùng `|cos|` (không lật). Cần cho `rect` mang dấu và đảo trục trong shader xoay (`crates/d3d12-backend/src/rotated_place.rs`) để lật gương thật, mở khoá các kiểu lật 3D. Ghi ngày 2026-11-13.
+
+### [Thấp] Đổi chữ hoa/thường có thể đổi độ dài chuỗi nên chỉ số theo ký tự phải đi qua chuỗi đã đổi
+
+`TextContent::shaped_content` (`crates/engine/src/project.rs`) dùng `to_uppercase`/`to_lowercase`, mà kết quả có thể dài hơn hoặc khác số ký tự (`ß` thành `SS`, `İ` thành `i̇` hai điểm mã). Mọi chỉ số theo ký tự thêm sau này (karaoke, tô từng chữ, hiệu ứng theo ký tự) phải ánh xạ qua chuỗi đã đổi, không dùng chỉ số của `content` gốc. Ghi ngày 2026-11-13.
