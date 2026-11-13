@@ -24,7 +24,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SA
 use crate::decoder::DecodedFrame;
 use crate::gpu::AppGpu;
 
-const MIX_PACKAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/FFmpegGpuFilter/packages/gpufx/capcut/mix");
+const MIX_PACKAGE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/FFmpegGpuFilter/packages/gpufx/ffmpeg/fade-grays");
 const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// The RGBA result, as a D3D12 resource and as a texture of the app's wgpu device.

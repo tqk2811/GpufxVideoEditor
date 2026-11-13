@@ -264,7 +264,7 @@ fn a_zoom_in_clip_shorter_than_its_duration_keeps_the_zoom_in_its_transition() {
             r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
                 {{"source":"{}","start":0,"source_in":0,"duration":{},"effects":[{{"package":"{package}","params":{params}}}]}},
                 {{"source":"{}","start":{},"source_in":0,"duration":{}}}],
-                "transitions":[{{"after_clip":0,"package":"packages/gpufx/capcut/mix","duration":{}}}]}}]}}"#,
+                "transitions":[{{"after_clip":0,"package":"packages/gpufx/ffmpeg/fade-grays","duration":{}}}]}}]}}"#,
             json_path(&a), 12 * FRAME, json_path(&b), 12 * FRAME, 30 * FRAME, 10 * FRAME
         )
     };
