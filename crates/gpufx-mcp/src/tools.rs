@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engine::Time;
-use gpufx_editor::agent::protocol::{double_option, ClipRef, TextAnimationPatch, TextPatch};
+use gpufx_editor::agent::protocol::{double_option, ClipRef, KaraokePatch, TextAnimationPatch, TextPatch};
 use gpufx_editor::agent::{AgentEdit, AgentError, AgentRequest, CaptureTarget};
 use rmcp::model::{JsonObject, Tool};
 use schemars::JsonSchema;
@@ -224,6 +224,97 @@ pub struct GlowParam {
     pub falloff: Option<f32>,
 }
 
+/// How karaoke marks the spoken word.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum KaraokeModeParam {
+    /// No marking.
+    None,
+    /// Each word takes the colour and opacity of its state.
+    Color,
+    /// As color, with a box behind the active word (active.background, else active.color).
+    Box,
+    /// Scaling the active word is not drawn yet: draws as color.
+    Scale,
+}
+
+impl From<KaraokeModeParam> for engine::KaraokeMode {
+    fn from(mode: KaraokeModeParam) -> Self {
+        match mode {
+            KaraokeModeParam::None => Self::None,
+            KaraokeModeParam::Color => Self::Color,
+            KaraokeModeParam::Box => Self::Box,
+            KaraokeModeParam::Scale => Self::Scale,
+        }
+    }
+}
+
+/// The look of the words in one karaoke state; an absent field keeps the text's own.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct KaraokeLookParam {
+    /// [r, g, b, a], each 0 to 255.
+    pub color: Option<[u8; 4]>,
+    /// [r, g, b, a] of the box behind the word in box mode.
+    pub background: Option<[u8; 4]>,
+    /// Above 0, at most 4. Kept; not drawn yet.
+    pub scale: Option<f32>,
+    /// 0 to 1.
+    pub opacity: Option<f32>,
+}
+
+impl From<KaraokeLookParam> for engine::KaraokeLook {
+    fn from(look: KaraokeLookParam) -> Self {
+        Self { color: look.color, background: look.background, scale: look.scale, opacity: look.opacity }
+    }
+}
+
+/// When one word is spoken, in ticks of the clip's source time (0 is where the cue starts).
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct KaraokeWordParam {
+    pub start: i64,
+    pub end: i64,
+    /// Drawn with the emphasis look on top of its state's.
+    #[serde(default)]
+    pub emphasis: bool,
+}
+
+/// Karaoke of a text. An absent field stays as it is.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct KaraokeParam {
+    pub mode: Option<KaraokeModeParam>,
+    /// The word being spoken.
+    pub active: Option<KaraokeLookParam>,
+    /// The words already spoken.
+    pub spoken: Option<KaraokeLookParam>,
+    /// The words still to come.
+    pub upcoming: Option<KaraokeLookParam>,
+    /// Words marked emphasis, on top of their state's look.
+    pub emphasis: Option<KaraokeLookParam>,
+    /// One time per word (words are runs without white space, after the case change), in order
+    /// and not overlapping. An empty list shares the cue among the words by their characters,
+    /// which is what a text without times does. New content without words drops the old times.
+    pub words: Option<Vec<KaraokeWordParam>>,
+}
+
+impl From<KaraokeParam> for KaraokePatch {
+    fn from(karaoke: KaraokeParam) -> Self {
+        Self {
+            mode: karaoke.mode.map(Into::into),
+            active: karaoke.active.map(Into::into),
+            spoken: karaoke.spoken.map(Into::into),
+            upcoming: karaoke.upcoming.map(Into::into),
+            emphasis: karaoke.emphasis.map(Into::into),
+            words: karaoke.words.map(|words| words.into_iter().map(|word| engine::KaraokeWord { start: ticks(word.start), end: ticks(word.end), emphasis: word.emphasis }).collect()),
+        }
+    }
+}
+
 /// One preset animation of a clip with a picture.
 #[derive(Deserialize, JsonSchema, Clone)]
 #[schemars(inline)]
@@ -298,6 +389,9 @@ pub struct TextStyleParam {
     /// Extra space after each character, in parts of the font size, -2 to 2; 0 by default.
     pub letter_spacing: Option<f32>,
     pub animation: Option<AnimationParam>,
+    /// Marks each word as it is spoken; null takes it off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub karaoke: Option<Option<KaraokeParam>>,
     /// A style of an installed text or subtitle style pack, as text_style_list names it
     /// ("<pack>/<item>"): its values are copied into the text first, and the other fields here
     /// override them. A subtitle style also moves the text where its layout says.
@@ -322,6 +416,7 @@ impl TextStyleParam {
             transform: self.transform.map(Into::into),
             letter_spacing: self.letter_spacing,
             animation: self.animation.map(Into::into),
+            karaoke: self.karaoke.map(|value| value.map(Into::into)),
             style_id: self.style_id,
         }
     }
@@ -376,6 +471,9 @@ params!(TextSetParams {
     transform: Option<TransformParam>,
     letter_spacing: Option<f32>,
     animation: Option<AnimationParam>,
+    /// Marks each word as it is spoken; null takes it off.
+    #[serde(default, deserialize_with = "double_option")]
+    karaoke: Option<Option<KaraokeParam>>,
     /// A style text_style_list names, applied before the other fields, which override it.
     style_id: Option<String>,
 });
@@ -512,7 +610,7 @@ fn text_add(p: TextAddParams) -> Result<AgentRequest, AgentError> {
 }
 
 fn text_set(p: TextSetParams) -> Result<AgentRequest, AgentError> {
-    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, glow: p.glow, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation, style_id: p.style_id };
+    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, glow: p.glow, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation, karaoke: p.karaoke, style_id: p.style_id };
     edit(p.expected_revision, AgentEdit::TextSet { clip: p.clip.into(), patch: style.patch(p.content) })
 }
 
@@ -546,7 +644,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("track_set_hidden", "Hides or shows a track in picture and sound.", TrackHiddenParams, |p| edit(p.expected_revision, AgentEdit::TrackSetHidden { track: p.track, hidden: p.hidden })),
         tool!("clip_add", "Adds a source file, a still image (png, jpg, webp, on a video track only), or a file of an installed pack as asset:<type>/<id>/<file> (type sfx, music or sticker), as a clip at start (ticks). duration defaults to what the stream the track plays still holds at that speed, and to 5 seconds for an image, whose end can be set freely. speed defaults to 1, between 0.1 and 10, and does not apply to an image. Returns the new clip.", ClipAddParams, |p| edit(p.expected_revision, AgentEdit::ClipAdd { track: p.track, source: p.source, start: ticks(p.start), source_in: p.source_in.map(ticks), duration: p.duration.map(ticks), speed: p.speed })),
         tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track or, when track is absent, on the first video track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, glow, align, line_spacing, weight, italic, transform, letter_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
-        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow, glow or an animation group off. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
+        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow, glow, karaoke or an animation group off. karaoke sets how the spoken word is marked (mode none, color, box or scale; looks for active, spoken, upcoming and emphasis words) and may give each word its time in source ticks; without times the words share the cue by their characters. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
         tool!("font_list", "The fonts a text can name, each as the font value to give: the default font first (the system UI font, such as Segoe UI), then the installed families. state is loading while the installed fonts are still being read; ask again then.", NoParams, |_| Ok(AgentRequest::FontList)),
         tool!("clip_animation_list", "The preset animations a clip with a picture (video, image, sticker or text) can name: each with its id, its group (in, out or loop) and default_duration in ticks (for loop, one cycle). Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::ClipAnimationList)),
         tool!("text_style_list", "The styles of the installed text style and subtitle style packs, filtered by type (text or subtitle; both when absent): each with its id to give as style_id to text_add (in style) or text_set, its name, type, category, preview_text, pack, the style values it copies into a text (absent ones are as on a new text; an absent size keeps the text's), its animations (durations in ticks) and, for a subtitle style, its layout (anchor_y and max_width in parts of the frame). font_hint names fonts used when installed. state is loading while the packs are still being read.", TextStyleListParams, |p| Ok(AgentRequest::TextStyleList { kind: p.kind.map(|kind| match kind { StyleTypeParam::Text => "text".to_owned(), StyleTypeParam::Subtitle => "subtitle".to_owned() }) })),

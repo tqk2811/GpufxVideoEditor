@@ -143,6 +143,22 @@ fn text_set_changes_the_content_and_takes_an_outline_and_an_animation_off_with_n
 }
 
 #[test]
+fn text_set_turns_karaoke_on_with_word_times_and_refuses_times_that_do_not_fit() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let added = call_ok(&mut session, "text_add", json!({"expected_revision": 0, "start": 0, "duration": SECOND, "content": "one two"}));
+    let karaoke = json!({"mode": "box", "active": {"color": [255, 0, 0, 255]}, "words": [{"start": 0, "end": 30000}, {"start": 30000, "end": 90000, "emphasis": true}]});
+    let set = call_ok(&mut session, "text_set", json!({"expected_revision": revision(&added), "clip": {"track": 0, "clip": 0}, "karaoke": karaoke}));
+    let text = text_of(&mut session, 0, 0);
+    let on = text.karaoke.expect("karaoke on");
+    assert_eq!((on.mode, on.words.len(), on.words[1].emphasis), (engine::KaraokeMode::Box, 2, true));
+    assert_eq!(on.active.and_then(|look| look.color), Some([255, 0, 0, 255]));
+    let error = call_err(&mut session, "text_set", json!({"expected_revision": revision(&set), "clip": {"track": 0, "clip": 0}, "karaoke": {"words": [{"start": 0, "end": 10}]}}));
+    assert_eq!(error.code, "invalid_params", "{error:?}");
+    call_ok(&mut session, "text_set", json!({"expected_revision": revision(&set), "clip": {"track": 0, "clip": 0}, "karaoke": null}));
+    assert_eq!(text_of(&mut session, 0, 0).karaoke, None);
+}
+
+#[test]
 fn a_text_no_text_can_be_is_refused_with_a_clear_code_and_changes_nothing() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
     let current = with_text(&mut session);

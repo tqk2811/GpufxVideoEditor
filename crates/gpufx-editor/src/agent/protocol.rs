@@ -70,6 +70,9 @@ pub struct TextPatch {
     pub letter_spacing: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<TextAnimationPatch>,
+    /// Changes the karaoke; `null` takes it off.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub karaoke: Option<Option<KaraokePatch>>,
     /// A style of an installed text or subtitle style pack, `"<pack id>/<item id>"`, applied
     /// before the other fields, which override it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,6 +84,26 @@ impl TextPatch {
     pub fn is_empty(&self) -> bool {
         *self == TextPatch::default()
     }
+}
+
+/// What to change of the karaoke of a text. A field that is absent stays; a look given replaces
+/// that state's look whole. `words` gives one time per word of the text as shaped (an empty list
+/// shares the cue by characters again).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KaraokePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<engine::KaraokeMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<engine::KaraokeLook>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoken: Option<engine::KaraokeLook>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upcoming: Option<engine::KaraokeLook>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<engine::KaraokeLook>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<engine::KaraokeWord>>,
 }
 
 /// What to change of the animation of a text, one group at a time, like [`TextPatch`].

@@ -113,6 +113,32 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         }
         next.letter_spacing = letter_spacing;
     }
+    // New content has other words, so times set for the old ones go unless new ones are given.
+    if patch.content.as_ref().is_some_and(|content| *content != text.content) {
+        if let Some(karaoke) = next.karaoke.as_mut() {
+            karaoke.words.clear();
+        }
+    }
+    if let Some(karaoke) = &patch.karaoke {
+        next.karaoke = karaoke.as_ref().map(|change| {
+            let mut karaoke = next.karaoke.clone().unwrap_or_default();
+            if let Some(mode) = change.mode {
+                karaoke.mode = mode;
+            }
+            for (look, value) in [(&mut karaoke.active, change.active), (&mut karaoke.spoken, change.spoken), (&mut karaoke.upcoming, change.upcoming), (&mut karaoke.emphasis, change.emphasis)] {
+                if value.is_some() {
+                    *look = value;
+                }
+            }
+            if let Some(words) = &change.words {
+                karaoke.words.clone_from(words);
+            }
+            karaoke
+        });
+    }
+    if let Some(problem) = engine::karaoke_problem(&next) {
+        return Err(invalid(problem));
+    }
     Ok(next)
 }
 
@@ -291,6 +317,31 @@ pub fn animation_list(library: &ClipAnimationLibrary) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn karaoke_is_patched_checked_and_taken_off_with_null() {
+        use super::super::protocol::KaraokePatch;
+        let word = |start: i64, end: i64| engine::KaraokeWord { start: engine::Time::from_ticks(start), end: engine::Time::from_ticks(end), emphasis: false };
+        let text = TextContent::new("one two", 0.1);
+        let on = TextPatch { karaoke: Some(Some(KaraokePatch { mode: Some(engine::KaraokeMode::Box), words: Some(vec![word(0, 10), word(10, 20)]), ..KaraokePatch::default() })), ..TextPatch::default() };
+        let patched = apply_patch(&text, &on).unwrap();
+        let karaoke = patched.karaoke.clone().unwrap();
+        assert_eq!((karaoke.mode, karaoke.words.len()), (engine::KaraokeMode::Box, 2));
+
+        let look = TextPatch { karaoke: Some(Some(KaraokePatch { active: Some(engine::KaraokeLook { color: Some([255, 0, 0, 255]), ..Default::default() }), ..KaraokePatch::default() })), ..TextPatch::default() };
+        let looked = apply_patch(&patched, &look).unwrap();
+        assert_eq!(looked.karaoke.as_ref().unwrap().mode, engine::KaraokeMode::Box, "what is absent stays");
+        assert_eq!(looked.karaoke.as_ref().unwrap().words.len(), 2);
+
+        let wrong = TextPatch { karaoke: Some(Some(KaraokePatch { words: Some(vec![word(0, 10)]), ..KaraokePatch::default() })), ..TextPatch::default() };
+        assert!(apply_patch(&patched, &wrong).unwrap_err().message.contains("2 words"));
+
+        let retyped = apply_patch(&patched, &TextPatch { content: Some("a b c".to_owned()), ..TextPatch::default() }).unwrap();
+        assert!(retyped.karaoke.as_ref().unwrap().words.is_empty(), "new words share the cue again");
+
+        let off = apply_patch(&patched, &TextPatch { karaoke: Some(None), ..TextPatch::default() }).unwrap();
+        assert_eq!(off.karaoke, None);
+    }
 
     #[test]
     fn a_pack_preset_is_listed_with_its_pack_and_accepted_for_the_kinds_it_applies_to() {
