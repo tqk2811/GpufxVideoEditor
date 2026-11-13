@@ -214,11 +214,15 @@ pub struct StyledBase {
 }
 
 /// The [`StyledBase`] of `text` and `animation` for a patch naming `style_id`. A style that is not
-/// installed is refused, or said to be still loading while the packs are being read.
-pub fn styled_base(library: &TextStyleLibrary, style_id: Option<&str>, text: &TextContent, animation: &ClipAnimation) -> Result<StyledBase, AgentError> {
+/// installed is refused, or said to be still loading while the packs are being read. A style that
+/// names fonts in its `font_hint` while `families` (the installed fonts) is empty is said to be
+/// loading too: the scan of the fonts is still running, and applying it now would silently skip the
+/// font.
+pub fn styled_base(library: &TextStyleLibrary, families: &[String], style_id: Option<&str>, text: &TextContent, animation: &ClipAnimation) -> Result<StyledBase, AgentError> {
     let Some(style_id) = style_id else { return Ok(StyledBase { text: text.clone(), animation: animation.clone(), layout: None }) };
     match library.find(style_id) {
-        Some(style) => Ok(StyledBase { text: style.apply(text, &available_families()), animation: style.animation_for(animation), layout: style.layout }),
+        Some(style) if families.is_empty() && !style.style.font_hint.is_empty() => Err(invalid(format!("'{style_id}' names fonts, but the list of fonts is still loading; try again in a moment"))),
+        Some(style) => Ok(StyledBase { text: style.apply(text, families), animation: style.animation_for(animation), layout: style.layout }),
         None if !library.loaded => Err(invalid(format!("'{style_id}' may be a style of an installed pack, but the packs are still loading; try again in a moment"))),
         None => Err(invalid(format!("no style '{style_id}': text_style_list names the installed styles"))),
     }
@@ -329,6 +333,21 @@ mod tests {
 
     fn file(path: &str) -> FontRef {
         FontRef::File { path: path.to_owned() }
+    }
+
+    #[test]
+    fn a_style_with_a_font_hint_is_said_to_be_loading_until_the_fonts_are_listed() {
+        let text = crate::text_clip::default_text("Hi");
+        let animation = ClipAnimation::default();
+        let hinted = crate::text_style_library::subtitle_library_for_test(&["Segoe UI"]);
+        let error = styled_base(&hinted, &[], Some("s/low"), &text, &animation).map(|_| ()).unwrap_err();
+        assert!(error.message.contains("still loading") && error.message.contains("fonts"), "{}", error.message);
+        let families = vec!["Segoe UI".to_owned()];
+        let styled = styled_base(&hinted, &families, Some("s/low"), &text, &animation).unwrap();
+        assert_eq!(styled.text.font, FontRef::System { family: "Segoe UI".to_owned() });
+        let plain = crate::text_style_library::subtitle_library_for_test(&[]);
+        assert!(styled_base(&plain, &[], Some("s/low"), &text, &animation).is_ok(), "a style without a font_hint needs no fonts");
+        assert!(styled_base(&hinted, &[], None, &text, &animation).is_ok(), "no style, no wait");
     }
 
     #[test]

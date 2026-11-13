@@ -203,6 +203,23 @@ pub fn scan_text_style_packs(roots: &[PathBuf]) -> TextStyleLibrary {
     library
 }
 
+/// A library with one subtitle style, `s/low`, that names `font_hint`; for tests of other modules.
+#[cfg(test)]
+pub(crate) fn subtitle_library_for_test(font_hint: &[&str]) -> TextStyleLibrary {
+    let style = LibraryTextStyle {
+        reference: "s/low".to_owned(),
+        name: "Low".to_owned(),
+        category: None,
+        preview_text: "Low!".to_owned(),
+        kind: StyleKind::Subtitle,
+        style: PackTextStyle { weight: Some(800), font_hint: font_hint.iter().map(|family| (*family).to_owned()).collect(), ..PackTextStyle::default() },
+        animation: None,
+        layout: Some(SubtitleLayout { anchor_y: 0.85, max_width: 0.9, max_lines: 2 }),
+        karaoke: None,
+    };
+    TextStyleLibrary { packs: vec![TextStylePack { id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![style] }], problems: Vec::new(), loaded: true }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

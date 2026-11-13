@@ -1604,10 +1604,7 @@ impl EditorState {
         let Some(current) = clip.text.as_ref() else { return };
         let text = style.apply(current, &available_families());
         let animation = style.animation_for(&clip.animation);
-        let placement = match style.layout {
-            Some(layout) => subtitle_placement(self.text_pixels(&text), self.output_pixels(), &layout),
-            None => self.rescaled_text_placement(key, &text),
-        };
+        let placement = self.styled_text_placement(key, &text, style.layout.as_ref());
         if text == *current && animation == clip.animation && placement.is_none_or(|placement| clip.placement == Some(placement)) {
             return;
         }
@@ -1619,6 +1616,19 @@ impl EditorState {
                 None => Ok(next),
             }
         });
+    }
+
+    /// The place the text clip `key` takes when it shows `text` in a style: where a subtitle
+    /// `layout` says, else as [`Self::rescaled_text_placement`]. `None` leaves the place as it is,
+    /// always so when the clip has keyframes of its place, which a layout must not overwrite with
+    /// a fixed one.
+    pub fn styled_text_placement(&self, key: ClipKey, text: &TextContent, layout: Option<&SubtitleLayout>) -> Option<ClipPlacement> {
+        let Some(layout) = layout else { return self.rescaled_text_placement(key, text) };
+        let clip = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip))?;
+        if ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)) {
+            return None;
+        }
+        subtitle_placement(self.text_pixels(text), self.output_pixels(), layout)
     }
 
     /// The place the text clip `key` takes when it shows `text`: its place scaled as the user gave
@@ -3774,6 +3784,19 @@ second line")), "Title…");
         let (x, y) = centre_of(&state, &clip);
         assert!((x - 0.5).abs() < 1e-6 && (y - 0.85).abs() < 1e-6, "{x} {y}");
         assert!(clip.animation.is_empty(), "a style without animations keeps the clip's");
+    }
+
+    #[test]
+    fn a_subtitle_style_leaves_a_place_with_keyframes_alone() {
+        let (mut state, key) = added_text_state();
+        state.text_style_library = style_library();
+        state.toggle_keyframe(key, KeyframeTarget::Property(ClipProperty::X), 0.2);
+        let before = state.project().tracks[key.track].clips[key.clip].placement;
+        assert!(before.is_some(), "keying a number gives the place a value");
+        state.apply_text_style(key, "s/low");
+        let clip = &state.project().tracks[key.track].clips[key.clip];
+        assert_eq!(clip.placement, before, "the layout does not overwrite a keyframed place");
+        assert_eq!(clip.text.as_ref().map(|text| text.weight), Some(800), "the text itself is still styled");
     }
 
     #[test]

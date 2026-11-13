@@ -21,6 +21,7 @@ use crate::i18n::Language;
 use crate::media::{choose_track, TrackChoice};
 use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
 use crate::text_clip::{default_text, natural_placement};
+use crate::text_shapes::available_families;
 use crate::text_style_library::subtitle_placement;
 use crate::project_file::{load_project_file_for_agent, save_project_file};
 use crate::preview::plan::frame_index;
@@ -268,7 +269,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 return Err(AgentError::new("invalid_params", "duration must be above 0"));
             }
             let patch = super::protocol::TextPatch { content: Some(content), ..style };
-            let styled = styled_base(&state.text_style_library, patch.style_id.as_deref(), &default_text(String::new()), &engine::ClipAnimation::default())?;
+            let styled = styled_base(&state.text_style_library, &available_families(), patch.style_id.as_deref(), &default_text(String::new()), &engine::ClipAnimation::default())?;
             let text = apply_patch(&styled.text, &patch)?;
             let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::Text, &styled.animation, &patch)?.unwrap_or(styled.animation);
             let animation = Some(animation).filter(|animation| !animation.is_empty());
@@ -307,14 +308,11 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             let key = ClipKey::from(clip);
             let found = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).and_then(|track| track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key })).map_err(|error| AgentError::from_edit(&error))?;
             let Some(old) = found.text.as_ref() else { return Err(AgentError::from_edit(&engine::EditError::NotText { key })) };
-            let styled = styled_base(&state.text_style_library, patch.style_id.as_deref(), old, &found.animation)?;
+            let styled = styled_base(&state.text_style_library, &available_families(), patch.style_id.as_deref(), old, &found.animation)?;
             let text = apply_patch(&styled.text, &patch)?;
             let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::of(found), &styled.animation, &patch)?.unwrap_or(styled.animation);
             let animation = Some(animation).filter(|animation| *animation != found.animation);
-            let placement = match styled.layout {
-                Some(layout) => subtitle_placement(state.text_pixels(&text), state.output_pixels(), &layout),
-                None => state.rescaled_text_placement(key, &text),
-            };
+            let placement = state.styled_text_placement(key, &text, styled.layout.as_ref());
             state
                 .apply_agent_command(|project| {
                     let next = engine::set_text(project, key, text)?;
@@ -717,6 +715,23 @@ mod tests {
         assert_eq!(added(Some(Time::from_ticks(3000)), Some(Time::from_ticks(3000)), Some(2.0)).unwrap().duration, Time::from_ticks(3000));
         assert_eq!(code(added(Some(Time::from_ticks(3000)), Some(Time::from_ticks(3002)), Some(2.0)).map(|_| json!({}))), "out_of_range");
         assert_eq!(code(added(None, Some(Time::from_ticks(9001)), None).map(|_| json!({}))), "out_of_range", "at 1x as well");
+    }
+
+    #[test]
+    fn a_text_set_with_a_subtitle_style_leaves_a_place_with_keyframes_alone() {
+        let mut host = FakeHost::new("live");
+        host.state.text_style_library = crate::text_style_library::subtitle_library_for_test(&[]);
+        host.state.add_text_at_playhead();
+        let key = host.state.selection().expect("the new text is selected");
+        host.state.toggle_keyframe(key, KeyframeTarget::Property(engine::ClipProperty::X), 0.2);
+        let before = host.state.project().tracks[key.track].clips[key.clip].placement;
+        let patch = super::super::protocol::TextPatch { style_id: Some("s/low".to_owned()), ..Default::default() };
+        let edit = AgentEdit::TextSet { clip: ClipRef { track: key.track, clip: key.clip }, patch };
+        let revision = host.state.revision();
+        host.run(AgentRequest::Edit { expected_revision: revision, edit }).expect("text_set");
+        let clip = &host.state.project().tracks[key.track].clips[key.clip];
+        assert_eq!(clip.placement, before, "the layout does not overwrite a keyframed place");
+        assert_eq!(clip.text.as_ref().map(|text| text.weight), Some(800));
     }
 
     #[test]

@@ -530,3 +530,7 @@ Clip chữ chỉ thêm bằng nút "Thêm chữ" ở tab Chữ (`EditorState::ad
 ### [Thấp] Đổi chữ hoa/thường có thể đổi độ dài chuỗi nên chỉ số theo ký tự phải đi qua chuỗi đã đổi
 
 `TextContent::shaped_content` (`crates/engine/src/project.rs`) dùng `to_uppercase`/`to_lowercase`, mà kết quả có thể dài hơn hoặc khác số ký tự (`ß` thành `SS`, `İ` thành `i̇` hai điểm mã). Mọi chỉ số theo ký tự thêm sau này (karaoke, tô từng chữ, hiệu ứng theo ký tự) phải ánh xạ qua chuỗi đã đổi, không dùng chỉ số của `content` gốc. Ghi ngày 2026-11-13.
+
+### [Thấp] Kiểu phụ đề: max_width chỉ thu nhỏ placement, chưa ngắt dòng; max_lines chưa dùng; font_hint ở UI bị bỏ qua lặng lẽ khi chưa nạp danh sách font
+
+`SubtitleLayout::max_width` (`crates/gpufx-editor/src/text_style_library.rs` `subtitle_placement`) hiện chỉ thu nhỏ bề ngang placement của clip, chữ không được ngắt dòng cho vừa; `max_lines` đọc vào nhưng chưa dùng ở đâu. Nên ngắt dòng theo `max_width` và cắt/co theo `max_lines`. Thêm: phía UI (`EditorState::apply_text_style` và `add_styled_text_at_playhead` trong `crates/gpufx-editor/src/editor.rs`) khi style có `font_hint` mà `available_families()` còn rỗng (chưa quét xong font) thì font bị bỏ qua lặng lẽ, giữ font cũ; MCP đã báo `still loading` (`styled_base`), UI chưa. Nên chặn/báo trạng thái đang nạp hoặc áp lại font khi danh sách sẵn sàng. Ghi ngày 2026-11-13.
