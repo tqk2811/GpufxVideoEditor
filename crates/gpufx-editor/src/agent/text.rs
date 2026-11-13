@@ -5,7 +5,7 @@ use engine::{AnimationGroup, FontRef, ClipAnimation, AnimationRef, TextContent, 
 
 use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary};
 use crate::subtitle_style_install::SubtitleLayout;
-use crate::text_style_library::{StyleKind, TextStyleLibrary};
+use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStyleLibrary};
 use serde_json::{json, Value};
 
 use super::protocol::{AgentError, TextAnimationPatch, TextPatch};
@@ -223,6 +223,19 @@ pub fn styled_base(library: &TextStyleLibrary, families: &[String], style_id: Op
     match library.find(style_id) {
         Some(style) if families.is_empty() && !style.style.font_hint.is_empty() => Err(invalid(format!("'{style_id}' names fonts, but the list of fonts is still loading; try again in a moment"))),
         Some(style) => Ok(StyledBase { text: style.apply(text, families), animation: style.animation_for(animation), layout: style.layout }),
+        None if !library.loaded => Err(invalid(format!("'{style_id}' may be a style of an installed pack, but the packs are still loading; try again in a moment"))),
+        None => Err(invalid(format!("no style '{style_id}': text_style_list names the installed styles"))),
+    }
+}
+
+/// The subtitle style `style_id` of `library`, refused like [`styled_base`] refuses a style: not
+/// installed, still loading, or naming fonts while the list of fonts is loading; and refused when it
+/// is a text style.
+pub fn subtitle_style(library: &TextStyleLibrary, families: &[String], style_id: &str) -> Result<LibraryTextStyle, AgentError> {
+    match library.find(style_id) {
+        Some(style) if style.kind != StyleKind::Subtitle => Err(invalid(format!("'{style_id}' is a text style; text_style_list with type subtitle names the subtitle styles"))),
+        Some(style) if families.is_empty() && !style.style.font_hint.is_empty() => Err(invalid(format!("'{style_id}' names fonts, but the list of fonts is still loading; try again in a moment"))),
+        Some(style) => Ok(style.clone()),
         None if !library.loaded => Err(invalid(format!("'{style_id}' may be a style of an installed pack, but the packs are still loading; try again in a moment"))),
         None => Err(invalid(format!("no style '{style_id}': text_style_list names the installed styles"))),
     }

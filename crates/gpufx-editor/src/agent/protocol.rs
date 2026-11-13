@@ -129,6 +129,12 @@ pub enum AgentEdit {
     /// `at` is in ticks from the start of the clip. `easing` of `None` keeps the one replaced.
     KeyframeSet { clip: ClipRef, target: KeyframeTarget, at: Time, value: f64, easing: Option<Easing> },
     KeyframeRemove { clip: ClipRef, target: KeyframeTarget, at: Time },
+    /// Adds an SRT file, read from `path` or given as `content` (exactly one), as a new subtitle
+    /// track with one text clip per cue, in the subtitle style `style_id` when given.
+    SubtitleImport { path: Option<PathBuf>, content: Option<String>, style_id: Option<String> },
+    /// Gives subtitle track `track` the subtitle style `style_id`. A cue with a style of its own
+    /// keeps it unless `all`.
+    SubtitleSetStyle { track: usize, style_id: String, all: bool },
 }
 
 /// Which output frame to capture.
@@ -156,6 +162,8 @@ pub enum AgentRequest {
     /// The styles of the installed text (`text`) or subtitle (`subtitle`) style packs; both when
     /// `kind` is `None`.
     TextStyleList { kind: Option<String> },
+    /// The text clips of subtitle track `track` as an SRT file, also written to `path` when given.
+    SubtitleExport { track: usize, path: Option<PathBuf>, overwrite: bool },
     Edit { expected_revision: u64, edit: AgentEdit },
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },

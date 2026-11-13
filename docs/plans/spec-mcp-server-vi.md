@@ -56,6 +56,7 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `text_add`, `text_set` | Thêm và sửa clip chữ, xem mục `Chữ` |
 | `font_list`, `clip_animation_list` | Danh sách font và danh sách preset animation (id, nhóm `in`/`out`/`loop`, thời lượng mặc định) |
 | `text_style_list` | Danh sách kiểu chữ và kiểu phụ đề của các gói `text-style`/`subtitle-style` đã cài, lọc theo `type` (`text`/`subtitle`) |
+| `subtitle_import_srt`, `subtitle_set_style`, `subtitle_export_srt` | Nhập SRT thành track phụ đề, đổi kiểu phụ đề của track, xuất track ra SRT, xem mục `Phụ đề` |
 | `clip_animation_set` | Đặt animation `in`, `out`, `loop` cho một clip có hình (video, ảnh, sticker, chữ) |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
 | `clip_set_speed` | Tốc độ phát một clip, xem mục dưới |
@@ -98,6 +99,16 @@ Clip chữ là clip có `source` `text:` và trường `text` (`TextContent`); `
 `clip_animation_set` nhận `clip`, `expected_revision` và các nhóm `in`, `out`, `loop`, mỗi nhóm là `{preset, duration}`. Nhóm vắng giữ nguyên, `null` gỡ animation của nhóm đó, không có nhóm nào thì `invalid_params`. Dùng được cho mọi clip có hình (video, ảnh, sticker, chữ); clip trên track audio bị từ chối với `invalid_params`. `text_add` và `text_set` vẫn nhận `animation` như cũ.
 
 Giá trị không hợp lệ bị từ chối với `invalid_params` và nói rõ trường nào: `content` rỗng, `size` hay `line_spacing` không lớn hơn 0, độ rộng viền, `padding`, `radius` hay `blur` âm, preset không có hoặc sai nhóm, `duration` không dương, `text_set` không có trường nào để đổi.
+
+### Phụ đề
+
+Track phụ đề là track video có trường `subtitle: {"style"?}` trong project, mỗi cue một clip chữ (bắt đầu và kết thúc theo cue, `content` là chữ của cue). Project cũ không có trường này vẫn mở được. Kiểu phụ đề được chép vào từng clip như `style_id` của `text_add`; `subtitle.style` chỉ ghi lại id kiểu track được áp lần cuối, nên thiếu gói thì project vẫn mở như cũ. Clip có `text.own_style: true` là cue đã được áp kiểu riêng (`text_set` với `style_id`, hoặc "Áp kiểu" trong editor) và giữ kiểu đó khi track đổi kiểu.
+
+- `subtitle_import_srt` nhận `expected_revision`, đúng một trong `path` (file UTF-8, có hoặc không BOM) và `content`, tuỳ chọn `style_id` (kiểu phụ đề do `text_style_list` liệt kê). Trình đọc chấp nhận CRLF hoặc LF, `,` hoặc `.` trước mili giây, số thứ tự thiếu hoặc sai, cue nhiều dòng; bỏ tag `<i>`, `<b>`, `<u>`, `<s>`, `<font>` và `{\an8}`. Cue không đọc được, kết thúc không sau lúc bắt đầu, hoặc không còn chữ thì bị bỏ; cue chồng lên cue sau bị cắt tại lúc cue sau bắt đầu; cue bắt đầu cùng lúc với cue trước bị bỏ. Trả `{"track", "cues", "warnings": [{"skipped", "message"}]}`, `message` có số dòng. Không còn cue nào thì `invalid_params` (kèm `data.warnings`). Không có `style_id` thì cue là chữ mặc định, đặt gần đáy khung. Một bước undo.
+- `subtitle_set_style` nhận `expected_revision`, `track`, `style_id`, `all` (mặc định `false`). Chép kiểu vào mọi cue (giữ chữ và thời gian), đặt cue theo `layout` trừ cue có keyframe vị trí; cue `own_style` được giữ trừ khi `all`, khi đó cue nhận kiểu track và bỏ cờ. Track không phải track phụ đề hoặc kiểu không phải kiểu phụ đề thì `invalid_params`. Trả `{"track", "restyled"}`. Một bước undo.
+- `subtitle_export_srt` nhận `track`, tuỳ chọn `path`, `overwrite`. Trả `{"track", "cues", "srt", "path"}`; `srt` dùng CRLF và `,` trước mili giây. File đã có thì `file_exists` trừ khi `overwrite`; file project đang đọc thì `invalid_output`.
+
+Karaoke (thời gian từng từ) làm ở bước sau; thời gian và chữ của cue nằm sẵn trong clip để chia theo từ.
 
 ### Xuất file
 

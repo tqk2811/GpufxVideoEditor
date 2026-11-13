@@ -391,6 +391,25 @@ params!(TextStyleListParams {
     #[serde(rename = "type")]
     kind: Option<StyleTypeParam>,
 });
+params!(SubtitleImportParams {
+    expected_revision: u64,
+    /// The SRT file to read, UTF-8 with or without a byte order mark.
+    path: Option<PathBuf>,
+    /// The SRT text itself, instead of a path.
+    content: Option<String>,
+    /// A subtitle style text_style_list names.
+    style_id: Option<String>,
+});
+params!(SubtitleSetStyleParams {
+    expected_revision: u64,
+    track: usize,
+    /// A subtitle style text_style_list names.
+    style_id: String,
+    /// Also restyle the cues that were given a style of their own.
+    #[serde(default)]
+    all: bool,
+});
+params!(SubtitleExportParams { track: usize, path: Option<PathBuf>, #[serde(default)] overwrite: bool });
 params!(ClipMoveParams { expected_revision: u64, clip: ClipParam, track: usize, start: i64 });
 params!(ClipTrimStartParams { expected_revision: u64, clip: ClipParam, start: i64 });
 params!(ClipTrimEndParams { expected_revision: u64, clip: ClipParam, end: i64 });
@@ -532,6 +551,9 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("clip_animation_list", "The preset animations a clip with a picture (video, image, sticker or text) can name: each with its id, its group (in, out or loop) and default_duration in ticks (for loop, one cycle). Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::ClipAnimationList)),
         tool!("text_style_list", "The styles of the installed text style and subtitle style packs, filtered by type (text or subtitle; both when absent): each with its id to give as style_id to text_add (in style) or text_set, its name, type, category, preview_text, pack, the style values it copies into a text (absent ones are as on a new text; an absent size keeps the text's), its animations (durations in ticks) and, for a subtitle style, its layout (anchor_y and max_width in parts of the frame). font_hint names fonts used when installed. state is loading while the packs are still being read.", TextStyleListParams, |p| Ok(AgentRequest::TextStyleList { kind: p.kind.map(|kind| match kind { StyleTypeParam::Text => "text".to_owned(), StyleTypeParam::Subtitle => "subtitle".to_owned() }) })),
         tool!("clip_animation_set", "Sets the preset animations of a clip with a picture (video, image, sticker or text): in plays as it appears, out as it goes away, loop the whole time it shows. Each is {preset, duration in ticks}, with a preset clip_animation_list names for that group; a group that is absent stays, and null takes its animation off. Refused with invalid_params for a clip on an audio track.", ClipAnimationSetParams, clip_animation_set),
+        tool!("subtitle_import_srt", "Adds an SRT file as a new subtitle track on top: one text clip per cue, from its start to its end, with the cue's text (tags such as <i> and {\\an8} dropped). Give exactly one of path and content. style_id, a subtitle style text_style_list names, is copied into every cue and remembered on the track; without one the cues are the default text near the bottom of the frame. A cue that cannot be read is left out, a cue running into the next is cut where the next starts, and one starting together with an earlier one is left out; warnings says which, by line. Returns track, cues and warnings. One undo step.", SubtitleImportParams, |p| edit(p.expected_revision, AgentEdit::SubtitleImport { path: p.path, content: p.content, style_id: p.style_id })),
+        tool!("subtitle_set_style", "Gives a subtitle track the subtitle style style_id: its values are copied into every cue, which keeps its text and time, and each cue goes where the style's layout says unless its place has keyframes. A cue given a style of its own (text_set with style_id, or Apply style in the editor) keeps it unless all is true. Refused with invalid_params for a track that is not a subtitle track. Returns how many cues were restyled. One undo step.", SubtitleSetStyleParams, |p| edit(p.expected_revision, AgentEdit::SubtitleSetStyle { track: p.track, style_id: p.style_id, all: p.all })),
+        tool!("subtitle_export_srt", "The text clips of a subtitle track as an SRT file (CRLF line ends), returned as srt, and also written to path when given. An existing file is refused with file_exists unless overwrite is true.", SubtitleExportParams, |p| Ok(AgentRequest::SubtitleExport { track: p.track, path: p.path, overwrite: p.overwrite })),
         tool!("clip_move", "Moves a clip to a track, as near start as the other clips allow. Returns where it landed.", ClipMoveParams, |p| edit(p.expected_revision, AgentEdit::ClipMove { clip: p.clip.into(), track: p.track, start: ticks(p.start) })),
         tool!("clip_trim_start", "Moves the start edge of a clip, keeping the frames under the end edge.", ClipTrimStartParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimStart { clip: p.clip.into(), start: ticks(p.start) })),
         tool!("clip_trim_end", "Moves the end edge of a clip.", ClipTrimEndParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimEnd { clip: p.clip.into(), end: ticks(p.end) })),

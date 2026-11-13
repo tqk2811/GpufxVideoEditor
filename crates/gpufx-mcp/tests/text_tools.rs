@@ -425,3 +425,57 @@ fn the_schemas_of_the_text_tools_name_every_field_an_agent_may_give() {
     let animation = add.to_string();
     assert!(animation.contains("\"in\"") && animation.contains("\"out\"") && animation.contains("\"loop\""), "{add}");
 }
+
+const SRT: &str = "1\n00:00:01,000 --> 00:00:02,000\n<i>One</i>\n\n2\n00:00:03,000 --> 00:00:04,000\nTwo\n\n3\nbroken\n";
+
+#[test]
+fn subtitles_are_imported_restyled_and_exported() {
+    let mut session = FileSession::with_roots(vec![style_root()]);
+    let imported = call_ok(&mut session, "subtitle_import_srt", json!({"expected_revision": 0, "content": SRT}));
+    assert_eq!((imported["track"].as_u64(), imported["cues"].as_u64()), (Some(0), Some(2)));
+    assert_eq!(imported["warnings"].as_array().unwrap().len(), 1);
+    assert_eq!(imported["warnings"][0]["skipped"], true);
+    assert!(imported["warnings"][0]["message"].as_str().unwrap().contains("line 9"), "{imported}");
+    let project = project_of(&mut session);
+    assert!(project.tracks[0].is_subtitle());
+    assert_eq!(project.tracks[0].clips[0].text.as_ref().unwrap().content, "One");
+
+    // A cue given a style of its own keeps it when the track gets one.
+    let own = call_ok(&mut session, "text_set", json!({"expected_revision": revision(&imported), "clip": {"track": 0, "clip": 0}, "style_id": "styles/bold"}));
+    assert!(text_of(&mut session, 0, 0).own_style);
+    let set = call_ok(&mut session, "subtitle_set_style", json!({"expected_revision": revision(&own), "track": 0, "style_id": "subs/low"}));
+    assert_eq!(set["restyled"], 1);
+    assert_eq!(text_of(&mut session, 0, 0).weight, 800);
+    assert!(text_of(&mut session, 0, 1).background.is_some());
+    assert_eq!(project_of(&mut session).tracks[0].subtitle.as_ref().unwrap().style.as_deref(), Some("subs/low"));
+    let all = call_ok(&mut session, "subtitle_set_style", json!({"expected_revision": revision(&set), "track": 0, "style_id": "subs/low", "all": true}));
+    assert_eq!(all["restyled"], 2);
+    assert!(!text_of(&mut session, 0, 0).own_style);
+
+    let out = scratch("subtitle-export").join("out.srt");
+    let _ = std::fs::remove_file(&out);
+    let exported = call_ok(&mut session, "subtitle_export_srt", json!({"track": 0, "path": out}));
+    let srt = "1\r\n00:00:01,000 --> 00:00:02,000\r\nOne\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nTwo\r\n\r\n";
+    assert_eq!(exported["srt"], srt);
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), srt);
+    assert_eq!(call_err(&mut session, "subtitle_export_srt", json!({"track": 0, "path": out})).code, "file_exists");
+
+    // From a file, in a style.
+    let file = scratch("subtitle-import").join("in.srt");
+    std::fs::write(&file, format!("\u{feff}{}", SRT.replace('\n', "\r\n"))).unwrap();
+    let from_file = call_ok(&mut session, "subtitle_import_srt", json!({"expected_revision": revision(&all), "path": file, "style_id": "subs/low"}));
+    assert_eq!((from_file["track"].as_u64(), from_file["cues"].as_u64()), (Some(1), Some(2)));
+    assert!(text_of(&mut session, 1, 0).background.is_some());
+}
+
+#[test]
+fn bad_subtitle_calls_are_refused() {
+    let mut session = FileSession::with_roots(vec![style_root()]);
+    assert_eq!(call_err(&mut session, "subtitle_import_srt", json!({"expected_revision": 0})).code, "invalid_params");
+    assert_eq!(call_err(&mut session, "subtitle_import_srt", json!({"expected_revision": 0, "content": "nothing"})).code, "invalid_params");
+    assert_eq!(call_err(&mut session, "subtitle_import_srt", json!({"expected_revision": 0, "content": SRT, "style_id": "styles/bold"})).code, "invalid_params", "a text style is not a subtitle style");
+    let added = with_text(&mut session);
+    assert_eq!(call_err(&mut session, "subtitle_set_style", json!({"expected_revision": added, "track": 0, "style_id": "subs/low"})).code, "invalid_params", "not a subtitle track");
+    assert_eq!(call_err(&mut session, "subtitle_export_srt", json!({"track": 0})).code, "invalid_params");
+    assert_eq!(call_err(&mut session, "subtitle_export_srt", json!({"track": 4})).code, "track_not_found");
+}

@@ -13,7 +13,9 @@ use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
-use super::text::{animation_list, apply_animation_patch, apply_patch, font_list, patched_animation, styled_base};
+use super::text::{animation_list, apply_animation_patch, apply_patch, font_list, patched_animation, styled_base, subtitle_style};
+use crate::editor::read_subtitle_file;
+use crate::subtitle_track::track_srt;
 use crate::clip_animation_library::AnimatedClipKind;
 use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_IMAGE_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::export::{export_blocker, ExportOutcome};
@@ -309,7 +311,11 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             let found = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).and_then(|track| track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key })).map_err(|error| AgentError::from_edit(&error))?;
             let Some(old) = found.text.as_ref() else { return Err(AgentError::from_edit(&engine::EditError::NotText { key })) };
             let styled = styled_base(&state.text_style_library, &available_families(), patch.style_id.as_deref(), old, &found.animation)?;
-            let text = apply_patch(&styled.text, &patch)?;
+            let mut text = apply_patch(&styled.text, &patch)?;
+            // A cue of a subtitle track given a style of its own keeps it when the track's changes.
+            if patch.style_id.is_some() && state.project().tracks[clip.track].is_subtitle() {
+                text.own_style = true;
+            }
             let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::of(found), &styled.animation, &patch)?.unwrap_or(styled.animation);
             let animation = Some(animation).filter(|animation| *animation != found.animation);
             let placement = state.styled_text_placement(key, &text, styled.layout.as_ref());
@@ -358,6 +364,41 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             result.insert("clip".to_owned(), json!(ClipRef { track: clip.track, clip: clip.clip + 1 }));
         }
         AgentEdit::ClipDelete { clip } => state.apply_agent_command(|project| engine::delete_clip(project, clip.into())).map_err(refused)?,
+        AgentEdit::SubtitleImport { path, content, style_id } => {
+            let srt = match (path, content) {
+                (Some(path), None) => read_subtitle_file(&path).map_err(|reason| AgentError::new("invalid_path", format!("{}: {reason}", path.display())))?,
+                (None, Some(content)) => content,
+                _ => return Err(AgentError::new("invalid_params", "give exactly one of path and content")),
+            };
+            let style = match style_id.as_deref() {
+                Some(style_id) => Some(subtitle_style(&state.text_style_library, &available_families(), style_id)?),
+                None => None,
+            };
+            let (clips, notes) = state.subtitle_clips(&srt, style.as_ref());
+            let warnings: Vec<Value> = notes.iter().map(|note| json!({"skipped": note.skipped(), "message": note.to_string()})).collect();
+            if clips.is_empty() {
+                return Err(AgentError { code: "invalid_params".to_owned(), message: "the subtitles hold no cue that can be read".to_owned(), data: json!({"warnings": warnings}) });
+            }
+            let (track, cues) = (state.project().tracks.len(), clips.len());
+            let subtitle = engine::SubtitleTrack { style: style.map(|style| style.reference) };
+            state.apply_agent_command(|project| engine::add_subtitle_track(project, subtitle, clips)).map_err(refused)?;
+            result.insert("track".to_owned(), json!(track));
+            result.insert("cues".to_owned(), json!(cues));
+            result.insert("warnings".to_owned(), Value::Array(warnings));
+        }
+        AgentEdit::SubtitleSetStyle { track, style_id, all } => {
+            let style = subtitle_style(&state.text_style_library, &available_families(), &style_id)?;
+            let target = state.project().tracks.get(track).ok_or(engine::EditError::TrackNotFound { track }).map_err(|error| AgentError::from_edit(&error))?;
+            if !target.is_subtitle() {
+                return Err(AgentError::new("invalid_params", format!("track {track} is not a subtitle track; subtitle_import_srt makes one")));
+            }
+            let restyled = state.subtitle_restyle(track, &style, all).map_err(refused)?;
+            let count = restyled.len();
+            let subtitle = Some(engine::SubtitleTrack { style: Some(style.reference.clone()) });
+            state.apply_agent_command(|project| engine::restyle_track(project, track, subtitle, restyled)).map_err(refused)?;
+            result.insert("track".to_owned(), json!(track));
+            result.insert("restyled".to_owned(), json!(count));
+        }
         AgentEdit::EffectAdd { clip, package, params } => {
             let params = crate::params::without_clip_clock(state.catalog.params_of(&package), params);
             state.apply_agent_command(|project| engine::add_effect(project, clip.into(), Effect { package, params, keyframes: Default::default() })).map_err(refused)?
@@ -468,6 +509,34 @@ fn project_save<H: AgentHost>(host: &mut H, path: Option<&Path>, overwrite: bool
     Ok(json!({"path": file}))
 }
 
+/// The text clips of subtitle track `track` as SRT, also written to `path` when given. A file that
+/// is there is refused unless `overwrite`, and a file the project reads always is.
+fn subtitle_export<H: AgentHost>(host: &mut H, track: usize, path: Option<&Path>, overwrite: bool) -> Result<Value, AgentError> {
+    let paths = host.paths();
+    let state = host.state();
+    let target = state.project().tracks.get(track).ok_or_else(|| AgentError::from_edit(&engine::EditError::TrackNotFound { track }))?;
+    if !target.is_subtitle() {
+        return Err(AgentError::new("invalid_params", format!("track {track} is not a subtitle track")));
+    }
+    let srt = track_srt(target);
+    let cues = target.clips.iter().filter(|clip| clip.is_text()).count();
+    let file = match path {
+        Some(path) => {
+            let file = std::path::absolute(path).map_err(|e| AgentError::new("invalid_path", e.to_string()))?;
+            if let Some(what) = overwritten_input(state.project(), &paths, &file) {
+                return Err(AgentError::new("invalid_output", format!("{} is {what}; it would be overwritten", file.display())));
+            }
+            if file.exists() && !overwrite {
+                return Err(AgentError::new("file_exists", format!("{} exists: pass overwrite to replace it", file.display())));
+            }
+            std::fs::write(&file, &srt).map_err(|e| AgentError::new("save_failed", e.to_string()))?;
+            Some(file)
+        }
+        None => None,
+    };
+    Ok(json!({"track": track, "cues": cues, "srt": srt, "path": file}))
+}
+
 fn project_summary(project: &Project) -> Value {
     let frames = frame_count(project);
     let duration = project.tracks.iter().flat_map(|track| &track.clips).filter_map(Clip::end).max().unwrap_or(Time::ZERO);
@@ -576,6 +645,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::FontList => Ok(font_list()),
         AgentRequest::ClipAnimationList => Ok(animation_list(&host.state().clip_animation_library)),
         AgentRequest::TextStyleList { kind } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref()),
+        AgentRequest::SubtitleExport { track, path, overwrite } => subtitle_export(host, track, path.as_deref(), overwrite),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
             None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe)),
