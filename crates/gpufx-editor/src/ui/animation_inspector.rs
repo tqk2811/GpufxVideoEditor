@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn a_pack_preset_is_named_with_its_pack_or_marked_missing() {
-        let rise = crate::clip_animation_library::LibraryAnimation { reference: "p/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default() };
+        let rise = crate::clip_animation_library::LibraryAnimation { reference: "p/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default(), effect_package: None, effect: None };
         let library = ClipAnimationLibrary { packs: vec![crate::clip_animation_library::ClipAnimationPack { id: "p".to_owned(), name: "Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
         assert_eq!(shown_name("p/rise", AnimationGroup::Enter, &library, Language::English), "Pack: Rise");
         assert_eq!(shown_name("q/gone", AnimationGroup::Enter, &library, Language::English), "q/gone (pack not installed)");

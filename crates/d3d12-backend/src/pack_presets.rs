@@ -7,16 +7,22 @@ use std::path::PathBuf;
 use engine::{PackPreset, PackPresets, PACK_PRESET_SEPARATOR};
 
 use crate::clip_animation_pack::scan_clip_animation_folders;
+use crate::preset_effects::resolve_item_effects;
 
 /// The presets of the accepted packs under every root. A pack in an earlier root hides one of the
-/// same id in a later one, as for the editor.
+/// same id in a later one, as for the editor. An item effect whose gpufx package is under the
+/// roots plays with the item; one that is not is left out (see [`crate::preset_effects`]).
 pub fn read_pack_presets(roots: &[PathBuf]) -> PackPresets {
+    let packs = scan_clip_animation_folders(roots).packs;
+    let mut effects = resolve_item_effects(roots, &packs).ready;
     let mut presets = Vec::new();
-    for manifest in scan_clip_animation_folders(roots).packs {
+    for manifest in packs {
         let id = manifest.id.to_ascii_lowercase();
         for item in manifest.items {
             let Some(group) = item.group() else { continue };
-            presets.push(PackPreset::new(format!("{id}{PACK_PRESET_SEPARATOR}{}", item.id), group, item.curve));
+            let reference = format!("{id}{PACK_PRESET_SEPARATOR}{}", item.id);
+            let effect = effects.remove(&reference);
+            presets.push(PackPreset::new(reference, group, item.curve).with_effect(effect));
         }
     }
     PackPresets::new(presets)

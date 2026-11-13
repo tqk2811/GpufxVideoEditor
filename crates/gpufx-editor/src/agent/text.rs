@@ -308,7 +308,8 @@ pub fn animation_list(library: &ClipAnimationLibrary) -> Value {
     let packs = library.packs.iter().flat_map(|pack| {
         pack.animations.iter().map(move |animation| {
             let applies_to = animation.applies_to.as_ref().map(|kinds| kinds.iter().map(|kind| kind.name()).collect::<Vec<_>>());
-            json!({"id": animation.reference, "group": animation.group.name(), "default_duration": animation.default_duration.ticks(), "name": animation.name, "pack": {"id": pack.id, "name": pack.name}, "applies_to": applies_to})
+            let effect = animation.effect_package.as_ref().map(|package| json!({"package": package, "available": animation.effect.is_some()}));
+            json!({"id": animation.reference, "group": animation.group.name(), "default_duration": animation.default_duration.ticks(), "name": animation.name, "pack": {"id": pack.id, "name": pack.name}, "applies_to": applies_to, "effect": effect})
         })
     });
     let presets: Vec<Value> = built_in.chain(packs).collect();
@@ -362,7 +363,7 @@ mod tests {
     fn a_pack_preset_is_listed_with_its_pack_and_accepted_for_the_kinds_it_applies_to() {
         use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary, ClipAnimationPack, LibraryAnimation};
         let curve = engine::AnimationCurve::default().with(engine::CurveProperty::Opacity, vec![engine::CurveKey { t: 0.0, value: 0.0, ease: engine::Ease::Linear }, engine::CurveKey { t: 1.0, value: 1.0, ease: engine::Ease::Linear }]);
-        let rise = LibraryAnimation { reference: "agent-pack/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(45_000), applies_to: Some(vec![AnimatedClipKind::Text]), curve };
+        let rise = LibraryAnimation { reference: "agent-pack/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(45_000), applies_to: Some(vec![AnimatedClipKind::Text]), curve, effect_package: None, effect: None };
         let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { id: "agent-pack".to_owned(), name: "Agent Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
 
         let list = animation_list(&library);
@@ -383,6 +384,20 @@ mod tests {
         assert!(error.message.contains("still loading"), "{}", error.message);
         let error = patched_animation(&loading, AnimatedClipKind::Text, &ClipAnimation::default(), &patch("nope")).unwrap_err();
         assert!(error.message.contains("is not a preset"), "a name without a pack is not waiting for one: {}", error.message);
+    }
+
+    #[test]
+    fn the_list_says_whether_the_effect_of_a_pack_preset_is_installed() {
+        use crate::clip_animation_library::{ClipAnimationLibrary, ClipAnimationPack, LibraryAnimation};
+        let animation = |id: &str, effect_package: Option<&str>, effect: Option<engine::PresetEffect>| LibraryAnimation { reference: format!("p/{id}"), name: id.to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default(), effect_package: effect_package.map(str::to_owned), effect };
+        let ready = engine::PresetEffect { package: "packages/gpufx/x/wipe".to_owned(), progress: "progress".to_owned(), params: serde_json::Map::new() };
+        let animations = vec![animation("plain", None, None), animation("ready", Some("io.x.wipe"), Some(ready)), animation("missing", Some("io.x.gone"), None)];
+        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { id: "p".to_owned(), name: "P".to_owned(), animations }], problems: Vec::new(), loaded: true };
+        let list = animation_list(&library);
+        let effect = |id: &str| list["presets"].as_array().unwrap().iter().find(|preset| preset["id"] == format!("p/{id}")).unwrap()["effect"].clone();
+        assert_eq!(effect("plain"), Value::Null);
+        assert_eq!(effect("ready"), json!({"package": "io.x.wipe", "available": true}));
+        assert_eq!(effect("missing"), json!({"package": "io.x.gone", "available": false}));
     }
 
     #[test]

@@ -66,11 +66,67 @@ pub struct ClipAnimationManifestItem {
     /// The kinds of clip (see [`CLIP_KINDS`]) the item is offered for; every kind when absent.
     #[serde(default)]
     pub applies_to: Option<Vec<String>>,
-    pub curve: AnimationCurve,
-    /// Reserved for a gpufx shader the item will run on top of its curve. It is read and kept, but
-    /// not used yet.
+    /// The motion of the item; an item with an effect may leave it out.
     #[serde(default)]
-    pub effect: Option<serde_json::Value>,
+    pub curve: AnimationCurve,
+    /// A gpufx effect the item runs on top of its curve while it plays.
+    #[serde(default)]
+    pub effect: Option<ItemEffect>,
+}
+
+/// The default name of the parameter an item effect drives.
+pub const DEFAULT_PROGRESS_PARAM: &str = "progress";
+/// The most static parameters an item effect may set.
+pub const MAX_EFFECT_PARAMS: usize = 64;
+
+fn default_progress() -> String {
+    DEFAULT_PROGRESS_PARAM.to_owned()
+}
+
+/// The `effect` of an item: a gpufx effect package by its manifest id, the parameter given the
+/// progress of the animation and static parameters (a number, a bool, or 2 to 4 numbers for a
+/// vector or a colour). Whether the package is installed, and has those parameters, is checked
+/// when the packs are read for playing (see [`crate::preset_effects`]), not here.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemEffect {
+    pub package: String,
+    #[serde(default = "default_progress")]
+    pub progress: String,
+    #[serde(default)]
+    pub params: serde_json::Map<String, serde_json::Value>,
+}
+
+/// Whether `value` can be a static parameter of an item effect.
+fn is_static_value(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Number(number) => number.as_f64().is_some_and(f64::is_finite),
+        Value::Bool(_) => true,
+        Value::Array(items) => (2..=4).contains(&items.len()) && items.iter().all(|item| item.as_f64().is_some_and(f64::is_finite)),
+        _ => false,
+    }
+}
+
+fn check_effect(id: &str, effect: &ItemEffect) -> Result<(), ManifestProblem> {
+    if !is_safe_id(&effect.package) {
+        return bad(format!("the effect of the item \"{id}\" names the package \"{}\", which is not a package id", effect.package));
+    }
+    if effect.progress.trim().is_empty() {
+        return bad(format!("the effect of the item \"{id}\" has an empty progress"));
+    }
+    if effect.params.len() > MAX_EFFECT_PARAMS {
+        return bad(format!("the effect of the item \"{id}\" sets more than {MAX_EFFECT_PARAMS} parameters"));
+    }
+    if effect.params.contains_key(&effect.progress) {
+        return bad(format!("the effect of the item \"{id}\" sets its progress parameter \"{}\" in params", effect.progress));
+    }
+    for (name, value) in &effect.params {
+        if name.trim().is_empty() || !is_static_value(value) {
+            return bad(format!("the effect parameter \"{name}\" of the item \"{id}\" must be a number, a bool or 2 to 4 numbers"));
+        }
+    }
+    Ok(())
 }
 
 impl ClipAnimationManifestItem {
@@ -130,6 +186,12 @@ fn check_item(item: &ClipAnimationManifestItem) -> Result<(), ManifestProblem> {
             if !seen.insert(kind) {
                 return bad(format!("the item \"{id}\" lists \"{kind}\" twice in applies_to"));
             }
+        }
+    }
+    if let Some(effect) = &item.effect {
+        check_effect(id, effect)?;
+        if item.curve.tracks.is_empty() {
+            return Ok(());
         }
     }
     check_curve(&item.curve).or_else(|message| bad(format!("the item \"{id}\": {message}")))

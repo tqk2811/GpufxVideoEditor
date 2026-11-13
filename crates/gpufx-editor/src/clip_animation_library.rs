@@ -2,12 +2,16 @@
 //!
 //! Each item of a pack is a preset a clip names as `"<pack id>/<item id>"`, the pack id lower-cased.
 //! The scan only reads manifests; the engine gets the curves as a table (see
-//! [`ClipAnimationLibrary::preset_table`]) and never reads a pack itself.
+//! [`ClipAnimationLibrary::preset_table`]) and never reads a pack itself. An item may also run a
+//! gpufx effect; the scan finds its package (see [`d3d12_backend::resolve_item_effects`]) and a
+//! missing one is listed among the problems while the item keeps its curve.
 
 use std::path::PathBuf;
 
-use d3d12_backend::{scan_clip_animation_folders, ClipAnimationManifest};
-use engine::{AnimationCurve, AnimationGroup, Clip, PackPreset, PackPresets, Time};
+use std::collections::HashMap;
+
+use d3d12_backend::{resolve_item_effects, scan_clip_animation_folders, ClipAnimationManifest};
+use engine::{AnimationCurve, AnimationGroup, Clip, PackPreset, PackPresets, PresetEffect, Time};
 
 use crate::audio_library::LibraryProblem;
 use crate::timecode::from_seconds;
@@ -68,6 +72,10 @@ pub struct LibraryAnimation {
     /// The kinds of clip it is offered for; every kind when `None`.
     pub applies_to: Option<Vec<AnimatedClipKind>>,
     pub curve: AnimationCurve,
+    /// The gpufx package id the item's effect names, when it has one.
+    pub effect_package: Option<String>,
+    /// That effect, when its package is installed and fits; it plays on top of the curve.
+    pub effect: Option<PresetEffect>,
 }
 
 impl LibraryAnimation {
@@ -102,7 +110,7 @@ impl ClipAnimationLibrary {
 
     /// The curves of every animation, for [`engine::set_pack_presets`].
     pub fn preset_table(&self) -> PackPresets {
-        PackPresets::new(self.packs.iter().flat_map(|pack| &pack.animations).map(|animation| PackPreset::new(animation.reference.clone(), animation.group, animation.curve.clone())).collect())
+        PackPresets::new(self.packs.iter().flat_map(|pack| &pack.animations).map(|animation| PackPreset::new(animation.reference.clone(), animation.group, animation.curve.clone()).with_effect(animation.effect.clone())).collect())
     }
 
     /// The animation a clip names as `reference` in `group`.
@@ -116,15 +124,18 @@ pub fn pack_reference(pack: &str, item: &str) -> String {
     format!("{}{}{item}", pack.to_ascii_lowercase(), engine::PACK_PRESET_SEPARATOR)
 }
 
-fn library_pack(manifest: ClipAnimationManifest) -> ClipAnimationPack {
+fn library_pack(manifest: ClipAnimationManifest, effects: &mut HashMap<String, PresetEffect>) -> ClipAnimationPack {
     let id = manifest.id.to_ascii_lowercase();
     let animations = manifest
         .items
         .into_iter()
         .filter_map(|item| {
             let group = item.group()?;
+            let reference = pack_reference(&id, &item.id);
             Some(LibraryAnimation {
-                reference: pack_reference(&id, &item.id),
+                effect: effects.remove(&reference),
+                effect_package: item.effect.map(|effect| effect.package),
+                reference,
                 name: item.name,
                 group,
                 default_duration: from_seconds(item.default_duration).max(Time::from_ticks(1)),
@@ -141,8 +152,11 @@ fn library_pack(manifest: ClipAnimationManifest) -> ClipAnimationPack {
 /// pack in an earlier root hides one of the same id in a later one only when it is accepted.
 pub fn scan_clip_animation_packs(roots: &[PathBuf]) -> ClipAnimationLibrary {
     let scan = scan_clip_animation_folders(roots);
-    let problems = scan.problems.into_iter().map(|problem| LibraryProblem { pack: problem.pack, message: problem.message }).collect();
-    let mut packs: Vec<ClipAnimationPack> = scan.packs.into_iter().map(library_pack).collect();
+    // An item whose effect package is missing still plays its curve; the problem says why.
+    let effects = resolve_item_effects(roots, &scan.packs);
+    let mut ready = effects.ready;
+    let problems = scan.problems.into_iter().chain(effects.problems).map(|problem| LibraryProblem { pack: problem.pack, message: problem.message }).collect();
+    let mut packs: Vec<ClipAnimationPack> = scan.packs.into_iter().map(|manifest| library_pack(manifest, &mut ready)).collect();
     packs.sort_by_key(|pack| pack.name.to_lowercase());
     ClipAnimationLibrary { packs, problems, loaded: true }
 }

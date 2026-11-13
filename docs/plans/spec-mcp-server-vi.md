@@ -94,7 +94,7 @@ Clip chữ là clip có `source` `text:` và trường `text` (`TextContent`); `
 
 `text_style_list` trả `{"state", "styles": [{"id", "name", "type", "category", "preview_text", "pack", "style", "animation", "layout"}, ...], "problems"}`; `state` là `loading` khi các gói còn đang được đọc.
 
-`clip_animation_list` trả `{"presets": [{"id", "group", "default_duration"}, ...]}`, `group` là `in`, `out` hoặc `loop`, `default_duration` tính bằng tick (với `loop` là một chu kỳ). Preset chỉ được dùng đúng nhóm của nó, `duration` của một preset tính bằng tick và phải lớn hơn 0.
+`clip_animation_list` trả `{"presets": [{"id", "group", "default_duration"}, ...]}`, `group` là `in`, `out` hoặc `loop`, `default_duration` tính bằng tick (với `loop` là một chu kỳ). Preset của gói có thêm `name`, `pack`, `applies_to` và `effect`: `null` hoặc `{"package", "available"}`, tức gói effect gpufx preset chạy kèm và gói đó có được cài hay không (thiếu thì bỏ effect, preset chỉ chạy phần chuyển động). Preset chỉ được dùng đúng nhóm của nó, `duration` của một preset tính bằng tick và phải lớn hơn 0.
 
 `clip_animation_set` nhận `clip`, `expected_revision` và các nhóm `in`, `out`, `loop`, mỗi nhóm là `{preset, duration}`. Nhóm vắng giữ nguyên, `null` gỡ animation của nhóm đó, không có nhóm nào thì `invalid_params`. Dùng được cho mọi clip có hình (video, ảnh, sticker, chữ); clip trên track audio bị từ chối với `invalid_params`. `text_add` và `text_set` vẫn nhận `animation` như cũ.
 

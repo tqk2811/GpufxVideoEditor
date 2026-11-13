@@ -27,6 +27,7 @@ mod paths;
 mod probe;
 mod progress;
 mod rotated_place;
+mod preset_effects;
 mod still;
 mod thumbnail;
 
@@ -38,8 +39,9 @@ pub use effect_preview_protocol::{InvalidJob, PreviewBlame, PreviewEvent, Previe
 pub use encoder::{encoder_exists, EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
 pub use export::{overwritten_input, reserve_temporary, same_file, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;
-pub use clip_animation_pack::{check_clip_animation_fields, is_clip_animation_type, parse_clip_animation_manifest, scan_clip_animation_folders, ClipAnimationManifest, ClipAnimationManifestItem, ClipAnimationScan, ManifestProblem, PackLicense, PackReadProblem, CLIP_ANIMATION_FOLDER, CLIP_ANIMATION_TYPE_ALIAS, CLIP_KINDS, MAX_DEFAULT_DURATION, MAX_MANIFEST_ITEMS as MAX_CLIP_ANIMATION_ITEMS};
+pub use clip_animation_pack::{check_clip_animation_fields, is_clip_animation_type, parse_clip_animation_manifest, scan_clip_animation_folders, ClipAnimationManifest, ClipAnimationManifestItem, ClipAnimationScan, ItemEffect, ManifestProblem, PackLicense, PackReadProblem, CLIP_ANIMATION_FOLDER, CLIP_ANIMATION_TYPE_ALIAS, CLIP_KINDS, DEFAULT_PROGRESS_PARAM, MAX_DEFAULT_DURATION, MAX_MANIFEST_ITEMS as MAX_CLIP_ANIMATION_ITEMS};
 pub use pack_presets::read_pack_presets;
+pub use preset_effects::{effect_mismatch, resolve_item_effects, ItemEffects};
 pub use packages::{expression_error, read_package_info, read_zip_package_info, PackageInfo, ParamInfo, ParamKind, CLIP_DURATION, CLIP_TIME};
 pub use paths::{asset_source, check_path_part, is_asset_source, is_safe_id, parse_asset_source, AssetProblem, AssetRef, PathPartProblem, ProjectPaths, ASSET_AUDIO_EXTENSIONS, ASSET_IMAGE_EXTENSIONS, ASSET_PREFIX, ASSET_TYPES, MAX_ASSET_ID_LENGTH};
 pub use probe::{probe_media, MediaProbe};
