@@ -78,6 +78,24 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         positive("line_spacing", line_spacing)?;
         next.line_spacing = line_spacing;
     }
+    if let Some(weight) = patch.weight {
+        if !engine::TEXT_WEIGHT_RANGE.contains(&weight) {
+            return Err(invalid(format!("weight must be from 100 to 900, not {weight}")));
+        }
+        next.weight = weight;
+    }
+    if let Some(italic) = patch.italic {
+        next.italic = italic;
+    }
+    if let Some(transform) = patch.transform {
+        next.transform = transform;
+    }
+    if let Some(letter_spacing) = patch.letter_spacing {
+        if !(letter_spacing.is_finite() && letter_spacing.abs() <= gpufx_text::MAX_LETTER_SPACING) {
+            return Err(invalid(format!("letter_spacing must be from -{0} to {0}, not {letter_spacing}", gpufx_text::MAX_LETTER_SPACING)));
+        }
+        next.letter_spacing = letter_spacing;
+    }
     Ok(next)
 }
 
@@ -226,6 +244,17 @@ mod tests {
         assert!(error.message.contains("still loading"), "{}", error.message);
         let error = patched_animation(&loading, AnimatedClipKind::Text, &ClipAnimation::default(), &patch("nope")).unwrap_err();
         assert!(error.message.contains("is not a preset"), "a name without a pack is not waiting for one: {}", error.message);
+    }
+
+    #[test]
+    fn weight_italic_transform_and_letter_spacing_are_patched_and_checked() {
+        let text = TextContent::new("Hi", 0.1);
+        let patch = TextPatch { weight: Some(700), italic: Some(true), transform: Some(engine::TextTransform::Uppercase), letter_spacing: Some(0.1), ..TextPatch::default() };
+        let next = apply_patch(&text, &patch).unwrap();
+        assert_eq!((next.weight, next.italic, next.transform, next.letter_spacing), (700, true, engine::TextTransform::Uppercase, 0.1));
+        for bad in [TextPatch { weight: Some(50), ..TextPatch::default() }, TextPatch { weight: Some(1000), ..TextPatch::default() }, TextPatch { letter_spacing: Some(f32::NAN), ..TextPatch::default() }, TextPatch { letter_spacing: Some(3.0), ..TextPatch::default() }] {
+            assert_eq!(apply_patch(&text, &bad).unwrap_err().code, "invalid_params", "{bad:?}");
+        }
     }
 
     fn file(path: &str) -> FontRef {

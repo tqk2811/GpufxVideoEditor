@@ -433,3 +433,51 @@ fn a_font_file_with_the_family_and_weight_of_an_installed_font_draws_its_own_gly
     assert!(r.rasterize(&text, HEIGHT, 1.0).pixels == verdana_pixels, "the installed Verdana is not replaced by the file");
     let _ = std::fs::remove_dir_all(file.parent().unwrap());
 }
+
+#[test]
+fn bold_text_has_more_ink_than_regular() {
+    let Some(mut r) = rasterizer() else { return };
+    let regular = r.rasterize(&TextContent::new("Hello world", 0.1), HEIGHT, 1.0);
+    let mut text = TextContent::new("Hello world", 0.1);
+    text.weight = 700;
+    let bold = r.rasterize(&text, HEIGHT, 1.0);
+    assert!(covered(&bold) > covered(&regular) * 11 / 10, "bold {} vs regular {}", covered(&bold), covered(&regular));
+    text.weight = 650;
+    assert_eq!(r.rasterize(&text, HEIGHT, 1.0), bold, "a weight the font lacks takes the nearest face by the CSS rules");
+}
+
+#[test]
+fn italic_text_differs_from_upright() {
+    let Some(mut r) = rasterizer() else { return };
+    let upright = r.rasterize(&TextContent::new("Hello", 0.1), HEIGHT, 1.0);
+    let mut text = TextContent::new("Hello", 0.1);
+    text.italic = true;
+    let italic = r.rasterize(&text, HEIGHT, 1.0);
+    assert_ne!(italic.pixels, upright.pixels);
+    assert_eq!(italic.missing_family, None);
+}
+
+#[test]
+fn uppercase_draws_like_capital_letters() {
+    let Some(mut r) = rasterizer() else { return };
+    let mut text = TextContent::new("Hello", 0.1);
+    text.transform = engine::TextTransform::Uppercase;
+    assert_eq!(r.rasterize(&text, HEIGHT, 1.0), r.rasterize(&TextContent::new("HELLO", 0.1), HEIGHT, 1.0));
+    text.transform = engine::TextTransform::Lowercase;
+    assert_eq!(r.rasterize(&text, HEIGHT, 1.0), r.rasterize(&TextContent::new("hello", 0.1), HEIGHT, 1.0));
+}
+
+#[test]
+fn letter_spacing_widens_the_text() {
+    let Some(mut r) = rasterizer() else { return };
+    let plain = r.measure(&TextContent::new("Hello", 0.1), HEIGHT, 1.0);
+    let mut text = TextContent::new("Hello", 0.1);
+    text.letter_spacing = 0.2;
+    let wide = r.measure(&text, HEIGHT, 1.0);
+    // Five letters, 72 px font: about 0.2 * 72 more after each.
+    assert!(wide.0 >= plain.0 + 50, "{wide:?} vs {plain:?}");
+    text.letter_spacing = -0.05;
+    assert!(r.measure(&text, HEIGHT, 1.0).0 < plain.0);
+    text.letter_spacing = f32::NAN;
+    assert_eq!(r.measure(&text, HEIGHT, 1.0), plain, "a spacing that is not a number is none");
+}

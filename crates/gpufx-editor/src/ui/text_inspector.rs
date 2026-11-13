@@ -10,7 +10,7 @@ use crate::i18n::{Language, Message};
 use crate::text_clip::{default_background, default_outline, default_shadow, TEXT_SIZE_RANGE};
 use crate::text_shapes::available_families;
 use egui::{Rect, Vec2};
-use engine::{ClipKey, FontRef, Rgba, TextAlign, TextContent};
+use engine::{ClipKey, FontRef, Rgba, TextAlign, TextContent, TextTransform, TEXT_WEIGHT_RANGE};
 use std::ops::RangeInclusive;
 
 /// How long typing must pause before the text on screen follows, in seconds. Each pause is one
@@ -19,6 +19,10 @@ const TYPING_PAUSE: f64 = 0.6;
 const CONTENT_ROWS: usize = 3;
 const FONT_LIST_HEIGHT: f32 = 320.0;
 const LINE_SPACING_RANGE: RangeInclusive<f64> = 0.5..=3.0;
+/// Letter spacing, in percent of the font size.
+const LETTER_SPACING_RANGE: RangeInclusive<f64> = -20.0..=100.0;
+/// Font weights go in steps of a hundred, as fonts name them.
+const WEIGHT_STEP: f64 = 100.0;
 /// Outline, padding, radius, offset and blur, in parts of the font size, shown in percent.
 const OUTLINE_RANGE: RangeInclusive<f64> = 0.0..=30.0;
 const PADDING_RANGE: RangeInclusive<f64> = 0.0..=100.0;
@@ -57,6 +61,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(spacing) = slider_row(ui, &language.t(Message::FieldLineSpacing), f64::from(text.line_spacing), LINE_SPACING_RANGE, 2, "\u{d7}") {
         next.line_spacing = spacing as f32;
     }
+    style_rows(ui, &mut next, language);
     ui.separator();
     outline_rows(ui, &mut next, language);
     background_rows(ui, &mut next, language);
@@ -172,6 +177,24 @@ fn align_row(ui: &mut egui::Ui, align: &mut TextAlign, language: Language) {
             }
         });
     });
+}
+
+/// Weight, italic, case and letter spacing.
+fn style_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
+    let range = f64::from(*TEXT_WEIGHT_RANGE.start())..=f64::from(*TEXT_WEIGHT_RANGE.end());
+    if let Some(weight) = slider_row(ui, &language.t(Message::FieldFontWeight), f64::from(text.weight), range.clone(), 0, "") {
+        text.weight = ((weight / WEIGHT_STEP).round() * WEIGHT_STEP).clamp(*range.start(), *range.end()) as u16;
+    }
+    ui.checkbox(&mut text.italic, language.t(Message::TextItalic));
+    ui.horizontal(|ui| {
+        ui.colored_label(theme::text_dim(), language.t(Message::FieldTextTransform));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for (value, label) in [(TextTransform::Lowercase, Message::TransformLowercase), (TextTransform::Uppercase, Message::TransformUppercase), (TextTransform::None, Message::TransformNone)] {
+                ui.selectable_value(&mut text.transform, value, language.t(label));
+            }
+        });
+    });
+    percent_row(ui, &language.t(Message::FieldLetterSpacing), &mut text.letter_spacing, LETTER_SPACING_RANGE);
 }
 
 /// A checkbox that turns a style on, with its default, or off.

@@ -70,6 +70,8 @@ pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 /// The widest an outline may be, as a part of the font size. Wider would bury the letters, and
 /// the room around the text grows with it.
 pub const MAX_OUTLINE_RATIO: f32 = 0.25;
+/// The most letter spacing, either way, as a part of the font size.
+pub const MAX_LETTER_SPACING: f32 = 2.0;
 
 /// A rasterized text picture.
 #[derive(Debug, Clone, PartialEq)]
@@ -323,6 +325,7 @@ impl TextRasterizer {
             layout.no_font = true;
             return layout;
         };
+        let face = self.styled(face, text);
         if text.content.is_empty() || !font_px.is_finite() || font_px < 0.5 {
             return layout;
         }
@@ -334,8 +337,12 @@ impl TextRasterizer {
         let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(font_px, line_height));
         buffer.set_wrap(Wrap::None);
         buffer.set_size(None, None);
-        let attrs = Attrs::new().family(Family::Name(&face.name)).weight(face.weight).style(face.style).stretch(face.stretch);
-        buffer.set_text(&text.content, &attrs, Shaping::Advanced, None);
+        let letter_spacing = if text.letter_spacing.is_finite() { text.letter_spacing.clamp(-MAX_LETTER_SPACING, MAX_LETTER_SPACING) } else { 0.0 };
+        let mut attrs = Attrs::new().family(Family::Name(&face.name)).weight(face.weight).style(face.style).stretch(face.stretch);
+        if letter_spacing != 0.0 {
+            attrs = attrs.letter_spacing(letter_spacing);
+        }
+        buffer.set_text(&text.shaped_content(), &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         // Glyph positions and the size of the line boxes.
@@ -393,6 +400,23 @@ impl TextRasterizer {
         layout.pad_px = pad_px;
         layout.shadow = (shadow_dx, shadow_dy, shadow_blur);
         layout
+    }
+
+    /// `face` with the weight and slant `text` asks for. A family takes its face nearest the weight
+    /// by the CSS rules, since cosmic-text only takes a face of the exact weight. A font file has
+    /// one face, so its weight stays. Italic asks for an italic face, and cosmic-text slants a face
+    /// that is not italic.
+    fn styled(&self, mut face: FaceChoice, text: &TextContent) -> FaceChoice {
+        let style = if text.italic { cosmic_text::Style::Italic } else { face.style };
+        if !is_file_family(&face.name) {
+            let weight = cosmic_text::Weight(text.weight.clamp(*engine::TEXT_WEIGHT_RANGE.start(), *engine::TEXT_WEIGHT_RANGE.end()));
+            let query = fontdb::Query { families: &[fontdb::Family::Name(&face.name)], weight, stretch: face.stretch, style };
+            if let Some(found) = self.font_system.db().query(&query).and_then(|id| self.font_system.db().face(id)) {
+                face.weight = found.weight;
+            }
+        }
+        face.style = style;
+        face
     }
 
     /// The box of a glyph's outline around its origin, y down, in pixels. A glyph with no

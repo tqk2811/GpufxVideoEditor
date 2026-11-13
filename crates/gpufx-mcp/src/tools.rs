@@ -151,6 +151,25 @@ impl From<AlignParam> for engine::TextAlign {
     }
 }
 
+/// A case change of a text before it is drawn.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum TransformParam {
+    None,
+    Uppercase,
+    Lowercase,
+}
+
+impl From<TransformParam> for engine::TextTransform {
+    fn from(transform: TransformParam) -> Self {
+        match transform {
+            TransformParam::None => Self::None,
+            TransformParam::Uppercase => Self::Uppercase,
+            TransformParam::Lowercase => Self::Lowercase,
+        }
+    }
+}
+
 /// An outline around each glyph.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[schemars(inline)]
@@ -250,6 +269,14 @@ pub struct TextStyleParam {
     pub align: Option<AlignParam>,
     /// Line height as a multiple of the font size, above 0.
     pub line_spacing: Option<f32>,
+    /// Font weight, 100 to 900 (400 regular, 700 bold); the nearest weight the font has draws it.
+    pub weight: Option<u16>,
+    /// Italic; a font without an italic face is slanted.
+    pub italic: Option<bool>,
+    /// Case change before drawing; none by default.
+    pub transform: Option<TransformParam>,
+    /// Extra space after each character, in parts of the font size, -2 to 2; 0 by default.
+    pub letter_spacing: Option<f32>,
     pub animation: Option<AnimationParam>,
 }
 
@@ -265,6 +292,10 @@ impl TextStyleParam {
             shadow: self.shadow.map(|value| value.map(|v| engine::TextShadow { color: v.color, offset: v.offset, blur: v.blur })),
             align: self.align.map(Into::into),
             line_spacing: self.line_spacing,
+            weight: self.weight,
+            italic: self.italic,
+            transform: self.transform.map(Into::into),
+            letter_spacing: self.letter_spacing,
             animation: self.animation.map(Into::into),
         }
     }
@@ -312,6 +343,10 @@ params!(TextSetParams {
     shadow: Option<Option<ShadowParam>>,
     align: Option<AlignParam>,
     line_spacing: Option<f32>,
+    weight: Option<u16>,
+    italic: Option<bool>,
+    transform: Option<TransformParam>,
+    letter_spacing: Option<f32>,
     animation: Option<AnimationParam>,
 });
 params!(ClipMoveParams { expected_revision: u64, clip: ClipParam, track: usize, start: i64 });
@@ -416,7 +451,7 @@ fn text_add(p: TextAddParams) -> Result<AgentRequest, AgentError> {
 }
 
 fn text_set(p: TextSetParams) -> Result<AgentRequest, AgentError> {
-    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, align: p.align, line_spacing: p.line_spacing, animation: p.animation };
+    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation };
     edit(p.expected_revision, AgentEdit::TextSet { clip: p.clip.into(), patch: style.patch(p.content) })
 }
 
@@ -449,7 +484,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("track_set_locked", "Locks or unlocks a track. Edits of a locked track fail with track_locked.", TrackLockedParams, |p| edit(p.expected_revision, AgentEdit::TrackSetLocked { track: p.track, locked: p.locked })),
         tool!("track_set_hidden", "Hides or shows a track in picture and sound.", TrackHiddenParams, |p| edit(p.expected_revision, AgentEdit::TrackSetHidden { track: p.track, hidden: p.hidden })),
         tool!("clip_add", "Adds a source file, a still image (png, jpg, webp, on a video track only), or a file of an installed pack as asset:<type>/<id>/<file> (type sfx, music or sticker), as a clip at start (ticks). duration defaults to what the stream the track plays still holds at that speed, and to 5 seconds for an image, whose end can be set freely. speed defaults to 1, between 0.1 and 10, and does not apply to an image. Returns the new clip.", ClipAddParams, |p| edit(p.expected_revision, AgentEdit::ClipAdd { track: p.track, source: p.source, start: ticks(p.start), source_in: p.source_in.map(ticks), duration: p.duration.map(ticks), speed: p.speed })),
-        tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track or, when track is absent, on the first video track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, align, line_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
+        tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track or, when track is absent, on the first video track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, align, line_spacing, weight, italic, transform, letter_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
         tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow or an animation group off. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
         tool!("font_list", "The fonts a text can name, each as the font value to give: the default font first (the system UI font, such as Segoe UI), then the installed families. state is loading while the installed fonts are still being read; ask again then.", NoParams, |_| Ok(AgentRequest::FontList)),
         tool!("clip_animation_list", "The preset animations a clip with a picture (video, image, sticker or text) can name: each with its id, its group (in, out or loop) and default_duration in ticks (for loop, one cycle). Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::ClipAnimationList)),

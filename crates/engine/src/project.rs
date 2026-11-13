@@ -160,6 +160,18 @@ pub struct TextContent {
     /// Line height as a multiple of the font size.
     #[serde(default = "unit_f32")]
     pub line_spacing: f32,
+    /// Font weight, 100 (thin) to 900 (black); the nearest weight the font has draws it.
+    #[serde(default = "normal_weight", skip_serializing_if = "is_normal_weight")]
+    pub weight: u16,
+    /// Italic; a font without an italic face is slanted instead.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub italic: bool,
+    /// Case change applied to the content before it is shaped.
+    #[serde(default, skip_serializing_if = "TextTransform::is_none")]
+    pub transform: TextTransform,
+    /// Extra space after each character, in parts of the font size; may be negative.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub letter_spacing: f32,
 }
 
 impl TextContent {
@@ -175,7 +187,53 @@ impl TextContent {
             shadow: None,
             align: TextAlign::Center,
             line_spacing: 1.0,
+            weight: NORMAL_WEIGHT,
+            italic: false,
+            transform: TextTransform::None,
+            letter_spacing: 0.0,
         }
+    }
+
+    /// The content as it is shaped, with [`Self::transform`] applied.
+    pub fn shaped_content(&self) -> std::borrow::Cow<'_, str> {
+        match self.transform {
+            TextTransform::None => std::borrow::Cow::Borrowed(&self.content),
+            TextTransform::Uppercase => std::borrow::Cow::Owned(self.content.to_uppercase()),
+            TextTransform::Lowercase => std::borrow::Cow::Owned(self.content.to_lowercase()),
+        }
+    }
+}
+
+/// The weight of regular text.
+pub const NORMAL_WEIGHT: u16 = 400;
+/// The lightest and heaviest font weights a text may ask for.
+pub const TEXT_WEIGHT_RANGE: std::ops::RangeInclusive<u16> = 100..=900;
+
+fn normal_weight() -> u16 {
+    NORMAL_WEIGHT
+}
+
+fn is_normal_weight(weight: &u16) -> bool {
+    *weight == NORMAL_WEIGHT
+}
+
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
+}
+
+/// A case change of the text before it is shaped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextTransform {
+    #[default]
+    None,
+    Uppercase,
+    Lowercase,
+}
+
+impl TextTransform {
+    pub fn is_none(&self) -> bool {
+        *self == TextTransform::None
     }
 }
 

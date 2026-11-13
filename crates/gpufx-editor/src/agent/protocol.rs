@@ -1,7 +1,7 @@
 //! The requests an agent can make and the errors it can get, as JSON. The same types go over the
 //! pipe to an open window.
 
-use engine::{ClipPlacement, Easing, EditError, FontRef, KeyframeTarget, Rgba, TextAlign, AnimationRef, TextBackground, TextOutline, TextShadow, Time, TrackKind};
+use engine::{ClipPlacement, Easing, EditError, FontRef, KeyframeTarget, Rgba, TextAlign, AnimationRef, TextBackground, TextOutline, TextShadow, TextTransform, Time, TrackKind};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -58,6 +58,14 @@ pub struct TextPatch {
     pub align: Option<TextAlign>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_spacing: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<TextTransform>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letter_spacing: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<TextAnimationPatch>,
 }
