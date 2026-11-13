@@ -61,7 +61,7 @@ pub use schedule::{
     PROGRESS_PPM_SCALE,
 };
 pub use clip_animation::{animation_effects, animation_has_per_unit, animation_max_scale, animation_unit_poses, preset_is_per_unit, check_curve, animation_pose, effects_with_animation, PresetEffect, animation_rotates, find_preset, is_pack_preset, pack_presets, preset_pose, set_pack_presets, PackPreset, PackPresets, PACK_PRESET_SEPARATOR, AnimationCurve, AnimationGroup, CurveKey, CurveProperty, Ease, AnimationPose, AnimationPreset, ANIMATION_PRESETS};
-pub use per_unit::{check_per_unit, unit_ranges, PerUnit, RangeSelector, SelectorShape, TextUnit, UnitOrder};
+pub use per_unit::{check_per_unit, line_ranges, unit_ranges, PerUnit, RangeSelector, SelectorShape, TextUnit, UnitOrder};
 pub use srt::{format_timestamp, parse_srt, strip_tags, write_srt, SrtCue, SrtDocument, SrtWarning, SrtWarningKind};
 pub use time::{Time, TICKS_PER_SECOND};
 pub use validate::{text_style_problems, validate, AcceptAll, Resolver, TextStyleProblem, ValidationError};

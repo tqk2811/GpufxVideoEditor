@@ -156,20 +156,33 @@ pub fn unit_ranges(shaped: &str, unit: TextUnit) -> Vec<Range<usize>> {
     match unit {
         TextUnit::Char => shaped.grapheme_indices(true).filter(|(_, g)| !g.chars().all(char::is_whitespace)).map(|(at, g)| at..at + g.len()).collect(),
         TextUnit::Word => word_ranges(shaped),
-        TextUnit::Line => {
-            let mut lines = Vec::new();
-            let mut at = 0;
-            for piece in shaped.split_inclusive('\n') {
-                let body = piece.trim_end_matches(['\n', '\r']);
+        TextUnit::Line => line_ranges(shaped)
+            .into_iter()
+            .filter_map(|line| {
+                let body = &shaped[line.clone()];
                 let lead = body.len() - body.trim_start().len();
                 let trimmed = body.trim();
-                if !trimmed.is_empty() {
-                    lines.push(at + lead..at + lead + trimmed.len());
-                }
-                at += piece.len();
-            }
-            lines
-        }
+                (!trimmed.is_empty()).then(|| line.start + lead..line.start + lead + trimmed.len())
+            })
+            .collect(),
+    }
+}
+
+/// The lines of `shaped` as drawn, without their endings: a line ends at CR LF, LF CR, LF or CR,
+/// as cosmic-text cuts it (U+2028 and U+2029 do not end one). The text is never wrapped, so these
+/// are the lines shown; were wrapping turned on, the lines would have to come from the layout.
+pub fn line_ranges(shaped: &str) -> Vec<Range<usize>> {
+    let mut lines = Vec::new();
+    let mut at = 0;
+    loop {
+        let Some(found) = shaped[at..].find(['\r', '\n']) else {
+            lines.push(at..shaped.len());
+            return lines;
+        };
+        let end = at + found;
+        lines.push(at..end);
+        let rest = &shaped.as_bytes()[end..];
+        at = end + if rest.starts_with(b"\r\n") || rest.starts_with(b"\n\r") { 2 } else { 1 };
     }
 }
 
@@ -296,6 +309,8 @@ mod tests {
         assert_eq!(units, vec!["T", "i", "ế", "n", "g", "V", "i", "ệ", "t", "ß", "e\u{301}"]);
         assert_eq!(unit_ranges("a b\r\n  cd  \n\nx", TextUnit::Line).into_iter().map(|r| &"a b\r\n  cd  \n\nx"[r]).collect::<Vec<_>>(), vec!["a b", "cd", "x"]);
         assert_eq!(unit_ranges("one  two", TextUnit::Word).len(), 2);
+        let breaks = "a\rb\r\nc\n\rd\u{2028}e";
+        assert_eq!(unit_ranges(breaks, TextUnit::Line).into_iter().map(|r| &breaks[r]).collect::<Vec<_>>(), vec!["a", "b", "c", "d\u{2028}e"], "lines end as cosmic-text ends them");
     }
 
     #[test]

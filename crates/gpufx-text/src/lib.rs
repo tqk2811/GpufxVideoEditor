@@ -389,10 +389,10 @@ impl TextRasterizer {
             attrs = attrs.letter_spacing(letter_spacing);
         }
         let shaped = text.shaped_content();
-        // Where each line of the text starts, as cosmic-text cuts it, so a glyph's byte in its line
-        // gives its byte in the text.
-        let mut line_starts = vec![0];
-        line_starts.extend(shaped.match_indices('\n').map(|(at, _)| at + 1));
+        // Where each line of the text starts, as cosmic-text cuts it (CR, LF, CR LF and LF CR end a
+        // line), so a glyph's byte in its line gives its byte in the text. A ligature is one glyph
+        // starting at its first character, so it moves with that character's unit.
+        let line_starts: Vec<usize> = engine::line_ranges(&shaped).into_iter().map(|line| line.start).collect();
         let karaoke = text.karaoke.as_ref().filter(|karaoke| karaoke.is_on());
         if karaoke.is_some() {
             // Each word is a span of its own, its number plus one in the metadata of its glyphs;

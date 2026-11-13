@@ -80,6 +80,40 @@ fn each_character_keeps_its_outline_and_shadow() {
     assert!((shift - 0.2 * font_px).abs() <= 2.0, "the outline moved with its character: {shift}");
 }
 
+fn lines(opacities: &[f64]) -> Vec<(TextUnit, Vec<AnimationPose>)> {
+    vec![(TextUnit::Line, opacities.iter().map(|&opacity| AnimationPose { opacity, ..AnimationPose::IDENTITY }).collect())]
+}
+
+#[test]
+fn a_lone_carriage_return_breaks_the_line_for_units_too() {
+    let Some(mut r) = rasterizer() else { return };
+    let text = TextContent::new("AB\rCD", 0.1);
+    let still = ink_box(&r.rasterize(&text, HEIGHT, 1.0)).unwrap();
+    let middle = (still.1 + still.3) / 2;
+    let only_c = ink_box(&r.rasterize_units(&text, HEIGHT, 1.0, &shown(&[0.0, 0.0, 1.0, 0.0]))).expect("the C shows");
+    assert!(only_c.1 > middle, "the C is on the second line: {only_c:?} of {still:?}");
+    assert!(only_c.2 < (still.0 + still.2) / 2 + 2, "and is its first letter: {only_c:?} of {still:?}");
+    assert_eq!(engine::unit_ranges(&text.shaped_content(), TextUnit::Line).len(), 2, "two lines, as drawn");
+    let second = ink_box(&r.rasterize_units(&text, HEIGHT, 1.0, &lines(&[0.0, 1.0]))).expect("the second line shows");
+    assert!(second.1 > middle, "the second line alone: {second:?} of {still:?}");
+    let crlf = TextContent::new("AB\r\nCD\n\rEF", 0.1);
+    assert_eq!(engine::unit_ranges(&crlf.shaped_content(), TextUnit::Line).len(), 3, "a CR LF and an LF CR each end one line");
+    let third = ink_box(&r.rasterize_units(&crlf, HEIGHT, 1.0, &lines(&[0.0, 0.0, 1.0]))).expect("the third line shows");
+    let all = ink_box(&r.rasterize(&crlf, HEIGHT, 1.0)).unwrap();
+    assert!(third.1 > all.1 + (all.3 - all.1) / 2, "the last line alone: {third:?} of {all:?}");
+}
+
+#[test]
+fn a_line_separator_does_not_break_the_line() {
+    let Some(mut r) = rasterizer() else { return };
+    let text = TextContent::new("AB\u{2028}CD", 0.1);
+    assert_eq!(engine::unit_ranges(&text.shaped_content(), TextUnit::Line).len(), 1, "one line, as drawn");
+    let still = r.rasterize(&text, HEIGHT, 1.0);
+    let only_d = ink_box(&r.rasterize_units(&text, HEIGHT, 1.0, &shown(&[0.0, 0.0, 0.0, 1.0]))).expect("the D shows");
+    let all = ink_box(&still).unwrap();
+    assert!(only_d.0 > (all.0 + all.2) / 2, "the D is the last letter of the one line: {only_d:?} of {all:?}");
+}
+
 #[test]
 fn a_letter_with_its_marks_moves_as_one() {
     let Some(mut r) = rasterizer() else { return };
