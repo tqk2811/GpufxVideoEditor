@@ -23,6 +23,7 @@ pub mod keyframe;
 pub mod project;
 pub mod render;
 pub mod schedule;
+pub mod srt;
 pub mod stretch;
 pub mod clip_animation;
 pub mod time;
@@ -57,5 +58,6 @@ pub use schedule::{
     PROGRESS_PPM_SCALE,
 };
 pub use clip_animation::{animation_max_scale, check_curve, animation_pose, animation_rotates, find_preset, is_pack_preset, pack_presets, preset_pose, set_pack_presets, PackPreset, PackPresets, PACK_PRESET_SEPARATOR, AnimationCurve, AnimationGroup, CurveKey, CurveProperty, Ease, AnimationPose, AnimationPreset, ANIMATION_PRESETS};
+pub use srt::{format_timestamp, parse_srt, strip_tags, write_srt, SrtCue, SrtDocument, SrtWarning, SrtWarningKind};
 pub use time::{Time, TICKS_PER_SECOND};
 pub use validate::{text_style_problems, validate, AcceptAll, Resolver, TextStyleProblem, ValidationError};
