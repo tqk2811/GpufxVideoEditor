@@ -47,9 +47,109 @@ const MAX_TEXT_SIZES: usize = 4096;
 /// The side of the images a graph is tried on, to see what it does with alpha.
 const ALPHA_PROBE_SIDE: u32 = 16;
 
+/// A free pool image unused for this many frames is destroyed. Steady playback reuses its
+/// images every frame, so only images of a passed peak (a transition, a busier stretch) go.
+const IMAGE_IDLE_FRAMES: u64 = 120;
 /// A clip or transition graph unused for this many frames is dropped: its clip is gone from
 /// the project or far from the playhead.
 const GRAPH_IDLE_FRAMES: u64 = 120;
+
+/// The images of the pool, by stable index. A slot whose image was destroyed stays empty
+/// until an acquire needs a new image, so indices handed out never move.
+struct ImageSlots<T> {
+    slots: Vec<Option<T>>,
+    /// The frame each slot was last acquired in.
+    last_used: Vec<u64>,
+    /// Slots holding an idle image, the last released on top.
+    free: Vec<usize>,
+    /// Slots whose image was destroyed.
+    empty: Vec<usize>,
+    frame: u64,
+}
+
+impl<T> Default for ImageSlots<T> {
+    fn default() -> Self {
+        Self { slots: Vec::new(), last_used: Vec::new(), free: Vec::new(), empty: Vec::new(), frame: 0 }
+    }
+}
+
+impl<T> ImageSlots<T> {
+    /// An idle image, else a new one from `create`, in an empty slot when there is one.
+    fn acquire<E>(&mut self, create: impl FnOnce() -> Result<T, E>) -> Result<usize, E> {
+        let index = match self.free.pop() {
+            Some(index) => index,
+            None => {
+                let image = create()?;
+                match self.empty.pop() {
+                    Some(index) => {
+                        self.slots[index] = Some(image);
+                        index
+                    }
+                    None => self.push(image),
+                }
+            }
+        };
+        self.last_used[index] = self.frame;
+        Ok(index)
+    }
+
+    /// Adds an image in use, outside the free list.
+    fn push(&mut self, image: T) -> usize {
+        self.slots.push(Some(image));
+        self.last_used.push(self.frame);
+        self.slots.len() - 1
+    }
+
+    fn release(&mut self, index: usize) {
+        self.free.push(index);
+    }
+
+    /// Counts a frame and destroys the free images unused for more than `idle_frames` frames
+    /// that `can_drop` allows (no GPU work left on them). An image acquired within the window
+    /// stays, so the pool never shrinks below what the window peaked at.
+    fn end_frame(&mut self, idle_frames: u64, can_drop: impl Fn(&T) -> bool) {
+        self.frame += 1;
+        let frame = self.frame;
+        let last_used = std::mem::take(&mut self.last_used);
+        self.drop_free(|index| frame - last_used[index] > idle_frames, can_drop);
+        self.last_used = last_used;
+    }
+
+    /// Destroys every free image that `can_drop` allows.
+    fn trim(&mut self, can_drop: impl Fn(&T) -> bool) {
+        self.drop_free(|_| true, can_drop);
+    }
+
+    fn drop_free(&mut self, old: impl Fn(usize) -> bool, can_drop: impl Fn(&T) -> bool) {
+        let (slots, empty) = (&mut self.slots, &mut self.empty);
+        self.free.retain(|&index| {
+            let gone = old(index) && slots[index].as_ref().is_some_and(&can_drop);
+            if gone {
+                slots[index] = None;
+                empty.push(index);
+            }
+            !gone
+        });
+    }
+
+    /// How many images exist, in use or idle.
+    fn live(&self) -> usize {
+        self.slots.len() - self.empty.len()
+    }
+}
+
+impl<T> std::ops::Index<usize> for ImageSlots<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &T {
+        self.slots[index].as_ref().expect("a live image")
+    }
+}
+
+impl<T> std::ops::IndexMut<usize> for ImageSlots<T> {
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        self.slots[index].as_mut().expect("a live image")
+    }
+}
 
 /// An index into the image pool, or [`BLANK_IMAGE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +302,12 @@ impl Image {
                 }
             });
         }
+    }
+
+    /// Whether the GPU reached the image's fence, so nothing still uses it.
+    fn idle(&self) -> bool {
+        // SAFETY: reading the completed value of a live fence.
+        (unsafe { self.fence.GetCompletedValue() }) >= self.fence_value
     }
 
     fn wait(&self) -> Result<(), String> {
@@ -549,8 +655,7 @@ pub struct D3d12Compositor {
     paths: Arc<ProjectPaths>,
     width: u32,
     height: u32,
-    images: Vec<Image>,
-    free: Vec<usize>,
+    images: ImageSlots<Image>,
     /// Images handed back through [`D3d12Compositor::recycle`], ready to be reused.
     spares: Vec<Image>,
     clip_graphs: ClipCache<[String], ClipGraph>,
@@ -596,7 +701,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default() })
+        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default() })
     }
 
     /// Makes `closing` stop the decoders opened from now on at once, and lets a newer request stop
@@ -620,11 +725,13 @@ impl D3d12Compositor {
     }
 
     fn acquire(&mut self) -> Result<ImageId, String> {
-        if let Some(index) = self.free.pop() {
-            return Ok(ImageId(index));
-        }
-        self.images.push(Image::create(&self.gpu, self.width, self.height)?);
-        Ok(ImageId(self.images.len() - 1))
+        let (gpu, width, height) = (&self.gpu, self.width, self.height);
+        self.images.acquire(|| Image::create(gpu, width, height)).map(ImageId)
+    }
+
+    /// How many pool images exist, in use or idle. For tests and diagnostics.
+    pub fn pool_images(&self) -> usize {
+        self.images.live()
     }
 
     /// How many clip and transition graphs are kept. For tests and diagnostics.
@@ -660,7 +767,7 @@ impl D3d12Compositor {
     }
 
     /// Runs `graph` into the image `output` and records the fence value it will reach.
-    fn run_graph(gpu: &Gpu, graph: &mut EffectGraph, inputs: &mut [D3d12Frame], images: &mut [Image], output: ImageId, width: u32, height: u32, info: &FrameInfo) -> Result<(), String> {
+    fn run_graph(gpu: &Gpu, graph: &mut EffectGraph, inputs: &mut [D3d12Frame], images: &mut (impl std::ops::IndexMut<usize, Output = Image> + ?Sized), output: ImageId, width: u32, height: u32, info: &FrameInfo) -> Result<(), String> {
         let mut outputs = [images[output.0].frame(width, height)];
         let pads: Vec<(u32, u32)> = inputs.iter().map(|frame| (frame.width, frame.height)).collect();
         // A shader that computes an output size submits once for new input sizes, so it happens
@@ -801,8 +908,7 @@ impl D3d12Compositor {
         if let Some(image) = self.transparent {
             return Ok(image);
         }
-        self.images.push(Image::create(&self.gpu, self.width, self.height)?);
-        let image = ImageId(self.images.len() - 1);
+        let image = ImageId(self.images.push(Image::create(&self.gpu, self.width, self.height)?));
         self.transparent = Some(image);
         Ok(image)
     }
@@ -928,7 +1034,7 @@ impl D3d12Compositor {
 
     fn release_image(&mut self, image: ImageId) {
         if image != BLANK_IMAGE {
-            self.free.push(image.0);
+            self.images.release(image.0);
         }
     }
 }
@@ -1275,9 +1381,11 @@ impl Compositor for D3d12Compositor {
         let seen = &self.clip_graphs_used;
         self.clip_graphs.retain(|key| seen.contains_key(&key));
         self.transition_graphs.retain(|_, built| frames - built.last_used <= GRAPH_IDLE_FRAMES);
+        self.images.end_frame(IMAGE_IDLE_FRAMES, Image::idle);
     }
 
     fn trim(&mut self) {
+        self.images.trim(Image::idle);
         self.spares.clear();
         self.gpu.context.trim_pool();
     }
@@ -1338,7 +1446,8 @@ mod tests {
     #[test]
     fn a_failing_output_size_ends_the_step_before_gpufx_runs() {
         let Some((gpu, mut overlay)) = overlay_on_hardware() else { return };
-        let mut images = vec![Image::create(&gpu, 16, 16).expect("an image")];
+        let mut images = ImageSlots::default();
+        images.push(Image::create(&gpu, 16, 16).expect("an image"));
         // The overlay takes two inputs, so asking for its size with one fails.
         let mut inputs = [images[0].frame(16, 16)];
         let error = D3d12Compositor::run_graph(&gpu, &mut overlay, &mut inputs, &mut images, ImageId(0), 16, 16, &FrameInfo::new(0.0, 0)).expect_err("one input is refused");
@@ -1355,8 +1464,7 @@ mod tests {
         let rgba = (0..width * height).flat_map(|i| if i % width < width / 2 { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
         let picture = StillPicture { width, height, rgba, has_alpha: false };
         let mut draw = |blur: f64| {
-            compositor.images.push(Image::upload(&compositor.gpu, &picture).expect("an upload"));
-            let image = ImageId(compositor.images.len() - 1);
+            let image = ImageId(compositor.images.push(Image::upload(&compositor.gpu, &picture).expect("an upload")));
             let transform = ClipTransform { blur, ..ClipTransform::default() };
             let placed = compositor.place(image, transform, f64::from(width) / f64::from(height), false, &FrameInfo::new(0.0, 0)).expect("placed");
             let mut rgba = Vec::new();
@@ -1370,8 +1478,63 @@ mod tests {
         assert!(left < 250 && right > 5, "the largest blur, 8 pixels at this height, mixes both sides of the edge: {left} {right}");
     }
 
+    /// Acquires `count` images at once, gives them back and ends the frame.
+    fn busy_frame(slots: &mut ImageSlots<u32>, count: usize, created: &Cell<u32>) {
+        let taken: Vec<usize> = (0..count)
+            .map(|_| {
+                slots
+                    .acquire(|| {
+                        created.set(created.get() + 1);
+                        Ok::<_, ()>(created.get())
+                    })
+                    .unwrap()
+            })
+            .collect();
+        for index in taken {
+            slots.release(index);
+        }
+        slots.end_frame(IMAGE_IDLE_FRAMES, |_| true);
+    }
+
     #[test]
-    fn unused_graphs_are_let_go() {
+    fn the_image_pool_shrinks_after_a_peak_and_steady_frames_create_nothing() {
+        let mut slots = ImageSlots::default();
+        let created = Cell::new(0);
+        let held = slots.push(0);
+        for _ in 0..10 {
+            busy_frame(&mut slots, 2, &created);
+        }
+        assert_eq!(created.get(), 2, "steady frames reuse their images");
+        busy_frame(&mut slots, 5, &created);
+        assert_eq!((created.get(), slots.live()), (5, 6));
+        for _ in 1..IMAGE_IDLE_FRAMES {
+            busy_frame(&mut slots, 2, &created);
+        }
+        assert_eq!(slots.live(), 6, "the peak stays for the whole window");
+        busy_frame(&mut slots, 2, &created);
+        assert_eq!((created.get(), slots.live()), (5, 3), "the peak's extra images went, the steady two and the held one stay");
+        assert_eq!(slots[held], 0, "an image in use keeps its index and is never freed");
+        busy_frame(&mut slots, 4, &created);
+        assert_eq!((created.get(), slots.live()), (7, 5), "a new peak fills empty slots");
+        assert!(slots.slots.len() <= 6, "empty slots are reused before the list grows");
+    }
+
+    #[test]
+    fn trimming_the_image_pool_keeps_what_the_gpu_still_uses() {
+        let mut slots = ImageSlots::default();
+        let busy = slots.acquire(|| Ok::<_, ()>(1)).unwrap();
+        let done = slots.acquire(|| Ok::<_, ()>(2)).unwrap();
+        let held = slots.acquire(|| Ok::<_, ()>(3)).unwrap();
+        slots.release(busy);
+        slots.release(done);
+        slots.trim(|image| *image != 1);
+        assert_eq!(slots.live(), 2);
+        assert_eq!((slots[busy], slots[held]), (1, 3));
+        assert_eq!(slots.acquire(|| Ok::<_, ()>(9)).unwrap(), busy, "the kept idle image is handed out again");
+    }
+
+    #[test]
+    fn unused_graphs_and_idle_images_are_let_go() {
         let Some((gpu, _)) = overlay_on_hardware() else { return };
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
         if !root.join("packages/gpufx/ffmpeg/dissolve/manifest.json").exists() {
@@ -1397,14 +1560,16 @@ mod tests {
             compositor.release(image);
         }
         compositor.end_frame(&[key]);
-        assert_eq!(compositor.cached_graphs(), (1, 1));
+        assert_eq!((compositor.cached_graphs(), compositor.pool_images()), ((1, 1), 3));
         let other = ClipKey { track: 1, clip: 0 };
-        for _ in 1..GRAPH_IDLE_FRAMES {
+        for _ in 1..GRAPH_IDLE_FRAMES.min(IMAGE_IDLE_FRAMES) {
             compositor.end_frame(&[other]);
         }
         assert_eq!(compositor.cached_graphs(), (1, 1), "kept for the whole window");
-        compositor.end_frame(&[other]);
-        assert_eq!(compositor.cached_graphs(), (0, 0), "a removed clip's graph and an unused transition go");
+        for _ in 0..GRAPH_IDLE_FRAMES.max(IMAGE_IDLE_FRAMES) - GRAPH_IDLE_FRAMES.min(IMAGE_IDLE_FRAMES) + 1 {
+            compositor.end_frame(&[other]);
+        }
+        assert_eq!((compositor.cached_graphs(), compositor.pool_images()), ((0, 0), 0), "a removed clip's graph, an unused transition and idle images go");
         compositor.trim();
         assert_eq!(compositor.gpu.context.pool_stats().idle, 0, "trim empties the shared texture pool");
     }
