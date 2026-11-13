@@ -9,10 +9,13 @@
 //! own and the picture grows only by the glow's reach.
 //!
 //! A text whose characters move one by one (see [`TextRasterizer::rasterize_units`]) is drawn from
-//! a picture of each character with its own glow, shadow and outline, made once and kept, each put
-//! in place with its own move, turn, scale and opacity (see the `units` module).
+//! the coverage of each character, made once and kept, each put in place with its own move, turn,
+//! scale and opacity into one mask that is then drawn as a still picture's glyphs (see the `units`
+//! module).
 
 mod units;
+
+pub use units::{UnitsPlan, MAX_UNIT_PLANS, UNIT_PLAN_BYTES};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -104,6 +107,10 @@ pub struct TextImage {
     /// Whether the text was drawn smaller than asked to stay within [`MAX_DIMENSION`] and
     /// [`MAX_PIXELS`].
     pub downscaled: bool,
+    /// The pixels added on the left and on the right (first) and on the top and on the bottom
+    /// (second) of the still picture, so moved units fit (see [`UnitsPlan::draw`]); the still
+    /// picture is the middle. (0, 0) for every other picture.
+    pub margin: (u32, u32),
 }
 
 /// Holds the fonts and the glyph cache. Building one loads fonts, so make one and keep it.
@@ -116,8 +123,11 @@ pub struct TextRasterizer {
     files: HashMap<PathBuf, LoadedFile>,
     /// How many font files have been loaded, which numbers their [`LoadedFile::select_name`].
     file_loads: u64,
-    /// The pictures of the characters of the text last drawn by units, by a key of its text and size.
-    unit_sprites: Option<(u64, Arc<Vec<units::Sprite>>)>,
+    /// What the texts last drawn by units are drawn from, by a key of the text, size and font
+    /// file, the latest last (see [`Self::prepare_units`]).
+    unit_plans: Vec<(u64, UnitsPlan)>,
+    /// How many plans were made, for tests.
+    unit_plan_builds: u64,
 }
 
 /// A font file as loaded: the stamp it had, its faces and its family (`None` when not a font).
@@ -198,7 +208,7 @@ impl TextRasterizer {
             None => eprintln!("gpufx-text: no font is installed; text cannot be drawn"),
         }
         let locale = sys_locale();
-        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0, unit_sprites: None }
+        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0, unit_plans: Vec::new(), unit_plan_builds: 0 }
     }
 
     /// The installed family [`FontRef::Default`] draws with: the first of
@@ -311,16 +321,18 @@ impl TextRasterizer {
     /// As [`Self::rasterize`], with the units of the text (see [`engine::unit_ranges`]) each moved
     /// by its pose: for each kind of unit, the pose of unit `i` is `poses[i]`, with `dx` and `dy`
     /// in font sizes, the scale and turn (degrees, clockwise) around the middle of the unit's ink
-    /// and the opacity multiplied. The kinds apply in order. Each character keeps its own glow,
-    /// shadow and outline; the background box stays. The picture has the size of the still text, so
-    /// a unit moved past its edge is cut. With no pose, or only poses that change nothing, this is
-    /// exactly the still picture.
+    /// and the opacity multiplied. The kinds apply in order. The glow, shadow and outline are drawn
+    /// around the moved characters as one, as in the still picture; a partly see-through character
+    /// has its own. The background box stays. The picture is the still picture grown by
+    /// [`TextImage::margin`] on each side when a unit moves past its edge (up to two font sizes; a
+    /// unit farther out is cut). With no pose, or only poses that change nothing, this is exactly
+    /// the still picture. To draw frames without holding the rasterizer, use
+    /// [`Self::prepare_units`] and [`UnitsPlan::draw`].
     pub fn rasterize_units(&mut self, text: &TextContent, output_height_px: u32, scale: f32, poses: &[(engine::TextUnit, Vec<engine::AnimationPose>)]) -> TextImage {
-        let (layout, downscaled) = self.fitted_layout(text, output_height_px, scale);
-        let still = poses.iter().all(|(_, poses)| poses.iter().all(|pose| units::is_rest(pose)));
-        let mut image = if still { self.draw(text, &layout, &[]) } else { self.draw_units(text, &layout, poses) };
-        image.downscaled = downscaled;
-        image
+        if poses.iter().all(|(_, poses)| poses.iter().all(|pose| units::is_rest(pose))) {
+            return self.rasterize(text, output_height_px, scale);
+        }
+        self.prepare_units(text, output_height_px, scale).draw(poses)
     }
 
     /// The layout of `text`, shrunk to the limits when it is over them, and whether it was.
@@ -576,7 +588,7 @@ impl TextRasterizer {
 
     /// Draws a layout from [`Self::layout`]. One over the limits draws nothing.
     fn draw(&mut self, text: &TextContent, layout: &Layout, styles: &[WordStyle]) -> TextImage {
-        let mut image = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, downscaled: false };
+        let mut image = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, downscaled: false, margin: (0, 0) };
         let (width, height) = (layout.width as usize, layout.height as usize);
         if width == 0 || height == 0 {
             return image;
