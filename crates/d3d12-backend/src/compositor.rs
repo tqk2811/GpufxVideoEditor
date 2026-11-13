@@ -439,6 +439,9 @@ pub enum SourceFrame {
     /// A step of a karaoke text not drawn yet. The compositor draws it, through its still cache,
     /// before it reads the frame (see [`D3d12Compositor::resolve_frame`]).
     Step { steps: Arc<KaraokeSteps>, step: usize },
+    /// A frame of a text whose characters move one by one, not drawn yet; drawn like a karaoke
+    /// step, with the poses of its units at the clip's clock.
+    Units(Arc<Clip>),
 }
 
 /// The steps of a karaoke text: the step at `times[i]` is step `i + 1`, and the time before the
@@ -458,6 +461,7 @@ impl SourceFrame {
             Self::Video(frame) => decoded_input(frame),
             Self::Still(still) => Ok(still.input()),
             Self::Step { .. } => Err("a karaoke step was read before it was drawn".to_owned()),
+            Self::Units(_) => Err("a text frame was read before it was drawn".to_owned()),
         }
     }
 
@@ -465,7 +469,7 @@ impl SourceFrame {
         match self {
             Self::Video(frame) => frame.display_aspect(),
             Self::Still(still) => still.aspect,
-            Self::Step { .. } => 1.0,
+            Self::Step { .. } | Self::Units(_) => 1.0,
         }
     }
 
@@ -475,7 +479,7 @@ impl SourceFrame {
             Self::Still(still) => {
                 still.fence_value.fetch_max(value, Ordering::Relaxed);
             }
-            Self::Step { .. } => {}
+            Self::Step { .. } | Self::Units(_) => {}
         }
     }
 
@@ -485,7 +489,7 @@ impl SourceFrame {
     }
 
     fn is_still(&self) -> bool {
-        matches!(self, Self::Still(_) | Self::Step { .. })
+        matches!(self, Self::Still(_) | Self::Step { .. } | Self::Units(_))
     }
 }
 
@@ -495,6 +499,8 @@ pub enum SourceDecoder {
     Still(Arc<StillImage>),
     /// A karaoke text, a picture per step.
     Steps(Arc<KaraokeSteps>),
+    /// A text whose characters move one by one, a picture per frame while they move.
+    Units(Arc<Clip>),
 }
 
 impl Decoder for SourceDecoder {
@@ -509,15 +515,35 @@ impl Decoder for SourceDecoder {
                 let shown = steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().filter(|(shown, _)| *shown == step).and_then(|(_, still)| still.upgrade());
                 Ok(shown.map_or_else(|| SourceFrame::Step { steps: steps.clone(), step }, SourceFrame::Still))
             }
+            Self::Units(clip) => Ok(SourceFrame::Units(clip.clone())),
         }
     }
 
     fn wait_idle(&mut self) -> Result<(), RenderError> {
         match self {
             Self::Video(decoder) => decoder.wait_idle(),
-            Self::Still(_) | Self::Steps(_) => Ok(()),
+            Self::Still(_) | Self::Steps(_) | Self::Units(_) => Ok(()),
         }
     }
+}
+
+/// The poses of the units of a text on one frame, by kind of unit.
+type UnitPoses = (engine::TextUnit, Vec<engine::AnimationPose>);
+
+/// A key of `poses` that does not tell apart poses closer than a pixel of a large text.
+fn poses_key(poses: &[UnitPoses]) -> String {
+    let mut key = String::new();
+    for (unit, poses) in poses {
+        key.push_str(unit.name());
+        for pose in poses {
+            let p = [pose.dx, pose.dy, pose.scale, pose.scale_x, pose.scale_y, pose.rotation / 100.0, pose.opacity];
+            for value in p {
+                key.push_str(&format!(" {:.4}", value));
+            }
+            key.push(';');
+        }
+    }
+    key
 }
 
 /// What a kept still was made from.
@@ -856,10 +882,12 @@ impl D3d12Compositor {
         size
     }
 
-    fn rasterize(&mut self, text: &TextContent, scale: f32, styles: &[engine::WordStyle]) -> gpufx_text::TextImage {
+    fn rasterize(&mut self, text: &TextContent, scale: f32, styles: &[engine::WordStyle], poses: &[UnitPoses]) -> gpufx_text::TextImage {
         let rasterizer = self.text_rasterizer.get_or_insert_with(gpufx_text::shared).clone();
         // A panic in another user leaves the fonts as they were, so the lock is still fine to take.
-        let image = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).rasterize_words(text, self.height, scale, styles);
+        let mut rasterizer = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let image = if poses.is_empty() { rasterizer.rasterize_words(text, self.height, scale, styles) } else { rasterizer.rasterize_units(text, self.height, scale, poses) };
+        drop(rasterizer);
         self.text_rasterizations += 1;
         if let Some(family) = &image.missing_family {
             if !self.missing_font_families.contains(family) {
@@ -874,8 +902,10 @@ impl D3d12Compositor {
     /// [`engine::text_raster_scale`], which rounds to steps) and kept like an
     /// image, by its text, output height and scale. Only measured, not drawn, to learn the scale.
     /// `styles` are the looks of its words at one karaoke step (see
-    /// [`gpufx_text::TextRasterizer::rasterize_words`]), part of the key too.
-    fn load_text(&mut self, clip: &Clip, text: &TextContent, styles: &[engine::WordStyle]) -> Result<Arc<StillImage>, String> {
+    /// [`gpufx_text::TextRasterizer::rasterize_words`]), part of the key too, and so are `poses`,
+    /// the poses of its units on one frame of a text whose characters move (see
+    /// [`gpufx_text::TextRasterizer::rasterize_units`]).
+    fn load_text(&mut self, clip: &Clip, text: &TextContent, styles: &[engine::WordStyle], poses: &[UnitPoses]) -> Result<Arc<StillImage>, String> {
         // A font file named relative to the project is read from the project folder.
         let resolved;
         let text = match &text.font {
@@ -905,25 +935,38 @@ impl D3d12Compositor {
         let output_aspect = f64::from(self.width) / f64::from(self.height.max(1));
         let scale = text_raster_scale(clip.widest(output_aspect, source_aspect), self.width, width);
         let digest = if styles.is_empty() { digest } else { Sha256::new().chain_update(digest).chain_update(format!("{styles:?}").as_bytes()).finalize().into() };
+        // Poses a pixel apart are the same picture: kept to a few digits, a held pose (a character
+        // typed and waiting) is drawn once.
+        let digest = if poses.is_empty() { digest } else { Sha256::new().chain_update(digest).chain_update(poses_key(poses).as_bytes()).finalize().into() };
         let key = StillKey::Text { digest, output_height: self.height, scale: scale.to_bits() };
         self.stills_used += 1;
         if let Some(cached) = self.stills.get_mut(&key) {
             cached.last_used = self.stills_used;
             return Ok(cached.still.clone());
         }
-        let image = self.rasterize(text, scale, styles);
+        let image = self.rasterize(text, scale, styles, poses);
         let picture = premultiplied_still(image.width, image.height, image.pixels);
         self.insert_still(key, (0, None), picture)
     }
 
     /// Draws a karaoke step that `frame` holds, or takes it from the still cache, and makes the
     /// frame that picture. Any other frame stays as it is.
-    fn resolve_frame(&mut self, frame: &mut SourceFrame) -> Result<(), String> {
+    /// A text whose characters move is drawn the same way, with the poses of its units at `clock`;
+    /// once they rest it is the still text.
+    fn resolve_frame(&mut self, frame: &mut SourceFrame, clock: ClipClock) -> Result<(), String> {
+        if let SourceFrame::Units(clip) = frame {
+            let clip = clip.clone();
+            let text = clip.text.as_ref().ok_or("a moving text of a clip without text")?;
+            let shaped = text.shaped_content();
+            let poses = engine::animation_unit_poses(&clip.animation, clock, |unit| engine::unit_ranges(&shaped, unit).len());
+            *frame = SourceFrame::Still(self.load_text(&clip, text, &[], &poses)?);
+            return Ok(());
+        }
         let SourceFrame::Step { steps, step } = frame else { return Ok(()) };
         let (steps, step) = (steps.clone(), *step);
         let text = steps.clip.text.as_ref().ok_or("a karaoke step of a clip without text")?;
         let styles = engine::karaoke::word_styles(text, &steps.words, &engine::karaoke::step_states(&steps.words, &steps.times, step));
-        let still = self.load_text(&steps.clip, text, &styles)?;
+        let still = self.load_text(&steps.clip, text, &styles, &[])?;
         *steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((step, Arc::downgrade(&still)));
         *frame = SourceFrame::Still(still);
         Ok(())
@@ -1232,7 +1275,12 @@ impl Compositor for D3d12Compositor {
                 let times = engine::karaoke::step_times(&words);
                 return Ok(SourceDecoder::Steps(Arc::new(KaraokeSteps { clip: clip.clone(), words, times, shown: Mutex::new(None) })));
             }
-            return self.load_text(clip, text, &[]).map(SourceDecoder::Still).map_err(RenderError);
+            // A text whose characters move gets a picture per frame while they move. (With
+            // karaoke on, karaoke wins and the characters stay still.)
+            if engine::animation_has_per_unit(&clip.animation) {
+                return Ok(SourceDecoder::Units(Arc::new(clip.clone())));
+            }
+            return self.load_text(clip, text, &[], &[]).map(SourceDecoder::Still).map_err(RenderError);
         }
         let source = clip.source.as_str();
         if is_image_source(source) {
@@ -1250,7 +1298,7 @@ impl Compositor for D3d12Compositor {
     }
 
     fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SourceDecoder as Decoder>::Frame, effects: &[ProjectEffect], transform: ClipTransform, clock: ClipClock, at: FrameContext) -> Result<ImageId, RenderError> {
-        self.resolve_frame(frame).map_err(RenderError)?;
+        self.resolve_frame(frame, clock).map_err(RenderError)?;
         let info = Self::info(at);
         let (input, output) = input_then_output(|| frame.input(), || self.acquire())?;
         let (width, height) = (self.width, self.height);
@@ -1640,7 +1688,7 @@ mod tests {
         let mut kept = Vec::new();
         for time in [0, 1, 20_000, 20_001, 50_000, 89_000] {
             let mut frame = decoder.frame_at(Time::from_ticks(time)).expect("a frame");
-            compositor.resolve_frame(&mut frame).expect("a drawn step");
+            compositor.resolve_frame(&mut frame, ClipClock { elapsed: Time::ZERO, duration: Time::from_ticks(90_000) }).expect("a drawn step");
             assert!(matches!(frame, SourceFrame::Still(_)), "at {time}");
             kept.push(frame);
         }
@@ -1650,6 +1698,40 @@ mod tests {
         drop(kept);
         assert!(compositor.stills.values().all(|cached| Arc::strong_count(&cached.still) == 1), "the decoder holds no step picture, so the cache can let them go");
         drop(decoder);
+    }
+
+    #[test]
+    fn a_typed_text_moves_while_its_enter_plays_then_is_the_still_text() {
+        let Some((gpu, _)) = overlay_on_hardware() else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        let mut compositor = D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), 320, 180).expect("a compositor");
+        let text = TextContent::new("HHHH", 0.2);
+        let mut clip = engine::edit::text_clip(Time::ZERO, Time::from_ticks(270_000), text.clone());
+        clip.animation.enter = Some(engine::AnimationRef { preset: "typewriter".to_owned(), duration: Time::from_ticks(90_000) });
+        let mut decoder = compositor.open_decoder(&clip).expect("a decoder");
+        let clock = |elapsed: i64| ClipClock { elapsed: Time::from_ticks(elapsed), duration: Time::from_ticks(270_000) };
+        let mut at = |compositor: &mut D3d12Compositor, elapsed: i64| {
+            let mut frame = decoder.frame_at(Time::from_ticks(elapsed)).expect("a frame");
+            assert!(matches!(frame, SourceFrame::Units(_)), "drawn when shown");
+            compositor.resolve_frame(&mut frame, clock(elapsed)).expect("a drawn frame");
+            let SourceFrame::Still(still) = frame else { panic!("a still once drawn") };
+            still
+        };
+        let read = |compositor: &D3d12Compositor, still: &StillImage| {
+            let buffer = readback_buffer(&compositor.gpu, still.image.width, still.image.height);
+            let mut rgba = Vec::new();
+            still.image.read_rgba(&compositor.gpu, &buffer, &mut rgba).expect("read back");
+            rgba
+        };
+        let middle = at(&mut compositor, 45_000);
+        let again = at(&mut compositor, 45_001);
+        assert!(Arc::ptr_eq(&middle, &again), "a held pose is drawn once");
+        let last = at(&mut compositor, 200_000);
+        let still = compositor.load_text(&clip, &text, &[], &[]).expect("the still text");
+        assert!(Arc::ptr_eq(&last, &still), "after its enter the text is the still picture");
+        let (middle_pixels, still_pixels) = (read(&compositor, &middle), read(&compositor, &still));
+        let ink = |pixels: &[u8]| pixels.chunks(4).filter(|p| p[3] > 64).count();
+        assert!(ink(&middle_pixels) > 0 && ink(&middle_pixels) < ink(&still_pixels), "half typed: {} of {}", ink(&middle_pixels), ink(&still_pixels));
     }
 
     #[test]
