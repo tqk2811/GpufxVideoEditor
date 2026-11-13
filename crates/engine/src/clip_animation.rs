@@ -113,6 +113,16 @@ impl Ease {
     /// The usual amplitude of [`Ease::BackIn`] and [`Ease::BackOut`].
     pub const BACK_AMPLITUDE: f64 = 1.70158;
 
+    /// Whether the numbers of the ease make a curve: a finite amplitude, and a bezier with finite
+    /// points whose x lie in 0..1, as CSS asks.
+    pub fn is_valid(self) -> bool {
+        match self {
+            Ease::BackIn { amplitude } | Ease::BackOut { amplitude } => amplitude.is_finite(),
+            Ease::CubicBezier(points) => points.iter().all(|p| p.is_finite()) && (0.0..=1.0).contains(&points[0]) && (0.0..=1.0).contains(&points[2]),
+            _ => true,
+        }
+    }
+
     /// Where `t`, between 0 and 1, lands on the curve.
     pub fn apply(self, t: f64) -> f64 {
         let t = t.clamp(0.0, 1.0);
@@ -290,6 +300,9 @@ pub fn check_curve(curve: &AnimationCurve) -> Result<(), String> {
             }
             if key.t < last {
                 return Err(format!("the keyframes of the {property:?} track are not in rising t"));
+            }
+            if !key.ease.is_valid() {
+                return Err(format!("a keyframe of the {property:?} track has an ease with bad numbers"));
             }
             last = key.t;
         }

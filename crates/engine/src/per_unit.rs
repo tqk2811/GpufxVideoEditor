@@ -123,6 +123,9 @@ fn check_track(name: &str, keys: &[CurveKey]) -> Result<(), String> {
         if key.t < last {
             return Err(format!("the keyframes of the selector {name} are not in rising t"));
         }
+        if !key.ease.is_valid() {
+            return Err(format!("a keyframe of the selector {name} has an ease with bad numbers"));
+        }
         last = key.t;
     }
     Ok(())
@@ -350,5 +353,11 @@ mod tests {
         assert!(check_per_unit(&PerUnit { curve: blur, ..opacity_in() }).is_err());
         let back = RangeSelector { start: vec![key(0.5, 0.0, Ease::Linear), key(0.2, 0.0, Ease::Linear)], ..RangeSelector::default() };
         assert!(check_per_unit(&PerUnit { stagger: None, selector: Some(back), ..opacity_in() }).is_err());
+        let bad_ease = RangeSelector { offset: vec![key(0.0, 0.0, Ease::CubicBezier([1.5, 0.0, 0.5, 1.0])), key(1.0, 1.0, Ease::Linear)], ..RangeSelector::default() };
+        assert!(check_per_unit(&PerUnit { stagger: None, selector: Some(bad_ease), ..opacity_in() }).is_err(), "a bezier x past 1");
+        let nan = RangeSelector { end: vec![key(0.0, 1.0, Ease::BackOut { amplitude: f64::NAN })], ..RangeSelector::default() };
+        assert!(check_per_unit(&PerUnit { stagger: None, selector: Some(nan), ..opacity_in() }).is_err(), "an amplitude that is not a number");
+        let curve = AnimationCurve::default().with(CurveProperty::Opacity, vec![key(0.0, 0.0, Ease::BackIn { amplitude: f64::INFINITY }), key(1.0, 1.0, Ease::Linear)]);
+        assert!(check_per_unit(&PerUnit { curve, ..opacity_in() }).is_err(), "the curve's eases too");
     }
 }

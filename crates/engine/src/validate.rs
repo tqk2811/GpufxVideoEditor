@@ -2,7 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
-use crate::clip_animation::{find_preset, is_pack_preset, AnimationGroup, ANIMATION_PRESETS};
+use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;
@@ -499,6 +499,9 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                         Some(preset) if preset.per_unit().is_some() && !clip.is_text() => errors.push(PerUnitAnimationNotText { track: t, clip: c, group: group.name(), preset: reference.preset.clone() }),
                         Some(_) => {}
                     }
+                } else if !clip.is_text() && preset_is_per_unit(group, &reference.preset) {
+                    // A pack preset found on this machine is checked like a built-in one.
+                    errors.push(PerUnitAnimationNotText { track: t, clip: c, group: group.name(), preset: reference.preset.clone() });
                 }
                 if reference.duration <= Time::ZERO {
                     errors.push(InvalidAnimationDuration { track: t, clip: c, group: group.name(), duration: reference.duration });
