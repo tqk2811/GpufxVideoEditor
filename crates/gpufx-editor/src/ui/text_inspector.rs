@@ -67,10 +67,11 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     for group in [AnimationGroup::Enter, AnimationGroup::Exit, AnimationGroup::Repeat] {
         animation_row(ui, id, &mut next_animation, group, language);
     }
-    if next != *text {
-        state.live_text(next);
-    } else if next_animation != *animation {
-        state.live_animation(next_animation);
+    match (next != *text, next_animation != *animation) {
+        (true, true) => state.live_text_and_animation(next, next_animation),
+        (true, false) => state.live_text(next),
+        (false, true) => state.live_animation(next_animation),
+        (false, false) => {}
     }
 }
 

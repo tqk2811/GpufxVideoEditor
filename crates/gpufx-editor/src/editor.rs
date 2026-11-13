@@ -1528,13 +1528,33 @@ impl EditorState {
         });
     }
 
-    /// Replaces the preset animations of the selected clip, as a live edit.
+    /// Replaces the preset animations of the selected clip, as a live edit. It builds on what a live
+    /// edit already shows, so a text typed but not yet committed stays.
     pub fn live_animation(&mut self, animation: engine::ClipAnimation) {
         let Some(key) = self.selection else { return };
         if self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_none() {
             return;
         }
-        self.live_edit(|project| engine::set_animation(project, key, animation));
+        let shown = self.project().clone();
+        self.live_edit(|_| engine::set_animation(&shown, key, animation));
+    }
+
+    /// Shows the selected text clip with `text` and `animation` both, as one live edit: a change of
+    /// both in the same frame must not lose either.
+    pub fn live_text_and_animation(&mut self, text: TextContent, animation: engine::ClipAnimation) {
+        let Some(key) = self.selection else { return };
+        if self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_none() {
+            return;
+        }
+        let rescaled = self.rescaled_text_placement(key, &text);
+        self.live_edit(|project| {
+            let next = set_text(project, key, text)?;
+            let next = match rescaled {
+                Some(placement) => set_placement(&next, key, Some(placement))?,
+                None => next,
+            };
+            engine::set_animation(&next, key, animation)
+        });
     }
 
     /// Gives text clip `key` the font `font` as one undo step, keeping a fixed place scaled like
@@ -3692,6 +3712,26 @@ second line")), "Title…");
         assert!((old.0 - new.0).abs() < 1e-6 && (old.1 - new.1).abs() < 1e-6, "{old:?} {new:?}");
         state.undo();
         assert_eq!(state.project().tracks[key.track].clips[key.clip], before, "the whole drag is one step");
+    }
+
+    #[test]
+    fn an_animation_chosen_after_a_live_text_edit_keeps_the_text_and_both_together_keep_both() {
+        let (mut state, key) = added_text_state();
+        let mut text = state.project().tracks[key.track].clips[key.clip].text.clone().unwrap();
+        text.content = "typed".to_owned();
+        state.live_text(text.clone());
+        let fade = engine::ClipAnimation { enter: Some(engine::AnimationRef { preset: "fade".to_owned(), duration: Time::from_seconds(1).unwrap() }), ..Default::default() };
+        state.live_animation(fade.clone());
+        let shown = state.project().tracks[key.track].clips[key.clip].clone();
+        assert_eq!(shown.text.as_ref().map(|text| text.content.as_str()), Some("typed"));
+        assert_eq!(shown.animation, fade);
+        state.commit_live();
+        state.undo();
+        let (mut state, key) = added_text_state();
+        state.live_text_and_animation(text, fade.clone());
+        let shown = state.project().tracks[key.track].clips[key.clip].clone();
+        assert_eq!(shown.text.as_ref().map(|text| text.content.as_str()), Some("typed"));
+        assert_eq!(shown.animation, fade);
     }
 
     #[test]
