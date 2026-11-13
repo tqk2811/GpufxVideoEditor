@@ -592,3 +592,74 @@ fn letter_spacing_leaves_the_end_of_a_line_out_of_the_alignment() {
     assert!(((cl + ch) / 2).abs_diff(w / 2) <= 5, "centre: {cl}..{ch} of {w}");
     assert!(w - rh <= 14, "right: ends at {rh} of {w}");
 }
+
+fn karaoke_text(content: &str, mode: engine::KaraokeMode) -> TextContent {
+    let mut text = TextContent::new(content, 0.1);
+    text.karaoke = Some(engine::TextKaraoke { mode, ..engine::TextKaraoke::default() });
+    text
+}
+
+/// Columns of `image` (whole height) where the ink is mostly red, and where it is mostly white.
+fn red_and_white_columns(image: &TextImage) -> (Vec<u32>, Vec<u32>) {
+    let (mut red, mut white) = (Vec::new(), Vec::new());
+    for x in 0..image.width {
+        for y in 0..image.height {
+            let p = &image.pixels[((y * image.width + x) * 4) as usize..][..4];
+            if p[3] > 200 && p[0] > 200 && p[1] < 60 {
+                red.push(x);
+                break;
+            }
+            if p[3] > 200 && p[0] > 200 && p[1] > 200 && p[2] > 200 {
+                white.push(x);
+                break;
+            }
+        }
+    }
+    (red, white)
+}
+
+#[test]
+fn a_karaoke_word_takes_its_colour_and_the_others_keep_theirs() {
+    let Some(mut r) = rasterizer() else { return };
+    let text = karaoke_text("HHH HHH", engine::KaraokeMode::Color);
+    let white = engine::WordStyle { color: [255, 255, 255, 255], background: None };
+    let red = engine::WordStyle { color: [255, 0, 0, 255], background: None };
+    let image = r.rasterize_words(&text, HEIGHT, 1.0, &[white, red]);
+    let (reds, whites) = red_and_white_columns(&image);
+    assert!(!reds.is_empty() && !whites.is_empty());
+    assert!(whites.iter().max() < reds.iter().min(), "the second word is red, the first white");
+    assert_eq!((image.width, image.height), r.measure(&text, HEIGHT, 1.0), "every step has the measured size");
+    let first_red = r.rasterize_words(&text, HEIGHT, 1.0, &[red, white]);
+    let (reds, whites) = red_and_white_columns(&first_red);
+    assert!(reds.iter().max() < whites.iter().min(), "now the first word is red");
+}
+
+#[test]
+fn karaoke_words_are_found_after_a_case_change_that_lengthens_the_text() {
+    let Some(mut r) = rasterizer() else { return };
+    // "ß" becomes "SS", so the second word starts two bytes later in the shaped text.
+    let mut text = karaoke_text("ßßß hhh", engine::KaraokeMode::Color);
+    text.transform = engine::TextTransform::Uppercase;
+    let white = engine::WordStyle { color: [255, 255, 255, 255], background: None };
+    let red = engine::WordStyle { color: [255, 0, 0, 255], background: None };
+    let image = r.rasterize_words(&text, HEIGHT, 1.0, &[white, red]);
+    let (reds, whites) = red_and_white_columns(&image);
+    assert!(!reds.is_empty() && !whites.is_empty());
+    assert!(whites.iter().max() < reds.iter().min(), "the whole of SSSSSS is white, HHH red");
+}
+
+#[test]
+fn box_mode_draws_a_box_behind_the_active_word_only_and_keeps_its_size() {
+    let Some(mut r) = rasterizer() else { return };
+    let text = karaoke_text("HHH HHH", engine::KaraokeMode::Box);
+    let plain = engine::WordStyle { color: [255, 255, 255, 255], background: None };
+    let boxed = engine::WordStyle { color: [255, 255, 255, 255], background: Some([0, 0, 255, 255]) };
+    let none = r.rasterize_words(&text, HEIGHT, 1.0, &[plain, plain]);
+    let image = r.rasterize_words(&text, HEIGHT, 1.0, &[plain, boxed]);
+    assert_eq!((none.width, none.height), (image.width, image.height), "room for the box at every step");
+    let blue: Vec<u32> = (0..image.width).filter(|&x| (0..image.height).any(|y| { let p = &image.pixels[((y * image.width + x) * 4) as usize..][..4]; p[3] > 200 && p[2] > 200 && p[0] < 60 })).collect();
+    assert!(!blue.is_empty(), "a blue box");
+    assert!(*blue.iter().min().unwrap() > image.width / 3, "only behind the second word: {blue:?}");
+    let plain_box = r.rasterize(&karaoke_text("HHH HHH", engine::KaraokeMode::None), HEIGHT, 1.0);
+    assert!(plain_box.width < image.width, "a text without a box keeps no room for one");
+}

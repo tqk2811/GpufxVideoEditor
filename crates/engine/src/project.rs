@@ -196,6 +196,10 @@ pub struct TextContent {
     /// editor sets it when a style is applied to this clip alone.
     #[serde(default, skip_serializing_if = "is_false")]
     pub own_style: bool,
+    /// Marks each word as it is spoken. Absent on texts without karaoke, so older projects load
+    /// and save unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub karaoke: Option<crate::karaoke::TextKaraoke>,
 }
 
 impl TextContent {
@@ -217,6 +221,7 @@ impl TextContent {
             transform: TextTransform::None,
             letter_spacing: 0.0,
             own_style: false,
+            karaoke: None,
         }
     }
 

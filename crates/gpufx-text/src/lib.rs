@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use cosmic_text::{Attrs, Buffer, Command, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Wrap};
+use engine::karaoke::{word_ranges, WordStyle, KARAOKE_BOX_PADDING, KARAOKE_BOX_RADIUS};
 use engine::project::{FontRef, Rgba, TextAlign, TextContent};
 
 /// The installed families tried, in order, for the default font: Segoe UI on Windows (it has the
@@ -284,6 +285,15 @@ impl TextRasterizer {
     /// 0 by 0 picture. The size is decided from the layout first, so a picture over the limits is
     /// never drawn at full size.
     pub fn rasterize(&mut self, text: &TextContent, output_height_px: u32, scale: f32) -> TextImage {
+        self.rasterize_words(text, output_height_px, scale, &[])
+    }
+
+    /// As [`Self::rasterize`], with word `i` of the text (see [`engine::karaoke::word_ranges`])
+    /// drawn as `styles[i]`: its fill colour and the box behind it. A word past the end of
+    /// `styles` takes the text's colour. The words split the shaping only when the text has
+    /// karaoke on, and the picture keeps room for a box in `box` mode whatever the styles, so
+    /// every step of a karaoke text has the size [`Self::measure`] gives.
+    pub fn rasterize_words(&mut self, text: &TextContent, output_height_px: u32, scale: f32, styles: &[WordStyle]) -> TextImage {
         let font_px = text.size * output_height_px as f32 * scale;
         let mut layout = self.layout(text, font_px);
         let mut downscaled = false;
@@ -298,7 +308,7 @@ impl TextRasterizer {
             layout = self.layout(text, layout.font_px * ratio as f32);
             downscaled = true;
         }
-        let mut image = self.draw(text, &layout);
+        let mut image = self.draw(text, &layout, styles);
         image.downscaled = downscaled;
         image
     }
@@ -349,7 +359,28 @@ impl TextRasterizer {
         if letter_spacing != 0.0 {
             attrs = attrs.letter_spacing(letter_spacing);
         }
-        buffer.set_text(&text.shaped_content(), &attrs, Shaping::Advanced, None);
+        let shaped = text.shaped_content();
+        let karaoke = text.karaoke.as_ref().filter(|karaoke| karaoke.is_on());
+        if karaoke.is_some() {
+            // Each word is a span of its own, its number plus one in the metadata of its glyphs;
+            // the space between words has 0. The spans are the same at every step, so the shaping
+            // and the picture's size are too.
+            let mut spans = Vec::new();
+            let mut at = 0;
+            for (index, range) in word_ranges(&shaped).into_iter().enumerate() {
+                if range.start > at {
+                    spans.push((&shaped[at..range.start], attrs.clone()));
+                }
+                spans.push((&shaped[range.clone()], attrs.clone().metadata(index + 1)));
+                at = range.end;
+            }
+            if at < shaped.len() {
+                spans.push((&shaped[at..], attrs.clone()));
+            }
+            buffer.set_rich_text(spans, &attrs, Shaping::Advanced, None);
+        } else {
+            buffer.set_text(&shaped, &attrs, Shaping::Advanced, None);
+        }
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         // Glyph positions and the size of the line boxes.
@@ -362,12 +393,12 @@ impl TextRasterizer {
             let line_w = if run.glyphs.is_empty() { run.line_w } else { run.line_w - letter_spacing * font_px };
             text_w = text_w.max(line_w);
             text_h = text_h.max(run.line_top + run.line_height);
-            lines.push((line_w, run.line_y, run.glyphs.to_vec()));
+            lines.push((line_w, run.line_y, run.line_top, run.line_height, run.glyphs.to_vec()));
         }
         // The ink may leave the line boxes (marks stacked above a letter on a tight line spacing,
         // a glyph that starts left of its origin), so the picture holds both.
         let (mut x0, mut y0, mut x1, mut y1) = (0f32, 0f32, text_w, text_h);
-        for (line_w, line_y, run_glyphs) in lines {
+        for (line_w, line_y, line_top, line_height, run_glyphs) in lines {
             let shift = match text.align {
                 TextAlign::Left => 0.0,
                 TextAlign::Center => (text_w - line_w) / 2.0,
@@ -377,6 +408,19 @@ impl TextRasterizer {
                 if glyph.glyph_id == 0 {
                     layout.missing_glyphs += 1;
                 }
+                if glyph.metadata > 0 {
+                    // The word's box on this line, in line box coordinates.
+                    let word = glyph.metadata - 1;
+                    let (gx0, gx1) = (shift + glyph.x, shift + glyph.x + glyph.w);
+                    match layout.word_boxes.last_mut() {
+                        Some((last, line, b)) if *last == word && *line == line_top => {
+                            b.0 = b.0.min(gx0);
+                            b.2 = b.2.max(gx1);
+                        }
+                        _ => layout.word_boxes.push((word, line_top, (gx0, line_top, gx1, line_top + line_height))),
+                    }
+                }
+                layout.glyph_words.push(glyph.metadata.checked_sub(1));
                 let physical = glyph.physical((shift, line_y), 1.0);
                 if let Some((gx0, gy0, gx1, gy1)) = self.ink_bounds(physical.cache_key) {
                     // One pixel more on each side for the sub-pixel offset and anti-aliasing.
@@ -392,6 +436,8 @@ impl TextRasterizer {
         // Room around the text for the outline, the box and the shadow.
         let outline_px = text.outline.map(|o| (o.width * font_px).clamp(0.0, font_px * MAX_OUTLINE_RATIO)).unwrap_or(0.0);
         let pad_px = text.background.map(|b| (b.padding * font_px).clamp(0.0, font_px * 4.0)).unwrap_or(0.0);
+        // Room for the box behind the active word, kept at every step.
+        let pad_px = if karaoke.is_some_and(|karaoke| karaoke.draws_box()) { pad_px.max(KARAOKE_BOX_PADDING * font_px) } else { pad_px };
         let (shadow_dx, shadow_dy, shadow_blur) = text.shadow.map(|s| ((s.offset[0] * font_px).clamp(-font_px * 4.0, font_px * 4.0), (s.offset[1] * font_px).clamp(-font_px * 4.0, font_px * 4.0), (s.blur * font_px).clamp(0.0, font_px * 2.0))).unwrap_or((0.0, 0.0, 0.0));
         // A blur too small to move a pixel is no blur, and needs no room.
         let shadow_blur = if blur_half(shadow_blur) == 0 { 0.0 } else { shadow_blur };
@@ -493,7 +539,7 @@ impl TextRasterizer {
     }
 
     /// Draws a layout from [`Self::layout`]. One over the limits draws nothing.
-    fn draw(&mut self, text: &TextContent, layout: &Layout) -> TextImage {
+    fn draw(&mut self, text: &TextContent, layout: &Layout, styles: &[WordStyle]) -> TextImage {
         let mut image = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, downscaled: false };
         let (width, height) = (layout.width as usize, layout.height as usize);
         if width == 0 || height == 0 {
@@ -512,8 +558,18 @@ impl TextRasterizer {
 
         // Glyph coverage.
         let mut fill = Mask::new(width, height);
+        // The glyphs of the words whose colour is not the text's, one mask per colour.
+        let mut tinted: Vec<(Rgba, Mask)> = Vec::new();
         let (ox, oy) = (left as i32, top as i32);
-        for glyph in &layout.glyphs {
+        for (number, glyph) in layout.glyphs.iter().enumerate() {
+            let color = layout.glyph_words.get(number).copied().flatten().and_then(|word| styles.get(word)).map(|style| style.color).filter(|color| *color != text.color);
+            let group = color.map(|color| match tinted.iter().position(|(known, _)| *known == color) {
+                Some(group) => group,
+                None => {
+                    tinted.push((color, Mask::new(width, height)));
+                    tinted.len() - 1
+                }
+            });
             let Some(picture) = self.cache.get_image(&mut self.font_system, glyph.cache_key).as_ref() else { continue };
             let p = picture.placement;
             let x0 = ox + glyph.x + p.left;
@@ -528,6 +584,9 @@ impl TextRasterizer {
                     // Colour glyphs (emoji) are drawn in the text colour for now.
                     let a = picture.data[index + stride - 1] as f32 / 255.0;
                     fill.add(x0 + i, y0 + j, a);
+                    if let Some(group) = group {
+                        tinted[group].1.add(x0 + i, y0 + j, a);
+                    }
                 }
             }
         }
@@ -551,6 +610,22 @@ impl TextRasterizer {
                 }
             }
         }
+        // The box behind each word that has one, such as the active word in karaoke `box` mode.
+        let box_pad = KARAOKE_BOX_PADDING * font_px;
+        let box_radius = KARAOKE_BOX_RADIUS * font_px;
+        for (word, _, (bx0, by0, bx1, by1)) in &layout.word_boxes {
+            let Some(color) = styles.get(*word).and_then(|style| style.background) else { continue };
+            let rect = (left + bx0 - box_pad, top + by0, left + bx1 + box_pad, top + by1);
+            let color = premultiplied(color);
+            let (ys, ye) = (rect.1.floor().max(0.0) as usize, (rect.3.ceil().max(0.0) as usize).min(height));
+            let (xs, xe) = (rect.0.floor().max(0.0) as usize, (rect.2.ceil().max(0.0) as usize).min(width));
+            for y in ys..ye {
+                for x in xs..xe {
+                    let a = rounded_rect_coverage(x as f32 + 0.5, y as f32 + 0.5, rect, box_radius);
+                    over(&mut canvas[y * width + x], color, a);
+                }
+            }
+        }
         if let (Some(glow), Some(squared)) = (glow, squared.as_deref()) {
             draw_glow(&mut canvas, squared, &glow, if outline.is_some() { outline_px } else { 0.0 }, layout.glow_px);
         }
@@ -564,7 +639,19 @@ impl TextRasterizer {
         if let Some((color, mask)) = &outline {
             draw_mask(&mut canvas, mask, premultiplied(*color));
         }
-        draw_mask(&mut canvas, &fill, premultiplied(text.color));
+        if tinted.is_empty() {
+            draw_mask(&mut canvas, &fill, premultiplied(text.color));
+        } else {
+            // The text colour fills what no tinted word covers; each tinted word its own colour.
+            let mut plain = fill;
+            for (_, mask) in &tinted {
+                plain.subtract(mask);
+            }
+            draw_mask(&mut canvas, &plain, premultiplied(text.color));
+            for (color, mask) in &tinted {
+                draw_mask(&mut canvas, mask, premultiplied(*color));
+            }
+        }
 
         image.pixels = canvas.iter().flat_map(|p| p.map(|c| (c * 255.0 + 0.5).clamp(0.0, 255.0) as u8)).collect();
         image
@@ -576,6 +663,11 @@ impl TextRasterizer {
 struct Layout {
     font_px: f32,
     glyphs: Vec<cosmic_text::PhysicalGlyph>,
+    /// The word of each glyph of `glyphs` when the text has karaoke on.
+    glyph_words: Vec<Option<usize>>,
+    /// The box of each word on each line (word, line top, (x0, y0, x1, y1)), in line box
+    /// coordinates: as wide as its glyphs' advances, as tall as the line.
+    word_boxes: Vec<(usize, f32, (f32, f32, f32, f32))>,
     width: u32,
     height: u32,
     /// Where the top left of the line boxes lands in the picture.
@@ -707,6 +799,13 @@ impl Mask {
         if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
             let v = &mut self.data[y as usize * self.width + x as usize];
             *v = (*v + a).min(1.0);
+        }
+    }
+
+    /// Takes the coverage of `other`, of the same size, away.
+    fn subtract(&mut self, other: &Mask) {
+        for (v, o) in self.data.iter_mut().zip(&other.data) {
+            *v = (*v - o).max(0.0);
         }
     }
 

@@ -476,6 +476,9 @@ impl SourceFrame {
 pub enum SourceDecoder {
     Video(SequentialDecoder),
     Still(Arc<StillImage>),
+    /// A karaoke text: the picture of each step, the step at `times[i]` drawn by `stills[i + 1]`
+    /// and the time before the first by `stills[0]` (see [`engine::karaoke::step_at`]).
+    Steps { times: Vec<engine::time::Time>, stills: Vec<Arc<StillImage>> },
 }
 
 impl Decoder for SourceDecoder {
@@ -485,13 +488,14 @@ impl Decoder for SourceDecoder {
         match self {
             Self::Video(decoder) => decoder.frame_at(time).map(SourceFrame::Video),
             Self::Still(still) => Ok(SourceFrame::Still(still.clone())),
+            Self::Steps { times, stills } => Ok(SourceFrame::Still(stills[engine::karaoke::step_at(times, time).min(stills.len() - 1)].clone())),
         }
     }
 
     fn wait_idle(&mut self) -> Result<(), RenderError> {
         match self {
             Self::Video(decoder) => decoder.wait_idle(),
-            Self::Still(_) => Ok(()),
+            Self::Still(_) | Self::Steps { .. } => Ok(()),
         }
     }
 }
@@ -828,10 +832,10 @@ impl D3d12Compositor {
         size
     }
 
-    fn rasterize(&mut self, text: &TextContent, scale: f32) -> gpufx_text::TextImage {
+    fn rasterize(&mut self, text: &TextContent, scale: f32, styles: &[engine::WordStyle]) -> gpufx_text::TextImage {
         let rasterizer = self.text_rasterizer.get_or_insert_with(gpufx_text::shared).clone();
         // A panic in another user leaves the fonts as they were, so the lock is still fine to take.
-        let image = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).rasterize(text, self.height, scale);
+        let image = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).rasterize_words(text, self.height, scale, styles);
         self.text_rasterizations += 1;
         if let Some(family) = &image.missing_family {
             if !self.missing_font_families.contains(family) {
@@ -845,7 +849,9 @@ impl D3d12Compositor {
     /// The still of a text clip, rasterized sharp enough for the widest the clip is shown (see
     /// [`engine::text_raster_scale`], which rounds to steps) and kept like an
     /// image, by its text, output height and scale. Only measured, not drawn, to learn the scale.
-    fn load_text(&mut self, clip: &Clip, text: &TextContent) -> Result<Arc<StillImage>, String> {
+    /// `styles` are the looks of its words at one karaoke step (see
+    /// [`gpufx_text::TextRasterizer::rasterize_words`]), part of the key too.
+    fn load_text(&mut self, clip: &Clip, text: &TextContent, styles: &[engine::WordStyle]) -> Result<Arc<StillImage>, String> {
         // A font file named relative to the project is read from the project folder.
         let resolved;
         let text = match &text.font {
@@ -874,13 +880,14 @@ impl D3d12Compositor {
         let source_aspect = if width == 0 || height == 0 { 1.0 } else { f64::from(width) / f64::from(height) };
         let output_aspect = f64::from(self.width) / f64::from(self.height.max(1));
         let scale = text_raster_scale(clip.widest(output_aspect, source_aspect), self.width, width);
+        let digest = if styles.is_empty() { digest } else { Sha256::new().chain_update(digest).chain_update(format!("{styles:?}").as_bytes()).finalize().into() };
         let key = StillKey::Text { digest, output_height: self.height, scale: scale.to_bits() };
         self.stills_used += 1;
         if let Some(cached) = self.stills.get_mut(&key) {
             cached.last_used = self.stills_used;
             return Ok(cached.still.clone());
         }
-        let image = self.rasterize(text, scale);
+        let image = self.rasterize(text, scale, styles);
         let picture = premultiplied_still(image.width, image.height, image.pixels);
         self.insert_still(key, (0, None), picture)
     }
@@ -1183,7 +1190,17 @@ impl Compositor for D3d12Compositor {
 
     fn open_decoder(&mut self, clip: &Clip) -> Result<SourceDecoder, RenderError> {
         if let Some(text) = &clip.text {
-            return self.load_text(clip, text).map(SourceDecoder::Still).map_err(RenderError);
+            if let Some(words) = engine::clip_words(clip).filter(|words| !words.is_empty()) {
+                // One picture per karaoke step: a cue of a few words has only a few.
+                let times = engine::karaoke::step_times(&words);
+                let mut stills = Vec::with_capacity(times.len() + 1);
+                for step in 0..=times.len() {
+                    let styles = engine::karaoke::word_styles(text, &words, &engine::karaoke::step_states(&words, &times, step));
+                    stills.push(self.load_text(clip, text, &styles).map_err(RenderError)?);
+                }
+                return Ok(SourceDecoder::Steps { times, stills });
+            }
+            return self.load_text(clip, text, &[]).map(SourceDecoder::Still).map_err(RenderError);
         }
         let source = clip.source.as_str();
         if is_image_source(source) {

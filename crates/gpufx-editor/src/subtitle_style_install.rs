@@ -12,7 +12,6 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::Path;
 
-use engine::Rgba;
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
@@ -24,8 +23,7 @@ use crate::text_style_install::{check_style_item_parts, no_media, PackStyleAnima
 pub const SUBTITLE_STYLE_TYPE: &str = "subtitle-style";
 /// The most lines a subtitle layout may ask for.
 pub const MAX_SUBTITLE_LINES: u32 = 10;
-/// The most a karaoke look may scale a word.
-pub const MAX_KARAOKE_SCALE: f32 = 4.0;
+pub use engine::{KaraokeLook, KaraokeMode, MAX_KARAOKE_SCALE};
 
 /// A subtitle style pack that was installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,7 +75,8 @@ pub struct SubtitleLayout {
     pub max_lines: u32,
 }
 
-/// How a karaoke style marks the words. Read and kept; nothing draws it yet.
+/// How a karaoke style marks the words. Applying the style copies it into the text
+/// ([`Self::to_text`]).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubtitleKaraoke {
@@ -92,29 +91,12 @@ pub struct SubtitleKaraoke {
     pub emphasis: Option<KaraokeLook>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum KaraokeMode {
-    None,
-    Color,
-    Box,
-    Scale,
-}
-
-/// The look of the words in one state.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct KaraokeLook {
-    #[serde(default)]
-    pub color: Option<Rgba>,
-    #[serde(default)]
-    pub background: Option<Rgba>,
-    /// Above 0 and at most [`MAX_KARAOKE_SCALE`].
-    #[serde(default)]
-    pub scale: Option<f32>,
-    /// 0 to 1.
-    #[serde(default)]
-    pub opacity: Option<f32>,
+impl SubtitleKaraoke {
+    /// The karaoke of a text in this style, its words timed from `words` (those of the text the
+    /// style is applied to, so times set by hand stay).
+    pub fn to_text(&self, words: Vec<engine::KaraokeWord>) -> engine::TextKaraoke {
+        engine::TextKaraoke { mode: self.mode, active: self.active, spoken: self.spoken, upcoming: self.upcoming, emphasis: self.emphasis, words }
+    }
 }
 
 fn check_layout(layout: &SubtitleLayout) -> Result<(), String> {

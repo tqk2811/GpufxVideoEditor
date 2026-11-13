@@ -58,7 +58,7 @@ pub struct LibraryTextStyle {
     pub animation: Option<ClipAnimation>,
     /// Where a subtitle style puts its text.
     pub layout: Option<SubtitleLayout>,
-    /// Read and kept; not drawn yet.
+    /// How a subtitle style marks the spoken word; copied into the text when applied.
     pub karaoke: Option<SubtitleKaraoke>,
 }
 
@@ -68,6 +68,14 @@ impl LibraryTextStyle {
     pub fn apply(&self, current: &TextContent, families: &[String]) -> TextContent {
         let mut next = self.style.text(&current.content, current.size);
         next.font = pick_font(&self.style.font_hint, families).unwrap_or_else(|| current.font.clone());
+        // A subtitle style sets the karaoke, none when it has none; a text style leaves it. Word
+        // times set by hand stay either way.
+        let words = current.karaoke.as_ref().map(|karaoke| karaoke.words.clone()).unwrap_or_default();
+        next.karaoke = match (&self.karaoke, self.kind) {
+            (Some(karaoke), _) => Some(karaoke.to_text(words)),
+            (None, StyleKind::Subtitle) => None,
+            (None, _) => current.karaoke.clone(),
+        };
         next
     }
 
@@ -326,5 +334,31 @@ mod tests {
         assert!(style.karaoke.is_some());
         assert_eq!(style.preview_text, "TikTok", "the name when there is no preview text");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn applying_a_subtitle_style_copies_its_karaoke_and_keeps_word_times() {
+        let dir = scratch("subtitle-karaoke");
+        let library = library_with_both(&dir);
+        let style = library.find("avs-subs/tiktok").unwrap();
+        let mut current = default_text("one two");
+        let word = |start: i64, end: i64| engine::KaraokeWord { start: engine::Time::from_ticks(start), end: engine::Time::from_ticks(end), emphasis: false };
+        current.karaoke = Some(engine::TextKaraoke { words: vec![word(0, 5), word(5, 9)], ..engine::TextKaraoke::default() });
+        let styled = style.apply(&current, &[]);
+        let karaoke = styled.karaoke.expect("the style's karaoke");
+        assert_eq!(karaoke.mode, engine::KaraokeMode::Color);
+        assert_eq!(karaoke.active.and_then(|look| look.color), Some([255, 220, 0, 255]));
+        assert_eq!(karaoke.words.len(), 2, "times set by hand stay");
+        let plain_subtitle = LibraryTextStyle { karaoke: None, ..style.clone() };
+        assert_eq!(plain_subtitle.apply(&styled_text_with_karaoke(), &[]).karaoke, None, "a subtitle style without karaoke turns it off");
+        let text_style = LibraryTextStyle { karaoke: None, kind: StyleKind::Text, ..style.clone() };
+        assert!(text_style.apply(&styled_text_with_karaoke(), &[]).karaoke.is_some(), "a text style leaves it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn styled_text_with_karaoke() -> TextContent {
+        let mut text = default_text("one two");
+        text.karaoke = Some(engine::TextKaraoke { mode: engine::KaraokeMode::Box, ..engine::TextKaraoke::default() });
+        text
     }
 }

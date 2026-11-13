@@ -424,3 +424,33 @@ fn a_text_with_no_size_yet_draws_nothing() {
         assert!(brightest <= 4, "{preset}: nothing drawn at the first frame, brightest {brightest}");
     }
 }
+
+#[test]
+fn a_karaoke_text_reds_the_word_being_spoken_with_one_picture_per_step() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    let mut compositor = text_compositor(&gpu);
+    let karaoke = r#""karaoke":{"mode":"color","active":{"color":[255,0,0,255]}}"#;
+    let track = format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HH HH","size":0.4,"color":[255,255,255,255],{karaoke}}}}}]}}"#, 8 * FRAME);
+    let project = parse(&project_json(&track));
+    let errors = validate(&project, &engine::AcceptAll);
+    assert!(errors.is_empty(), "invalid project: {errors:?}");
+    let mut renderer = FrameRenderer::default();
+    // The columns with red ink at a frame: the first word speaks over frames 0 to 3, the second
+    // over 4 to 7, as both have two characters.
+    let mut red_columns = |index| -> Vec<u32> {
+        let rgba = renderer
+            .render_frame(&project, &mut compositor, index, |compositor, image| {
+                let mut rgba = Vec::new();
+                compositor.read(image, &mut rgba)?;
+                Ok(rgba)
+            })
+            .expect("frame");
+        (0..WIDTH).filter(|&x| (0..HEIGHT).any(|y| { let p = pixel(&rgba, x, y); p[0] > 150 && p[1] < 60 })).collect()
+    };
+    let first = red_columns(1);
+    let second = red_columns(6);
+    assert!(!first.is_empty() && !second.is_empty(), "{first:?} {second:?}");
+    assert!(first.iter().max() < second.iter().min(), "the red moves right: {first:?} {second:?}");
+    assert!(compositor.text_rasterizations() <= 4, "one picture per step: {}", compositor.text_rasterizations());
+}

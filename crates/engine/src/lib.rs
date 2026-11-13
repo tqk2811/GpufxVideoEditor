@@ -19,6 +19,7 @@ pub mod audio_clock;
 pub mod audio_mix;
 pub mod audio_schedule;
 pub mod edit;
+pub mod karaoke;
 pub mod keyframe;
 pub mod project;
 pub mod render;
@@ -43,6 +44,7 @@ pub use edit::{
     nearest_free_start, remove_effect, remove_keyframe, remove_transition, set_effect_params, set_effect_params_at, set_fades, set_gain,
     set_frame_duration, set_keyframe, set_motion_value, set_muted, set_opacity, set_output_size, set_placement, set_placement_at, set_rotation, set_speed, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, EditError, EditHistory,
 };
+pub use karaoke::{clip_words, karaoke_problem, KaraokeLook, KaraokeMode, KaraokeWord, TextKaraoke, WordState, WordStyle, MAX_KARAOKE_SCALE};
 pub use keyframe::{
     effects_at, keyframe_neighbors, keyframe_tolerance, nearest_keyframe, nearest_keyframe_inside, sample_keyframes, ClipMotion, ClipProperty, ClipTransform, Easing, Keyframe, KeyframeTarget, MAX_KEYFRAMES, MAX_KEYFRAME_TIME, MAX_ROTATION,
 };

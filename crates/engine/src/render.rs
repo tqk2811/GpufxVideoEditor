@@ -233,6 +233,9 @@ pub struct TextSpec {
     pub fitted: bool,
     /// The step of the widest placed or keyframed width, `None` when there is neither.
     pub widest_step: Option<u64>,
+    /// Where the cue ends when karaoke shares it among the words by their characters, so a clip
+    /// made longer or shorter times its words again. `None` otherwise.
+    pub karaoke_cue_end: Option<crate::time::Time>,
 }
 
 impl DecoderSpec {
@@ -240,7 +243,7 @@ impl DecoderSpec {
         let text = clip.text.as_ref().map(|text| {
             let keys = clip.motion.keyframes.get(&ClipProperty::Width).map_or(&[][..], Vec::as_slice);
             let widest = clip.placement.map(|placement| placement.width).into_iter().chain(keys.iter().map(|key| key.value)).filter(|value| value.is_finite()).reduce(f64::max);
-            TextSpec { text: text.clone(), fitted: clip.placement.is_none(), widest_step: widest.map(|value| text_step_up(value).to_bits()) }
+            TextSpec { text: text.clone(), fitted: clip.placement.is_none(), widest_step: widest.map(|value| text_step_up(value).to_bits()), karaoke_cue_end: text.karaoke.as_ref().filter(|karaoke| karaoke.is_on() && karaoke.words.is_empty()).map(|_| crate::karaoke::cue_end(clip)) }
         });
         DecoderSpec { source: clip.source.clone(), text }
     }

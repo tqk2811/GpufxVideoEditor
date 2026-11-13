@@ -225,6 +225,9 @@ pub enum ValidationError {
     /// A text clip `weight`, `letter_spacing` or glow value (`glow.radius`, `glow.intensity`,
     /// `glow.falloff`) is not a number or outside `allowed`.
     InvalidTextStyle { track: usize, clip: usize, field: &'static str, value: f32, allowed: String },
+    /// A text clip's karaoke has a look out of range, or word times that are not one per word, in
+    /// order and not overlapping.
+    InvalidKaraoke { track: usize, clip: usize, problem: String },
     /// A clip names a preset animation that is not in [`crate::ANIMATION_PRESETS`] for
     /// its group (`in`, `out` or `loop`). It is left out when drawing.
     UnknownAnimation { track: usize, clip: usize, group: &'static str, preset: String },
@@ -366,6 +369,7 @@ impl fmt::Display for ValidationError {
             InvalidTextSize { track, clip, size } => write!(f, "track {track}, clip {clip}: text size {size} must be above 0"),
             InvalidLineSpacing { track, clip, line_spacing } => write!(f, "track {track}, clip {clip}: line spacing {line_spacing} must be above 0"),
             InvalidTextStyle { track, clip, field, value, allowed } => write!(f, "track {track}, clip {clip}: text {field} {value} must be {allowed}"),
+            InvalidKaraoke { track, clip, problem } => write!(f, "track {track}, clip {clip}: {problem}"),
             UnknownAnimation { track, clip, group, preset } => {
                 write!(f, "track {track}, clip {clip}: there is no '{group}' animation '{preset}'")?;
                 // A preset of another group is most likely in the wrong place.
@@ -529,6 +533,9 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 }
                 for problem in text_style_problems(text) {
                     errors.push(InvalidTextStyle { track: t, clip: c, field: problem.field, value: problem.value, allowed: problem.allowed });
+                }
+                if let Some(problem) = crate::karaoke::karaoke_problem(text) {
+                    errors.push(InvalidKaraoke { track: t, clip: c, problem });
                 }
                 if track.is_audio() {
                     errors.push(TextOnAudioTrack { track: t, clip: c });
