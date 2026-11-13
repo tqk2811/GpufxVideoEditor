@@ -160,6 +160,7 @@ impl Session {
         let gpu = Arc::new(Gpu::create()?);
         let attributes = Window::default_attributes().with_title("gpufx editor").with_inner_size(winit::dpi::LogicalSize::new(1280, 720)).with_min_inner_size(winit::dpi::LogicalSize::new(800, 500));
         let window = Arc::new(event_loop.create_window(attributes).map_err(|e| format!("creating the window failed: {e}"))?);
+        crate::dpi_window::install(&window);
         let presenter = Presenter::new(&gpu, window.clone())?;
         let producer_gpu = gpu.clone();
         let window_for_scan = window.clone();
