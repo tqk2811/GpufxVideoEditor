@@ -256,6 +256,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::AnimationExit => "Out".to_owned(),
         Message::AnimationRepeat => "Loop".to_owned(),
         Message::AnimationNone => "None".to_owned(),
+        Message::AnimationPackMissing(id) => format!("{id} (pack not installed)"),
         Message::FieldAnimationDuration => "Duration".to_owned(),
         Message::AnimationPreset(id) => animation_preset(id),
         Message::TabEffects => "Effects".to_owned(),

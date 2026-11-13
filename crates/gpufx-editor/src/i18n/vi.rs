@@ -239,6 +239,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::AnimationExit => "Ra".to_owned(),
         Message::AnimationRepeat => "Lặp".to_owned(),
         Message::AnimationNone => "Không".to_owned(),
+        Message::AnimationPackMissing(id) => format!("{id} (chưa cài gói)"),
         Message::FieldAnimationDuration => "Thời lượng".to_owned(),
         Message::AnimationPreset(id) => animation_preset(id),
         Message::TabEffects => "Hiệu ứng".to_owned(),

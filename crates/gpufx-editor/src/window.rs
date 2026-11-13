@@ -320,8 +320,13 @@ impl Session {
     /// Takes the installed clip animation packs once their scan has finished.
     fn collect_clip_animation_library(&mut self) {
         if let Some(Ok(library)) = self.clip_animation_library.as_ref().map(Receiver::try_recv) {
+            // The engine never reads a pack: it plays the curves the editor hands it.
+            engine::set_pack_presets(library.preset_table());
             self.state.clip_animation_library = library;
             self.clip_animation_library = None;
+            // Frames drawn without the new curves must be drawn again.
+            self.tracker = RequestTracker::default();
+            self.shown = None;
         }
     }
 

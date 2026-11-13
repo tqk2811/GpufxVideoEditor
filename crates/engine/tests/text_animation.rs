@@ -105,6 +105,15 @@ fn a_short_clip_shrinks_enter_and_exit_alike() {
 }
 
 #[test]
+fn a_preset_of_a_missing_pack_does_nothing_and_is_not_an_error() {
+    let animation = ClipAnimation { enter: reference("not-installed/rise", 9000), ..Default::default() };
+    assert_eq!(animation_pose(&animation, clock(100, 90_000)), engine::AnimationPose::IDENTITY);
+    let p = project_with(vec![animated(0, 90_000, animation)]);
+    assert!(close(transform_at_frame(&p, 0).opacity, 1.0));
+    assert_eq!(validate(&p, &AcceptAll), Vec::new(), "a project opens without the pack");
+}
+
+#[test]
 fn an_unknown_preset_does_nothing_and_validation_names_it() {
     let animation = ClipAnimation { enter: reference("wobble", 9000), exit: reference("fade", 0), repeat: reference("fade", 9000) };
     assert_eq!(animation_pose(&animation, clock(100, 90_000)), engine::AnimationPose::IDENTITY);

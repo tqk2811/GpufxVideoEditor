@@ -14,10 +14,16 @@
 //! When enter and exit together are longer than the visible time, both are shortened by the same
 //! factor so they fill it exactly, the enter in the first part and the exit in the rest.
 //! A preset id that is not known, or a duration that is not above zero, is left out.
+//!
+//! Presets of packs: a clip names one as `"<pack id>/<item id>"` (see [`PACK_PRESET_SEPARATOR`]).
+//! The engine never reads a pack: the editor reads the installed packs and hands their curves over
+//! with [`set_pack_presets`], one table for the whole process (as the fonts of the system are). A
+//! pack preset that is not in the table is left out like an unknown id, but is not a validation
+//! error, so a project opens and renders, without that animation, where its pack is missing.
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -245,6 +251,30 @@ impl AnimationCurve {
     }
 }
 
+/// Checks a curve that came from outside (a pack): at least one track, none empty, every
+/// keyframe finite with its `t` in 0..1, in rising `t`. The message says what is wrong.
+pub fn check_curve(curve: &AnimationCurve) -> Result<(), String> {
+    if curve.tracks.is_empty() {
+        return Err("the curve has no track".to_owned());
+    }
+    for (property, keys) in &curve.tracks {
+        if keys.is_empty() {
+            return Err(format!("the {property:?} track has no keyframe"));
+        }
+        let mut last = 0.0;
+        for key in keys {
+            if !(key.t.is_finite() && (0.0..=1.0).contains(&key.t)) || !key.value.is_finite() {
+                return Err(format!("a keyframe of the {property:?} track is not finite or its t is not in 0..1"));
+            }
+            if key.t < last {
+                return Err(format!("the keyframes of the {property:?} track are not in rising t"));
+            }
+            last = key.t;
+        }
+    }
+    Ok(())
+}
+
 /// A keyframe of a curve.
 pub fn key(t: f64, value: f64, ease: Ease) -> CurveKey {
     CurveKey { t, value, ease }
@@ -291,6 +321,18 @@ struct Built {
 /// How many steps of `t` measure the largest scale of a curve.
 const MEASURE_STEPS: u32 = 2000;
 
+/// Whether `curve` turns the picture, and the largest scale it gives.
+fn measure(curve: &AnimationCurve) -> (bool, f64) {
+    let rotates = curve.tracks.get(&CurveProperty::Rotation).is_some_and(|keys| keys.iter().any(|key| key.value != 0.0));
+    let max_scale = (0..=MEASURE_STEPS)
+        .map(|step| {
+            let pose = evaluate_curve(curve, f64::from(step) / f64::from(MEASURE_STEPS));
+            pose.scale * pose.scale_x.max(pose.scale_y)
+        })
+        .fold(1.0, f64::max);
+    (rotates, max_scale)
+}
+
 fn built() -> &'static [Built] {
     static BUILT: OnceLock<Vec<Built>> = OnceLock::new();
     BUILT.get_or_init(|| {
@@ -298,13 +340,7 @@ fn built() -> &'static [Built] {
             .iter()
             .map(|preset| {
                 let curve = (preset.build)();
-                let rotates = curve.tracks.get(&CurveProperty::Rotation).is_some_and(|keys| keys.iter().any(|key| key.value != 0.0));
-                let max_scale = (0..=MEASURE_STEPS)
-                    .map(|step| {
-                        let pose = evaluate_curve(&curve, f64::from(step) / f64::from(MEASURE_STEPS));
-                        pose.scale * pose.scale_x.max(pose.scale_y)
-                    })
-                    .fold(1.0, f64::max);
+                let (rotates, max_scale) = measure(&curve);
                 Built { curve, rotates, max_scale }
             })
             .collect()
@@ -331,6 +367,90 @@ impl AnimationPreset {
     pub fn max_scale(&self) -> f64 {
         self.built().max_scale
     }
+}
+
+/// A preset of a pack, as the editor read it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackPreset {
+    /// What a clip names: `"<pack id>/<item id>"`.
+    pub reference: String,
+    pub group: AnimationGroup,
+    pub curve: AnimationCurve,
+    rotates: bool,
+    max_scale: f64,
+}
+
+impl PackPreset {
+    pub fn new(reference: String, group: AnimationGroup, curve: AnimationCurve) -> Self {
+        let (rotates, max_scale) = measure(&curve);
+        PackPreset { reference, group, curve, rotates, max_scale }
+    }
+
+    /// Whether the preset turns the picture.
+    pub fn rotates(&self) -> bool {
+        self.rotates
+    }
+
+    /// The largest scale the preset ever gives.
+    pub fn max_scale(&self) -> f64 {
+        self.max_scale
+    }
+}
+
+/// The presets of the installed packs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PackPresets {
+    presets: Vec<PackPreset>,
+}
+
+impl PackPresets {
+    pub fn new(presets: Vec<PackPreset>) -> Self {
+        PackPresets { presets }
+    }
+
+    /// The preset `reference` of `group`.
+    pub fn find(&self, group: AnimationGroup, reference: &str) -> Option<&PackPreset> {
+        self.presets.iter().find(|preset| preset.group == group && preset.reference == reference)
+    }
+
+    pub fn presets(&self) -> &[PackPreset] {
+        &self.presets
+    }
+}
+
+fn pack_table() -> &'static RwLock<Arc<PackPresets>> {
+    static TABLE: OnceLock<RwLock<Arc<PackPresets>>> = OnceLock::new();
+    TABLE.get_or_init(Default::default)
+}
+
+/// Replaces the presets of packs every clip of the process can name.
+pub fn set_pack_presets(presets: PackPresets) {
+    *pack_table().write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(presets);
+}
+
+/// The presets of packs now set.
+pub fn pack_presets() -> Arc<PackPresets> {
+    pack_table().read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// Whether `id` names a preset of a pack rather than a built-in one.
+pub fn is_pack_preset(id: &str) -> bool {
+    id.contains(PACK_PRESET_SEPARATOR)
+}
+
+/// A preset found, built in or from a pack.
+#[derive(Clone, Copy)]
+struct Resolved<'a> {
+    curve: &'a AnimationCurve,
+    rotates: bool,
+    max_scale: f64,
+}
+
+fn resolve<'a>(group: AnimationGroup, id: &str, packs: &'a PackPresets) -> Option<Resolved<'a>> {
+    if let Some(preset) = find_preset(group, id) {
+        return Some(Resolved { curve: preset.curve(), rotates: preset.rotates(), max_scale: preset.max_scale() });
+    }
+    packs.find(group, id).map(|preset| Resolved { curve: &preset.curve, rotates: preset.rotates, max_scale: preset.max_scale })
 }
 
 /// How a preset changes the picture at one moment, on top of the clip's own motion.
@@ -521,38 +641,42 @@ pub fn find_preset(group: AnimationGroup, id: &str) -> Option<&'static Animation
 
 /// The pose of preset `id` of `group` at `progress` (0 to 1; for a repeat preset, the phase in
 /// cycles, of which only the fraction counts), `None` when the preset is not known.
+/// A pack preset is looked up in the table [`set_pack_presets`] set.
 pub fn preset_pose(group: AnimationGroup, id: &str, progress: f64) -> Option<AnimationPose> {
-    let preset = find_preset(group, id)?;
+    let packs = pack_presets();
+    resolve(group, id, &packs).map(|preset| curve_pose(group, preset.curve, progress))
+}
+
+fn curve_pose(group: AnimationGroup, curve: &AnimationCurve, progress: f64) -> AnimationPose {
     let t = match group {
         AnimationGroup::Repeat => progress.rem_euclid(1.0),
         _ => progress.clamp(0.0, 1.0),
     };
-    Some(evaluate_curve(preset.curve(), t))
+    evaluate_curve(curve, t)
 }
 
 /// The preset and its ticks when it will run, `None` when it is unknown or does not last.
-fn usable(group: AnimationGroup, reference: &Option<AnimationRef>) -> Option<(&'static AnimationPreset, f64)> {
+fn usable<'a>(group: AnimationGroup, reference: &Option<AnimationRef>, packs: &'a PackPresets) -> Option<(Resolved<'a>, f64)> {
     let reference = reference.as_ref()?;
     let ticks = reference.duration.ticks();
     if ticks <= 0 {
         return None;
     }
-    find_preset(group, &reference.preset).map(|preset| (preset, ticks as f64))
+    resolve(group, &reference.preset, packs).map(|preset| (preset, ticks as f64))
 }
 
 /// The pose of `animation` at `clock` (see the module timing rules).
 pub fn animation_pose(animation: &ClipAnimation, clock: ClipClock) -> AnimationPose {
     let elapsed = clock.elapsed.ticks() as f64;
     let total = clock.duration.ticks().max(0) as f64;
-    let enter = usable(AnimationGroup::Enter, &animation.enter);
-    let exit = usable(AnimationGroup::Exit, &animation.exit);
+    let packs = pack_presets();
+    let enter = usable(AnimationGroup::Enter, &animation.enter, &packs);
+    let exit = usable(AnimationGroup::Exit, &animation.exit, &packs);
     let both = enter.map_or(0.0, |(_, d)| d) + exit.map_or(0.0, |(_, d)| d);
     let shrink = if both > total { total / both } else { 1.0 };
     let mut pose = AnimationPose::IDENTITY;
-    let mut add = |group, preset: &AnimationPreset, progress| {
-        if let Some(part) = preset_pose(group, preset.id, progress) {
-            pose = pose.then(part);
-        }
+    let mut add = |group, preset: Resolved, progress| {
+        pose = pose.then(curve_pose(group, preset.curve, progress));
     };
     if let Some((preset, duration)) = enter {
         let duration = duration * shrink;
@@ -570,31 +694,40 @@ pub fn animation_pose(animation: &ClipAnimation, clock: ClipClock) -> AnimationP
             add(AnimationGroup::Exit, preset, (elapsed - from) / duration);
         }
     }
-    if let Some((preset, period)) = usable(AnimationGroup::Repeat, &animation.repeat) {
+    if let Some((preset, period)) = usable(AnimationGroup::Repeat, &animation.repeat, &packs) {
         add(AnimationGroup::Repeat, preset, elapsed / period);
     }
     pose
 }
 
-fn presets_of(animation: &ClipAnimation) -> impl Iterator<Item = &'static AnimationPreset> + '_ {
+fn presets_of<'a>(animation: &'a ClipAnimation, packs: &'a PackPresets) -> impl Iterator<Item = (AnimationGroup, Resolved<'a>)> + 'a {
     [(AnimationGroup::Enter, &animation.enter), (AnimationGroup::Exit, &animation.exit), (AnimationGroup::Repeat, &animation.repeat)]
         .into_iter()
-        .filter_map(|(group, reference)| usable(group, reference).map(|(preset, _)| preset))
+        .filter_map(move |(group, reference)| usable(group, reference, packs).map(|(preset, _)| (group, preset)))
 }
 
 /// Whether any preset of `animation` turns the picture.
 pub fn animation_rotates(animation: &ClipAnimation) -> bool {
-    presets_of(animation).any(|preset| preset.rotates())
+    if animation.is_empty() {
+        return false;
+    }
+    let packs = pack_presets();
+    let rotates = presets_of(animation, &packs).any(|(_, preset)| preset.rotates);
+    rotates
 }
 
 /// The largest scale `animation` ever gives: the larger of enter and exit, times the repeat.
 pub fn animation_max_scale(animation: &ClipAnimation) -> f64 {
+    if animation.is_empty() {
+        return 1.0;
+    }
     let mut once = 1.0f64;
     let mut repeat = 1.0f64;
-    for preset in presets_of(animation) {
-        match preset.group {
-            AnimationGroup::Repeat => repeat = repeat.max(preset.max_scale()),
-            _ => once = once.max(preset.max_scale()),
+    let packs = pack_presets();
+    for (group, preset) in presets_of(animation, &packs) {
+        match group {
+            AnimationGroup::Repeat => repeat = repeat.max(preset.max_scale),
+            _ => once = once.max(preset.max_scale),
         }
     }
     once * repeat
@@ -603,6 +736,27 @@ pub fn animation_max_scale(animation: &ClipAnimation) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The only test of the crate that sets the pack table, so tests running at the same time do
+    /// not race on it.
+    #[test]
+    fn a_pack_preset_plays_from_the_table_and_a_missing_one_is_left_out() {
+        let rise = AnimationCurve::default().with(CurveProperty::Opacity, vec![key(0.0, 0.0, Ease::Linear), key(1.0, 1.0, Ease::Linear)]).with(CurveProperty::Scale, vec![key(0.0, 2.0, Ease::Linear), key(1.0, 1.0, Ease::Linear)]);
+        set_pack_presets(PackPresets::new(vec![PackPreset::new("test-pack/rise".to_owned(), AnimationGroup::Enter, rise)]));
+        let clock = |elapsed| ClipClock { elapsed: Time::from_ticks(elapsed), duration: Time::from_ticks(100_000) };
+        let named = |preset: &str| ClipAnimation { enter: Some(AnimationRef { preset: preset.to_owned(), duration: Time::from_ticks(10_000) }), ..ClipAnimation::default() };
+
+        let animation = named("test-pack/rise");
+        let pose = animation_pose(&animation, clock(5000));
+        assert!((pose.opacity - 0.5).abs() < 1e-9 && (pose.scale - 1.5).abs() < 1e-9, "{pose:?}");
+        assert!((animation_max_scale(&animation) - 2.0).abs() < 1e-9);
+        assert!(!animation_rotates(&animation));
+        assert!(preset_pose(AnimationGroup::Exit, "test-pack/rise", 0.5).is_none(), "only in its own group");
+
+        let missing = named("gone-pack/rise");
+        assert_eq!(animation_pose(&missing, clock(5000)), AnimationPose::IDENTITY);
+        assert!(is_pack_preset("gone-pack/rise") && !is_pack_preset("fade"));
+    }
 
     /// The hard-coded presets the curves replaced, kept to show the curves give the same poses.
     mod legacy {

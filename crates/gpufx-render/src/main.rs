@@ -150,6 +150,8 @@ fn run() -> Result<(), Failure> {
         watch_stdin(cancel.clone(), arguments.cancel_on_stdin_eof);
     }
 
+    // The presets of the clip animation packs, which the editor that started this export reads too.
+    engine::set_pack_presets(d3d12_backend::read_pack_presets(&arguments.package_roots));
     let paths = Arc::new(ProjectPaths::new(&arguments.project, arguments.package_roots.clone()));
     let has_audio = project.output.audio.is_some();
     let total = frame_count(&project);

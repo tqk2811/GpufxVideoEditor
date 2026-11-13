@@ -564,7 +564,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::ProjectGet => Ok(project_summary(host.state().project())),
         AgentRequest::PackagesList { .. } => Ok(package_list.unwrap_or_default()),
         AgentRequest::FontList => Ok(font_list()),
-        AgentRequest::ClipAnimationList => Ok(animation_list()),
+        AgentRequest::ClipAnimationList => Ok(animation_list(&host.state().clip_animation_library)),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
             None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe)),

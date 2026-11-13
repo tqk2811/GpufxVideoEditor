@@ -2,7 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::project::{speed_in_range, Clip, Project, TEXT_SOURCE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
-use crate::clip_animation::{find_preset, AnimationGroup, ANIMATION_PRESETS};
+use crate::clip_animation::{find_preset, is_pack_preset, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
 use std::fmt;
@@ -438,7 +438,8 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             }
             for (group, reference) in [(AnimationGroup::Enter, &animation.enter), (AnimationGroup::Exit, &animation.exit), (AnimationGroup::Repeat, &animation.repeat)] {
                 let Some(reference) = reference else { continue };
-                if find_preset(group, &reference.preset).is_none() {
+                // A preset of a pack may be missing on this machine: it is left out, not refused.
+                if !is_pack_preset(&reference.preset) && find_preset(group, &reference.preset).is_none() {
                     errors.push(UnknownAnimation { track: t, clip: c, group: group.name(), preset: reference.preset.clone() });
                 }
                 if reference.duration <= Time::ZERO {

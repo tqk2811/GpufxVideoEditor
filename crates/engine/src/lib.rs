@@ -56,6 +56,6 @@ pub use schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, Layer, LayerContent, Progress, SourceSample,
     PROGRESS_PPM_SCALE,
 };
-pub use clip_animation::{animation_max_scale, animation_pose, animation_rotates, find_preset, preset_pose, PACK_PRESET_SEPARATOR, AnimationCurve, AnimationGroup, AnimationPose, AnimationPreset, ANIMATION_PRESETS};
+pub use clip_animation::{animation_max_scale, check_curve, animation_pose, animation_rotates, find_preset, is_pack_preset, pack_presets, preset_pose, set_pack_presets, PackPreset, PackPresets, PACK_PRESET_SEPARATOR, AnimationCurve, AnimationGroup, CurveKey, CurveProperty, Ease, AnimationPose, AnimationPreset, ANIMATION_PRESETS};
 pub use time::{Time, TICKS_PER_SECOND};
 pub use validate::{validate, AcceptAll, Resolver, ValidationError};

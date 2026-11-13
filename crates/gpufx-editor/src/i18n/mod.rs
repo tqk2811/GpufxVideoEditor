@@ -268,6 +268,8 @@ pub enum Message {
     FieldAnimationDuration,
     /// The name of a text animation preset, by its id.
     AnimationPreset(&'static str),
+    /// A preset of a pack that is not installed, by what the clip stores.
+    AnimationPackMissing(String),
     TabEffects,
     Transitions,
     ImportFromComputer,
@@ -466,6 +468,7 @@ mod tests {
             Message::FieldAnimationDuration,
             Message::AnimationPreset("fade"),
             Message::AnimationPreset("unknown-id"),
+            Message::AnimationPackMissing(name()),
             Message::SessionAudio,
             Message::InstalledPacks,
             Message::ReadingAudioPacks,

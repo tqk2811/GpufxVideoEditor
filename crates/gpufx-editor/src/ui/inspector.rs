@@ -146,7 +146,7 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     if super::animation_inspector::shows_animation(track_kind) {
         ui.separator();
         let id = ui.scope_id().with(("animation-inspector", clip_identity(key, &clip)));
-        ui.add_enabled_ui(editable, |ui| super::animation_inspector::show(ui, state, id, &clip.animation));
+        ui.add_enabled_ui(editable, |ui| super::animation_inspector::show(ui, state, id, &clip));
     }
 
     if track_kind == TrackKind::Video {

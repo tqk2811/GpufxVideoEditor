@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use engine::{AnimationCurve, AnimationGroup, Clip, Time};
+use engine::{AnimationCurve, AnimationGroup, Clip, PackPreset, PackPresets, Time};
 
 use crate::audio_library::LibraryProblem;
 use crate::clip_animation_install::{check_clip_animation_fields, parse_clip_animation_manifest, CLIP_ANIMATION_TYPE};
@@ -31,6 +31,16 @@ impl AnimatedClipKind {
             "video" => Some(Self::Video),
             "sticker" => Some(Self::Sticker),
             _ => None,
+        }
+    }
+
+    /// The name of the kind in a manifest's `applies_to`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Sticker => "sticker",
         }
     }
 
@@ -89,6 +99,11 @@ impl ClipAnimationLibrary {
     /// the order of the library.
     pub fn offered(&self, group: AnimationGroup, kind: AnimatedClipKind) -> Vec<(&str, &LibraryAnimation)> {
         self.packs.iter().flat_map(|pack| pack.animations.iter().map(move |animation| (pack.name.as_str(), animation))).filter(|(_, animation)| animation.group == group && animation.applies_to(kind)).collect()
+    }
+
+    /// The curves of every animation, for [`engine::set_pack_presets`].
+    pub fn preset_table(&self) -> PackPresets {
+        PackPresets::new(self.packs.iter().flat_map(|pack| &pack.animations).map(|animation| PackPreset::new(animation.reference.clone(), animation.group, animation.curve.clone())).collect())
     }
 
     /// The animation a clip names as `reference` in `group`.
@@ -218,6 +233,9 @@ mod tests {
         assert_eq!(names(AnimationGroup::Repeat, AnimatedClipKind::Sticker), vec!["P:Wave"], "no applies_to: every kind");
         assert!(library.find(AnimationGroup::Repeat, "p/wave").is_some());
         assert!(library.find(AnimationGroup::Enter, "p/wave").is_none(), "another group");
+        let table = library.preset_table();
+        assert_eq!(table.presets().len(), 2);
+        assert!(table.find(AnimationGroup::Repeat, "p/wave").is_some_and(engine::PackPreset::rotates));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -14,7 +14,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use d3d12_backend::is_safe_id;
-use engine::{AnimationCurve, AnimationGroup};
+use engine::{check_curve, AnimationCurve, AnimationGroup};
 use serde::Deserialize;
 use zip::ZipArchive;
 
@@ -119,25 +119,7 @@ fn check_item(item: &ClipAnimationManifestItem) -> Result<(), ImportProblem> {
             }
         }
     }
-    if item.curve.tracks.is_empty() {
-        return bad(format!("the curve of the item \"{id}\" has no track"));
-    }
-    for (property, keys) in &item.curve.tracks {
-        if keys.is_empty() {
-            return bad(format!("the {property:?} track of the item \"{id}\" has no keyframe"));
-        }
-        let mut last = 0.0;
-        for key in keys {
-            if !(key.t.is_finite() && (0.0..=1.0).contains(&key.t)) || !key.value.is_finite() {
-                return bad(format!("a keyframe of the {property:?} track of the item \"{id}\" is not finite or its t is not in 0..1"));
-            }
-            if key.t < last {
-                return bad(format!("the keyframes of the {property:?} track of the item \"{id}\" are not in rising t"));
-            }
-            last = key.t;
-        }
-    }
-    Ok(())
+    check_curve(&item.curve).or_else(|message| bad(format!("the item \"{id}\": {message}")))
 }
 
 /// Checks what a manifest says, apart from the files.

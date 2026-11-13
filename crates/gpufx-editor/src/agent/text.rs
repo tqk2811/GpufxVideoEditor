@@ -2,6 +2,8 @@
 //! checks an agent's mistake deserves a clear answer for, and the lists of fonts and animations.
 
 use engine::{AnimationGroup, FontRef, ClipAnimation, AnimationRef, TextContent, ANIMATION_PRESETS};
+
+use crate::clip_animation_library::ClipAnimationLibrary;
 use serde_json::{json, Value};
 
 use super::protocol::{AgentError, TextAnimationPatch, TextPatch};
@@ -143,7 +145,9 @@ pub fn patched_animation(current: &ClipAnimation, patch: &TextAnimationPatch) ->
 
 fn check_animation(group: AnimationGroup, value: &AnimationRef) -> Result<(), AgentError> {
     let name = group.name();
-    if engine::find_preset(group, &value.preset).is_none() {
+    // A preset of a pack is checked against the packs the engine was handed.
+    let known = engine::find_preset(group, &value.preset).is_some() || engine::pack_presets().find(group, &value.preset).is_some();
+    if !known {
         let known = presets(group).join(", ");
         return Err(invalid(format!("'{}' is not a preset of the '{name}' group; clip_animation_list names them: {known}", value.preset)));
     }
@@ -153,8 +157,10 @@ fn check_animation(group: AnimationGroup, value: &AnimationRef) -> Result<(), Ag
     Ok(())
 }
 
-fn presets(group: AnimationGroup) -> Vec<&'static str> {
-    ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id).collect()
+fn presets(group: AnimationGroup) -> Vec<String> {
+    let packs = engine::pack_presets();
+    let built_in = ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id.to_owned());
+    built_in.chain(packs.presets().iter().filter(|preset| preset.group == group).map(|preset| preset.reference.clone())).collect()
 }
 
 /// The fonts a text can name, each as the `font` value to use: the system default first. While the
@@ -170,15 +176,44 @@ pub fn font_list() -> Value {
 }
 
 /// Every preset animation: its id, the name of its group in a project (`in`, `out` or `loop`) and
-/// the duration a new one gets, in ticks.
-pub fn animation_list() -> Value {
-    let presets: Vec<Value> = ANIMATION_PRESETS.iter().map(|preset| json!({"id": preset.id, "group": preset.group.name(), "default_duration": preset.default_duration.ticks()})).collect();
+/// the duration a new one gets, in ticks. A preset of an installed pack also names its pack, its
+/// own name and the kinds of clip it is made for.
+pub fn animation_list(library: &ClipAnimationLibrary) -> Value {
+    let built_in = ANIMATION_PRESETS.iter().map(|preset| json!({"id": preset.id, "group": preset.group.name(), "default_duration": preset.default_duration.ticks()}));
+    let packs = library.packs.iter().flat_map(|pack| {
+        pack.animations.iter().map(move |animation| {
+            let applies_to = animation.applies_to.as_ref().map(|kinds| kinds.iter().map(|kind| kind.name()).collect::<Vec<_>>());
+            json!({"id": animation.reference, "group": animation.group.name(), "default_duration": animation.default_duration.ticks(), "name": animation.name, "pack": {"id": pack.id, "name": pack.name}, "applies_to": applies_to})
+        })
+    });
+    let presets: Vec<Value> = built_in.chain(packs).collect();
     json!({"presets": presets})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The only test of the crate that sets the pack table of the engine.
+    #[test]
+    fn a_pack_preset_is_listed_with_its_pack_and_accepted_once_the_engine_has_it() {
+        use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary, ClipAnimationPack, LibraryAnimation};
+        let curve = engine::AnimationCurve::default().with(engine::CurveProperty::Opacity, vec![engine::CurveKey { t: 0.0, value: 0.0, ease: engine::Ease::Linear }, engine::CurveKey { t: 1.0, value: 1.0, ease: engine::Ease::Linear }]);
+        let rise = LibraryAnimation { reference: "agent-pack/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(45_000), applies_to: Some(vec![AnimatedClipKind::Text]), curve };
+        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { id: "agent-pack".to_owned(), name: "Agent Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
+
+        let list = animation_list(&library);
+        let presets = list["presets"].as_array().unwrap();
+        assert_eq!(presets.len(), ANIMATION_PRESETS.len() + 1);
+        let pack = presets.iter().find(|preset| preset["id"] == "agent-pack/rise").unwrap();
+        assert_eq!((pack["group"].as_str(), pack["pack"]["name"].as_str(), pack["applies_to"][0].as_str(), pack["default_duration"].as_i64()), (Some("in"), Some("Agent Pack"), Some("text"), Some(45_000)));
+
+        let patch = |preset: &str| TextAnimationPatch { enter: Some(Some(AnimationRef { preset: preset.to_owned(), duration: engine::Time::from_ticks(9000) })), exit: None, repeat: None };
+        engine::set_pack_presets(library.preset_table());
+        assert!(patched_animation(&ClipAnimation::default(), &patch("agent-pack/rise")).is_ok());
+        let error = patched_animation(&ClipAnimation::default(), &patch("agent-pack/gone")).unwrap_err();
+        assert!(error.message.contains("agent-pack/rise"), "names the pack presets too: {}", error.message);
+    }
 
     fn file(path: &str) -> FontRef {
         FontRef::File { path: path.to_owned() }
