@@ -375,7 +375,7 @@ fn a_text_fading_in_is_part_way_clear_halfway_and_drawn_once() {
     let Some(gpu) = gpu() else { return };
     let mut compositor = text_compositor(&gpu);
     let fade = 4 * FRAME;
-    let track = format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HI","size":0.5,"color":[255,255,255,255],"animation":{{"in":{{"preset":"fade","duration":{fade}}}}}}}}}]}}"#, 8 * FRAME);
+    let track = format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HI","size":0.5,"color":[255,255,255,255]}},"animation":{{"in":{{"preset":"fade","duration":{fade}}}}}}}]}}"#, 8 * FRAME);
     let project = parse(&project_json(&track));
     let errors = validate(&project, &engine::AcceptAll);
     assert!(errors.is_empty(), "invalid project: {errors:?}");
@@ -409,7 +409,7 @@ fn a_text_with_no_size_yet_draws_nothing() {
     let mut renderer = FrameRenderer::default();
     for preset in ["zoom", "spin", "pop"] {
         let span = 4 * FRAME;
-        let track = format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HI","size":0.5,"color":[255,255,255,255],"animation":{{"in":{{"preset":"{preset}","duration":{span}}},"out":{{"preset":"{preset}","duration":{span}}}}}}}}}]}}"#, 8 * FRAME);
+        let track = format!(r#"{{"clips":[{{"source":"text:","start":0,"source_in":0,"duration":{},"text":{{"content":"HI","size":0.5,"color":[255,255,255,255]}},"animation":{{"in":{{"preset":"{preset}","duration":{span}}},"out":{{"preset":"{preset}","duration":{span}}}}}}}]}}"#, 8 * FRAME);
         let project = parse(&project_json(&track));
         let errors = validate(&project, &engine::AcceptAll);
         assert!(errors.is_empty(), "invalid project: {errors:?}");

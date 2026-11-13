@@ -1,7 +1,7 @@
 //! What the agent tools of text clips need beyond the engine: applying a patch to a text with the
 //! checks an agent's mistake deserves a clear answer for, and the lists of fonts and animations.
 
-use engine::{AnimationGroup, FontRef, TextAnimation, TextAnimationRef, TextContent, TEXT_ANIMATION_PRESETS};
+use engine::{AnimationGroup, FontRef, ClipAnimation, AnimationRef, TextContent, ANIMATION_PRESETS};
 use serde_json::{json, Value};
 
 use super::protocol::{AgentError, TextAnimationPatch, TextPatch};
@@ -76,10 +76,13 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         positive("line_spacing", line_spacing)?;
         next.line_spacing = line_spacing;
     }
-    if let Some(animation) = &patch.animation {
-        next.animation = patched_animation(&next.animation, animation)?;
-    }
     Ok(next)
+}
+
+/// The animations of a clip with the `animation` field of `patch` applied, `None` when the patch
+/// leaves them as they are. The animations live on the clip, not on its text.
+pub fn apply_animation_patch(current: &ClipAnimation, patch: &TextPatch) -> Result<Option<ClipAnimation>, AgentError> {
+    patch.animation.as_ref().map(|animation| patched_animation(current, animation)).transpose()
 }
 
 /// Whether `path` names a network share or a device (`\\server\share`, `//server/share`,
@@ -125,7 +128,7 @@ fn check_font(font: &FontRef) -> Result<(), AgentError> {
     }
 }
 
-fn patched_animation(current: &TextAnimation, patch: &TextAnimationPatch) -> Result<TextAnimation, AgentError> {
+fn patched_animation(current: &ClipAnimation, patch: &TextAnimationPatch) -> Result<ClipAnimation, AgentError> {
     let mut next = current.clone();
     for (group, change, slot) in [(AnimationGroup::Enter, &patch.enter, &mut next.enter), (AnimationGroup::Exit, &patch.exit, &mut next.exit), (AnimationGroup::Repeat, &patch.repeat, &mut next.repeat)] {
         if let Some(value) = change {
@@ -138,7 +141,7 @@ fn patched_animation(current: &TextAnimation, patch: &TextAnimationPatch) -> Res
     Ok(next)
 }
 
-fn check_animation(group: AnimationGroup, value: &TextAnimationRef) -> Result<(), AgentError> {
+fn check_animation(group: AnimationGroup, value: &AnimationRef) -> Result<(), AgentError> {
     let name = group.name();
     if engine::find_preset(group, &value.preset).is_none() {
         let known = presets(group).join(", ");
@@ -151,7 +154,7 @@ fn check_animation(group: AnimationGroup, value: &TextAnimationRef) -> Result<()
 }
 
 fn presets(group: AnimationGroup) -> Vec<&'static str> {
-    TEXT_ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id).collect()
+    ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id).collect()
 }
 
 /// The fonts a text can name, each as the `font` value to use: the system default first. While the

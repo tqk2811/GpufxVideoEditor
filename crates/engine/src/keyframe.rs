@@ -328,7 +328,7 @@ impl Clip {
             width: motion.value_at(ClipProperty::Width, offset),
             opacity: motion.value_at(ClipProperty::Opacity, offset).unwrap_or(motion.opacity),
             rotation: motion.value_at(ClipProperty::Rotation, offset).unwrap_or(motion.rotation),
-            rotates: motion.has_keyframes(ClipProperty::Rotation) || motion.rotation != 0.0 || self.text.as_ref().is_some_and(|text| animation_rotates(&text.animation)),
+            rotates: motion.has_keyframes(ClipProperty::Rotation) || motion.rotation != 0.0 || animation_rotates(&self.animation),
             shift: [0.0, 0.0],
             zoom: 1.0,
             stretch: [1.0, 1.0],
@@ -343,7 +343,7 @@ impl Clip {
         let base = PlacedRect::of(self.placement, output_aspect, source_aspect).width;
         let keys = self.motion.keyframes.get(&ClipProperty::Width).map_or(&[][..], Vec::as_slice);
         let widest = keys.iter().map(|key| key.value).filter(|value| value.is_finite()).fold(base, f64::max);
-        widest * self.text.as_ref().map_or(1.0, |text| animation_max_scale(&text.animation))
+        widest * animation_max_scale(&self.animation)
     }
 
     /// The value of a property `offset` ticks after the start of the clip, for a source of `source_aspect`.

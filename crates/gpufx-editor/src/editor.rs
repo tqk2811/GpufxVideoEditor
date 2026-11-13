@@ -356,6 +356,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         placement: None,
         motion: Default::default(),
         text: None,
+        animation: Default::default(),
     }
 }
 
@@ -1525,6 +1526,15 @@ impl EditorState {
                 None => Ok(next),
             }
         });
+    }
+
+    /// Replaces the preset animations of the selected clip, as a live edit.
+    pub fn live_animation(&mut self, animation: engine::ClipAnimation) {
+        let Some(key) = self.selection else { return };
+        if self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_none() {
+            return;
+        }
+        self.live_edit(|project| engine::set_animation(project, key, animation));
     }
 
     /// Gives text clip `key` the font `font` as one undo step, keeping a fixed place scaled like

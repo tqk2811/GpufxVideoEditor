@@ -37,7 +37,7 @@
 use crate::audio_schedule::sample_position;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
-use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, Effect, Project, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, Effect, Project, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -351,6 +351,7 @@ pub fn add_text_clip(project: &Project, track: usize, start: Time, duration: Tim
         placement: None,
         motion: ClipMotion::default(),
         text: Some(text),
+        animation: ClipAnimation::default(),
     };
     add_clip(project, track, clip)
 }
@@ -363,6 +364,14 @@ pub fn set_text(project: &Project, key: ClipKey, text: TextContent) -> Result<Pr
     }
     let mut next = project.clone();
     clip_mut(&mut next, key)?.text = Some(text);
+    finish(next)
+}
+
+/// Replaces the preset animations of a clip. Its time on the timeline does not change.
+pub fn set_animation(project: &Project, key: ClipKey, animation: ClipAnimation) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.animation = animation;
     finish(next)
 }
 

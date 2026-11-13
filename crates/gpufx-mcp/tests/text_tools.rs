@@ -22,6 +22,10 @@ fn text_of(session: &mut FileSession, track: usize, clip: usize) -> TextContent 
     project_of(session).tracks[track].clips[clip].text.clone().expect("a text clip")
 }
 
+fn animation_of(session: &mut FileSession, track: usize, clip: usize) -> engine::ClipAnimation {
+    project_of(session).tracks[track].clips[clip].animation.clone()
+}
+
 fn placement_of(session: &mut FileSession, track: usize, clip: usize) -> ClipPlacement {
     project_of(session).tracks[track].clips[clip].placement.expect("a placed clip")
 }
@@ -73,9 +77,10 @@ fn a_text_added_with_a_style_keeps_every_field_and_a_second_one_shares_a_free_tr
     assert_eq!(text.outline.map(|outline| outline.width), Some(0.05));
     assert_eq!(text.shadow.map(|shadow| shadow.blur), Some(0.1));
     assert_eq!(text.background, None);
-    assert_eq!(text.animation.enter.map(|animation| (animation.preset, animation.duration.ticks())), Some(("fade".to_owned(), 45_000)));
-    assert_eq!(text.animation.repeat.map(|animation| animation.preset), Some("pulse".to_owned()));
-    assert!(text.animation.exit.is_none());
+    let animation = animation_of(&mut session, 0, 0);
+    assert_eq!(animation.enter.map(|animation| (animation.preset, animation.duration.ticks())), Some(("fade".to_owned(), 45_000)));
+    assert_eq!(animation.repeat.map(|animation| animation.preset), Some("pulse".to_owned()));
+    assert!(animation.exit.is_none());
     // An overlap on the same track goes to a new one.
     let third = call_ok(&mut session, "text_add", json!({"expected_revision": revision(&second), "start": 0, "duration": SECOND, "content": "Over"}));
     assert_eq!(third["clip"], json!({"track": 1, "clip": 0}));
@@ -130,7 +135,7 @@ fn text_set_changes_the_content_and_takes_an_outline_and_an_animation_off_with_n
     assert!(wide > 0.2, "longer content draws wider: {wide}");
     call_ok(&mut session, "text_set", json!({"expected_revision": revision(&longer), "clip": {"track": 0, "clip": 0}, "outline": null, "animation": {"out": null}}));
     let text = text_of(&mut session, 0, 0);
-    assert!(text.outline.is_none() && text.animation.is_empty(), "{text:?}");
+    assert!(text.outline.is_none() && animation_of(&mut session, 0, 0).is_empty(), "{text:?}");
 }
 
 #[test]

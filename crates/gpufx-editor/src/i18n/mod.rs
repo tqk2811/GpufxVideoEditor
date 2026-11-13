@@ -551,7 +551,7 @@ mod tests {
         assert_eq!(Language::English.t(Message::AnimationPreset("slide-left")), "Slide left");
         assert_eq!(Language::Vietnamese.t(Message::AnimationPreset("fade")), "Mờ dần");
         assert_eq!(Language::English.t(Message::AnimationPreset("new-one")), "new-one", "an unknown id shows as it is");
-        for preset in engine::TEXT_ANIMATION_PRESETS {
+        for preset in engine::ANIMATION_PRESETS {
             assert_ne!(Language::Vietnamese.t(Message::AnimationPreset(preset.id)), preset.id, "{} has a Vietnamese name", preset.id);
         }
     }

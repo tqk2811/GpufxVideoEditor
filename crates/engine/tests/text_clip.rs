@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use engine::{add_text_clip, audio_segments, layers_at_frame, set_speed, set_text, trim_start, ClipKey, EditError, EditHistory, Time, validate, AcceptAll, Clip, FontRef, Project, TextAlign, TextAnimationRef, TextContent, TextOutline, TextShadow, Track, TrackKind, ValidationError, TEXT_SOURCE};
+use engine::{add_text_clip, audio_segments, layers_at_frame, set_speed, set_text, trim_start, ClipKey, EditError, EditHistory, Time, validate, AcceptAll, Clip, FontRef, Project, TextAlign, AnimationRef, TextContent, TextOutline, TextShadow, Track, TrackKind, ValidationError, TEXT_SOURCE};
 
 pub fn text_clip(content: &str, start: i64, duration: i64) -> Clip {
     Clip { source: TEXT_SOURCE.to_owned(), text: Some(TextContent::new(content, 0.08)), ..clip(TEXT_SOURCE, start, 0, duration) }
@@ -30,7 +30,7 @@ fn text_clip_round_trips_through_json() {
     text.align = TextAlign::Right;
     text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: 0.1 });
     text.shadow = Some(TextShadow { color: [0, 0, 0, 128], offset: [0.05, 0.05], blur: 0.1 });
-    text.animation.enter = Some(TextAnimationRef { preset: "fade".into(), duration: t(9000) });
+    c.animation.enter = Some(AnimationRef { preset: "fade".into(), duration: t(9000) });
     let p = project_with(vec![c]);
     let json = serde_json::to_string(&p).unwrap();
     assert!(json.contains("\"in\":"), "{json}");

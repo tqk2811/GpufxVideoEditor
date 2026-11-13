@@ -173,10 +173,10 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
         duration: visible_end.saturating_sub(visible_start),
     };
     let mut transform = c.transform_at(offset);
-    // The preset animations of a text clip only move the picture it was drawn into, on the clock of
-    // the time it is visible.
-    if let Some(text) = c.text.as_ref().filter(|text| !text.animation.is_empty()) {
-        transform = transform.with_pose(animation_pose(&text.animation, clock));
+    // The preset animations of a clip move its picture after its own place and keyframes, on the
+    // clock of the time it is visible.
+    if !c.animation.is_empty() {
+        transform = transform.with_pose(animation_pose(&c.animation, clock));
     }
     SourceSample {
         clip,

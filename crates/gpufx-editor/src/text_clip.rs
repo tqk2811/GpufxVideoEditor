@@ -2,7 +2,7 @@
 //! placed, how its place follows a change of its size, and which animation presets each combo
 //! offers.
 
-use engine::{AnimationGroup, ClipPlacement, TextAnimation, TextAnimationRef, TextContent, TextBackground, TextOutline, TextShadow, Time, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH, TEXT_ANIMATION_PRESETS};
+use engine::{AnimationGroup, ClipPlacement, ClipAnimation, AnimationRef, TextContent, TextBackground, TextOutline, TextShadow, Time, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH, ANIMATION_PRESETS};
 
 /// The font size of a new text, in parts of the output height.
 pub const DEFAULT_TEXT_SIZE: f32 = 0.08;
@@ -48,11 +48,11 @@ fn parts(pixels: (u32, u32), output: (u32, u32)) -> Option<(f64, f64)> {
 
 /// The ids of the presets a combo of `group` offers, in the order of the engine list.
 pub fn presets_of(group: AnimationGroup) -> Vec<&'static str> {
-    TEXT_ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id).collect()
+    ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id).collect()
 }
 
 /// The animation of `group` in `animation`.
-pub fn animation_of(animation: &TextAnimation, group: AnimationGroup) -> Option<&TextAnimationRef> {
+pub fn animation_of(animation: &ClipAnimation, group: AnimationGroup) -> Option<&AnimationRef> {
     match group {
         AnimationGroup::Enter => animation.enter.as_ref(),
         AnimationGroup::Exit => animation.exit.as_ref(),
@@ -61,7 +61,7 @@ pub fn animation_of(animation: &TextAnimation, group: AnimationGroup) -> Option<
 }
 
 /// `animation` with the animation of `group` replaced by `value`.
-pub fn with_animation(animation: &TextAnimation, group: AnimationGroup, value: Option<TextAnimationRef>) -> TextAnimation {
+pub fn with_animation(animation: &ClipAnimation, group: AnimationGroup, value: Option<AnimationRef>) -> ClipAnimation {
     let mut next = animation.clone();
     match group {
         AnimationGroup::Enter => next.enter = value,
@@ -73,9 +73,9 @@ pub fn with_animation(animation: &TextAnimation, group: AnimationGroup, value: O
 
 /// The animation of `group` once preset `id` is chosen, or none for `None`: the duration it had,
 /// or [`DEFAULT_ANIMATION_DURATION`] when there was none.
-pub fn choose_preset(animation: &TextAnimation, group: AnimationGroup, id: Option<&str>) -> TextAnimation {
+pub fn choose_preset(animation: &ClipAnimation, group: AnimationGroup, id: Option<&str>) -> ClipAnimation {
     let duration = animation_of(animation, group).map_or(DEFAULT_ANIMATION_DURATION, |current| current.duration);
-    with_animation(animation, group, id.map(|id| TextAnimationRef { preset: id.to_owned(), duration }))
+    with_animation(animation, group, id.map(|id| AnimationRef { preset: id.to_owned(), duration }))
 }
 
 /// The outline a text gets when it is turned on: black, a twentieth of the font size.
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(text.font, engine::FontRef::Default);
         assert_eq!(text.color, [255, 255, 255, 255]);
         assert_eq!(text.align, engine::TextAlign::Center);
-        assert!(text.outline.is_none() && text.background.is_none() && text.shadow.is_none() && text.animation.is_empty());
+        assert!(text.outline.is_none() && text.background.is_none() && text.shadow.is_none());
     }
 
     #[test]
@@ -167,9 +167,9 @@ mod tests {
 
     #[test]
     fn choosing_a_preset_keeps_the_duration_and_the_other_groups() {
-        let first = choose_preset(&TextAnimation::default(), AnimationGroup::Enter, Some("fade"));
-        assert_eq!(first.enter, Some(TextAnimationRef { preset: "fade".to_owned(), duration: DEFAULT_ANIMATION_DURATION }));
-        let longer = with_animation(&first, AnimationGroup::Enter, Some(TextAnimationRef { preset: "fade".to_owned(), duration: Time::from_ticks(engine::TICKS_PER_SECOND) }));
+        let first = choose_preset(&ClipAnimation::default(), AnimationGroup::Enter, Some("fade"));
+        assert_eq!(first.enter, Some(AnimationRef { preset: "fade".to_owned(), duration: DEFAULT_ANIMATION_DURATION }));
+        let longer = with_animation(&first, AnimationGroup::Enter, Some(AnimationRef { preset: "fade".to_owned(), duration: Time::from_ticks(engine::TICKS_PER_SECOND) }));
         let looped = choose_preset(&longer, AnimationGroup::Repeat, Some("pulse"));
         let swapped = choose_preset(&looped, AnimationGroup::Enter, Some("zoom"));
         assert_eq!(swapped.enter.as_ref().map(|value| (value.preset.as_str(), value.duration)), Some(("zoom", Time::from_ticks(engine::TICKS_PER_SECOND))));

@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::project::{TextAnimation, TextAnimationRef};
+use crate::project::{ClipAnimation, AnimationRef};
 use crate::schedule::ClipClock;
 use crate::time::{Time, TICKS_PER_SECOND};
 
@@ -291,7 +291,7 @@ const MEASURE_STEPS: u32 = 2000;
 fn built() -> &'static [Built] {
     static BUILT: OnceLock<Vec<Built>> = OnceLock::new();
     BUILT.get_or_init(|| {
-        TEXT_ANIMATION_PRESETS
+        ANIMATION_PRESETS
             .iter()
             .map(|preset| {
                 let curve = (preset.build)();
@@ -310,7 +310,7 @@ fn built() -> &'static [Built] {
 
 impl AnimationPreset {
     fn built(&self) -> &'static Built {
-        let index = TEXT_ANIMATION_PRESETS.iter().position(|preset| preset == self).expect("a preset of the list");
+        let index = ANIMATION_PRESETS.iter().position(|preset| preset == self).expect("a preset of the list");
         &built()[index]
     }
 
@@ -489,7 +489,7 @@ fn shake() -> AnimationCurve {
 }
 
 /// Every preset, by group. Enter and exit presets share their ids and mirror each other.
-pub const TEXT_ANIMATION_PRESETS: &[AnimationPreset] = &[
+pub const ANIMATION_PRESETS: &[AnimationPreset] = &[
     preset("fade", AnimationGroup::Enter, fade_in),
     preset("slide-left", AnimationGroup::Enter, slide_left_in),
     preset("slide-right", AnimationGroup::Enter, slide_right_in),
@@ -513,7 +513,7 @@ pub const TEXT_ANIMATION_PRESETS: &[AnimationPreset] = &[
 
 /// The preset `id` of `group`, `None` when there is none.
 pub fn find_preset(group: AnimationGroup, id: &str) -> Option<&'static AnimationPreset> {
-    TEXT_ANIMATION_PRESETS.iter().find(|preset| preset.group == group && preset.id == id)
+    ANIMATION_PRESETS.iter().find(|preset| preset.group == group && preset.id == id)
 }
 
 /// The pose of preset `id` of `group` at `progress` (0 to 1; for a repeat preset, the phase in
@@ -528,7 +528,7 @@ pub fn preset_pose(group: AnimationGroup, id: &str, progress: f64) -> Option<Ani
 }
 
 /// The preset and its ticks when it will run, `None` when it is unknown or does not last.
-fn usable(group: AnimationGroup, reference: &Option<TextAnimationRef>) -> Option<(&'static AnimationPreset, f64)> {
+fn usable(group: AnimationGroup, reference: &Option<AnimationRef>) -> Option<(&'static AnimationPreset, f64)> {
     let reference = reference.as_ref()?;
     let ticks = reference.duration.ticks();
     if ticks <= 0 {
@@ -538,7 +538,7 @@ fn usable(group: AnimationGroup, reference: &Option<TextAnimationRef>) -> Option
 }
 
 /// The pose of `animation` at `clock` (see the module timing rules).
-pub fn animation_pose(animation: &TextAnimation, clock: ClipClock) -> AnimationPose {
+pub fn animation_pose(animation: &ClipAnimation, clock: ClipClock) -> AnimationPose {
     let elapsed = clock.elapsed.ticks() as f64;
     let total = clock.duration.ticks().max(0) as f64;
     let enter = usable(AnimationGroup::Enter, &animation.enter);
@@ -573,19 +573,19 @@ pub fn animation_pose(animation: &TextAnimation, clock: ClipClock) -> AnimationP
     pose
 }
 
-fn presets_of(animation: &TextAnimation) -> impl Iterator<Item = &'static AnimationPreset> + '_ {
+fn presets_of(animation: &ClipAnimation) -> impl Iterator<Item = &'static AnimationPreset> + '_ {
     [(AnimationGroup::Enter, &animation.enter), (AnimationGroup::Exit, &animation.exit), (AnimationGroup::Repeat, &animation.repeat)]
         .into_iter()
         .filter_map(|(group, reference)| usable(group, reference).map(|(preset, _)| preset))
 }
 
 /// Whether any preset of `animation` turns the picture.
-pub fn animation_rotates(animation: &TextAnimation) -> bool {
+pub fn animation_rotates(animation: &ClipAnimation) -> bool {
     presets_of(animation).any(|preset| preset.rotates())
 }
 
 /// The largest scale `animation` ever gives: the larger of enter and exit, times the repeat.
-pub fn animation_max_scale(animation: &TextAnimation) -> f64 {
+pub fn animation_max_scale(animation: &ClipAnimation) -> f64 {
     let mut once = 1.0f64;
     let mut repeat = 1.0f64;
     for preset in presets_of(animation) {
@@ -657,7 +657,7 @@ mod tests {
 
     #[test]
     fn curves_give_the_poses_of_the_old_presets() {
-        for preset in TEXT_ANIMATION_PRESETS {
+        for preset in ANIMATION_PRESETS {
             for step in -20..=4020 {
                 let progress = f64::from(step) / 4000.0;
                 let old = match preset.group {
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn no_preset_scales_past_its_max_or_turns_when_it_says_not() {
-        for preset in TEXT_ANIMATION_PRESETS {
+        for preset in ANIMATION_PRESETS {
             for step in 0..=1000 {
                 let pose = preset_pose(preset.group, preset.id, f64::from(step) / 1000.0).unwrap();
                 assert!(pose.scale <= preset.max_scale() + 1e-9, "{} {:?} at {step}: {}", preset.id, preset.group, pose.scale);
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn enter_ends_settled_and_exit_starts_settled() {
-        for preset in TEXT_ANIMATION_PRESETS.iter().filter(|p| p.group != AnimationGroup::Repeat) {
+        for preset in ANIMATION_PRESETS.iter().filter(|p| p.group != AnimationGroup::Repeat) {
             let at = if preset.group == AnimationGroup::Enter { 1.0 } else { 0.0 };
             let settled = preset_pose(preset.group, preset.id, at).unwrap();
             let still = AnimationPose::IDENTITY;

@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
-use super::text::{animation_list, apply_patch, font_list};
+use super::text::{animation_list, apply_animation_patch, apply_patch, font_list};
 use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_IMAGE_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::export::{export_blocker, ExportOutcome};
 use crate::i18n::Language;
@@ -265,7 +265,9 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             if duration <= Time::ZERO {
                 return Err(AgentError::new("invalid_params", "duration must be above 0"));
             }
-            let text = apply_patch(&default_text(String::new()), &super::protocol::TextPatch { content: Some(content), ..style })?;
+            let patch = super::protocol::TextPatch { content: Some(content), ..style };
+            let text = apply_patch(&default_text(String::new()), &patch)?;
+            let animation = apply_animation_patch(&engine::ClipAnimation::default(), &patch)?;
             let placement = natural_placement(state.text_pixels(&text), state.output_pixels());
             let (track, new_track) = match track {
                 Some(track) => (track, false),
@@ -278,9 +280,14 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 .apply_agent_command(|project| {
                     let with_track = if new_track { engine::add_track(project, TrackKind::Video)? } else { project.clone() };
                     let next = engine::add_text_clip(&with_track, track, start, duration, text)?;
-                    match (placement, clip_at(&next, track, start)) {
-                        (Some(placement), Some(key)) => engine::set_placement(&next, key, Some(placement)),
-                        _ => Ok(next),
+                    let Some(key) = clip_at(&next, track, start) else { return Ok(next) };
+                    let next = match animation {
+                        Some(animation) => engine::set_animation(&next, key, animation)?,
+                        None => next,
+                    };
+                    match placement {
+                        Some(placement) => engine::set_placement(&next, key, Some(placement)),
+                        None => Ok(next),
                     }
                 })
                 .map_err(refused)?;
@@ -294,10 +301,15 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             let found = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).and_then(|track| track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key })).map_err(|error| AgentError::from_edit(&error))?;
             let Some(old) = found.text.as_ref() else { return Err(AgentError::from_edit(&engine::EditError::NotText { key })) };
             let text = apply_patch(old, &patch)?;
+            let animation = apply_animation_patch(&found.animation, &patch)?;
             let placement = state.rescaled_text_placement(key, &text);
             state
                 .apply_agent_command(|project| {
                     let next = engine::set_text(project, key, text)?;
+                    let next = match animation {
+                        Some(animation) => engine::set_animation(&next, key, animation)?,
+                        None => next,
+                    };
                     match placement {
                         Some(placement) => engine::set_placement(&next, key, Some(placement)),
                         None => Ok(next),

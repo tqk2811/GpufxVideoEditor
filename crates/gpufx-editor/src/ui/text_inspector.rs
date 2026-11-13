@@ -10,7 +10,7 @@ use crate::text_clip::{choose_preset, default_background, default_outline, defau
 use crate::text_shapes::available_families;
 use crate::timecode::{from_seconds, to_seconds};
 use egui::{Rect, Vec2};
-use engine::{AnimationGroup, ClipKey, FontRef, Rgba, TextAlign, TextAnimationRef, TextContent, Time};
+use engine::{AnimationGroup, ClipAnimation, ClipKey, FontRef, Rgba, TextAlign, AnimationRef, TextContent, Time};
 use std::ops::RangeInclusive;
 
 /// How long typing must pause before the text on screen follows, in seconds. Each pause is one
@@ -36,7 +36,7 @@ struct ContentDraft {
     typed_at: f64,
 }
 
-pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id: egui::Id, text: &TextContent) {
+pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id: egui::Id, text: &TextContent, animation: &ClipAnimation) {
     let language = state.language();
     ui.label(egui::RichText::new(language.t(Message::TabText)).strong());
     if let Some(family) = state.missing_font(key) {
@@ -63,11 +63,14 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     background_rows(ui, &mut next, language);
     shadow_rows(ui, &mut next, language);
     ui.separator();
+    let mut next_animation = animation.clone();
     for group in [AnimationGroup::Enter, AnimationGroup::Exit, AnimationGroup::Repeat] {
-        animation_row(ui, id, &mut next, group, language);
+        animation_row(ui, id, &mut next_animation, group, language);
     }
     if next != *text {
         state.live_text(next);
+    } else if next_animation != *animation {
+        state.live_animation(next_animation);
     }
 }
 
@@ -228,13 +231,13 @@ fn shadow_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
 }
 
 /// The preset of one animation group, and how long it lasts when one is set.
-fn animation_row(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, group: AnimationGroup, language: Language) {
+fn animation_row(ui: &mut egui::Ui, id: egui::Id, animation: &mut ClipAnimation, group: AnimationGroup, language: Language) {
     let label = match group {
         AnimationGroup::Enter => Message::AnimationEnter,
         AnimationGroup::Exit => Message::AnimationExit,
         AnimationGroup::Repeat => Message::AnimationRepeat,
     };
-    let current = crate::text_clip::animation_of(&text.animation, group).cloned();
+    let current = crate::text_clip::animation_of(animation, group).cloned();
     let none = language.t(Message::AnimationNone);
     let mut chosen: Option<Option<&'static str>> = None;
     ui.horizontal(|ui| {
@@ -253,7 +256,7 @@ fn animation_row(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, group:
         });
     });
     if let Some(choice) = chosen {
-        text.animation = choose_preset(&text.animation, group, choice);
+        *animation = choose_preset(animation, group, choice);
         return;
     }
     let Some(current) = current else { return };
@@ -264,7 +267,7 @@ fn animation_row(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, group:
                 let mut seconds = to_seconds(current.duration);
                 if drag_field(ui, &mut seconds, ANIMATION_SECONDS, 0.01, 2, " s", None).1 {
                     let duration = from_seconds(seconds).max(Time::from_ticks(1));
-                    text.animation = with_animation(&text.animation, group, Some(TextAnimationRef { duration, ..current.clone() }));
+                    *animation = with_animation(animation, group, Some(AnimationRef { duration, ..current.clone() }));
                 }
             });
         });
@@ -273,7 +276,7 @@ fn animation_row(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, group:
 
 /// The message naming preset `id`, which the engine list holds for as long as the editor runs.
 fn preset_name(id: &str) -> Message {
-    let known = engine::TEXT_ANIMATION_PRESETS.iter().find(|preset| preset.id == id).map(|preset| preset.id);
+    let known = engine::ANIMATION_PRESETS.iter().find(|preset| preset.id == id).map(|preset| preset.id);
     match known {
         Some(id) => Message::AnimationPreset(id),
         None => Message::Technical(id.to_owned()),

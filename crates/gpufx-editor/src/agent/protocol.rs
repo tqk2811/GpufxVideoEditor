@@ -1,7 +1,7 @@
 //! The requests an agent can make and the errors it can get, as JSON. The same types go over the
 //! pipe to an open window.
 
-use engine::{ClipPlacement, Easing, EditError, FontRef, KeyframeTarget, Rgba, TextAlign, TextAnimationRef, TextBackground, TextOutline, TextShadow, Time, TrackKind};
+use engine::{ClipPlacement, Easing, EditError, FontRef, KeyframeTarget, Rgba, TextAlign, AnimationRef, TextBackground, TextOutline, TextShadow, Time, TrackKind};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -74,11 +74,11 @@ impl TextPatch {
 #[serde(deny_unknown_fields)]
 pub struct TextAnimationPatch {
     #[serde(default, rename = "in", deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
-    pub enter: Option<Option<TextAnimationRef>>,
+    pub enter: Option<Option<AnimationRef>>,
     #[serde(default, rename = "out", deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
-    pub exit: Option<Option<TextAnimationRef>>,
+    pub exit: Option<Option<AnimationRef>>,
     #[serde(default, rename = "loop", deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
-    pub repeat: Option<Option<TextAnimationRef>>,
+    pub repeat: Option<Option<AnimationRef>>,
 }
 
 /// A change of the timeline; each is one undo step, except locking.

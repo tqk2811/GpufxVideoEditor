@@ -121,6 +121,10 @@ pub struct Clip {
     /// [`TEXT_SOURCE`]; absent on media clips, so older projects load and save unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<TextContent>,
+    /// Preset animations of the picture of the clip (video, image, sticker or text). Left out of
+    /// the file when there are none; ignored on an audio track.
+    #[serde(default, skip_serializing_if = "ClipAnimation::is_empty")]
+    pub animation: ClipAnimation,
 }
 
 /// The `source` of every text clip. It names no file and has no extension, so
@@ -156,9 +160,6 @@ pub struct TextContent {
     /// Line height as a multiple of the font size.
     #[serde(default = "unit_f32")]
     pub line_spacing: f32,
-    /// Preset animations. Left out of the file when there are none.
-    #[serde(default, skip_serializing_if = "TextAnimation::is_empty")]
-    pub animation: TextAnimation,
 }
 
 impl TextContent {
@@ -174,7 +175,6 @@ impl TextContent {
             shadow: None,
             align: TextAlign::Center,
             line_spacing: 1.0,
-            animation: TextAnimation::default(),
         }
     }
 }
@@ -276,18 +276,18 @@ pub struct TextShadow {
     pub blur: f32,
 }
 
-/// The preset animations of a text clip: one to enter, one to leave and one that repeats.
+/// The preset animations of a clip: one to enter, one to leave and one that repeats.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct TextAnimation {
+pub struct ClipAnimation {
     #[serde(default, rename = "in", skip_serializing_if = "Option::is_none")]
-    pub enter: Option<TextAnimationRef>,
+    pub enter: Option<AnimationRef>,
     #[serde(default, rename = "out", skip_serializing_if = "Option::is_none")]
-    pub exit: Option<TextAnimationRef>,
+    pub exit: Option<AnimationRef>,
     #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
-    pub repeat: Option<TextAnimationRef>,
+    pub repeat: Option<AnimationRef>,
 }
 
-impl TextAnimation {
+impl ClipAnimation {
     /// Whether no animation is set.
     pub fn is_empty(&self) -> bool {
         self.enter.is_none() && self.exit.is_none() && self.repeat.is_none()
@@ -296,7 +296,7 @@ impl TextAnimation {
 
 /// One preset animation and how long one run of it lasts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TextAnimationRef {
+pub struct AnimationRef {
     /// The preset id, such as `fade`.
     pub preset: String,
     pub duration: Time,
@@ -548,6 +548,7 @@ impl From<ProjectV1> for Project {
                             placement: None,
                             motion: ClipMotion::default(),
                             text: None,
+                            animation: ClipAnimation::default(),
                         })
                         .collect(),
                     transitions: track.transitions,
@@ -653,7 +654,7 @@ pub(crate) mod tests_support {
 
     /// A plain clip of one second at the start of the timeline.
     pub(crate) fn clip() -> Clip {
-        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None }
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default() }
     }
 }
 

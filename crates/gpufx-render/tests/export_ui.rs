@@ -38,7 +38,7 @@ fn hardware_gpu() -> Option<Arc<Gpu>> {
 }
 
 fn clip(path: &Path, start: i64, duration: i64) -> Clip {
-    Clip { source: path.to_string_lossy().into_owned(), start: Time::from_ticks(start), source_in: Time::ZERO, duration: Time::from_ticks(duration), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None }
+    Clip { source: path.to_string_lossy().into_owned(), start: Time::from_ticks(start), source_in: Time::ZERO, duration: Time::from_ticks(duration), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default() }
 }
 
 fn project_with_transition_and_sound() -> Project {

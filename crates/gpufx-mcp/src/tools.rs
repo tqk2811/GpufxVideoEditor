@@ -199,7 +199,7 @@ pub struct AnimationRefParam {
     pub duration: i64,
 }
 
-impl From<AnimationRefParam> for engine::TextAnimationRef {
+impl From<AnimationRefParam> for engine::AnimationRef {
     fn from(animation: AnimationRefParam) -> Self {
         Self { preset: animation.preset, duration: ticks(animation.duration) }
     }
