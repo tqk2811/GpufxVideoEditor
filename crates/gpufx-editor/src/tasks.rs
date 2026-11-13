@@ -27,9 +27,10 @@ pub enum FileDialog {
     Export,
     /// An SRT file to import as a subtitle track.
     ImportSubtitles,
-    /// Where to save subtitle track `track` as an SRT file. Tracks are only ever appended, so the
-    /// index still names it when the dialog closes.
-    ExportSubtitles { track: usize },
+    /// Where to save subtitle track `track` as an SRT file, while the project is still at
+    /// `revision`: an undo or another project may have removed or replaced the track meanwhile, so
+    /// a change while the dialog is up drops the choice.
+    ExportSubtitles { track: usize, revision: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,7 +267,7 @@ impl Tasks {
             Request::Export => self.start_dialog(FileDialog::Export),
             Request::PickFont { clip } => self.start_dialog(FileDialog::PickFont { clip, revision: state.revision() }),
             Request::ImportSubtitles => self.start_dialog(FileDialog::ImportSubtitles),
-            Request::ExportSubtitles { track } => self.start_dialog(FileDialog::ExportSubtitles { track }),
+            Request::ExportSubtitles { track } => self.start_dialog(FileDialog::ExportSubtitles { track, revision: state.revision() }),
         }
     }
 
@@ -385,8 +386,8 @@ impl Tasks {
                         state.import_subtitles_file(&path);
                         Action::Nothing
                     }
-                    FileDialog::ExportSubtitles { track } => {
-                        state.export_subtitles_file(track, &path);
+                    FileDialog::ExportSubtitles { track, revision } => {
+                        state.export_subtitles_for(track, revision, &path);
                         Action::Nothing
                     }
                 }
@@ -1186,6 +1187,34 @@ mod tests {
         assert_eq!(tasks.begin(&mut state, Request::PickFont { clip: key }), Action::ShowFileDialog(dialog));
         assert_eq!(tasks.on_arrival(&mut state, picked(dialog, "C:/fonts/a.ttf")), Action::Nothing);
         assert_eq!(font_of(&state, key), engine::FontRef::File { path: "C:/fonts/a.ttf".to_owned() });
+    }
+
+    #[test]
+    fn subtitles_are_not_exported_when_the_project_changed_while_the_dialog_was_up() {
+        let mut state = EditorState::default();
+        let (track, _) = state.import_subtitles("1\n00:00:01,000 --> 00:00:02,000\nOne\n", None).unwrap();
+        let mut tasks = Tasks::default();
+        let Action::ShowFileDialog(dialog) = tasks.begin(&mut state, Request::ExportSubtitles { track }) else { panic!("no dialog") };
+        // Undoing the import removes the track, and a later import puts another at the same index.
+        state.undo();
+        state.import_subtitles("1\n00:00:05,000 --> 00:00:06,000\nOther\n", None).unwrap();
+        let file = std::env::temp_dir().join(format!("gpufx-editor-export-stale-{}.srt", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(tasks.on_arrival(&mut state, picked(dialog, file.to_str().unwrap())), Action::Nothing);
+        assert!(!file.exists(), "nothing is written");
+        assert_eq!(state.status(), &Status::Refused(Message::SubtitleExportTargetChanged));
+    }
+
+    #[test]
+    fn subtitles_are_exported_when_the_project_stayed_the_same() {
+        let mut state = EditorState::default();
+        let (track, _) = state.import_subtitles("1\n00:00:01,000 --> 00:00:02,000\nOne\n", None).unwrap();
+        let mut tasks = Tasks::default();
+        let Action::ShowFileDialog(dialog) = tasks.begin(&mut state, Request::ExportSubtitles { track }) else { panic!("no dialog") };
+        let file = std::env::temp_dir().join(format!("gpufx-editor-export-ok-{}.srt", std::process::id()));
+        assert_eq!(tasks.on_arrival(&mut state, picked(dialog, file.to_str().unwrap())), Action::Nothing);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("One"));
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

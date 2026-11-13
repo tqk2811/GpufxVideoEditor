@@ -251,6 +251,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::SubtitleOwnStyle => "Keep this cue's own style".to_owned(),
         Message::ExportSubtitles => "Export SRT\u{2026}".to_owned(),
         Message::SubtitlesExported(path) => format!("Saved the subtitles to {path}"),
+        Message::SubtitleExportTargetChanged => "The project changed while the file was being chosen, so the subtitles were not saved; export them again.".to_owned(),
         Message::SubtitleExportFailed(reason) => format!("The subtitles could not be saved: {reason}"),
         Message::FontTargetChanged => "The project changed while the font file was being chosen, so it was not applied; choose it again.".to_owned(),
         Message::LoadingFonts => "Loading fonts...".to_owned(),

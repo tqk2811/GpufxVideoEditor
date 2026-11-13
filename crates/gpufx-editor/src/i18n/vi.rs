@@ -234,6 +234,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::SubtitleOwnStyle => "Giữ kiểu riêng cho câu này".to_owned(),
         Message::ExportSubtitles => "Xuất SRT\u{2026}".to_owned(),
         Message::SubtitlesExported(path) => format!("Đã lưu phụ đề vào {path}"),
+        Message::SubtitleExportTargetChanged => "Project đã đổi trong lúc chọn file nên phụ đề chưa được lưu; hãy xuất lại.".to_owned(),
         Message::SubtitleExportFailed(reason) => format!("Không lưu được phụ đề: {reason}"),
         Message::FontTargetChanged => "Project đã đổi trong lúc chọn file font nên font chưa được áp dụng; hãy chọn lại.".to_owned(),
         Message::LoadingFonts => "Đang nạp font...".to_owned(),

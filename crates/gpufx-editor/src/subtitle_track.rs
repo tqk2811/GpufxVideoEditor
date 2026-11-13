@@ -47,7 +47,7 @@ impl fmt::Display for CueNote {
         match self {
             Self::Srt(warning) => warning.fmt(f),
             Self::Shortened { line } => write!(f, "line {line}: the cue overlaps the next one and was cut where it starts"),
-            Self::Overlapping { line } => write!(f, "line {line}: the cue starts together with an earlier one, skipped"),
+            Self::Overlapping { line } => write!(f, "line {line}: the cue overlaps another one and would show for less than a frame, skipped"),
         }
     }
 }
@@ -55,8 +55,9 @@ impl fmt::Display for CueNote {
 /// The cues of `srt` as clip times that do not overlap, in time order, and the notes about it.
 ///
 /// A track cannot hold two clips at once, so a cue that runs into the next is cut where the next
-/// starts, and a cue starting at the same time as an earlier one is left out.
-pub fn cue_spans(srt: &str) -> (Vec<CueSpan>, Vec<CueNote>) {
+/// starts, and a cue starting at the same time as an earlier one is left out. A cue that this
+/// would leave shorter than `shortest` (one output frame) is left out too, for it would never show.
+pub fn cue_spans(srt: &str, shortest: Time) -> (Vec<CueSpan>, Vec<CueNote>) {
     let document = parse_srt(srt);
     let mut notes: Vec<CueNote> = document.warnings.into_iter().map(CueNote::Srt).collect();
     let mut cues = document.cues;
@@ -65,9 +66,13 @@ pub fn cue_spans(srt: &str) -> (Vec<CueSpan>, Vec<CueNote>) {
     for cue in cues {
         if let Some((previous, line)) = spans.last_mut() {
             if cue.start < previous.end {
-                if cue.start > previous.start {
+                if cue.start.saturating_sub(previous.start) >= shortest.max(Time::from_ticks(1)) {
                     previous.end = cue.start;
                     notes.push(CueNote::Shortened { line: *line });
+                } else if cue.start > previous.start {
+                    // Cut where this one starts, the earlier cue would be shorter than a frame.
+                    notes.push(CueNote::Overlapping { line: *line });
+                    spans.pop();
                 } else {
                     notes.push(CueNote::Overlapping { line: cue.line });
                     continue;
@@ -98,11 +103,24 @@ mod tests {
     #[test]
     fn overlapping_cues_are_cut_or_left_out() {
         let srt = "1\n00:00:01,000 --> 00:00:03,000\nA\n\n2\n00:00:02,000 --> 00:00:04,000\nB\n\n3\n00:00:02,000 --> 00:00:05,000\nC\n\n4\n00:00:00,000 --> 00:00:00,500\nD\n";
-        let (spans, notes) = cue_spans(srt);
+        let (spans, notes) = cue_spans(srt, ms(1));
         let got: Vec<(Time, Time, &str)> = spans.iter().map(|span| (span.start, span.end, span.text.as_str())).collect();
         assert_eq!(got, vec![(ms(0), ms(500), "D"), (ms(1000), ms(2000), "A"), (ms(2000), ms(4000), "B")]);
         assert_eq!(notes, vec![CueNote::Shortened { line: 2 }, CueNote::Overlapping { line: 10 }]);
         assert!(!notes[0].skipped() && notes[1].skipped());
+    }
+
+    #[test]
+    fn a_cue_cut_to_less_than_a_frame_is_left_out() {
+        // 30 fps: A would be cut to 10 ms by B, so it never shows a frame and is left out.
+        let srt = "1\n00:00:01,000 --> 00:00:03,000\nA\n\n2\n00:00:01,010 --> 00:00:04,000\nB\n";
+        let (spans, notes) = cue_spans(srt, ms(33));
+        let got: Vec<(Time, Time, &str)> = spans.iter().map(|span| (span.start, span.end, span.text.as_str())).collect();
+        assert_eq!(got, vec![(ms(1010), ms(4000), "B")]);
+        assert_eq!(notes, vec![CueNote::Overlapping { line: 2 }]);
+        assert!(notes[0].skipped());
+        let (spans, _) = cue_spans(srt, ms(5));
+        assert_eq!(spans.len(), 2, "a cut that still holds a frame stays");
     }
 
     #[test]
@@ -113,7 +131,7 @@ mod tests {
         track.clips.push(engine::Clip { text: None, source: "a.mp4".to_owned(), ..text_clip(ms(5000), ms(1000), TextContent::new("x", 0.05)) });
         let srt = track_srt(&track);
         assert_eq!(srt, "1\r\n00:00:01,000 --> 00:00:02,500\r\nOne\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nTwo\r\nlines\r\n\r\n");
-        let (spans, notes) = cue_spans(&srt);
+        let (spans, notes) = cue_spans(&srt, ms(1));
         assert!(notes.is_empty());
         assert_eq!(spans.len(), 2);
     }

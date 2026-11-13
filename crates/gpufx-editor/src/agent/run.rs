@@ -313,8 +313,10 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             let styled = styled_base(&state.text_style_library, &available_families(), patch.style_id.as_deref(), old, &found.animation)?;
             let mut text = apply_patch(&styled.text, &patch)?;
             // A cue of a subtitle track given a style of its own keeps it when the track's changes.
-            if patch.style_id.is_some() && state.project().tracks[clip.track].is_subtitle() {
-                text.own_style = true;
+            // The track's own style is not a style of its own.
+            if let Some(style_id) = patch.style_id.as_deref().filter(|_| state.project().tracks[clip.track].is_subtitle()) {
+                let track_style = state.project().tracks[clip.track].subtitle.as_ref().and_then(|subtitle| subtitle.style.as_deref());
+                text.own_style = !track_style.is_some_and(|own| own.eq_ignore_ascii_case(style_id));
             }
             let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::of(found), &styled.animation, &patch)?.unwrap_or(styled.animation);
             let animation = Some(animation).filter(|animation| *animation != found.animation);
@@ -522,7 +524,7 @@ fn subtitle_export<H: AgentHost>(host: &mut H, track: usize, path: Option<&Path>
     let cues = target.clips.iter().filter(|clip| clip.is_text()).count();
     let file = match path {
         Some(path) => {
-            let file = std::path::absolute(path).map_err(|e| AgentError::new("invalid_path", e.to_string()))?;
+            let file = subtitle_export_file(state.project_file(), path)?;
             if let Some(what) = overwritten_input(state.project(), &paths, &file) {
                 return Err(AgentError::new("invalid_output", format!("{} is {what}; it would be overwritten", file.display())));
             }
@@ -535,6 +537,22 @@ fn subtitle_export<H: AgentHost>(host: &mut H, track: usize, path: Option<&Path>
         None => None,
     };
     Ok(json!({"track": track, "cues": cues, "srt": srt, "path": file}))
+}
+
+/// The file a `subtitle_export_srt` writes: a `.srt` path, a relative one resolved against the
+/// folder of the saved project. With no saved project there is nothing to resolve it against, and
+/// the working directory of the editor is not something the agent can know, so it must be absolute.
+fn subtitle_export_file(project_file: Option<&Path>, path: &Path) -> Result<PathBuf, AgentError> {
+    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("srt")) {
+        return Err(AgentError::new("invalid_params", format!("{} is not a .srt file", path.display())));
+    }
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    match project_file.and_then(Path::parent) {
+        Some(folder) => Ok(folder.join(path)),
+        None => Err(AgentError::new("invalid_params", format!("{} is relative and the project is not saved: give an absolute path", path.display()))),
+    }
 }
 
 fn project_summary(project: &Project) -> Value {
@@ -802,6 +820,23 @@ mod tests {
         let clip = &host.state.project().tracks[key.track].clips[key.clip];
         assert_eq!(clip.placement, before, "the layout does not overwrite a keyframed place");
         assert_eq!(clip.text.as_ref().map(|text| text.weight), Some(800));
+    }
+
+    #[test]
+    fn a_subtitle_export_path_must_be_srt_and_absolute_unless_the_project_is_saved() {
+        let saved = Path::new("C:/work/edit/p.json");
+        let invalid = |result: Result<PathBuf, AgentError>| result.expect_err("refused").code;
+        assert_eq!(invalid(subtitle_export_file(None, Path::new("out.srt"))), "invalid_params", "relative with no saved project");
+        assert_eq!(invalid(subtitle_export_file(Some(saved), Path::new("out.txt"))), "invalid_params", "not .srt");
+        assert_eq!(invalid(subtitle_export_file(Some(saved), Path::new("C:/work/p.json"))), "invalid_params", "the project file itself");
+        assert_eq!(subtitle_export_file(Some(saved), Path::new("subs/out.SRT")).unwrap(), Path::new("C:/work/edit").join("subs/out.SRT"));
+        let absolute = std::env::temp_dir().join("out.srt");
+        assert_eq!(subtitle_export_file(None, &absolute).unwrap(), absolute);
+
+        let mut host = FakeHost::new("live");
+        let (clips, _) = host.state.subtitle_clips("1\n00:00:01,000 --> 00:00:02,000\nOne\n", None);
+        host.state.apply_agent_command(|project| engine::add_subtitle_track(project, engine::SubtitleTrack { style: None }, clips)).unwrap();
+        assert_eq!(code(host.run(AgentRequest::SubtitleExport { track: 0, path: Some(PathBuf::from("out.srt")), overwrite: false })), "invalid_params");
     }
 
     #[test]

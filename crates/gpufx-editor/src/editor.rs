@@ -1606,8 +1606,9 @@ impl EditorState {
         let Some(clip) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).cloned() else { return };
         let Some(current) = clip.text.as_ref() else { return };
         let mut text = style.apply(current, &available_families());
-        // A cue given a style of its own keeps it when its subtitle track is given another.
-        text.own_style = self.history.current().tracks.get(key.track).is_some_and(|track| track.is_subtitle());
+        // A cue given a style other than its track's keeps it when its subtitle track is given
+        // another; the track's own style is not a style of its own.
+        text.own_style = self.history.current().tracks.get(key.track).is_some_and(|track| track.is_subtitle() && track.subtitle.as_ref().and_then(|subtitle| subtitle.style.as_deref()).is_none_or(|own| !own.eq_ignore_ascii_case(&style.reference)));
         let animation = style.animation_for(&clip.animation);
         let placement = self.styled_text_placement(key, &text, style.layout.as_ref());
         if text == *current && animation == clip.animation && placement.is_none_or(|placement| clip.placement == Some(placement)) {
@@ -1627,7 +1628,7 @@ impl EditorState {
     /// about its cues. Each shows its cue in `style`, or as the default text when there is none,
     /// placed where the style's layout says (near the bottom without one).
     pub fn subtitle_clips(&self, srt: &str, style: Option<&LibraryTextStyle>) -> (Vec<engine::Clip>, Vec<CueNote>) {
-        let (spans, notes) = cue_spans(srt);
+        let (spans, notes) = cue_spans(srt, self.project().output.frame_duration);
         let families = if style.is_some() { available_families() } else { Default::default() };
         let layout = style.and_then(|style| style.layout).unwrap_or(DEFAULT_SUBTITLE_LAYOUT);
         let output = self.output_pixels();
@@ -1724,8 +1725,24 @@ impl EditorState {
         self.project().tracks.get(track).map(track_srt)
     }
 
-    /// Writes the text clips of `track` to `path` as an SRT file and says so on the status line.
+    /// [`Self::export_subtitles_file`] for a track chosen while the project was at `revision`: when
+    /// the project changed since, the track may be another or gone, so nothing is written and the
+    /// status line says so.
+    pub fn export_subtitles_for(&mut self, track: usize, revision: u64, path: &Path) {
+        if revision != self.revision {
+            self.status = Status::Refused(Message::SubtitleExportTargetChanged);
+            return;
+        }
+        self.export_subtitles_file(track, path);
+    }
+
+    /// Writes the text clips of subtitle track `track` to `path` as an SRT file and says so on the
+    /// status line. A track that is gone or is not a subtitle track is refused on the status line.
     pub fn export_subtitles_file(&mut self, track: usize, path: &Path) {
+        if !self.project().tracks.get(track).is_some_and(|found| found.is_subtitle()) {
+            self.status = Status::Refused(Message::SubtitleExportTargetChanged);
+            return;
+        }
         let Some(srt) = self.subtitle_srt(track) else { return };
         self.status = match std::fs::write(path, srt) {
             Ok(()) => Status::Info(Message::SubtitlesExported(path.display().to_string())),
@@ -2061,11 +2078,30 @@ pub fn clip_name(clip: &Clip) -> std::borrow::Cow<'_, str> {
 }
 
 /// The text of the subtitle file at `path`, without a byte order mark; the reason when it cannot
-/// be read or is not UTF-8.
+/// be read or is neither UTF-8 nor UTF-16 with a byte order mark.
 pub fn read_subtitle_file(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    String::from_utf8(bytes).map_err(|_| "the file is not UTF-8 text".to_owned())
+    decode_subtitle_bytes(std::fs::read(path).map_err(|error| error.to_string())?)
 }
+
+/// The text of subtitle file contents: UTF-8, or UTF-16 of either byte order when it starts with
+/// the mark. Text in another encoding is refused rather than shown with replacement characters.
+pub fn decode_subtitle_bytes(bytes: Vec<u8>) -> Result<String, String> {
+    let utf16 = |rest: &[u8], little: bool| -> Result<String, String> {
+        if rest.len() % 2 != 0 {
+            return Err("the UTF-16 file ends in the middle of a character".to_owned());
+        }
+        let units: Vec<u16> = rest.chunks_exact(2).map(|pair| if little { u16::from_le_bytes([pair[0], pair[1]]) } else { u16::from_be_bytes([pair[0], pair[1]]) }).collect();
+        String::from_utf16(&units).map_err(|_| "the UTF-16 file holds an invalid character".to_owned())
+    };
+    match bytes.as_slice() {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).map_err(|_| NOT_UNICODE.to_owned()),
+        _ => String::from_utf8(bytes).map_err(|_| NOT_UNICODE.to_owned()),
+    }
+}
+
+const NOT_UNICODE: &str = "the file is not UTF-8 or UTF-16 text: save it as UTF-8 and try again";
 
 #[cfg(test)]
 mod tests {
@@ -2075,6 +2111,20 @@ mod tests {
 
     fn seconds(value: i64) -> Time {
         Time::from_seconds(value).unwrap()
+    }
+
+    #[test]
+    fn subtitle_files_in_utf16_or_with_a_utf8_mark_are_read() {
+        let text = "1\r\n00:00:01,000 --> 00:00:02,000\r\nXin chào\r\n";
+        let le: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let be: Vec<u8> = [0xFE, 0xFF].into_iter().chain(text.encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        let marked: Vec<u8> = [0xEF, 0xBB, 0xBF].into_iter().chain(text.bytes()).collect();
+        assert_eq!(decode_subtitle_bytes(le).as_deref(), Ok(text));
+        assert_eq!(decode_subtitle_bytes(be).as_deref(), Ok(text));
+        assert_eq!(decode_subtitle_bytes(marked).as_deref(), Ok(text), "the mark is not part of the text");
+        assert_eq!(decode_subtitle_bytes(text.as_bytes().to_vec()).as_deref(), Ok(text));
+        assert!(decode_subtitle_bytes(vec![b'a', 0xE0, b'b']).is_err(), "Windows-1252 text is refused");
+        assert!(decode_subtitle_bytes(vec![0xFF, 0xFE, 0x41]).is_err(), "a cut UTF-16 file is refused");
     }
 
     #[test]
@@ -3967,6 +4017,20 @@ second line")), "Title…");
         let all = state.subtitle_restyle(track, state.text_style_library.find("s/low").unwrap(), true).unwrap();
         assert_eq!(all.len(), 2, "all: the cue with its own style takes the track's too");
         assert!(all.iter().all(|change| !change.text.own_style));
+    }
+
+    #[test]
+    fn the_style_of_the_track_given_to_a_cue_is_not_a_style_of_its_own() {
+        let mut state = EditorState::default();
+        state.text_style_library = style_library();
+        let (track, _) = state.import_subtitles(SRT, Some("s/low")).unwrap();
+        let cue = ClipKey { track, clip: 0 };
+        state.apply_text_style(cue, "s/low");
+        assert!(!state.project().tracks[track].clips[0].text.as_ref().unwrap().own_style, "the track's own style");
+        state.apply_text_style(cue, "p/bold");
+        assert!(state.project().tracks[track].clips[0].text.as_ref().unwrap().own_style, "another style is the cue's own");
+        state.apply_text_style(cue, "S/LOW");
+        assert!(!state.project().tracks[track].clips[0].text.as_ref().unwrap().own_style, "back to the track's, whatever the case");
     }
 
     #[test]
