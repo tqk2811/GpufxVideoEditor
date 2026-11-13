@@ -554,6 +554,8 @@ pub struct D3d12Compositor {
     placer: EffectGraph,
     /// Draws a clip that is turned. Built the first time one is.
     rotator: Option<EffectGraph>,
+    /// The gaussian blur of a blurred clip, loaded the first time one is drawn.
+    blurrer: Option<EffectGraph>,
     /// A fully transparent image, only ever read. Not in the pool, whose images hold old pictures.
     transparent: Option<ImageId>,
     stills: HashMap<StillKey, CachedStill>,
@@ -582,7 +584,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, rotator: None, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default() })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, rotator: None, blurrer: None, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default() })
     }
 
     /// Makes `closing` stop the decoders opened from now on at once, and lets a newer request stop
@@ -793,6 +795,43 @@ impl D3d12Compositor {
     /// `through_alpha` says it has see-through parts, whose colours only count through their alpha.
     /// The overlay mixes with the zero colour of the transparent image, so the result is premultiplied.
     fn place(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
+        let placed = self.place_sharp(picture, transform, source_aspect, through_alpha, info)?;
+        let radius = transform.blur * f64::from(self.height);
+        if !(radius >= MIN_BLUR_PIXELS) {
+            return Ok(placed);
+        }
+        match self.blur(placed, radius.min(MAX_BLUR_PIXELS), info) {
+            Ok(blurred) => Ok(blurred),
+            Err(message) => {
+                self.release_image(placed);
+                Err(message)
+            }
+        }
+    }
+
+    /// Blurs `image`, a full-frame picture, by `radius` pixels, and lets go of it.
+    fn blur(&mut self, image: ImageId, radius: f64, info: &FrameInfo) -> Result<ImageId, String> {
+        let (width, height) = (self.width, self.height);
+        let blurrer = match &mut self.blurrer {
+            Some(blurrer) => blurrer,
+            empty => empty.insert(load_blur(&self.gpu.context, &self.paths)?),
+        };
+        blurrer.set_param("radius", &[radius]).map_err(|e| format!("blur.radius: {e}"))?;
+        let output = self.acquire()?;
+        let blurrer = self.blurrer.as_mut().expect("loaded above");
+        let mut inputs = [self.images[image.0].frame(width, height)];
+        if let Err(message) = Self::run_graph(&self.gpu, blurrer, &mut inputs, &mut self.images, output, width, height, info) {
+            self.release_image(output);
+            return Err(message);
+        }
+        self.images[image.0].fence_value = inputs[0].fence_value;
+        self.images[output.0].premultiplied = self.images[image.0].premultiplied;
+        self.release_image(image);
+        Ok(output)
+    }
+
+    /// [`Self::place`] without the blur.
+    fn place_sharp(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
         let (width, height) = (self.width, self.height);
         let mut rect = transform.rect(f64::from(width) / f64::from(height), source_aspect);
         let mut transform = transform;
@@ -976,6 +1015,17 @@ fn load_overlay(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<Effec
     }
     let mut holder = Some(effect);
     EffectGraph::parse("overlay", |_| Ok(("overlay".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("overlay graph: {e}"))
+}
+
+/// A blur below this many pixels is not drawn at all.
+const MIN_BLUR_PIXELS: f64 = 0.5;
+/// The largest radius the gaussian blur package takes.
+const MAX_BLUR_PIXELS: f64 = 48.0;
+
+fn load_blur(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<EffectGraph, String> {
+    let path = package_path(paths, "packages/gpufx/ffmpeg/gaussian-blur")?;
+    let mut holder = Some(open_effect(context, &path, "gaussian-blur")?);
+    EffectGraph::parse("blur", |_| Ok(("blur".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("blur graph: {e}"))
 }
 
 fn load_rotator(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
@@ -1229,6 +1279,31 @@ mod tests {
         let mut inputs = [images[0].frame(16, 16)];
         let error = D3d12Compositor::run_graph(&gpu, &mut overlay, &mut inputs, &mut images, ImageId(0), 16, 16, &FrameInfo::new(0.0, 0)).expect_err("one input is refused");
         assert!(error.starts_with("computing the output size failed"), "{error}");
+    }
+
+    #[test]
+    fn a_blurred_pose_softens_an_edge_and_no_blur_keeps_it_sharp() {
+        let Some((gpu, _)) = overlay_on_hardware() else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        let (width, height) = (64u32, 32u32);
+        let mut compositor = D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), width, height).expect("a compositor");
+        // White on the left half, black on the right.
+        let rgba = (0..width * height).flat_map(|i| if i % width < width / 2 { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
+        let picture = StillPicture { width, height, rgba, has_alpha: false };
+        let mut draw = |blur: f64| {
+            compositor.images.push(Image::upload(&compositor.gpu, &picture).expect("an upload"));
+            let image = ImageId(compositor.images.len() - 1);
+            let transform = ClipTransform { blur, ..ClipTransform::default() };
+            let placed = compositor.place(image, transform, f64::from(width) / f64::from(height), false, &FrameInfo::new(0.0, 0)).expect("placed");
+            let mut rgba = Vec::new();
+            compositor.read(placed, &mut rgba).expect("read");
+            compositor.release(placed);
+            let at = |x: u32| rgba[((height / 2 * width + x) * 4) as usize];
+            (at(width / 2 - 1), at(width / 2))
+        };
+        assert_eq!(draw(0.0), (255, 0), "no blur leaves the edge as it is");
+        let (left, right) = draw(0.25);
+        assert!(left < 250 && right > 5, "a blur of 8 pixels mixes both sides of the edge: {left} {right}");
     }
 
     #[test]

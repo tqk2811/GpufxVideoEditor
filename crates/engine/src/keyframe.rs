@@ -253,6 +253,8 @@ pub struct ClipTransform {
     pub zoom: f64,
     /// Scale of the width and the height alone, on top of `zoom`.
     pub stretch: [f64; 2],
+    /// Blur radius of the placed picture, in parts of the output frame height. 0 is no blur.
+    pub blur: f64,
 }
 
 impl Default for ClipTransform {
@@ -264,7 +266,7 @@ impl Default for ClipTransform {
 impl ClipTransform {
     /// A clip with no motion at all at `placement`.
     pub fn still(placement: Option<ClipPlacement>) -> Self {
-        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0, stretch: [1.0, 1.0] }
+        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0, stretch: [1.0, 1.0], blur: 0.0 }
     }
 
     /// This transform with `pose` of a preset animation on top.
@@ -274,6 +276,7 @@ impl ClipTransform {
         self.stretch = [self.stretch[0] * pose.scale_x, self.stretch[1] * pose.scale_y];
         self.rotation += pose.rotation;
         self.opacity *= pose.opacity;
+        self.blur += pose.blur;
         self
     }
 
@@ -329,6 +332,7 @@ impl Clip {
             shift: [0.0, 0.0],
             zoom: 1.0,
             stretch: [1.0, 1.0],
+            blur: 0.0,
         }
     }
 

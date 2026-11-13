@@ -258,6 +258,7 @@ pub fn evaluate_curve(curve: &AnimationCurve, t: f64) -> AnimationPose {
         scale_y: at(CurveProperty::ScaleY),
         rotation: at(CurveProperty::Rotation),
         opacity: at(CurveProperty::Opacity),
+        blur: at(CurveProperty::Blur).max(0.0),
     }
 }
 
@@ -344,10 +345,12 @@ pub struct AnimationPose {
     pub rotation: f64,
     /// Multiplies the opacity.
     pub opacity: f64,
+    /// Added blur radius, in parts of the output frame height. 0 is no blur.
+    pub blur: f64,
 }
 
 impl AnimationPose {
-    pub const IDENTITY: AnimationPose = AnimationPose { dx: 0.0, dy: 0.0, scale: 1.0, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0 };
+    pub const IDENTITY: AnimationPose = AnimationPose { dx: 0.0, dy: 0.0, scale: 1.0, scale_x: 1.0, scale_y: 1.0, rotation: 0.0, opacity: 1.0, blur: 0.0 };
 
     /// Both poses at once.
     pub fn then(self, other: AnimationPose) -> AnimationPose {
@@ -359,6 +362,7 @@ impl AnimationPose {
             scale_y: self.scale_y * other.scale_y,
             rotation: self.rotation + other.rotation,
             opacity: self.opacity * other.opacity,
+            blur: self.blur + other.blur,
         }
     }
 }
@@ -665,7 +669,7 @@ mod tests {
                 let got = (new.dx, new.dy, new.scale, new.rotation, new.opacity);
                 let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
                 assert!(near(got.0, old.0) && near(got.1, old.1) && near(got.2, old.2) && near(got.3, old.3) && near(got.4, old.4), "{} {:?} at {progress}: {got:?} vs {old:?}", preset.id, preset.group);
-                assert_eq!((new.scale_x, new.scale_y), (1.0, 1.0));
+                assert_eq!((new.scale_x, new.scale_y, new.blur), (1.0, 1.0, 0.0));
             }
         }
     }
@@ -732,5 +736,16 @@ mod tests {
         assert_eq!(back, curve);
         let written: AnimationCurve = serde_json::from_str(r#"{"tracks":{"opacity":[{"t":0,"value":0},{"t":1,"value":1}]}}"#).unwrap();
         assert!((written.value_at(CurveProperty::Opacity, 0.25) - 0.25).abs() < 1e-12, "the ease defaults to linear");
+    }
+
+    #[test]
+    fn a_blur_track_blurs_and_poses_add_their_blur() {
+        let curve = curve().with(CurveProperty::Blur, ramp(0.04, 0.0, Ease::Linear));
+        assert!((evaluate_curve(&curve, 0.5).blur - 0.02).abs() < 1e-12);
+        assert_eq!(evaluate_curve(&curve, 1.0).blur, 0.0);
+        let negative = AnimationCurve::default().with(CurveProperty::Blur, ramp(-1.0, -1.0, Ease::Linear));
+        assert_eq!(evaluate_curve(&negative, 0.5).blur, 0.0, "a blur is never below 0");
+        let both = evaluate_curve(&curve, 0.0).then(evaluate_curve(&curve, 0.5));
+        assert!((both.blur - 0.06).abs() < 1e-12);
     }
 }
