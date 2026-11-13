@@ -309,3 +309,53 @@ fn the_second_half_of_a_split_still_starts_at_source_zero() {
         assert_eq!(clips[1].start, t(3003));
     }
 }
+
+fn karaoke_clip(content: &str, start: i64, duration: i64) -> Clip {
+    let mut c = text_clip(content, start, duration);
+    c.text.as_mut().unwrap().karaoke = Some(engine::TextKaraoke { mode: engine::KaraokeMode::Color, ..engine::TextKaraoke::default() });
+    c
+}
+
+/// The state of each word of `clip` at `offset` past its start, as the renderer asks for it.
+fn states_at(clip: &Clip, offset: i64) -> Vec<engine::WordState> {
+    let words = engine::clip_words(clip).unwrap();
+    engine::karaoke::word_states(&words, clip.source_in.saturating_add(t(offset)))
+}
+
+#[test]
+fn a_split_karaoke_text_goes_on_where_it_was_cut() {
+    let base = project_with(vec![karaoke_clip("aa bb cc", 0, 9000)]);
+    let whole = base.tracks[0].clips[0].clone();
+    let after = engine::split_clip(&base, KEY, t(4000)).unwrap();
+    assert_valid(&after);
+    let (first, second) = (&after.tracks[0].clips[0], &after.tracks[0].clips[1]);
+    let cut = second.start.ticks();
+    for offset in [0, 1000, cut - 1] {
+        assert_eq!(states_at(first, offset), states_at(&whole, offset), "first half at {offset}");
+    }
+    for offset in [0, 1000, 9000 - cut - 1] {
+        assert_eq!(states_at(second, offset), states_at(&whole, cut + offset), "second half at {offset}");
+    }
+}
+
+#[test]
+fn a_start_trim_of_a_karaoke_text_keeps_its_words_in_place() {
+    let base = project_with(vec![karaoke_clip("aa bb cc", 3000, 9000)]);
+    let whole = base.tracks[0].clips[0].clone();
+    let later = trim_start(&base, KEY, t(6000)).unwrap();
+    assert_valid(&later);
+    let trimmed = &later.tracks[0].clips[0];
+    for offset in [0, 1000, 5999] {
+        assert_eq!(states_at(trimmed, offset), states_at(&whole, 3000 + offset), "cut head at {offset}");
+    }
+    let earlier = trim_start(&later, KEY, t(0)).unwrap();
+    assert_valid(&earlier);
+    let grown = &earlier.tracks[0].clips[0];
+    assert_eq!(grown.source_in, Time::ZERO);
+    for offset in [6000, 7000, 11999] {
+        assert_eq!(states_at(grown, offset), states_at(&whole, offset - 3000), "grown back at {offset}");
+    }
+}
+fn assert_valid(p: &Project) {
+    assert_eq!(validate(p, &AcceptAll), vec![]);
+}

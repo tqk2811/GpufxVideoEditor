@@ -473,6 +473,23 @@ fn has_transition_before(track: &Track, clip: usize) -> bool {
     clip.checked_sub(1).is_some_and(|previous| has_transition_after(track, previous))
 }
 
+/// Whether `clip` is a text with karaoke on. Its word times count in its source time, so a cut or
+/// a trim keeps its `source_in`, unlike any other still, and first writes down the times the words
+/// had, since words shared over the cue would otherwise be shared again over each piece.
+fn keeps_karaoke_time(clip: &Clip) -> bool {
+    clip.text.as_ref().and_then(|text| text.karaoke.as_ref()).is_some_and(|karaoke| karaoke.is_on())
+}
+
+/// Writes the word times `clip` has now into its karaoke, each moved `shift` ticks later.
+fn freeze_karaoke_words(clip: &mut Clip, shift: i64) {
+    let Some(words) = crate::karaoke::clip_words(clip) else { return };
+    let shift = Time::from_ticks(shift);
+    let moved = words.into_iter().map(|word| crate::karaoke::KaraokeWord { start: word.start.saturating_add(shift), end: word.end.saturating_add(shift), ..word }).collect();
+    if let Some(karaoke) = clip.text.as_mut().and_then(|text| text.karaoke.as_mut()) {
+        karaoke.words = moved;
+    }
+}
+
 /// Moves the start edge of a clip to `new_start`, keeping the source frames under the end edge.
 pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
@@ -492,7 +509,11 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
         return finish(project.clone());
     }
     // A still has the same picture at every time, so its edge can go anywhere and it keeps no offset.
-    let source_in = if clip.is_still() { Time::ZERO } else { clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())? };
+    // A karaoke text keeps one, since its word times count in it (see keeps_karaoke_time).
+    let karaoke = keeps_karaoke_time(clip);
+    let mut source_in = if clip.is_still() && !karaoke { Time::ZERO } else { clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())? };
+    // Before source 0 the karaoke words move later instead, so they stay where they were on the timeline.
+    let words_shift = if karaoke && source_in < Time::ZERO { std::mem::replace(&mut source_in, Time::ZERO).ticks().checked_neg().ok_or(overflow.clone())? } else { 0 };
     if source_in < Time::ZERO {
         return Err(EditError::BeforeSourceStart { key, source_in });
     }
@@ -508,6 +529,9 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     let target = &mut next.tracks[key.track];
     let changed = &mut target.clips[key.clip];
     changed.start = new_start;
+    if karaoke {
+        freeze_karaoke_words(changed, words_shift);
+    }
     changed.source_in = source_in;
     changed.duration = duration;
     changed.shift_keyframes(Time::from_ticks(-delta.ticks()));
@@ -650,16 +674,22 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     let offset = Time::from_ticks(aligned_cut(clip, wanted.ticks(), earliest, latest).ok_or(outside)?);
     let rest = clip.duration.saturating_sub(offset);
 
-    let mut second = clip.clone();
+    let karaoke = keeps_karaoke_time(clip);
+    let mut whole = clip.clone();
+    if karaoke {
+        freeze_karaoke_words(&mut whole, 0);
+    }
+    let mut second = whole.clone();
     second.start = clip.start.saturating_add(offset);
-    // A still keeps no offset, as in trim_start.
-    second.source_in = if clip.is_still() { Time::ZERO } else { clip.source_in.saturating_add(clip.source_offset(offset)) };
+    // A still keeps no offset, as in trim_start, but a karaoke text does.
+    second.source_in = if clip.is_still() && !karaoke { Time::ZERO } else { clip.source_in.saturating_add(clip.source_offset(offset)) };
     second.duration = rest;
     second.fade_in = Time::ZERO;
     second.shift_keyframes(Time::from_ticks(-offset.ticks()));
 
     let mut next = project.clone();
     let target = &mut next.tracks[key.track];
+    target.clips[key.clip] = whole;
     let first = &mut target.clips[key.clip];
     first.duration = offset;
     first.fade_out = Time::ZERO;
