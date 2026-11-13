@@ -232,7 +232,7 @@ pub enum KaraokeModeParam {
     None,
     /// Each word takes the colour and opacity of its state.
     Color,
-    /// As color, with a box behind the active word (active.background, else active.color).
+    /// As color, with a box behind the active word (active.background, else a yellow box, never the word colour).
     Box,
     /// Scaling the active word is not drawn yet: draws as color.
     Scale,

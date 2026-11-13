@@ -19,7 +19,8 @@ pub const MAX_KARAOKE_SCALE: f32 = 4.0;
 pub const KARAOKE_BOX_PADDING: f32 = 0.12;
 /// The corner radius of that box, in parts of the font size.
 pub const KARAOKE_BOX_RADIUS: f32 = 0.18;
-/// The box colour in `box` mode when the active look names none.
+/// The box colour in `box` mode when the active look names no background. Never the word colour,
+/// which would hide the word.
 pub const DEFAULT_KARAOKE_BOX: Rgba = [255, 200, 0, 255];
 
 /// How the spoken word is marked.
@@ -169,9 +170,7 @@ pub fn clip_words(clip: &Clip) -> Option<Vec<KaraokeWord>> {
 
 /// Where a clip's source ends: `source_in` plus the source it consumes.
 pub fn cue_end(clip: &Clip) -> Time {
-    let consumed = (clip.duration.ticks() as f64 * clip.speed).round();
-    let consumed = if consumed.is_finite() { consumed.clamp(0.0, i64::MAX as f64) as i64 } else { 0 };
-    clip.source_in.saturating_add(Time::from_ticks(consumed))
+    clip.source_end()
 }
 
 /// The times at which the look of `words` changes, sorted, each once.
@@ -231,7 +230,7 @@ pub fn word_styles(text: &TextContent, words: &[KaraokeWord], states: &[WordStat
             if opacity.is_finite() {
                 color[3] = (f32::from(color[3]) * opacity.clamp(0.0, 1.0)).round() as u8;
             }
-            let background = (karaoke.draws_box() && *state == WordState::Active).then(|| extra.background.or(look.background).or(look.color).unwrap_or(DEFAULT_KARAOKE_BOX));
+            let background = (karaoke.draws_box() && *state == WordState::Active).then(|| extra.background.or(look.background).unwrap_or(DEFAULT_KARAOKE_BOX));
             WordStyle { color, background }
         })
         .collect()
@@ -335,7 +334,7 @@ mod tests {
         text.karaoke.as_mut().unwrap().mode = KaraokeMode::Box;
         let words = split_by_characters(&text, Time::ZERO, Time::from_ticks(600));
         let styles = word_styles(&text, &words, &[WordState::Active, WordState::Upcoming]);
-        assert_eq!(styles[0].background, Some([255, 0, 0, 255]), "the active colour when no background is named");
+        assert!(styles[0].background.is_some());
         assert_eq!(styles[1].background, None);
     }
 
@@ -359,5 +358,22 @@ mod tests {
         let text: TextContent = serde_json::from_str(r#"{"content":"Hi","size":0.1}"#).unwrap();
         assert_eq!(text.karaoke, None);
         assert!(!serde_json::to_string(&text).unwrap().contains("karaoke"));
+    }
+    #[test]
+    fn the_cue_ends_where_the_clip_source_ends() {
+        let mut clip = crate::edit::text_clip(Time::ZERO, Time::from_ticks(3), karaoke_text("a b"));
+        clip.speed = 1.5;
+        assert_eq!(cue_end(&clip), clip.source_end());
+    }
+
+    #[test]
+    fn the_box_does_not_take_the_colour_of_the_word() {
+        let mut text = karaoke_text("one two");
+        text.karaoke.as_mut().unwrap().mode = KaraokeMode::Box;
+        let words = split_by_characters(&text, Time::ZERO, Time::from_ticks(600));
+        let styles = word_styles(&text, &words, &[WordState::Active]);
+        assert_eq!(styles[0].background, Some(DEFAULT_KARAOKE_BOX), "the default box when no background is named");
+        text.karaoke.as_mut().unwrap().active.as_mut().unwrap().background = Some([0, 0, 255, 255]);
+        assert_eq!(word_styles(&text, &words, &[WordState::Active])[0].background, Some([0, 0, 255, 255]));
     }
 }
