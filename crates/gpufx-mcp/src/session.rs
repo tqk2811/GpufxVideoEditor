@@ -11,6 +11,7 @@ use engine::render::{Compositor, FrameRenderer, RenderError};
 use engine::{frame_count, Project};
 use gpufx_editor::agent::gateway::{self, pipe_name};
 use gpufx_editor::agent::{check_export, execute, prepare, AgentError, AgentHost, AgentRequest, AgentResult, Step};
+use gpufx_editor::clip_animation_library::scan_clip_animation_packs;
 use gpufx_editor::editor::{EditorState, Status};
 use gpufx_editor::export::{sibling_render_exe, ExportWorker};
 use gpufx_editor::project_file::package_roots;
@@ -146,7 +147,11 @@ impl FileSession {
     }
 
     pub fn with_roots(roots: Vec<PathBuf>) -> Self {
-        Self { host: FileHost { state: EditorState::default(), roots: roots.clone(), gpu: None, rig: None, export: None }, roots }
+        // There is no window to scan the clip animation packs, so they are read here: a preset of a pack
+        // is checked against the library.
+        let mut state = EditorState::default();
+        state.clip_animation_library = scan_clip_animation_packs(&roots);
+        Self { host: FileHost { state, roots: roots.clone(), gpu: None, rig: None, export: None }, roots }
     }
 }
 

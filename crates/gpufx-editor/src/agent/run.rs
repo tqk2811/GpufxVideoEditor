@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
 use super::text::{animation_list, apply_animation_patch, apply_patch, font_list, patched_animation};
+use crate::clip_animation_library::AnimatedClipKind;
 use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_IMAGE_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::export::{export_blocker, ExportOutcome};
 use crate::i18n::Language;
@@ -267,7 +268,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             }
             let patch = super::protocol::TextPatch { content: Some(content), ..style };
             let text = apply_patch(&default_text(String::new()), &patch)?;
-            let animation = apply_animation_patch(&engine::ClipAnimation::default(), &patch)?;
+            let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::Text, &engine::ClipAnimation::default(), &patch)?;
             let placement = natural_placement(state.text_pixels(&text), state.output_pixels());
             let (track, new_track) = match track {
                 Some(track) => (track, false),
@@ -301,7 +302,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             let found = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).and_then(|track| track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key })).map_err(|error| AgentError::from_edit(&error))?;
             let Some(old) = found.text.as_ref() else { return Err(AgentError::from_edit(&engine::EditError::NotText { key })) };
             let text = apply_patch(old, &patch)?;
-            let animation = apply_animation_patch(&found.animation, &patch)?;
+            let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::of(found), &found.animation, &patch)?;
             let placement = state.rescaled_text_placement(key, &text);
             state
                 .apply_agent_command(|project| {
@@ -325,7 +326,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             if track.is_audio() {
                 return Err(AgentError::new("invalid_params", format!("track {} is an audio track: its clips have no picture to animate", clip.track)));
             }
-            let next = patched_animation(&found.animation, &animation)?;
+            let next = patched_animation(&state.clip_animation_library, AnimatedClipKind::of(found), &found.animation, &animation)?;
             state.apply_agent_command(|project| engine::set_animation(project, key, next)).map_err(refused)?;
             result.insert("clip".to_owned(), json!(clip));
         }

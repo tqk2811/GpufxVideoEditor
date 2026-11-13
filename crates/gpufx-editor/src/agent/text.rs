@@ -3,7 +3,7 @@
 
 use engine::{AnimationGroup, FontRef, ClipAnimation, AnimationRef, TextContent, ANIMATION_PRESETS};
 
-use crate::clip_animation_library::ClipAnimationLibrary;
+use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary};
 use serde_json::{json, Value};
 
 use super::protocol::{AgentError, TextAnimationPatch, TextPatch};
@@ -82,9 +82,10 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
 }
 
 /// The animations of a clip with the `animation` field of `patch` applied, `None` when the patch
-/// leaves them as they are. The animations live on the clip, not on its text.
-pub fn apply_animation_patch(current: &ClipAnimation, patch: &TextPatch) -> Result<Option<ClipAnimation>, AgentError> {
-    patch.animation.as_ref().map(|animation| patched_animation(current, animation)).transpose()
+/// leaves them as they are. The animations live on the clip, not on its text. `kind` is the kind of
+/// clip they are for, and `library` the installed packs a preset may come from.
+pub fn apply_animation_patch(library: &ClipAnimationLibrary, kind: AnimatedClipKind, current: &ClipAnimation, patch: &TextPatch) -> Result<Option<ClipAnimation>, AgentError> {
+    patch.animation.as_ref().map(|animation| patched_animation(library, kind, current, animation)).transpose()
 }
 
 /// Whether `path` names a network share or a device (`\\server\share`, `//server/share`,
@@ -130,12 +131,12 @@ fn check_font(font: &FontRef) -> Result<(), AgentError> {
     }
 }
 
-pub fn patched_animation(current: &ClipAnimation, patch: &TextAnimationPatch) -> Result<ClipAnimation, AgentError> {
+pub fn patched_animation(library: &ClipAnimationLibrary, kind: AnimatedClipKind, current: &ClipAnimation, patch: &TextAnimationPatch) -> Result<ClipAnimation, AgentError> {
     let mut next = current.clone();
     for (group, change, slot) in [(AnimationGroup::Enter, &patch.enter, &mut next.enter), (AnimationGroup::Exit, &patch.exit, &mut next.exit), (AnimationGroup::Repeat, &patch.repeat, &mut next.repeat)] {
         if let Some(value) = change {
             if let Some(value) = value {
-                check_animation(group, value)?;
+                check_animation(library, kind, group, value)?;
             }
             slot.clone_from(value);
         }
@@ -143,13 +144,20 @@ pub fn patched_animation(current: &ClipAnimation, patch: &TextAnimationPatch) ->
     Ok(next)
 }
 
-fn check_animation(group: AnimationGroup, value: &AnimationRef) -> Result<(), AgentError> {
+fn check_animation(library: &ClipAnimationLibrary, kind: AnimatedClipKind, group: AnimationGroup, value: &AnimationRef) -> Result<(), AgentError> {
     let name = group.name();
-    // A preset of a pack is checked against the packs the engine was handed.
-    let known = engine::find_preset(group, &value.preset).is_some() || engine::pack_presets().find(group, &value.preset).is_some();
-    if !known {
-        let known = presets(group).join(", ");
-        return Err(invalid(format!("'{}' is not a preset of the '{name}' group; clip_animation_list names them: {known}", value.preset)));
+    if engine::find_preset(group, &value.preset).is_none() {
+        if let Some((_, animation)) = library.find(group, &value.preset) {
+            if !animation.applies_to(kind) {
+                let kinds = animation.applies_to.iter().flatten().map(|kind| kind.name()).collect::<Vec<_>>().join(", ");
+                return Err(invalid(format!("'{}' is not offered for {} clips, only for: {kinds}; clip_animation_list names what each preset applies to", value.preset, kind.name())));
+            }
+        } else if !library.loaded && engine::is_pack_preset(&value.preset) {
+            return Err(invalid(format!("'{}' may be a preset of an installed pack, but the packs are still loading; try again in a moment", value.preset)));
+        } else {
+            let known = presets(library, group).join(", ");
+            return Err(invalid(format!("'{}' is not a preset of the '{name}' group; clip_animation_list names them: {known}", value.preset)));
+        }
     }
     if value.duration <= engine::Time::ZERO {
         return Err(invalid(format!("the '{name}' animation must last more than 0 ticks")));
@@ -157,10 +165,9 @@ fn check_animation(group: AnimationGroup, value: &AnimationRef) -> Result<(), Ag
     Ok(())
 }
 
-fn presets(group: AnimationGroup) -> Vec<String> {
-    let packs = engine::pack_presets();
+fn presets(library: &ClipAnimationLibrary, group: AnimationGroup) -> Vec<String> {
     let built_in = ANIMATION_PRESETS.iter().filter(|preset| preset.group == group).map(|preset| preset.id.to_owned());
-    built_in.chain(packs.presets().iter().filter(|preset| preset.group == group).map(|preset| preset.reference.clone())).collect()
+    built_in.chain(library.packs.iter().flat_map(|pack| &pack.animations).filter(|animation| animation.group == group).map(|animation| animation.reference.clone())).collect()
 }
 
 /// The fonts a text can name, each as the `font` value to use: the system default first. While the
@@ -194,9 +201,8 @@ pub fn animation_list(library: &ClipAnimationLibrary) -> Value {
 mod tests {
     use super::*;
 
-    /// The only test of the crate that sets the pack table of the engine.
     #[test]
-    fn a_pack_preset_is_listed_with_its_pack_and_accepted_once_the_engine_has_it() {
+    fn a_pack_preset_is_listed_with_its_pack_and_accepted_for_the_kinds_it_applies_to() {
         use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary, ClipAnimationPack, LibraryAnimation};
         let curve = engine::AnimationCurve::default().with(engine::CurveProperty::Opacity, vec![engine::CurveKey { t: 0.0, value: 0.0, ease: engine::Ease::Linear }, engine::CurveKey { t: 1.0, value: 1.0, ease: engine::Ease::Linear }]);
         let rise = LibraryAnimation { reference: "agent-pack/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(45_000), applies_to: Some(vec![AnimatedClipKind::Text]), curve };
@@ -209,10 +215,17 @@ mod tests {
         assert_eq!((pack["group"].as_str(), pack["pack"]["name"].as_str(), pack["applies_to"][0].as_str(), pack["default_duration"].as_i64()), (Some("in"), Some("Agent Pack"), Some("text"), Some(45_000)));
 
         let patch = |preset: &str| TextAnimationPatch { enter: Some(Some(AnimationRef { preset: preset.to_owned(), duration: engine::Time::from_ticks(9000) })), exit: None, repeat: None };
-        engine::set_pack_presets(library.preset_table());
-        assert!(patched_animation(&ClipAnimation::default(), &patch("agent-pack/rise")).is_ok());
-        let error = patched_animation(&ClipAnimation::default(), &patch("agent-pack/gone")).unwrap_err();
+        assert!(patched_animation(&library, AnimatedClipKind::Text, &ClipAnimation::default(), &patch("agent-pack/rise")).is_ok());
+        let error = patched_animation(&library, AnimatedClipKind::Text, &ClipAnimation::default(), &patch("agent-pack/gone")).unwrap_err();
         assert!(error.message.contains("agent-pack/rise"), "names the pack presets too: {}", error.message);
+        let error = patched_animation(&library, AnimatedClipKind::Video, &ClipAnimation::default(), &patch("agent-pack/rise")).unwrap_err();
+        assert!(error.message.contains("not offered for video") && error.message.contains("text"), "{}", error.message);
+
+        let loading = ClipAnimationLibrary::default();
+        let error = patched_animation(&loading, AnimatedClipKind::Text, &ClipAnimation::default(), &patch("agent-pack/rise")).unwrap_err();
+        assert!(error.message.contains("still loading"), "{}", error.message);
+        let error = patched_animation(&loading, AnimatedClipKind::Text, &ClipAnimation::default(), &patch("nope")).unwrap_err();
+        assert!(error.message.contains("is not a preset"), "a name without a pack is not waiting for one: {}", error.message);
     }
 
     fn file(path: &str) -> FontRef {

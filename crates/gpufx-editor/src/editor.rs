@@ -1661,11 +1661,13 @@ impl EditorState {
         self.ui.left_tab = LeftTab::Audio;
     }
 
-    /// Says that a sticker pack is there and shows the Sticker tab.
+    /// Says that a clip animation pack is there. The animations of a pack are offered in the
+    /// animation inspector, so no tab is shown.
     pub fn show_installed_clip_animation_pack(&mut self, installed: &InstalledClipAnimationPack) {
         self.report_info(Message::ClipAnimationPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
     }
 
+    /// Says that a sticker pack is there and shows the Sticker tab.
     pub fn show_installed_sticker_pack(&mut self, installed: &InstalledStickerPack) {
         self.report_info(Message::StickerPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
         self.ui.left_tab = LeftTab::Stickers;

@@ -325,6 +325,33 @@ fn clip_animation_set_animates_a_video_clip_and_a_text_and_refuses_an_audio_clip
 }
 
 #[test]
+fn clip_animation_set_refuses_a_pack_preset_that_is_not_for_the_kind_of_clip() {
+    let root = scratch("animation-applies-to");
+    let folder = root.join("packages/clip-animation/kinds");
+    std::fs::create_dir_all(&folder).unwrap();
+    let item = |id: &str, applies_to: &str| format!(r#"{{"id":"{id}","name":"{id}","kind":"in","default_duration":0.5,"applies_to":{applies_to},"curve":{{"tracks":{{"opacity":[{{"t":0,"value":0}},{{"t":1,"value":1}}]}}}}}}"#);
+    let manifest = format!(
+        r#"{{"format":1,"type":"clip-animation","id":"kinds","name":"Kinds","version":"1.0.0","license":{{"spdx":"MIT","files":["LICENSE.txt"]}},"items":[{},{}]}}"#,
+        item("sticker-only", r#"["sticker"]"#),
+        item("video-ok", r#"["video","text"]"#)
+    );
+    std::fs::write(folder.join("manifest.json"), manifest).unwrap();
+    let mut session = FileSession::with_roots(vec![root]);
+    let (video, _) = clip_paths();
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    let added = call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": video, "start": 0, "duration": SECOND}));
+    let current = revision(&added);
+
+    let refused = call_err(&mut session, "clip_animation_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}, "in": {"preset": "kinds/sticker-only", "duration": SECOND / 4}}));
+    assert_eq!(refused.code, "invalid_params");
+    assert!(refused.message.contains("not offered for video"), "{}", refused.message);
+    assert!(animation_of(&mut session, 0, 0).is_empty());
+
+    call_ok(&mut session, "clip_animation_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}, "in": {"preset": "kinds/video-ok", "duration": SECOND / 4}}));
+    assert_eq!(animation_of(&mut session, 0, 0).enter.map(|value| value.preset), Some("kinds/video-ok".to_owned()));
+}
+
+#[test]
 fn the_schemas_of_the_text_tools_name_every_field_an_agent_may_give() {
     let tools = gpufx_mcp::tools::all_tools();
     let schema = |name: &str| Value::Object(tools.iter().find(|tool| tool.name == name).unwrap().tool().input_schema.as_ref().clone());
