@@ -410,6 +410,8 @@ fn animation_preset(id: &str) -> String {
         "zoom" => "Zoom".to_owned(),
         "pop" => "Pop".to_owned(),
         "spin" => "Spin".to_owned(),
+        "typewriter" => "Typewriter".to_owned(),
+        "tumble" => "Tumble".to_owned(),
         "bounce" => "Bounce".to_owned(),
         "pulse" => "Pulse".to_owned(),
         "shake" => "Shake".to_owned(),

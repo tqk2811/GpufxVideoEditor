@@ -24,10 +24,10 @@ pub fn read_pack_presets(roots: &[PathBuf]) -> PackPresets {
             let reference = format!("{id}{PACK_PRESET_SEPARATOR}{}", item.id);
             let effect = effects.remove(&reference);
             // An item with only an effect has nothing to play without it; the problem says why.
-            if effect.is_none() && item.curve.tracks.is_empty() {
+            if effect.is_none() && item.curve.tracks.is_empty() && item.per_unit.is_none() {
                 continue;
             }
-            presets.push(PackPreset::new(reference, group, item.curve).with_effect(effect));
+            presets.push(PackPreset::new(reference, group, item.curve).with_effect(effect).with_per_unit(item.per_unit));
         }
     }
     PackPresets::new(presets)
@@ -71,6 +71,26 @@ mod tests {
         names.sort_unstable();
         assert_eq!(names, vec!["good/rise", "moves/other"]);
         assert!(presets.find(AnimationGroup::Exit, "moves/other").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_per_unit_item_is_read_for_text_only() {
+        let dir = std::env::temp_dir().join(format!("gpufx-pack-presets-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let per_unit = r#""per_unit":{"unit":"word","order":"random","seed":3,"selector":{"offset":[{"t":0,"value":-1},{"t":1,"value":1}],"shape":"ramp_down"},"curve":{"tracks":{"opacity":[{"t":0,"value":0}],"dy":[{"t":0,"value":0.5}]}}}"#;
+        write(&dir, "a", "words", &manifest("words", &format!(r#"{{"id":"rise","name":"Rise","kind":"in","default_duration":1,"applies_to":["text"],{per_unit}}}"#)));
+        write(&dir, "a", "notext", &manifest("notext", &format!(r#"{{"id":"rise","name":"Rise","kind":"in","default_duration":1,{per_unit}}}"#)));
+        write(&dir, "a", "unknown", &manifest("unknown", r#"{"id":"rise","name":"Rise","kind":"in","default_duration":1,"applies_to":["text"],"per_unit":{"stagger":0.5,"wobble":1,"curve":{"tracks":{"opacity":[{"t":0,"value":0}]}}}}"#));
+        let scan = scan_clip_animation_folders(&[dir.join("a")]);
+        let mut refused: Vec<&str> = scan.problems.iter().map(|problem| problem.pack.as_str()).collect();
+        refused.sort_unstable();
+        assert_eq!(refused, vec!["notext", "unknown"], "applies_to must be text, and a field the format does not know is refused");
+        let presets = read_pack_presets(&[dir.join("a")]);
+        let preset = presets.find(AnimationGroup::Enter, "words/rise").expect("an item with only per_unit plays");
+        let per_unit = preset.per_unit.as_ref().expect("its per_unit");
+        assert_eq!((per_unit.unit, per_unit.order, per_unit.seed), (engine::TextUnit::Word, engine::UnitOrder::Random, 3));
+        assert_eq!(per_unit.selector.as_ref().map(|selector| selector.shape), Some(engine::SelectorShape::RampDown));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

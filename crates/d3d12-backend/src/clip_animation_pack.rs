@@ -11,7 +11,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use engine::{check_curve, AnimationCurve, AnimationGroup};
+use engine::{check_curve, check_per_unit, AnimationCurve, AnimationGroup, PerUnit};
 use serde::Deserialize;
 
 use crate::paths::is_safe_id;
@@ -72,6 +72,10 @@ pub struct ClipAnimationManifestItem {
     /// A gpufx effect the item runs on top of its curve while it plays.
     #[serde(default)]
     pub effect: Option<ItemEffect>,
+    /// Moves the units of a text one by one (see [`engine::per_unit`]); an item with it applies to
+    /// `["text"]` only and may leave out its curve.
+    #[serde(default)]
+    pub per_unit: Option<PerUnit>,
 }
 
 /// The default name of the parameter an item effect drives.
@@ -189,11 +193,17 @@ fn check_item(item: &ClipAnimationManifestItem) -> Result<(), ManifestProblem> {
             }
         }
     }
+    if let Some(per_unit) = &item.per_unit {
+        if item.applies_to.as_deref() != Some(&["text".to_owned()][..]) {
+            return bad(format!("the item \"{id}\" has per_unit, so its applies_to must be [\"text\"]"));
+        }
+        check_per_unit(per_unit).or_else(|message| bad(format!("the item \"{id}\": {message}")))?;
+    }
     if let Some(effect) = &item.effect {
         check_effect(id, effect)?;
-        if item.curve.tracks.is_empty() {
-            return Ok(());
-        }
+    }
+    if (item.effect.is_some() || item.per_unit.is_some()) && item.curve.tracks.is_empty() {
+        return Ok(());
     }
     check_curve(&item.curve).or_else(|message| bad(format!("the item \"{id}\": {message}")))
 }

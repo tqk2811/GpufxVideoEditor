@@ -393,6 +393,8 @@ fn animation_preset(id: &str) -> String {
         "zoom" => "Thu phóng".to_owned(),
         "pop" => "Nảy".to_owned(),
         "spin" => "Xoay".to_owned(),
+        "typewriter" => "Đánh máy".to_owned(),
+        "tumble" => "Lật chữ".to_owned(),
         "bounce" => "Nhún".to_owned(),
         "pulse" => "Đập".to_owned(),
         "shake" => "Rung".to_owned(),

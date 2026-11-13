@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 
 use d3d12_backend::{resolve_item_effects, scan_clip_animation_folders, ClipAnimationManifest};
-use engine::{AnimationCurve, AnimationGroup, Clip, PackPreset, PackPresets, PresetEffect, Time};
+use engine::{AnimationCurve, AnimationGroup, Clip, PackPreset, PackPresets, PerUnit, PresetEffect, Time};
 
 use crate::audio_library::LibraryProblem;
 use crate::timecode::from_seconds;
@@ -76,6 +76,8 @@ pub struct LibraryAnimation {
     pub effect_package: Option<String>,
     /// That effect, when its package is installed and fits; it plays on top of the curve.
     pub effect: Option<PresetEffect>,
+    /// How it moves the units of a text one by one, for an animation of text clips.
+    pub per_unit: Option<PerUnit>,
 }
 
 impl LibraryAnimation {
@@ -110,7 +112,7 @@ impl ClipAnimationLibrary {
 
     /// The curves of every animation, for [`engine::set_pack_presets`].
     pub fn preset_table(&self) -> PackPresets {
-        PackPresets::new(self.packs.iter().flat_map(|pack| &pack.animations).map(|animation| PackPreset::new(animation.reference.clone(), animation.group, animation.curve.clone()).with_effect(animation.effect.clone())).collect())
+        PackPresets::new(self.packs.iter().flat_map(|pack| &pack.animations).map(|animation| PackPreset::new(animation.reference.clone(), animation.group, animation.curve.clone()).with_effect(animation.effect.clone()).with_per_unit(animation.per_unit.clone())).collect())
     }
 
     /// The animation a clip names as `reference` in `group`.
@@ -134,10 +136,11 @@ fn library_pack(manifest: ClipAnimationManifest, effects: &mut HashMap<String, P
             let reference = pack_reference(&id, &item.id);
             let effect = effects.remove(&reference);
             // An item with only an effect has nothing to play without it, as for an export.
-            if effect.is_none() && item.curve.tracks.is_empty() {
+            if effect.is_none() && item.curve.tracks.is_empty() && item.per_unit.is_none() {
                 return None;
             }
             Some(LibraryAnimation {
+                per_unit: item.per_unit,
                 effect,
                 effect_package: item.effect.map(|effect| effect.package),
                 reference,

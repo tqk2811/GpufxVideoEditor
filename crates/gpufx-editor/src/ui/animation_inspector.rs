@@ -66,7 +66,8 @@ fn animation_row(ui: &mut egui::Ui, id: egui::Id, animation: &mut ClipAnimation,
             if ui.selectable_label(current.is_none(), none.clone()).clicked() {
                 chosen = Some(Choice::None);
             }
-            for preset in presets_of(group) {
+            // A preset that moves the characters one by one is only for text.
+            for preset in presets_of(group).into_iter().filter(|preset| kind == AnimatedClipKind::Text || !engine::preset_is_per_unit(group, preset)) {
                 let selected = current.as_ref().is_some_and(|value| value.preset == preset);
                 if ui.selectable_label(selected, language.t(Message::AnimationPreset(preset))).clicked() {
                     chosen = Some(Choice::BuiltIn(preset));
@@ -154,7 +155,7 @@ mod tests {
 
     #[test]
     fn a_pack_preset_is_named_with_its_pack_or_marked_missing() {
-        let rise = crate::clip_animation_library::LibraryAnimation { reference: "p/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default(), effect_package: None, effect: None };
+        let rise = crate::clip_animation_library::LibraryAnimation { per_unit: None, reference: "p/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default(), effect_package: None, effect: None };
         let library = ClipAnimationLibrary { packs: vec![crate::clip_animation_library::ClipAnimationPack { id: "p".to_owned(), name: "Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
         assert_eq!(shown_name("p/rise", AnimationGroup::Enter, &library, Language::English), "Pack: Rise");
         assert_eq!(shown_name("q/gone", AnimationGroup::Enter, &library, Language::English), "q/gone (pack not installed)");
