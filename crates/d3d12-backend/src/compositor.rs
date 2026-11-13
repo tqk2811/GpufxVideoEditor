@@ -304,7 +304,9 @@ impl Image {
         }
     }
 
-    /// Whether the GPU reached the image's fence, so nothing still uses it.
+    /// Whether the GPU reached the fence of the last write to the image. Reads of it as a graph input
+    /// do not raise that fence, so a read may still be running: freeing it stays safe only because
+    /// the wgpu wrappers keep the resource alive until their submission finishes.
     fn idle(&self) -> bool {
         // SAFETY: reading the completed value of a live fence.
         (unsafe { self.fence.GetCompletedValue() }) >= self.fence_value

@@ -417,7 +417,6 @@ impl Session {
         }
     }
 
-    /// Follows the clock, and notices the end of the timeline or a failure.
     /// Lets the preview free what it kept for the next frames once playback stopped.
     fn trim_after_playback(&mut self) {
         let playing = self.state.is_playing();
@@ -427,6 +426,7 @@ impl Session {
         self.was_playing = playing;
     }
 
+    /// Follows the clock, and notices the end of the timeline or a failure.
     fn poll_playback(&mut self) {
         let Some(playback) = &self.playback else { return };
         if let Some(message) = playback.thread().take_error() {
