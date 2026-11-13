@@ -170,39 +170,63 @@ pub struct RenderSummary {
 /// Things built for a clip, each remembered with what it was built from. An edit renumbers clips,
 /// so a key alone does not identify a clip across projects: an entry whose recorded spec differs
 /// from the one asked for belongs to another clip and is rebuilt.
+///
+/// A key may keep up to `per_key` entries of different specs, the most recently used first, so a
+/// clip whose spec goes back and forth (the effects of its preset animations coming and going at
+/// the edges of their windows) finds what it was built for again instead of building it anew.
 pub struct ClipCache<S: ToOwned + PartialEq + ?Sized, V> {
-    entries: HashMap<ClipKey, (S::Owned, V)>,
+    entries: HashMap<ClipKey, Vec<(S::Owned, V)>>,
+    per_key: usize,
 }
 
 impl<S: ToOwned + PartialEq + ?Sized, V> Default for ClipCache<S, V> {
     fn default() -> Self {
-        Self { entries: HashMap::new() }
+        Self::with_per_key(1)
     }
 }
 
 impl<S: ToOwned + PartialEq + ?Sized, V> ClipCache<S, V> {
-    /// The entry of `key` for `wanted`, built by `build` when missing or stale. A failed build
-    /// leaves no entry, so the next call tries again.
+    /// A cache keeping up to `per_key` (at least 1) entries for each key.
+    pub fn with_per_key(per_key: usize) -> Self {
+        Self { entries: HashMap::new(), per_key: per_key.max(1) }
+    }
+
+    /// The entry of `key` for `wanted`, built by `build` when missing. When the key already holds
+    /// `per_key` entries, the least recently used one goes. A failed build leaves no entry, so the
+    /// next call tries again.
     pub fn get_or_build<E>(&mut self, key: ClipKey, wanted: &S, build: impl FnOnce() -> Result<V, E>) -> Result<&mut V, E> {
-        let stale = self.entries.get(&key).is_some_and(|(spec, _)| <S::Owned as std::borrow::Borrow<S>>::borrow(spec) != wanted);
-        if stale {
-            self.entries.remove(&key);
+        let list = self.entries.entry(key).or_default();
+        match list.iter().position(|(spec, _)| <S::Owned as std::borrow::Borrow<S>>::borrow(spec) == wanted) {
+            Some(index) => {
+                let found = list.remove(index);
+                list.insert(0, found);
+            }
+            None => {
+                let value = match build() {
+                    Ok(value) => value,
+                    Err(e) => {
+                        // With one entry a key, what is left belongs to another clip.
+                        if list.is_empty() || self.per_key == 1 {
+                            self.entries.remove(&key);
+                        }
+                        return Err(e);
+                    }
+                };
+                list.truncate(self.per_key - 1);
+                list.insert(0, (wanted.to_owned(), value));
+            }
         }
-        if !self.entries.contains_key(&key) {
-            let value = build()?;
-            self.entries.insert(key, (wanted.to_owned(), value));
-        }
-        Ok(&mut self.entries.get_mut(&key).expect("present or just inserted").1)
+        Ok(&mut self.entries.get_mut(&key).expect("present or just inserted")[0].1)
     }
 
-    /// The entry of `key`, whatever it was built from.
+    /// The most recently used entry of `key`, whatever it was built from.
     pub fn get_mut(&mut self, key: ClipKey) -> Option<&mut V> {
-        self.entries.get_mut(&key).map(|(_, value)| value)
+        self.entries.get_mut(&key).and_then(|list| list.first_mut()).map(|(_, value)| value)
     }
 
-    /// How many entries there are.
+    /// How many entries there are, over every key.
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.values().map(Vec::len).sum()
     }
 
     /// Whether there is no entry.
@@ -964,6 +988,32 @@ mod tests {
         assert!(cache.get_or_build(key(0), "b", || Err::<i32, _>(())).is_err());
         assert_eq!(cache.get_mut(key(0)), None, "must not leave a's value under b");
         assert_eq!(*cache.get_or_build(key(0), "b", || Ok::<_, ()>(3)).unwrap(), 3);
+    }
+
+    /// A clip whose preset animation has an effect in and out: its graph shape changes at each
+    /// edge of the windows. Every shape is built once, and a second play builds none.
+    #[test]
+    fn clip_cache_keeps_the_shapes_a_clip_goes_back_and_forth_between() {
+        let mut cache: ClipCache<str, i32> = ClipCache::with_per_key(3);
+        let builds = std::cell::Cell::new(0);
+        let mut play = || {
+            let before = builds.get();
+            for shape in ["own+in", "own+in", "own", "own", "own+out", "own+out"] {
+                cache.get_or_build(key(0), shape, || {
+                    builds.set(builds.get() + 1);
+                    Ok::<_, ()>(0)
+                })
+                .unwrap();
+            }
+            builds.get() - before
+        };
+        assert_eq!(play(), 3, "the first play builds each shape once");
+        assert_eq!(play(), 0, "a second play or a seek back builds none");
+        assert_eq!(cache.len(), 3);
+        cache.get_or_build(key(0), "own+other", || Ok::<_, ()>(9)).unwrap();
+        assert_eq!(cache.len(), 3, "the least recently used shape makes room");
+        cache.retain(|_| false);
+        assert!(cache.is_empty(), "a clip that leaves takes all its shapes with it");
     }
 
     #[test]
