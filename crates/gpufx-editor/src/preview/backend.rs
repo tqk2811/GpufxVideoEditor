@@ -87,6 +87,15 @@ impl D3d12Producer {
         Ok(rgba)
     }
 
+    /// Frees the images and pooled textures kept for the next frames, once playback stopped. The
+    /// graphs stay, so the next frame needs no shader built again.
+    pub fn trim(&mut self) {
+        match &mut self.compositor {
+            Some(sized) => sized.compositor.trim(),
+            None => self.gpu.context.trim_pool(),
+        }
+    }
+
     fn compositor_for(&mut self, width: u32, height: u32) -> Result<&mut D3d12Compositor, String> {
         let stale = self.compositor.as_ref().is_some_and(|sized| sized.width != width || sized.height != height);
         if stale {

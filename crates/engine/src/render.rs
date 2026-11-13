@@ -133,6 +133,14 @@ pub trait Compositor {
 
     /// Gives an image back.
     fn release(&mut self, image: Self::Image);
+
+    /// Called once a frame is finished, with the clips it used, so caches built for clips gone
+    /// from the project (or not drawn for a while) can be let go.
+    fn end_frame(&mut self, _used: &[ClipKey]) {}
+
+    /// Frees whatever is kept only for the next frames, for a caller that stopped rendering
+    /// (a paused preview, a finished export). The next frame builds what it needs again.
+    fn trim(&mut self) {}
 }
 
 /// Where the finished frames go.
@@ -189,6 +197,16 @@ impl<S: ToOwned + PartialEq + ?Sized, V> ClipCache<S, V> {
     /// The entry of `key`, whatever it was built from.
     pub fn get_mut(&mut self, key: ClipKey) -> Option<&mut V> {
         self.entries.get_mut(&key).map(|(_, value)| value)
+    }
+
+    /// How many entries there are.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether there is no entry.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     /// Keeps only the entries whose key passes `keep`.
@@ -378,6 +396,7 @@ impl<C: Compositor> FrameRenderer<C> {
         drop(kept);
         // A clip is contiguous on its track, so a clip unused in this frame is finished.
         self.decoders.retain(|key| used.contains(&key));
+        compositor.end_frame(&used);
         result
     }
 }
@@ -453,6 +472,8 @@ mod tests {
         events: Vec<String>,
         released: usize,
         acquired: usize,
+        /// The clips each finished frame used, as `end_frame` got them.
+        ended: Vec<Vec<ClipKey>>,
         /// `prepare_clip` fails on this track.
         failing_track: Option<usize>,
     }
@@ -567,6 +588,10 @@ mod tests {
 
         fn release(&mut self, _image: usize) {
             self.journal.borrow_mut().released += 1;
+        }
+
+        fn end_frame(&mut self, used: &[ClipKey]) {
+            self.journal.borrow_mut().ended.push(used.to_vec());
         }
     }
 
@@ -805,6 +830,16 @@ mod tests {
 
     fn consume_nothing(_: &mut FakeCompositor, _: usize) -> Result<(), RenderError> {
         Ok(())
+    }
+
+    #[test]
+    fn every_finished_frame_tells_the_compositor_its_clips() {
+        let (mut compositor, mut renderer, journal) = single_frame_rig();
+        let project = Project::from_json(TWO_TRACKS).expect("valid json");
+        renderer.render_frame(&project, &mut compositor, 0, consume_nothing).expect("frame 0");
+        renderer.render_frame(&project, &mut compositor, 1, consume_nothing).expect("frame 1");
+        let key = |track| ClipKey { track, clip: 0 };
+        assert_eq!(journal.borrow().ended, [vec![key(0)], vec![key(0), key(1)]]);
     }
 
     #[test]

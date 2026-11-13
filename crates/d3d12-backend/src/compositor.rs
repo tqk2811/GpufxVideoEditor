@@ -47,6 +47,10 @@ const MAX_TEXT_SIZES: usize = 4096;
 /// The side of the images a graph is tried on, to see what it does with alpha.
 const ALPHA_PROBE_SIDE: u32 = 16;
 
+/// A clip or transition graph unused for this many frames is dropped: its clip is gone from
+/// the project or far from the playhead.
+const GRAPH_IDLE_FRAMES: u64 = 120;
+
 /// An index into the image pool, or [`BLANK_IMAGE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImageId(usize);
@@ -535,6 +539,8 @@ struct ClipGraph {
 struct TransitionGraph {
     graph: EffectGraph,
     applied: Map<String, Value>,
+    /// The frame count of the compositor when it was last run.
+    last_used: u64,
 }
 
 /// Implements [`Compositor`] on a [`Gpu`]. Single threaded, one per [`Gpu`] (see the crate docs).
@@ -549,6 +555,10 @@ pub struct D3d12Compositor {
     spares: Vec<Image>,
     clip_graphs: ClipCache<[String], ClipGraph>,
     transition_graphs: HashMap<String, TransitionGraph>,
+    /// The frame count each clip graph's key was last seen in, for dropping unused ones.
+    clip_graphs_used: HashMap<ClipKey, u64>,
+    /// Frames ended through [`Compositor::end_frame`].
+    frames: u64,
     overlay: EffectGraph,
     /// The overlay that puts a clip at its place; its numbers change clip by clip.
     placer: EffectGraph,
@@ -586,7 +596,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default() })
+        Ok(Self { gpu, paths, width, height, images: Vec::new(), free: Vec::new(), spares: Vec::new(), clip_graphs: ClipCache::default(), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default() })
     }
 
     /// Makes `closing` stop the decoders opened from now on at once, and lets a newer request stop
@@ -615,6 +625,11 @@ impl D3d12Compositor {
         }
         self.images.push(Image::create(&self.gpu, self.width, self.height)?);
         Ok(ImageId(self.images.len() - 1))
+    }
+
+    /// How many clip and transition graphs are kept. For tests and diagnostics.
+    pub fn cached_graphs(&self) -> (usize, usize) {
+        (self.clip_graphs.len(), self.transition_graphs.len())
     }
 
     fn info(at: FrameContext) -> FrameInfo {
@@ -1185,7 +1200,7 @@ impl Compositor for D3d12Compositor {
                     trial.set_param("progress", &[0.5]).map_err(|e| format!("package {package}: setting progress failed: {e}"))?;
                     writes_alpha(&self.gpu, &mut trial, 2, &info)
                 };
-                TransitionGraph { graph: build_transition_graph(&self.gpu.context, &self.paths, package, params, larger_alpha)?, applied: params.clone() }
+                TransitionGraph { graph: build_transition_graph(&self.gpu.context, &self.paths, package, params, larger_alpha)?, applied: params.clone(), last_used: 0 }
             }
         };
         let output = self.acquire()?;
@@ -1195,6 +1210,7 @@ impl Compositor for D3d12Compositor {
             .set_param("progress", &[value])
             .map_err(|e| format!("package {package}: setting progress failed: {e}"))
             .and_then(|()| Self::run_graph(&self.gpu, &mut built.graph, &mut inputs, &mut self.images, output, width, height, &info));
+        built.last_used = self.frames;
         self.transition_graphs.insert(graph_key, built);
         if let Err(e) = result {
             self.release_image(output);
@@ -1247,6 +1263,23 @@ impl Compositor for D3d12Compositor {
 
     fn release(&mut self, image: ImageId) {
         self.release_image(image);
+    }
+
+    fn end_frame(&mut self, used: &[ClipKey]) {
+        for key in used {
+            self.clip_graphs_used.insert(*key, self.frames);
+        }
+        self.frames += 1;
+        let frames = self.frames;
+        self.clip_graphs_used.retain(|_, seen| frames - *seen <= GRAPH_IDLE_FRAMES);
+        let seen = &self.clip_graphs_used;
+        self.clip_graphs.retain(|key| seen.contains_key(&key));
+        self.transition_graphs.retain(|_, built| frames - built.last_used <= GRAPH_IDLE_FRAMES);
+    }
+
+    fn trim(&mut self) {
+        self.spares.clear();
+        self.gpu.context.trim_pool();
     }
 }
 
@@ -1335,6 +1368,45 @@ mod tests {
         assert_eq!(draw(0.0), (255, 0), "no blur leaves the edge as it is");
         let (left, right) = draw(MAX_BLUR_FRACTION);
         assert!(left < 250 && right > 5, "the largest blur, 8 pixels at this height, mixes both sides of the edge: {left} {right}");
+    }
+
+    #[test]
+    fn unused_graphs_are_let_go() {
+        let Some((gpu, _)) = overlay_on_hardware() else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        if !root.join("packages/gpufx/ffmpeg/dissolve/manifest.json").exists() {
+            eprintln!("skipping: the packages submodule is not checked out");
+            return;
+        }
+        let mut compositor = D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), 64, 36).expect("a compositor");
+        let key = ClipKey { track: 0, clip: 0 };
+        let effects = [ProjectEffect { package: "packages/gpufx/ffmpeg/invert".to_owned(), params: Map::new(), keyframes: Default::default() }];
+        let (context, paths) = (compositor.gpu.context.clone(), compositor.paths.clone());
+        compositor
+            .clip_graphs
+            .get_or_build(key, &["invert".to_owned()][..], || build_clip_graph(&context, &paths, 64, 36, &effects, false).map(|(graph, clocks)| ClipGraph { graph, applied: vec![Map::new()], clocks }))
+            .expect("a clip graph");
+        let (from, to) = (compositor.acquire().unwrap(), compositor.acquire().unwrap());
+        let progress = Progress { elapsed: Time::from_ticks(1), total: Time::from_ticks(2) };
+        let at = FrameContext { index: 0, time: Time::from_ticks(0) };
+        let mixed = compositor.transition("packages/gpufx/ffmpeg/dissolve", &Map::new(), from, to, progress, at).expect("a transition");
+        let mut rgba = Vec::new();
+        compositor.read(mixed, &mut rgba).expect("read");
+        for image in [from, to, mixed] {
+            compositor.images[image.0].wait().unwrap();
+            compositor.release(image);
+        }
+        compositor.end_frame(&[key]);
+        assert_eq!(compositor.cached_graphs(), (1, 1));
+        let other = ClipKey { track: 1, clip: 0 };
+        for _ in 1..GRAPH_IDLE_FRAMES {
+            compositor.end_frame(&[other]);
+        }
+        assert_eq!(compositor.cached_graphs(), (1, 1), "kept for the whole window");
+        compositor.end_frame(&[other]);
+        assert_eq!(compositor.cached_graphs(), (0, 0), "a removed clip's graph and an unused transition go");
+        compositor.trim();
+        assert_eq!(compositor.gpu.context.pool_stats().idle, 0, "trim empties the shared texture pool");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use engine::render::{render_with_audio, FrameSink, RenderError};
+use engine::render::{Compositor as _, render_with_audio, FrameSink, RenderError};
 use engine::{frame_count, validate, AudioSource, Project};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -286,6 +286,10 @@ impl ExportJob {
             compositor.set_closing(cancel.clone());
         }
         let result = self.render_into_files(&gpu, &mut compositor, &control, &settle);
+        // The export's images go with its compositor; the textures the graphs pooled on the
+        // shared device would otherwise stay until the preview renders again.
+        compositor.trim();
+        drop(compositor);
         if let Err(ExportError::Failed(message)) = &result {
             if !reported.get() {
                 settle(&Err(message.clone()));

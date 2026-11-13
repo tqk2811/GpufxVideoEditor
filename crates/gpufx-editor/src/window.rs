@@ -134,6 +134,8 @@ struct Session {
     snapshot: Option<(u64, Arc<Project>)>,
     /// A surface or resize failure that still applies; a following preview frame must not clear it.
     surface_error: Option<String>,
+    /// Whether playback ran at the last redraw, to trim the preview once it stops.
+    was_playing: bool,
     /// The revision the audio thread has.
     audio_revision: u64,
     package_roots: Vec<PathBuf>,
@@ -216,6 +218,7 @@ impl Session {
             shown: None,
             snapshot: None,
             surface_error: None,
+            was_playing: false,
             audio_revision: 0,
             package_roots,
             paths,
@@ -415,6 +418,15 @@ impl Session {
     }
 
     /// Follows the clock, and notices the end of the timeline or a failure.
+    /// Lets the preview free what it kept for the next frames once playback stopped.
+    fn trim_after_playback(&mut self) {
+        let playing = self.state.is_playing();
+        if self.was_playing && !playing {
+            self.preview.run_on_thread(Box::new(|producer: &mut D3d12Producer| producer.trim()));
+        }
+        self.was_playing = playing;
+    }
+
     fn poll_playback(&mut self) {
         let Some(playback) = &self.playback else { return };
         if let Some(message) = playback.thread().take_error() {
@@ -579,6 +591,7 @@ impl Session {
         self.poll_export();
         self.collect_preview();
         self.poll_playback();
+        self.trim_after_playback();
         #[cfg(debug_assertions)]
         self.drive_smoke();
         if let Some(retried) = self.presenter.retry_resize(&self.gpu) {
