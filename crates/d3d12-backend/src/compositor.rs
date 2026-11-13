@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 
 use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
@@ -436,6 +436,20 @@ impl StillImage {
 pub enum SourceFrame {
     Video(DecodedFrame),
     Still(Arc<StillImage>),
+    /// A step of a karaoke text not drawn yet. The compositor draws it, through its still cache,
+    /// before it reads the frame (see [`D3d12Compositor::resolve_frame`]).
+    Step { steps: Arc<KaraokeSteps>, step: usize },
+}
+
+/// The steps of a karaoke text: the step at `times[i]` is step `i + 1`, and the time before the
+/// first is step 0 (see [`engine::karaoke::step_at`]). Their pictures are drawn when shown and
+/// kept by the still cache only, so the cache can let them go; `shown` remembers the last one
+/// without keeping it.
+pub struct KaraokeSteps {
+    clip: Clip,
+    words: Vec<engine::KaraokeWord>,
+    times: Vec<Time>,
+    shown: Mutex<Option<(usize, Weak<StillImage>)>>,
 }
 
 impl SourceFrame {
@@ -443,6 +457,7 @@ impl SourceFrame {
         match self {
             Self::Video(frame) => decoded_input(frame),
             Self::Still(still) => Ok(still.input()),
+            Self::Step { .. } => Err("a karaoke step was read before it was drawn".to_owned()),
         }
     }
 
@@ -450,6 +465,7 @@ impl SourceFrame {
         match self {
             Self::Video(frame) => frame.display_aspect(),
             Self::Still(still) => still.aspect,
+            Self::Step { .. } => 1.0,
         }
     }
 
@@ -459,6 +475,7 @@ impl SourceFrame {
             Self::Still(still) => {
                 still.fence_value.fetch_max(value, Ordering::Relaxed);
             }
+            Self::Step { .. } => {}
         }
     }
 
@@ -468,7 +485,7 @@ impl SourceFrame {
     }
 
     fn is_still(&self) -> bool {
-        matches!(self, Self::Still(_))
+        matches!(self, Self::Still(_) | Self::Step { .. })
     }
 }
 
@@ -476,9 +493,8 @@ impl SourceFrame {
 pub enum SourceDecoder {
     Video(SequentialDecoder),
     Still(Arc<StillImage>),
-    /// A karaoke text: the picture of each step, the step at `times[i]` drawn by `stills[i + 1]`
-    /// and the time before the first by `stills[0]` (see [`engine::karaoke::step_at`]).
-    Steps { times: Vec<engine::time::Time>, stills: Vec<Arc<StillImage>> },
+    /// A karaoke text, a picture per step.
+    Steps(Arc<KaraokeSteps>),
 }
 
 impl Decoder for SourceDecoder {
@@ -488,14 +504,18 @@ impl Decoder for SourceDecoder {
         match self {
             Self::Video(decoder) => decoder.frame_at(time).map(SourceFrame::Video),
             Self::Still(still) => Ok(SourceFrame::Still(still.clone())),
-            Self::Steps { times, stills } => Ok(SourceFrame::Still(stills[engine::karaoke::step_at(times, time).min(stills.len() - 1)].clone())),
+            Self::Steps(steps) => {
+                let step = engine::karaoke::step_at(&steps.times, time);
+                let shown = steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().filter(|(shown, _)| *shown == step).and_then(|(_, still)| still.upgrade());
+                Ok(shown.map_or_else(|| SourceFrame::Step { steps: steps.clone(), step }, SourceFrame::Still))
+            }
         }
     }
 
     fn wait_idle(&mut self) -> Result<(), RenderError> {
         match self {
             Self::Video(decoder) => decoder.wait_idle(),
-            Self::Still(_) | Self::Steps { .. } => Ok(()),
+            Self::Still(_) | Self::Steps(_) => Ok(()),
         }
     }
 }
@@ -892,6 +912,19 @@ impl D3d12Compositor {
         self.insert_still(key, (0, None), picture)
     }
 
+    /// Draws a karaoke step that `frame` holds, or takes it from the still cache, and makes the
+    /// frame that picture. Any other frame stays as it is.
+    fn resolve_frame(&mut self, frame: &mut SourceFrame) -> Result<(), String> {
+        let SourceFrame::Step { steps, step } = frame else { return Ok(()) };
+        let (steps, step) = (steps.clone(), *step);
+        let text = steps.clip.text.as_ref().ok_or("a karaoke step of a clip without text")?;
+        let styles = engine::karaoke::word_styles(text, &steps.words, &engine::karaoke::step_states(&steps.words, &steps.times, step));
+        let still = self.load_text(&steps.clip, text, &styles)?;
+        *steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((step, Arc::downgrade(&still)));
+        *frame = SourceFrame::Still(still);
+        Ok(())
+    }
+
     fn insert_still(&mut self, key: StillKey, stamp: (u64, Option<SystemTime>), picture: StillPicture) -> Result<Arc<StillImage>, String> {
         let image = Image::upload(&self.gpu, &picture)?;
         let bytes = u64::from(picture.width) * u64::from(picture.height) * 4;
@@ -1191,14 +1224,9 @@ impl Compositor for D3d12Compositor {
     fn open_decoder(&mut self, clip: &Clip) -> Result<SourceDecoder, RenderError> {
         if let Some(text) = &clip.text {
             if let Some(words) = engine::clip_words(clip).filter(|words| !words.is_empty()) {
-                // One picture per karaoke step: a cue of a few words has only a few.
+                // One picture per karaoke step, drawn when the step is shown.
                 let times = engine::karaoke::step_times(&words);
-                let mut stills = Vec::with_capacity(times.len() + 1);
-                for step in 0..=times.len() {
-                    let styles = engine::karaoke::word_styles(text, &words, &engine::karaoke::step_states(&words, &times, step));
-                    stills.push(self.load_text(clip, text, &styles).map_err(RenderError)?);
-                }
-                return Ok(SourceDecoder::Steps { times, stills });
+                return Ok(SourceDecoder::Steps(Arc::new(KaraokeSteps { clip: clip.clone(), words, times, shown: Mutex::new(None) })));
             }
             return self.load_text(clip, text, &[]).map(SourceDecoder::Still).map_err(RenderError);
         }
@@ -1218,6 +1246,7 @@ impl Compositor for D3d12Compositor {
     }
 
     fn prepare_clip(&mut self, key: ClipKey, frame: &mut <SourceDecoder as Decoder>::Frame, effects: &[ProjectEffect], transform: ClipTransform, clock: ClipClock, at: FrameContext) -> Result<ImageId, RenderError> {
+        self.resolve_frame(frame).map_err(RenderError)?;
         let info = Self::info(at);
         let (input, output) = input_then_output(|| frame.input(), || self.acquire())?;
         let (width, height) = (self.width, self.height);
@@ -1591,6 +1620,32 @@ mod tests {
         assert_eq!((compositor.cached_graphs(), compositor.pool_images()), ((0, 0), 0), "a removed clip's graph, an unused transition and idle images go");
         compositor.trim();
         assert_eq!(compositor.gpu.context.pool_stats().idle, 0, "trim empties the shared texture pool");
+    }
+
+    #[test]
+    fn karaoke_steps_are_drawn_when_shown_and_left_to_the_cache() {
+        let Some((gpu, _)) = overlay_on_hardware() else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        let mut compositor = D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), 64, 36).expect("a compositor");
+        let mut text = TextContent::new("one two three", 0.1);
+        let active = engine::KaraokeLook { color: Some([255, 0, 0, 255]), ..engine::KaraokeLook::default() };
+        text.karaoke = Some(engine::TextKaraoke { mode: engine::KaraokeMode::Color, active: Some(active), ..engine::TextKaraoke::default() });
+        let clip = engine::edit::text_clip(Time::ZERO, Time::from_ticks(90_000), text);
+        let mut decoder = compositor.open_decoder(&clip).expect("a decoder");
+        assert_eq!(compositor.text_rasterizations(), 0, "no step is drawn before it is shown");
+        let mut kept = Vec::new();
+        for time in [0, 1, 20_000, 20_001, 50_000, 89_000] {
+            let mut frame = decoder.frame_at(Time::from_ticks(time)).expect("a frame");
+            compositor.resolve_frame(&mut frame).expect("a drawn step");
+            assert!(matches!(frame, SourceFrame::Still(_)), "at {time}");
+            kept.push(frame);
+        }
+        let drawn = compositor.text_rasterizations();
+        assert!((2..=4).contains(&drawn), "each step shown is drawn once, not every step: {drawn}");
+        assert!(matches!(decoder.frame_at(Time::from_ticks(89_001)).expect("a frame"), SourceFrame::Still(_)), "the step just shown is taken without the cache");
+        drop(kept);
+        assert!(compositor.stills.values().all(|cached| Arc::strong_count(&cached.still) == 1), "the decoder holds no step picture, so the cache can let them go");
+        drop(decoder);
     }
 
     #[test]
