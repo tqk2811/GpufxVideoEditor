@@ -268,6 +268,13 @@ pub enum Message {
     SubtitleStyleNone,
     /// The check box that keeps the style of one cue when the track's style changes.
     SubtitleOwnStyle,
+    /// The check box that turns karaoke on for a cue.
+    Karaoke,
+    KaraokeColor,
+    KaraokeBox,
+    KaraokeScale,
+    /// The colour of the word being spoken.
+    KaraokeActiveColor,
     ExportSubtitles,
     SubtitlesExported(String),
     SubtitleExportFailed(String),
@@ -500,6 +507,11 @@ mod tests {
             Message::SubtitleTrackStyle,
             Message::SubtitleStyleNone,
             Message::SubtitleOwnStyle,
+            Message::Karaoke,
+            Message::KaraokeColor,
+            Message::KaraokeBox,
+            Message::KaraokeScale,
+            Message::KaraokeActiveColor,
             Message::ExportSubtitles,
             Message::SubtitlesExported(name()),
             Message::SubtitleExportFailed(name()),

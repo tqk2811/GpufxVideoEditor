@@ -11,7 +11,7 @@ use crate::text_clip::{default_background, default_glow, default_outline, defaul
 use crate::text_shapes::available_families;
 use crate::text_style_library::StyleKind;
 use egui::{Rect, Vec2};
-use engine::{ClipKey, FontRef, Rgba, TextAlign, TextContent, TextTransform, TEXT_WEIGHT_RANGE};
+use engine::{ClipKey, FontRef, KaraokeLook, KaraokeMode, Rgba, TextAlign, TextContent, TextKaraoke, TextTransform, TEXT_WEIGHT_RANGE};
 use std::ops::RangeInclusive;
 
 /// How long typing must pause before the text on screen follows, in seconds. Each pause is one
@@ -61,6 +61,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
             Some(SubtitleAction::OwnStyle(own)) => next.own_style = own,
             None => {}
         }
+        karaoke_rows(ui, &mut next, language);
         ui.separator();
     }
     if let Some(reference) = style_combo(ui, id, state, language) {
@@ -278,6 +279,40 @@ fn style_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
         });
     });
     percent_row(ui, &language.t(Message::FieldLetterSpacing), &mut text.letter_spacing, LETTER_SPACING_RANGE);
+}
+
+/// Karaoke of a cue: on or off, how the spoken word is marked, and its colour. Word times are set
+/// through the agent tools; here the words share the cue by their characters unless set.
+fn karaoke_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
+    let mut on = text.karaoke.as_ref().is_some_and(|karaoke| karaoke.is_on());
+    if ui.checkbox(&mut on, language.t(Message::Karaoke)).changed() {
+        let mut karaoke = text.karaoke.clone().unwrap_or_else(default_karaoke);
+        karaoke.mode = if on { KaraokeMode::Color } else { KaraokeMode::None };
+        text.karaoke = Some(karaoke);
+    }
+    let text_color = text.color;
+    let Some(karaoke) = text.karaoke.as_mut().filter(|karaoke| karaoke.is_on()) else { return };
+    ui.indent("karaoke", |ui| {
+        ui.horizontal(|ui| {
+            for (value, label) in [(KaraokeMode::Color, Message::KaraokeColor), (KaraokeMode::Box, Message::KaraokeBox), (KaraokeMode::Scale, Message::KaraokeScale)] {
+                ui.selectable_value(&mut karaoke.mode, value, language.t(label));
+            }
+        });
+        // An active look without a colour keeps the text's; it is written only once changed.
+        let shown = karaoke.active.and_then(|look| look.color).unwrap_or(text_color);
+        let mut color = shown;
+        color_row(ui, &language.t(Message::KaraokeActiveColor), &mut color);
+        if color != shown {
+            karaoke.active.get_or_insert_with(KaraokeLook::default).color = Some(color);
+        }
+    });
+}
+
+/// The colour of the spoken word when karaoke is first turned on.
+const DEFAULT_KARAOKE_COLOR: Rgba = [255, 220, 0, 255];
+
+fn default_karaoke() -> TextKaraoke {
+    TextKaraoke { mode: KaraokeMode::Color, active: Some(KaraokeLook { color: Some(DEFAULT_KARAOKE_COLOR), ..KaraokeLook::default() }), ..TextKaraoke::default() }
 }
 
 /// A checkbox that turns a style on, with its default, or off.
