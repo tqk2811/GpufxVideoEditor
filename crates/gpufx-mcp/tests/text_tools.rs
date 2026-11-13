@@ -244,17 +244,84 @@ fn font_list_puts_the_default_font_first_and_says_while_the_fonts_are_still_bein
 }
 
 #[test]
-fn text_animation_list_names_the_presets_of_each_group() {
+fn clip_animation_list_names_every_preset_with_its_group_and_default_duration() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
-    let list = call_ok(&mut session, "text_animation_list", json!({}));
+    let list = call_ok(&mut session, "clip_animation_list", json!({}));
+    let presets = list["presets"].as_array().unwrap_or_else(|| panic!("no presets: {list}"));
+    assert_eq!(presets.len(), engine::ANIMATION_PRESETS.len());
     for group in [AnimationGroup::Enter, AnimationGroup::Exit, AnimationGroup::Repeat] {
-        let ids: Vec<&str> = list[group.name()].as_array().unwrap_or_else(|| panic!("no group {}: {list}", group.name())).iter().map(|id| id.as_str().unwrap()).collect();
+        let ids: Vec<&str> = presets.iter().filter(|preset| preset["group"] == group.name()).map(|preset| preset["id"].as_str().unwrap()).collect();
         assert_eq!(ids, gpufx_editor::text_clip::presets_of(group), "{}", group.name());
         assert!(!ids.is_empty());
     }
-    assert!(list["in"].as_array().unwrap().iter().any(|id| id == "fade"));
-    assert!(list["loop"].as_array().unwrap().iter().any(|id| id == "bounce"));
-    assert!(!list["in"].as_array().unwrap().iter().any(|id| id == "bounce"));
+    for preset in presets {
+        let known = engine::ANIMATION_PRESETS.iter().find(|known| known.id == preset["id"] && known.group.name() == preset["group"]).unwrap();
+        assert_eq!(preset["default_duration"], known.default_duration.ticks(), "{preset}");
+    }
+    assert!(presets.iter().any(|preset| preset["id"] == "fade" && preset["group"] == "in"));
+    assert!(presets.iter().any(|preset| preset["id"] == "bounce" && preset["group"] == "loop"));
+    assert!(!presets.iter().any(|preset| preset["id"] == "bounce" && preset["group"] == "in"));
+}
+
+/// One second of 16-bit mono silence at 8 kHz, written as a WAV file.
+fn silent_wav() -> String {
+    const RATE: u32 = 8000;
+    let data = RATE * 2;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&(36 + data).to_le_bytes());
+    bytes.extend_from_slice(b"WAVEfmt ");
+    bytes.extend_from_slice(&16u32.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&RATE.to_le_bytes());
+    bytes.extend_from_slice(&(RATE * 2).to_le_bytes());
+    bytes.extend_from_slice(&2u16.to_le_bytes());
+    bytes.extend_from_slice(&16u16.to_le_bytes());
+    bytes.extend_from_slice(b"data");
+    bytes.extend_from_slice(&data.to_le_bytes());
+    bytes.resize(bytes.len() + data as usize, 0);
+    let path = scratch("animation-audio").join("silence.wav");
+    std::fs::write(&path, bytes).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[test]
+fn clip_animation_set_animates_a_video_clip_and_a_text_and_refuses_an_audio_clip() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let (video, _) = clip_paths();
+    let audio = silent_wav();
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    call_ok(&mut session, "track_add", json!({"expected_revision": 1, "kind": "audio"}));
+    call_ok(&mut session, "clip_add", json!({"expected_revision": 2, "track": 0, "source": video, "start": 0, "duration": SECOND}));
+    let added = call_ok(&mut session, "clip_add", json!({"expected_revision": 3, "track": 1, "source": audio, "start": 0, "duration": SECOND}));
+    let current = revision(&added);
+
+    let set = call_ok(&mut session, "clip_animation_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}, "in": {"preset": "fade", "duration": SECOND / 4}, "loop": {"preset": "bounce", "duration": SECOND / 2}}));
+    let animation = animation_of(&mut session, 0, 0);
+    assert_eq!(animation.enter, Some(engine::AnimationRef { preset: "fade".into(), duration: engine::Time::from_ticks(SECOND / 4) }));
+    assert_eq!(animation.repeat.as_ref().map(|value| value.preset.as_str()), Some("bounce"));
+    assert_eq!(animation.exit, None);
+
+    let set = call_ok(&mut session, "clip_animation_set", json!({"expected_revision": revision(&set), "clip": {"track": 0, "clip": 0}, "loop": null}));
+    let animation = animation_of(&mut session, 0, 0);
+    assert!(animation.enter.is_some() && animation.repeat.is_none(), "an absent group stays, null takes one off: {animation:?}");
+    let current = revision(&set);
+
+    let audio_error = call_err(&mut session, "clip_animation_set", json!({"expected_revision": current, "clip": {"track": 1, "clip": 0}, "in": {"preset": "fade", "duration": SECOND / 4}}));
+    assert_eq!(audio_error.code, "invalid_params");
+    assert!(audio_error.message.contains("audio"), "{}", audio_error.message);
+    let wrong_group = call_err(&mut session, "clip_animation_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}, "in": {"preset": "bounce", "duration": SECOND}}));
+    assert_eq!(wrong_group.code, "invalid_params");
+    assert!(wrong_group.message.contains("clip_animation_list"), "{}", wrong_group.message);
+    assert_eq!(call_err(&mut session, "clip_animation_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}})).code, "invalid_params");
+    assert!(animation_of(&mut session, 1, 0).is_empty());
+
+    let text = call_ok(&mut session, "text_add", json!({"expected_revision": current, "start": 2 * SECOND, "duration": SECOND, "content": "Hi"}));
+    let clip = &text["clip"];
+    let (track, index) = (clip["track"].as_u64().unwrap() as usize, clip["clip"].as_u64().unwrap() as usize);
+    call_ok(&mut session, "clip_animation_set", json!({"expected_revision": revision(&text), "clip": {"track": track, "clip": index}, "out": {"preset": "fade", "duration": SECOND / 4}}));
+    assert_eq!(animation_of(&mut session, track, index).exit.map(|value| value.preset), Some("fade".to_owned()));
 }
 
 #[test]

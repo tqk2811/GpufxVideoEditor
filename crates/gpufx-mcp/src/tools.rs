@@ -188,12 +188,12 @@ pub struct ShadowParam {
     pub blur: f32,
 }
 
-/// One preset animation of a text.
+/// One preset animation of a clip with a picture.
 #[derive(Deserialize, JsonSchema, Clone)]
 #[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct AnimationRefParam {
-    /// An id text_animation_list names for this group.
+    /// An id clip_animation_list names for this group.
     pub preset: String,
     /// How long one run lasts, in ticks, above 0.
     pub duration: i64,
@@ -205,7 +205,7 @@ impl From<AnimationRefParam> for engine::AnimationRef {
     }
 }
 
-/// The animations of a text. A group that is absent stays as it is; null takes its animation off.
+/// The animations of a clip with a picture. A group that is absent stays as it is; null takes its animation off.
 #[derive(Deserialize, JsonSchema, Clone)]
 #[schemars(inline)]
 #[serde(deny_unknown_fields)]
@@ -325,6 +325,32 @@ params!(TransitionAddParams { expected_revision: u64, track: usize, after_clip: 
 params!(TransitionRemoveParams { expected_revision: u64, track: usize, after_clip: usize });
 params!(GainParams { expected_revision: u64, clip: ClipParam, gain_db: f64 });
 params!(SpeedParams { expected_revision: u64, clip: ClipParam, speed: f64 });
+/// The clip whose animations clip_animation_set changes, and the groups to change, as in
+/// [`AnimationParam`].
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClipAnimationSetParams {
+    pub expected_revision: u64,
+    pub clip: ClipParam,
+    /// Plays as the clip appears.
+    #[serde(default, rename = "in", deserialize_with = "double_option")]
+    pub enter: Option<Option<AnimationRefParam>>,
+    /// Plays as the clip goes away.
+    #[serde(default, rename = "out", deserialize_with = "double_option")]
+    pub exit: Option<Option<AnimationRefParam>>,
+    /// Repeats the whole time the clip shows.
+    #[serde(default, rename = "loop", deserialize_with = "double_option")]
+    pub repeat: Option<Option<AnimationRefParam>>,
+}
+
+fn clip_animation_set(p: ClipAnimationSetParams) -> Result<AgentRequest, AgentError> {
+    if p.enter.is_none() && p.exit.is_none() && p.repeat.is_none() {
+        return Err(AgentError::new("invalid_params", "give at least one of in, out and loop"));
+    }
+    let animation = AnimationParam { enter: p.enter, exit: p.exit, repeat: p.repeat }.into();
+    edit(p.expected_revision, AgentEdit::ClipSetAnimation { clip: p.clip.into(), animation })
+}
+
 params!(MutedParams { expected_revision: u64, clip: ClipParam, muted: bool });
 params!(FadesParams { expected_revision: u64, clip: ClipParam, fade_in: i64, fade_out: i64 });
 params!(TransformParams { expected_revision: u64, clip: ClipParam, placement: Option<PlacementParam>, opacity: Option<f64>, rotation: Option<f64> });
@@ -426,7 +452,8 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track or, when track is absent, on the first video track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, align, line_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
         tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow or an animation group off. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
         tool!("font_list", "The fonts a text can name, each as the font value to give: the default font first (the system UI font, such as Segoe UI), then the installed families. state is loading while the installed fonts are still being read; ask again then.", NoParams, |_| Ok(AgentRequest::FontList)),
-        tool!("text_animation_list", "The preset animation ids a text can name, by group: in, out and loop. Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::TextAnimationList)),
+        tool!("clip_animation_list", "The preset animations a clip with a picture (video, image, sticker or text) can name: each with its id, its group (in, out or loop) and default_duration in ticks (for loop, one cycle). Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::ClipAnimationList)),
+        tool!("clip_animation_set", "Sets the preset animations of a clip with a picture (video, image, sticker or text): in plays as it appears, out as it goes away, loop the whole time it shows. Each is {preset, duration in ticks}, with a preset clip_animation_list names for that group; a group that is absent stays, and null takes its animation off. Refused with invalid_params for a clip on an audio track.", ClipAnimationSetParams, clip_animation_set),
         tool!("clip_move", "Moves a clip to a track, as near start as the other clips allow. Returns where it landed.", ClipMoveParams, |p| edit(p.expected_revision, AgentEdit::ClipMove { clip: p.clip.into(), track: p.track, start: ticks(p.start) })),
         tool!("clip_trim_start", "Moves the start edge of a clip, keeping the frames under the end edge.", ClipTrimStartParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimStart { clip: p.clip.into(), start: ticks(p.start) })),
         tool!("clip_trim_end", "Moves the end edge of a clip.", ClipTrimEndParams, |p| edit(p.expected_revision, AgentEdit::ClipTrimEnd { clip: p.clip.into(), end: ticks(p.end) })),

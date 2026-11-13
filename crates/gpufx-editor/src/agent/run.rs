@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
-use super::text::{animation_list, apply_animation_patch, apply_patch, font_list};
+use super::text::{animation_list, apply_animation_patch, apply_patch, font_list, patched_animation};
 use crate::editor::{new_clip, AgentExport, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_IMAGE_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::export::{export_blocker, ExportOutcome};
 use crate::i18n::Language;
@@ -318,6 +318,17 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 .map_err(refused)?;
             result.insert("clip".to_owned(), json!(clip));
         }
+        AgentEdit::ClipSetAnimation { clip, animation } => {
+            let key = ClipKey::from(clip);
+            let track = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).map_err(|error| AgentError::from_edit(&error))?;
+            let found = track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key }).map_err(|error| AgentError::from_edit(&error))?;
+            if track.is_audio() {
+                return Err(AgentError::new("invalid_params", format!("track {} is an audio track: its clips have no picture to animate", clip.track)));
+            }
+            let next = patched_animation(&found.animation, &animation)?;
+            state.apply_agent_command(|project| engine::set_animation(project, key, next)).map_err(refused)?;
+            result.insert("clip".to_owned(), json!(clip));
+        }
         AgentEdit::ClipMove { clip, track, start } => {
             let landing = landing_start(state.project(), clip, track, start);
             state.apply_agent_command(|project| engine::move_clip(project, clip.into(), track, start)).map_err(refused)?;
@@ -553,7 +564,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::ProjectGet => Ok(project_summary(host.state().project())),
         AgentRequest::PackagesList { .. } => Ok(package_list.unwrap_or_default()),
         AgentRequest::FontList => Ok(font_list()),
-        AgentRequest::TextAnimationList => Ok(animation_list()),
+        AgentRequest::ClipAnimationList => Ok(animation_list()),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
             None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe)),

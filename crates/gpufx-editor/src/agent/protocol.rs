@@ -95,6 +95,8 @@ pub enum AgentEdit {
     TextAdd { track: Option<usize>, start: Time, duration: Time, content: String, style: TextPatch },
     /// Changes the text of a text clip; its place follows the size of the picture.
     TextSet { clip: ClipRef, patch: TextPatch },
+    /// Changes the preset animations of a clip with a picture, one group at a time.
+    ClipSetAnimation { clip: ClipRef, animation: TextAnimationPatch },
     ClipMove { clip: ClipRef, track: usize, start: Time },
     ClipTrimStart { clip: ClipRef, start: Time },
     ClipTrimEnd { clip: ClipRef, end: Time },
@@ -135,8 +137,8 @@ pub enum AgentRequest {
     PackagesList { filter: Option<String> },
     /// The font families a text can name.
     FontList,
-    /// The ids of the preset animations of a text, by group.
-    TextAnimationList,
+    /// The preset animations a clip with a picture can name: id, group and default duration.
+    ClipAnimationList,
     Edit { expected_revision: u64, edit: AgentEdit },
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },

@@ -54,7 +54,8 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `clip_add`, `clip_move`, `clip_trim_start`, `clip_trim_end`, `clip_split`, `clip_delete` | Sửa clip |
 | `effect_add`, `effect_remove`, `transition_add`, `transition_remove` | Hiệu ứng và transition |
 | `text_add`, `text_set` | Thêm và sửa clip chữ, xem mục `Chữ` |
-| `font_list`, `text_animation_list` | Danh sách font và danh sách preset hiệu ứng chữ theo nhóm `in`, `out`, `loop` |
+| `font_list`, `clip_animation_list` | Danh sách font và danh sách preset animation (id, nhóm `in`/`out`/`loop`, thời lượng mặc định) |
+| `clip_animation_set` | Đặt animation `in`, `out`, `loop` cho một clip có hình (video, ảnh, sticker, chữ) |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
 | `clip_set_speed` | Tốc độ phát một clip, xem mục dưới |
 | `clip_set_transform` | Vị trí, độ mờ, xoay tĩnh của clip |
@@ -87,7 +88,9 @@ Clip chữ là clip có `source` `text:` và trường `text` (`TextContent`); `
 
 `font_list` trả `{state, fonts}`. Mỗi phần tử của `fonts` là giá trị dùng được ngay cho `font`: `{"kind": "default"}` đứng đầu, rồi `{"kind": "system", "family": ...}`. Lần quét font hệ thống chưa xong thì `state` là `loading` và chỉ có font mặc định; gọi lại sau, `state` thành `ready`. Khi đã `ready`, một family không có trong danh sách bị từ chối; còn `loading` thì tên được nhận như đã cho. `font` còn nhận `{"kind": "file", "path": ...}` trỏ tới một file font (`.ttf`, `.otf`, `.ttc`, dùng face đầu tiên): `path` phải là đường dẫn tuyệt đối trên ổ đĩa của máy (không nhận share mạng `\\server\share`, `//server/share`, `\\?\UNC\...` hay thiết bị `\\.\...`), tới file có thật, không quá 50 MiB (kiểm trước khi đọc) và đọc được là font, sai thì `invalid_params`. File này không nằm trong `font_list`. Khi lưu project, đường dẫn nằm trong thư mục project được ghi tương đối như nguồn media.
 
-`text_animation_list` trả `{"in": [...], "out": [...], "loop": [...]}`, mỗi nhóm là các id preset. Preset chỉ được dùng đúng nhóm của nó, `duration` của một preset tính bằng tick và phải lớn hơn 0.
+`clip_animation_list` trả `{"presets": [{"id", "group", "default_duration"}, ...]}`, `group` là `in`, `out` hoặc `loop`, `default_duration` tính bằng tick (với `loop` là một chu kỳ). Preset chỉ được dùng đúng nhóm của nó, `duration` của một preset tính bằng tick và phải lớn hơn 0.
+
+`clip_animation_set` nhận `clip`, `expected_revision` và các nhóm `in`, `out`, `loop`, mỗi nhóm là `{preset, duration}`. Nhóm vắng giữ nguyên, `null` gỡ animation của nhóm đó, không có nhóm nào thì `invalid_params`. Dùng được cho mọi clip có hình (video, ảnh, sticker, chữ); clip trên track audio bị từ chối với `invalid_params`. `text_add` và `text_set` vẫn nhận `animation` như cũ.
 
 Giá trị không hợp lệ bị từ chối với `invalid_params` và nói rõ trường nào: `content` rỗng, `size` hay `line_spacing` không lớn hơn 0, độ rộng viền, `padding`, `radius` hay `blur` âm, preset không có hoặc sai nhóm, `duration` không dương, `text_set` không có trường nào để đổi.
 

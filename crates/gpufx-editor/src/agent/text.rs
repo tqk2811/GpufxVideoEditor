@@ -128,7 +128,7 @@ fn check_font(font: &FontRef) -> Result<(), AgentError> {
     }
 }
 
-fn patched_animation(current: &ClipAnimation, patch: &TextAnimationPatch) -> Result<ClipAnimation, AgentError> {
+pub fn patched_animation(current: &ClipAnimation, patch: &TextAnimationPatch) -> Result<ClipAnimation, AgentError> {
     let mut next = current.clone();
     for (group, change, slot) in [(AnimationGroup::Enter, &patch.enter, &mut next.enter), (AnimationGroup::Exit, &patch.exit, &mut next.exit), (AnimationGroup::Repeat, &patch.repeat, &mut next.repeat)] {
         if let Some(value) = change {
@@ -145,7 +145,7 @@ fn check_animation(group: AnimationGroup, value: &AnimationRef) -> Result<(), Ag
     let name = group.name();
     if engine::find_preset(group, &value.preset).is_none() {
         let known = presets(group).join(", ");
-        return Err(invalid(format!("'{}' is not a preset of the '{name}' group; text_animation_list names them: {known}", value.preset)));
+        return Err(invalid(format!("'{}' is not a preset of the '{name}' group; clip_animation_list names them: {known}", value.preset)));
     }
     if value.duration <= engine::Time::ZERO {
         return Err(invalid(format!("the '{name}' animation must last more than 0 ticks")));
@@ -169,13 +169,11 @@ pub fn font_list() -> Value {
     json!({"state": if families.is_empty() { "loading" } else { "ready" }, "fonts": fonts})
 }
 
-/// The preset ids, by the name of the group in a project: `in`, `out` and `loop`.
+/// Every preset animation: its id, the name of its group in a project (`in`, `out` or `loop`) and
+/// the duration a new one gets, in ticks.
 pub fn animation_list() -> Value {
-    let mut groups = serde_json::Map::new();
-    for group in [AnimationGroup::Enter, AnimationGroup::Exit, AnimationGroup::Repeat] {
-        groups.insert(group.name().to_owned(), json!(presets(group)));
-    }
-    Value::Object(groups)
+    let presets: Vec<Value> = ANIMATION_PRESETS.iter().map(|preset| json!({"id": preset.id, "group": preset.group.name(), "default_duration": preset.default_duration.ticks()})).collect();
+    json!({"presets": presets})
 }
 
 #[cfg(test)]
