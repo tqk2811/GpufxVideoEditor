@@ -1539,24 +1539,6 @@ impl EditorState {
         self.live_edit(|_| engine::set_animation(&shown, key, animation));
     }
 
-    /// Shows the selected text clip with `text` and `animation` both, as one live edit: a change of
-    /// both in the same frame must not lose either.
-    pub fn live_text_and_animation(&mut self, text: TextContent, animation: engine::ClipAnimation) {
-        let Some(key) = self.selection else { return };
-        if self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).is_none() {
-            return;
-        }
-        let rescaled = self.rescaled_text_placement(key, &text);
-        self.live_edit(|project| {
-            let next = set_text(project, key, text)?;
-            let next = match rescaled {
-                Some(placement) => set_placement(&next, key, Some(placement))?,
-                None => next,
-            };
-            engine::set_animation(&next, key, animation)
-        });
-    }
-
     /// Gives text clip `key` the font `font` as one undo step, keeping a fixed place scaled like
     /// [`Self::live_text`] does. Nothing for a clip that is gone or is not a text.
     pub fn set_text_font(&mut self, key: ClipKey, font: engine::FontRef) {
@@ -3715,20 +3697,13 @@ second line")), "Title…");
     }
 
     #[test]
-    fn an_animation_chosen_after_a_live_text_edit_keeps_the_text_and_both_together_keep_both() {
+    fn an_animation_chosen_after_a_live_text_edit_keeps_the_text() {
         let (mut state, key) = added_text_state();
         let mut text = state.project().tracks[key.track].clips[key.clip].text.clone().unwrap();
         text.content = "typed".to_owned();
         state.live_text(text.clone());
         let fade = engine::ClipAnimation { enter: Some(engine::AnimationRef { preset: "fade".to_owned(), duration: Time::from_seconds(1).unwrap() }), ..Default::default() };
         state.live_animation(fade.clone());
-        let shown = state.project().tracks[key.track].clips[key.clip].clone();
-        assert_eq!(shown.text.as_ref().map(|text| text.content.as_str()), Some("typed"));
-        assert_eq!(shown.animation, fade);
-        state.commit_live();
-        state.undo();
-        let (mut state, key) = added_text_state();
-        state.live_text_and_animation(text, fade.clone());
         let shown = state.project().tracks[key.track].clips[key.clip].clone();
         assert_eq!(shown.text.as_ref().map(|text| text.content.as_str()), Some("typed"));
         assert_eq!(shown.animation, fade);
