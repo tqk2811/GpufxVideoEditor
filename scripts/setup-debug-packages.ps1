@@ -2,7 +2,7 @@
 # - packages\gpufx: junctions to the effect and transition groups of FFmpegGpuFilter and GpufxVideoEditor-Assets.
 # - packages\gpufx_ai_*: junctions to the AI packages of FFmpegGpuFilter.
 # - packages\gpufx\capcut: junctions into a shallow clone of FFmpegGpuFilter-packages-capcut.
-# - packages\sfx, music, sticker: the audio and sticker packs of the GpufxVideoEditor-Assets releases, unpacked
+# - packages\sfx, music, sticker, clip-animation: the packs of the GpufxVideoEditor-Assets releases, unpacked
 #   the way the editor installs them.
 # The editor uses the packages next to its executable before those of the checkout, so once this folder
 # exists it must hold everything. Run it again after cargo clean, or with -Force to fetch the packs again.
@@ -108,8 +108,10 @@ foreach ($zip in Get-ChildItem -LiteralPath $download -Recurse -Filter '*.zip') 
     } finally {
         $archive.Dispose()
     }
-    if ($manifest.type -notin @('sfx', 'music', 'sticker')) { throw "$($zip.Name) has an unknown type '$($manifest.type)'" }
-    $packDir = Join-Path $packagesDir "$($manifest.type)\$($manifest.id.ToLowerInvariant())"
+    if ($manifest.type -notin @('sfx', 'music', 'sticker', 'clip-animation', 'text-animation')) { throw "$($zip.Name) has an unknown type '$($manifest.type)'" }
+    # text-animation is the older name of clip-animation; the editor installs both to clip-animation.
+    $typeFolder = if ($manifest.type -eq 'text-animation') { 'clip-animation' } else { $manifest.type }
+    $packDir = Join-Path $packagesDir "$typeFolder\$($manifest.id.ToLowerInvariant())"
     if (Test-Path -LiteralPath $packDir) {
         Remove-Item -LiteralPath $packDir -Recurse -Force
     }
