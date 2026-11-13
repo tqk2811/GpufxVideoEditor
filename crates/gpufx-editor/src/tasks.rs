@@ -127,6 +127,8 @@ pub enum Action {
     StickerPackInstalled,
     /// A clip animation pack was installed: the library must be read again.
     ClipAnimationPackInstalled,
+    /// A text or subtitle style pack was installed: the library must be read again.
+    TextStylePackInstalled,
     SaveTo(PathBuf),
     StartExport(PathBuf),
     /// The project was replaced, so playback of the old one must go.
@@ -490,6 +492,14 @@ impl Tasks {
                     state.show_installed_clip_animation_pack(&installed);
                     Action::ClipAnimationPackInstalled
                 }
+                Ok(ImportOutcome::TextStyleInstalled(installed)) => {
+                    state.show_installed_text_style_pack(&installed.name, installed.replaced);
+                    Action::TextStylePackInstalled
+                }
+                Ok(ImportOutcome::SubtitleStyleInstalled(installed)) => {
+                    state.show_installed_text_style_pack(&installed.name, installed.replaced);
+                    Action::TextStylePackInstalled
+                }
                 Err(problem) => {
                     state.report_refused(Message::PackageImportRefused(problem));
                     Action::Nothing
@@ -560,6 +570,18 @@ mod tests {
         let load = start_package_import(&mut tasks, &mut state);
         let installed = crate::clip_animation_install::InstalledClipAnimationPack { id: "p".to_owned(), name: "P".to_owned(), replaced: false };
         assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::ClipAnimationInstalled(installed)))), Action::ClipAnimationPackInstalled);
+    }
+
+    #[test]
+    fn an_installed_style_pack_asks_for_the_library_and_shows_the_text_tab() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let load = start_package_import(&mut tasks, &mut state);
+        let installed = crate::text_style_install::InstalledTextStylePack { id: "p".to_owned(), name: "P".to_owned(), replaced: false };
+        assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::TextStyleInstalled(installed)))), Action::TextStylePackInstalled);
+        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Text);
+        let load = start_package_import(&mut tasks, &mut state);
+        let installed = crate::subtitle_style_install::InstalledSubtitleStylePack { id: "s".to_owned(), name: "S".to_owned(), replaced: true };
+        assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::SubtitleStyleInstalled(installed)))), Action::TextStylePackInstalled);
     }
 
     #[test]

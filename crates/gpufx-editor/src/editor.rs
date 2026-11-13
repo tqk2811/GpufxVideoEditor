@@ -16,6 +16,7 @@ use crate::asset_install::InstalledAudioPack;
 use crate::audio_library::AudioLibrary;
 use crate::clip_animation_install::InstalledClipAnimationPack;
 use crate::clip_animation_library::ClipAnimationLibrary;
+use crate::text_style_library::TextStyleLibrary;
 use crate::sticker_install::InstalledStickerPack;
 use crate::sticker_library::StickerLibrary;
 use crate::effect_previews::PreviewManager;
@@ -87,6 +88,8 @@ pub struct EditorState {
     pub sticker_library: StickerLibrary,
     /// The clip animation packs installed on this machine.
     pub clip_animation_library: ClipAnimationLibrary,
+    /// The text and subtitle style packs installed on this machine.
+    pub text_style_library: TextStyleLibrary,
     pub picker: PickerState,
     pub encoders: Vec<EncoderOption>,
     pub encoder: usize,
@@ -408,6 +411,7 @@ impl EditorState {
             audio_library: AudioLibrary::default(),
             sticker_library: StickerLibrary::default(),
             clip_animation_library: ClipAnimationLibrary::default(),
+            text_style_library: TextStyleLibrary::default(),
             picker: PickerState::default(),
             encoders: Vec::new(),
             encoder: 0,
@@ -1665,6 +1669,13 @@ impl EditorState {
     /// animation inspector, so no tab is shown.
     pub fn show_installed_clip_animation_pack(&mut self, installed: &InstalledClipAnimationPack) {
         self.report_info(Message::ClipAnimationPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
+    }
+
+    /// Says that a text or subtitle style pack named `name` is there and shows the Text tab, where
+    /// its styles are.
+    pub fn show_installed_text_style_pack(&mut self, name: &str, replaced: bool) {
+        self.report_info(Message::TextStylePackInstalled { name: name.to_owned(), replaced });
+        self.ui.left_tab = LeftTab::Text;
     }
 
     /// Says that a sticker pack is there and shows the Sticker tab.

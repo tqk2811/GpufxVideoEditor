@@ -12,6 +12,7 @@ use engine::{frame_count, Project};
 use gpufx_editor::agent::gateway::{self, pipe_name};
 use gpufx_editor::agent::{check_export, execute, prepare, AgentError, AgentHost, AgentRequest, AgentResult, Step};
 use gpufx_editor::clip_animation_library::scan_clip_animation_packs;
+use gpufx_editor::text_style_library::scan_text_style_packs;
 use gpufx_editor::editor::{EditorState, Status};
 use gpufx_editor::export::{sibling_render_exe, ExportWorker};
 use gpufx_editor::project_file::package_roots;
@@ -151,6 +152,7 @@ impl FileSession {
         // is checked against the library.
         let mut state = EditorState::default();
         state.clip_animation_library = scan_clip_animation_packs(&roots);
+        state.text_style_library = scan_text_style_packs(&roots);
         Self { host: FileHost { state, roots: roots.clone(), gpu: None, rig: None, export: None }, roots }
     }
 }

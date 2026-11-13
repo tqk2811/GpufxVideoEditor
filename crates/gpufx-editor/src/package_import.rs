@@ -20,6 +20,8 @@ use crate::clip_animation_install::{install_clip_animation_pack, is_clip_animati
 use crate::asset_install::{install_audio_pack, AudioPackKind, InstalledAudioPack};
 use crate::packages::{classify, PackageKind};
 use crate::sticker_install::{install_sticker_pack, InstalledStickerPack, STICKER_TYPE};
+use crate::subtitle_style_install::{install_subtitle_style_pack, InstalledSubtitleStylePack, SUBTITLE_STYLE_TYPE};
+use crate::text_style_install::{install_text_style_pack, InstalledTextStylePack, TEXT_STYLE_TYPE};
 
 pub(crate) const MIB: u64 = 1 << 20;
 /// The folder under `packages/gpufx` that imported shader packages go to.
@@ -32,7 +34,7 @@ const MAX_ARCHIVE_BYTES: u64 = 2048 * MIB;
 /// A shader zip is read whole: its files, within [`SHADER_LIMITS`], and the zip's own headers.
 const MAX_SHADER_ARCHIVE_BYTES: u64 = 264 * MIB;
 /// The types of the packages the editor cannot use yet.
-const NON_SHADER_TYPES: [&str; 3] = ["font", "text-style", "subtitle-style"];
+const NON_SHADER_TYPES: [&str; 1] = ["font"];
 
 /// What a zip may declare. Sizes are as declared: what is really read is counted where it is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +124,8 @@ pub enum ImportOutcome {
     AudioInstalled(InstalledAudioPack),
     StickerInstalled(InstalledStickerPack),
     ClipAnimationInstalled(InstalledClipAnimationPack),
+    TextStyleInstalled(InstalledTextStylePack),
+    SubtitleStyleInstalled(InstalledSubtitleStylePack),
     /// A package with this name is there, and overwriting was not allowed.
     AlreadyInstalled { name: String },
 }
@@ -211,6 +215,8 @@ enum Declared {
     Audio(AudioPackKind),
     Sticker,
     ClipAnimation,
+    TextStyle,
+    SubtitleStyle,
 }
 
 /// What the manifest declares. A `type` the editor cannot use is an error here, so that it is
@@ -223,6 +229,8 @@ fn declared_package(manifest: &[u8]) -> Result<Declared, ImportProblem> {
         Some(Value::String(kind)) if AudioPackKind::from_name(kind).is_some() => Ok(Declared::Audio(AudioPackKind::from_name(kind).unwrap_or(AudioPackKind::Sfx))),
         Some(Value::String(kind)) if kind == STICKER_TYPE => Ok(Declared::Sticker),
         Some(Value::String(kind)) if is_clip_animation_type(kind) => Ok(Declared::ClipAnimation),
+        Some(Value::String(kind)) if kind == TEXT_STYLE_TYPE => Ok(Declared::TextStyle),
+        Some(Value::String(kind)) if kind == SUBTITLE_STYLE_TYPE => Ok(Declared::SubtitleStyle),
         Some(Value::String(kind)) if NON_SHADER_TYPES.contains(&kind.as_str()) => Err(ImportProblem::NotSupportedYet(kind.clone())),
         Some(Value::String(kind)) => Err(ImportProblem::UnknownType(kind.clone())),
         Some(_) => Err(ImportProblem::BadManifest("`type` is not a string".to_owned())),
@@ -316,6 +324,8 @@ pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<I
         Declared::Audio(_) => return install_audio_pack(source, user_root, overwrite),
         Declared::Sticker => return install_sticker_pack(source, user_root, overwrite),
         Declared::ClipAnimation => return install_clip_animation_pack(source, user_root, overwrite),
+        Declared::TextStyle => return install_text_style_pack(source, user_root, overwrite),
+        Declared::SubtitleStyle => return install_subtitle_style_pack(source, user_root, overwrite),
         Declared::Shader(_) => {}
     }
     let bytes = read_bounded(source, MAX_SHADER_ARCHIVE_BYTES)?;
@@ -446,6 +456,8 @@ mod tests {
         assert_eq!(declared_package(br#"{"type":"sfx"}"#), Ok(Declared::Audio(AudioPackKind::Sfx)));
         assert_eq!(declared_package(br#"{"type":"clip-animation"}"#), Ok(Declared::ClipAnimation));
         assert_eq!(declared_package(br#"{"type":"text-animation"}"#), Ok(Declared::ClipAnimation));
+        assert_eq!(declared_package(br#"{"type":"text-style"}"#), Ok(Declared::TextStyle));
+        assert_eq!(declared_package(br#"{"type":"subtitle-style"}"#), Ok(Declared::SubtitleStyle));
         assert_eq!(declared_package(br#"{"type":"music"}"#), Ok(Declared::Audio(AudioPackKind::Music)));
         assert_eq!(declared_package(br#"{"type":"effect"}"#), Err(ImportProblem::UnknownType("effect".to_owned())), "a shader package has no type");
         assert!(matches!(declared_package(br#"{"type":3}"#), Err(ImportProblem::BadManifest(_))));

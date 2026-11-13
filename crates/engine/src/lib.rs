@@ -58,4 +58,4 @@ pub use schedule::{
 };
 pub use clip_animation::{animation_max_scale, check_curve, animation_pose, animation_rotates, find_preset, is_pack_preset, pack_presets, preset_pose, set_pack_presets, PackPreset, PackPresets, PACK_PRESET_SEPARATOR, AnimationCurve, AnimationGroup, CurveKey, CurveProperty, Ease, AnimationPose, AnimationPreset, ANIMATION_PRESETS};
 pub use time::{Time, TICKS_PER_SECOND};
-pub use validate::{validate, AcceptAll, Resolver, ValidationError};
+pub use validate::{text_style_problems, validate, AcceptAll, Resolver, TextStyleProblem, ValidationError};

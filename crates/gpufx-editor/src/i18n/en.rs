@@ -214,6 +214,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::StickerLibraryEmpty => "No stickers yet. Import a pack (.zip).".to_owned(),
         Message::StickerAddHint => "Click to add a sticker at the playhead, or drag it onto a video track.".to_owned(),
         Message::StickerPackInstalled { name, replaced } => format!("{} \"{name}\" in Stickers.", if *replaced { "Replaced" } else { "Installed" }),
+        Message::TextStylePackInstalled { name, replaced } => format!("{} \"{name}\": its styles are in the Text tab.", if *replaced { "Replaced" } else { "Installed" }),
         Message::ClipAnimationPackInstalled { name, replaced } => format!("{} \"{name}\": its animations are in the Animation part of the inspector.", if *replaced { "Replaced" } else { "Installed" }),
         Message::ReadingStickerPacks => "Reading the installed sticker packs...".to_owned(),
         Message::StickerPackProblems(count) => format!("{} could not be read", counted(*count as i64, "pack or sticker")),

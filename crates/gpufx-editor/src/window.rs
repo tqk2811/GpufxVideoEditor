@@ -20,6 +20,7 @@ use crate::agent::{check_export, execute, AgentError, AgentHost};
 use crate::audio_library::{scan_audio_packs, AudioLibrary};
 use crate::sticker_library::{scan_sticker_packs, StickerLibrary};
 use crate::clip_animation_library::{scan_clip_animation_packs, ClipAnimationLibrary};
+use crate::text_style_library::{scan_text_style_packs, TextStyleLibrary};
 use crate::asset_install::recover_interrupted_install;
 use crate::editor::{EditorState, LeftTab, SoundPreviewWish, Status};
 use crate::export::{encoder_options, export_blocker, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
@@ -150,6 +151,7 @@ struct Session {
     audio_library: Option<Receiver<AudioLibrary>>,
     sticker_library: Option<Receiver<StickerLibrary>>,
     clip_animation_library: Option<Receiver<(ClipAnimationLibrary, engine::PackPresets)>>,
+    text_style_library: Option<Receiver<TextStyleLibrary>>,
     tasks: Tasks,
     arrivals: Receiver<Arrival>,
     arrival_sender: Sender<Arrival>,
@@ -200,6 +202,7 @@ impl Session {
         let audio_library = spawn_audio_scan(package_roots.clone(), window_for_scan.clone());
         let sticker_library = spawn_sticker_scan(package_roots.clone(), window_for_scan.clone());
         let clip_animation_library = spawn_clip_animation_scan(package_roots.clone(), window_for_scan.clone());
+        let text_style_library = spawn_text_style_scan(package_roots.clone(), window_for_scan.clone());
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
         let (arrival_sender, arrivals) = channel();
@@ -231,6 +234,7 @@ impl Session {
             audio_library: Some(audio_library),
             sticker_library: Some(sticker_library),
             clip_animation_library: Some(clip_animation_library),
+            text_style_library: Some(text_style_library),
             tasks: Tasks::default(),
             arrivals,
             arrival_sender,
@@ -314,6 +318,14 @@ impl Session {
         if let Some(Ok(catalog)) = self.catalog.as_ref().map(Receiver::try_recv) {
             self.state.catalog = catalog;
             self.catalog = None;
+        }
+    }
+
+    /// Takes the installed text and subtitle style packs once their scan has finished.
+    fn collect_text_style_library(&mut self) {
+        if let Some(Ok(library)) = self.text_style_library.as_ref().map(Receiver::try_recv) {
+            self.state.text_style_library = library;
+            self.text_style_library = None;
         }
     }
 
@@ -606,6 +618,7 @@ impl Session {
         self.collect_audio_library();
         self.collect_sticker_library();
         self.collect_clip_animation_library();
+        self.collect_text_style_library();
         self.collect_arrivals();
         self.poll_export();
         self.collect_preview();
@@ -825,6 +838,7 @@ impl Session {
             Action::AudioPackInstalled => self.audio_pack_installed(),
             Action::StickerPackInstalled => self.sticker_pack_installed(),
             Action::ClipAnimationPackInstalled => self.clip_animation_library = Some(spawn_clip_animation_scan(self.package_roots.clone(), self.window.clone())),
+            Action::TextStylePackInstalled => self.text_style_library = Some(spawn_text_style_scan(self.package_roots.clone(), self.window.clone())),
             Action::SaveTo(path) => self.save_project(path),
             Action::StartExport(path) => self.start_export(path, None),
             Action::ProjectReplaced => {
@@ -1046,6 +1060,22 @@ fn spawn_clip_animation_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiv
     });
     if let Err(e) = scanner {
         eprintln!("gpufx-editor: the clip animation pack scan could not start: {e}");
+    }
+    receiver
+}
+
+/// Reads the manifests of the installed text and subtitle style packs away from the UI thread.
+fn spawn_text_style_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<TextStyleLibrary> {
+    let (sender, receiver) = channel();
+    let scanner = std::thread::Builder::new().name("text-style-packs".to_owned()).spawn(move || {
+        if let Some(user_root) = user_package_root() {
+            recover_interrupted_install(&user_root);
+        }
+        let _ = sender.send(scan_text_style_packs(&roots));
+        window.request_redraw();
+    });
+    if let Err(e) = scanner {
+        eprintln!("gpufx-editor: the text style pack scan could not start: {e}");
     }
     receiver
 }

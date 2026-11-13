@@ -217,6 +217,7 @@ pub enum Message {
     StickerAddHint,
     StickerPackInstalled { name: String, replaced: bool },
     ClipAnimationPackInstalled { name: String, replaced: bool },
+    TextStylePackInstalled { name: String, replaced: bool },
     /// The Sticker tab has not finished reading the installed packs.
     ReadingStickerPacks,
     /// How many sticker packs or stickers could not be read.
@@ -436,6 +437,7 @@ mod tests {
             Message::StickerAddHint,
             Message::StickerPackInstalled { name: name(), replaced: true },
             Message::ClipAnimationPackInstalled { name: name(), replaced: false },
+            Message::TextStylePackInstalled { name: name(), replaced: true },
             Message::ReadingStickerPacks,
             Message::StickerPackProblems(2),
             Message::EditSpeedOfImage(TrackLabel::Video(1)),
