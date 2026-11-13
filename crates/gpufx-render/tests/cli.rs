@@ -34,7 +34,7 @@ fn two_clip_project() -> String {
         r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
            {{"source":"{}","start":0,"source_in":0,"duration":{CLIP_DURATION}}},
            {{"source":"{}","start":{CLIP_DURATION},"source_in":0,"duration":{CLIP_DURATION}}}],
-           "transitions":[{{"after_clip":0,"package":"mix","duration":{transition}}}]}}]}}"#,
+           "transitions":[{{"after_clip":0,"package":"fade-grays","duration":{transition}}}]}}]}}"#,
         json_path(&a),
         json_path(&b),
         transition = 15 * FRAME,
@@ -322,7 +322,7 @@ fn a_transition_longer_than_the_clips_is_rejected() {
     let (a, b) = test_clips();
     let tracks = format!(
         r#"{{"clips":[{{"source":"{}","start":0,"source_in":0,"duration":3000}},{{"source":"{}","start":3000,"source_in":0,"duration":3000}}],
-            "transitions":[{{"after_clip":0,"package":"mix","duration":9000}}]}}"#,
+            "transitions":[{{"after_clip":0,"package":"fade-grays","duration":9000}}]}}"#,
         json_path(&a),
         json_path(&b)
     );

@@ -28,8 +28,6 @@ function Initialize-Submodules {
     if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
     & git -C (Join-Path $repoRoot 'external\FFmpegGpuFilter') submodule update --init packages
     if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
-    & git -C (Join-Path $repoRoot 'external\FFmpegGpuFilter\packages') submodule update --init gpufx/capcut
-    if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
     & git -C $repoRoot submodule update --init external/GpufxVideoEditor-Assets
     if ($LASTEXITCODE -ne 0) { throw "git submodule update failed ($LASTEXITCODE)" }
 }

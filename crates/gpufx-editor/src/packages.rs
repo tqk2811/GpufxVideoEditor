@@ -258,8 +258,8 @@ mod tests {
     fn the_shipped_packages_are_read_and_sorted_into_both_lists() {
         let catalog = scan(&crate::project_file::package_roots(), d3d12_backend::read_package_info);
         assert!(catalog.effects.iter().any(|entry| short_name(&entry.package) == "grayscale"), "{} effects", catalog.effects.len());
-        assert!(catalog.transitions.iter().any(|entry| short_name(&entry.package) == "mix"), "{} transitions", catalog.transitions.len());
-        assert!(catalog.effects.len() + catalog.transitions.len() > 150, "the list must need its scroll bar");
+        assert!(catalog.transitions.iter().any(|entry| short_name(&entry.package) == "fade-grays"), "{} transitions", catalog.transitions.len());
+        assert!(catalog.effects.len() + catalog.transitions.len() > 100, "the list must need its scroll bar");
         assert!(catalog.effects.iter().chain(&catalog.transitions).all(|entry| entry.package.starts_with("packages/gpufx/")));
     }
 

@@ -630,7 +630,7 @@ mod tests {
     fn a_shipped_transition_and_effect_land_in_their_own_list() {
         let dir = scratch("shipped");
         let root = dir.join("root");
-        for (name, kind) in [("ffmpeg/invert", PackageKind::Effect), ("capcut/mix", PackageKind::Transition)] {
+        for (name, kind) in [("ffmpeg/invert", PackageKind::Effect), ("ffmpeg/fade-grays", PackageKind::Transition)] {
             match install_zip(&written(&dir, &shipped(name)), &root, false).unwrap() {
                 ImportOutcome::Installed(installed) => assert_eq!(installed.kind, kind, "{name}"),
                 other => panic!("{other:?}"),

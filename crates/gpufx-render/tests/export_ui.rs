@@ -44,7 +44,7 @@ fn clip(path: &Path, start: i64, duration: i64) -> Clip {
 fn project_with_transition_and_sound() -> Project {
     let (first, second) = (tone_clip_with_video(), flash_and_beep_clip());
     let clips = vec![clip(&first, 0, 45 * FRAME), clip(&second, 45 * FRAME, 45 * FRAME)];
-    let transitions = vec![Transition { after_clip: 0, package: "packages/gpufx/capcut/mix".to_owned(), duration: Time::from_ticks(15 * FRAME), params: Map::new() }];
+    let transitions = vec![Transition { after_clip: 0, package: "packages/gpufx/ffmpeg/fade-grays".to_owned(), duration: Time::from_ticks(15 * FRAME), params: Map::new() }];
     Project {
         version: SUPPORTED_VERSION,
         output: Output { width: CLIP_WIDTH, height: CLIP_HEIGHT, frame_duration: Time::from_ticks(FRAME), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
