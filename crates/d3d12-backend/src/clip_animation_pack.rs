@@ -84,8 +84,8 @@ fn default_progress() -> String {
 }
 
 /// The `effect` of an item: a gpufx effect package by its manifest id, the parameter given the
-/// progress of the animation and static parameters (a number, a bool, or 2 to 4 numbers for a
-/// vector or a colour). Whether the package is installed, and has those parameters, is checked
+/// progress of the animation and static parameters (a number, a bool, 2 to 4 numbers for a vector
+/// or a colour, or the name of a choice of an `enum` parameter, such as `"left"`). Whether the package is installed, and has those parameters, is checked
 /// when the packs are read for playing (see [`crate::preset_effects`]), not here.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +103,7 @@ fn is_static_value(value: &serde_json::Value) -> bool {
     match value {
         Value::Number(number) => number.as_f64().is_some_and(f64::is_finite),
         Value::Bool(_) => true,
+        Value::String(name) => !name.trim().is_empty(),
         Value::Array(items) => (2..=4).contains(&items.len()) && items.iter().all(|item| item.as_f64().is_some_and(f64::is_finite)),
         _ => false,
     }
@@ -123,7 +124,7 @@ fn check_effect(id: &str, effect: &ItemEffect) -> Result<(), ManifestProblem> {
     }
     for (name, value) in &effect.params {
         if name.trim().is_empty() || !is_static_value(value) {
-            return bad(format!("the effect parameter \"{name}\" of the item \"{id}\" must be a number, a bool or 2 to 4 numbers"));
+            return bad(format!("the effect parameter \"{name}\" of the item \"{id}\" must be a number, a bool, 2 to 4 numbers or the name of an enum choice"));
         }
     }
     Ok(())

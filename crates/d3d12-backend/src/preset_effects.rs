@@ -1,6 +1,8 @@
 //! Finds the gpufx effect package the `effect` of a clip animation item names, by its manifest
 //! id, and checks the item against the package: the progress parameter must be a float of the
-//! package and every static parameter must exist with a value of its type.
+//! package and every static parameter must exist with a value of its type. An `enum` parameter
+//! takes the name of one of its choices, passed to the graph as the number of that choice, as the editor stores the
+//! enum of an effect of a clip.
 //!
 //! A package that is not installed is not an error of the pack: the item plays its curve without
 //! the effect, and a problem says so. A package whose parameters do not fit is left out the same
@@ -93,8 +95,9 @@ fn index_packages(roots: &[PathBuf], wanted: &std::collections::HashSet<String>)
     index
 }
 
-/// Whether `value` fits a parameter of `kind`.
-fn fits(kind: ParamKind, value: &Value) -> bool {
+/// Whether `value` fits the parameter `param`.
+fn fits(param: &crate::packages::ParamInfo, value: &Value) -> bool {
+    let kind = param.kind;
     let numbers = |count: usize| value.as_array().is_some_and(|items| items.len() == count);
     match kind {
         ParamKind::Float => value.is_number(),
@@ -103,7 +106,8 @@ fn fits(kind: ParamKind, value: &Value) -> bool {
         ParamKind::Vec2 => numbers(2),
         ParamKind::Vec3 => numbers(3),
         ParamKind::Vec4 | ParamKind::Color => numbers(4),
-        ParamKind::Expr | ParamKind::Enum => false,
+        ParamKind::Enum => value.as_str().is_some_and(|name| param.choices.iter().any(|(choice, _)| choice == name)),
+        ParamKind::Expr => false,
     }
 }
 
@@ -112,16 +116,17 @@ pub fn effect_mismatch(effect: &ItemEffect, info: &PackageInfo) -> Option<String
     if info.inputs != 1 {
         return Some(format!("the package \"{}\" is not an effect of one picture", effect.package));
     }
-    let kind_of = |name: &str| info.params.iter().find(|param| param.name == name).map(|param| param.kind);
+    let param_of = |name: &str| info.params.iter().find(|param| param.name == name);
+    let kind_of = |name: &str| param_of(name).map(|param| param.kind);
     match kind_of(&effect.progress) {
         Some(ParamKind::Float) => {}
         Some(_) => return Some(format!("the parameter \"{}\" of \"{}\" is not a float", effect.progress, effect.package)),
         None => return Some(format!("the package \"{}\" has no parameter \"{}\"", effect.package, effect.progress)),
     }
     for (name, value) in &effect.params {
-        match kind_of(name) {
+        match param_of(name) {
             None => return Some(format!("the package \"{}\" has no parameter \"{name}\"", effect.package)),
-            Some(kind) if !fits(kind, value) => return Some(format!("the value of the parameter \"{name}\" does not fit its type ({kind:?}) in \"{}\"", effect.package)),
+            Some(param) if !fits(param, value) => return Some(format!("the value of the parameter \"{name}\" does not fit its type ({:?}) in \"{}\"", param.kind, effect.package)),
             Some(_) => {}
         }
     }
@@ -147,16 +152,27 @@ pub fn resolve_item_effects(roots: &[PathBuf], packs: &[ClipAnimationManifest]) 
                 continue;
             };
             let info = infos.entry(path.clone()).or_insert_with(|| read_package_info(path));
-            let mismatch = match info {
-                Ok(info) => effect_mismatch(effect, info),
-                Err(message) => Some(format!("the package \"{}\" cannot be read: {message}", effect.package)),
+            let info = match info {
+                Ok(info) => info,
+                Err(message) => {
+                    effects.problems.push(problem(format!("the package \"{}\" cannot be read: {message}", effect.package)));
+                    continue;
+                }
             };
-            if let Some(message) = mismatch {
+            if let Some(message) = effect_mismatch(effect, info) {
                 effects.problems.push(problem(message));
                 continue;
             }
+            let mut params = effect.params.clone();
+            for param in info.params.iter().filter(|param| param.kind == ParamKind::Enum) {
+                if let Some(value) = params.get_mut(&param.name) {
+                    if let Some((_, number)) = param.choices.iter().find(|(choice, _)| Some(choice.as_str()) == value.as_str()) {
+                        *value = Value::from(*number);
+                    }
+                }
+            }
             let reference = format!("{pack_id}{PACK_PRESET_SEPARATOR}{}", item.id);
-            effects.ready.insert(reference, PresetEffect { package: name.clone(), progress: effect.progress.clone(), params: effect.params.clone() });
+            effects.ready.insert(reference, PresetEffect { package: name.clone(), progress: effect.progress.clone(), params });
         }
     }
     effects
@@ -183,14 +199,15 @@ mod tests {
     #[test]
     fn the_reader_refuses_an_effect_of_the_wrong_shape() {
         assert_eq!(check(&item("a", r#"{"package":"io.x.wipe"}"#)), Ok(()), "an effect alone, progress by default");
-        assert_eq!(check(&item("a", r#"{"package":"io.x.wipe","progress":"t","params":{"n":1.5,"on":true,"at":[0.5,0.5],"tint":[1,0,0,1]}}"#)), Ok(()));
+        assert_eq!(check(&item("a", r#"{"package":"io.x.wipe","progress":"t","params":{"n":1.5,"on":true,"at":[0.5,0.5],"tint":[1,0,0,1],"direction":"left"}}"#)), Ok(()));
         let refused = [
             (r#"{"package":"../escape"}"#, "not a package id"),
             (r#"{"package":"io.x.wipe","extra":1}"#, "unknown field"),
             (r#"{"progress":"t"}"#, "package"),
             (r#"{"package":"io.x.wipe","progress":" "}"#, "empty progress"),
             (r#"{"package":"io.x.wipe","params":{"progress":0}}"#, "progress parameter"),
-            (r#"{"package":"io.x.wipe","params":{"s":"text"}}"#, "must be a number"),
+            (r#"{"package":"io.x.wipe","params":{"s":" "}}"#, "must be a number"),
+            (r#"{"package":"io.x.wipe","params":{"s":null}}"#, "must be a number"),
             (r#"{"package":"io.x.wipe","params":{"v":[1,2,3,4,5]}}"#, "must be a number"),
             (r#"{"package":"io.x.wipe","params":{"v":[1,"a"]}}"#, "must be a number"),
             (r#""io.x.wipe""#, "invalid type"),
@@ -290,6 +307,27 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&first);
         let _ = std::fs::remove_dir_all(&second);
+    }
+
+    #[test]
+    fn an_enum_parameter_takes_one_of_its_names() {
+        let items = [
+            item("right", r#"{"package":"test.probe","progress":"amount","params":{"side":"right"}}"#),
+            item("unknown", r#"{"package":"test.probe","progress":"amount","params":{"side":"up"}}"#),
+            item("number", r#"{"package":"test.probe","progress":"amount","params":{"side":1}}"#),
+            item("text-for-int", r#"{"package":"test.probe","progress":"amount","params":{"count":"right"}}"#),
+        ]
+        .join(",");
+        let root = root("enum", &items);
+        let roots = [root.clone()];
+        let scan = scan_clip_animation_folders(&roots);
+        assert!(scan.problems.is_empty(), "{:?}", scan.problems);
+        let effects = resolve_item_effects(&roots, &scan.packs);
+        let right = &effects.ready["fx/right"];
+        assert_eq!(right.params["side"], Value::from(1), "the number of the choice, as the editor stores an enum");
+        assert_eq!(effects.ready.len(), 1);
+        assert_eq!(effects.problems.len(), 3, "{:?}", effects.problems);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
