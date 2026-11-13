@@ -522,3 +522,7 @@ Clip chữ chỉ thêm bằng nút "Thêm chữ" ở tab Chữ (`EditorState::ad
 ### [Thấp] Hộp thoại chọn file clip dùng chỉ số track lấy lúc mở
 
 `crates/gpufx-editor/src/tasks.rs:335` (`FileDialog::PickClip { track }`) giữ chỉ số track lấy lúc bấm, rồi còn qua bước probe chạy nền. Project đổi trong lúc đó (agent thêm/xoá track, undo) thì clip có thể vào nhầm track. Hộp thoại chọn font đã được chặn bằng revision; PickClip chưa sửa vì chặn theo revision sẽ bỏ cả lần thêm khi agent chỉ sửa chỗ khác, cần so khớp track theo định danh ổn định thay vì chỉ số. Ghi ngày 2026-11-11.
+
+### [Thấp] Animation chưa lật gương được (scale âm)
+
+`crates/engine/src/keyframe.rs:301-306` nhân thẳng `rect.width *= zoom * stretch[0]`, nên `scaleX`/`scaleY` âm của animation cho bề ngang âm và compositor bỏ không vẽ (`crates/d3d12-backend/src/compositor.rs:978-980`): clip biến mất thay vì lật. Gói CapCut "Flip II" vì vậy dùng `|cos|` (không lật). Cần cho `rect` mang dấu và đảo trục trong shader xoay (`crates/d3d12-backend/src/rotated_place.rs`) để lật gương thật, mở khoá các kiểu lật 3D. Ghi ngày 2026-11-13.
