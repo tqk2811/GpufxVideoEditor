@@ -7,6 +7,12 @@
 //! both come from one squared distance field of the glyph coverage, computed once per picture into
 //! one buffer; the glow is blended straight into the picture from it, so it costs no mask of its
 //! own and the picture grows only by the glow's reach.
+//!
+//! A text whose characters move one by one (see [`TextRasterizer::rasterize_units`]) is drawn from
+//! a picture of each character with its own glow, shadow and outline, made once and kept, each put
+//! in place with its own move, turn, scale and opacity (see the `units` module).
+
+mod units;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -110,6 +116,8 @@ pub struct TextRasterizer {
     files: HashMap<PathBuf, LoadedFile>,
     /// How many font files have been loaded, which numbers their [`LoadedFile::select_name`].
     file_loads: u64,
+    /// The pictures of the characters of the text last drawn by units, by a key of its text and size.
+    unit_sprites: Option<(u64, Arc<Vec<units::Sprite>>)>,
 }
 
 /// A font file as loaded: the stamp it had, its faces and its family (`None` when not a font).
@@ -190,7 +198,7 @@ impl TextRasterizer {
             None => eprintln!("gpufx-text: no font is installed; text cannot be drawn"),
         }
         let locale = sys_locale();
-        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0 }
+        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0, unit_sprites: None }
     }
 
     /// The installed family [`FontRef::Default`] draws with: the first of
@@ -294,6 +302,29 @@ impl TextRasterizer {
     /// karaoke on, and the picture keeps room for a box in `box` mode whatever the styles, so
     /// every step of a karaoke text has the size [`Self::measure`] gives.
     pub fn rasterize_words(&mut self, text: &TextContent, output_height_px: u32, scale: f32, styles: &[WordStyle]) -> TextImage {
+        let (layout, downscaled) = self.fitted_layout(text, output_height_px, scale);
+        let mut image = self.draw(text, &layout, styles);
+        image.downscaled = downscaled;
+        image
+    }
+
+    /// As [`Self::rasterize`], with the units of the text (see [`engine::unit_ranges`]) each moved
+    /// by its pose: for each kind of unit, the pose of unit `i` is `poses[i]`, with `dx` and `dy`
+    /// in font sizes, the scale and turn (degrees, clockwise) around the middle of the unit's ink
+    /// and the opacity multiplied. The kinds apply in order. Each character keeps its own glow,
+    /// shadow and outline; the background box stays. The picture has the size of the still text, so
+    /// a unit moved past its edge is cut. With no pose, or only poses that change nothing, this is
+    /// exactly the still picture.
+    pub fn rasterize_units(&mut self, text: &TextContent, output_height_px: u32, scale: f32, poses: &[(engine::TextUnit, Vec<engine::AnimationPose>)]) -> TextImage {
+        let (layout, downscaled) = self.fitted_layout(text, output_height_px, scale);
+        let still = poses.iter().all(|(_, poses)| poses.iter().all(|pose| units::is_rest(pose)));
+        let mut image = if still { self.draw(text, &layout, &[]) } else { self.draw_units(text, &layout, poses) };
+        image.downscaled = downscaled;
+        image
+    }
+
+    /// The layout of `text`, shrunk to the limits when it is over them, and whether it was.
+    fn fitted_layout(&mut self, text: &TextContent, output_height_px: u32, scale: f32) -> (Layout, bool) {
         let font_px = text.size * output_height_px as f32 * scale;
         let mut layout = self.layout(text, font_px);
         let mut downscaled = false;
@@ -308,9 +339,7 @@ impl TextRasterizer {
             layout = self.layout(text, layout.font_px * ratio as f32);
             downscaled = true;
         }
-        let mut image = self.draw(text, &layout, styles);
-        image.downscaled = downscaled;
-        image
+        (layout, downscaled)
     }
 
     /// The width and height [`Self::rasterize`] would give before shrinking to the limits, so
@@ -360,6 +389,10 @@ impl TextRasterizer {
             attrs = attrs.letter_spacing(letter_spacing);
         }
         let shaped = text.shaped_content();
+        // Where each line of the text starts, as cosmic-text cuts it, so a glyph's byte in its line
+        // gives its byte in the text.
+        let mut line_starts = vec![0];
+        line_starts.extend(shaped.match_indices('\n').map(|(at, _)| at + 1));
         let karaoke = text.karaoke.as_ref().filter(|karaoke| karaoke.is_on());
         if karaoke.is_some() {
             // Each word is a span of its own, its number plus one in the metadata of its glyphs;
@@ -393,12 +426,12 @@ impl TextRasterizer {
             let line_w = if run.glyphs.is_empty() { run.line_w } else { run.line_w - letter_spacing * font_px };
             text_w = text_w.max(line_w);
             text_h = text_h.max(run.line_top + run.line_height);
-            lines.push((line_w, run.line_y, run.line_top, run.line_height, run.glyphs.to_vec()));
+            lines.push((line_w, run.line_y, run.line_top, run.line_height, run.glyphs.to_vec(), line_starts.get(run.line_i).copied().unwrap_or(0)));
         }
         // The ink may leave the line boxes (marks stacked above a letter on a tight line spacing,
         // a glyph that starts left of its origin), so the picture holds both.
         let (mut x0, mut y0, mut x1, mut y1) = (0f32, 0f32, text_w, text_h);
-        for (line_w, line_y, line_top, line_height, run_glyphs) in lines {
+        for (line_w, line_y, line_top, line_height, run_glyphs, line_start) in lines {
             let shift = match text.align {
                 TextAlign::Left => 0.0,
                 TextAlign::Center => (text_w - line_w) / 2.0,
@@ -421,14 +454,17 @@ impl TextRasterizer {
                     }
                 }
                 layout.glyph_words.push(glyph.metadata.checked_sub(1));
+                layout.glyph_starts.push(line_start + glyph.start);
                 let physical = glyph.physical((shift, line_y), 1.0);
-                if let Some((gx0, gy0, gx1, gy1)) = self.ink_bounds(physical.cache_key) {
+                let ink = self.ink_bounds(physical.cache_key).map(|(gx0, gy0, gx1, gy1)| (physical.x as f32 + gx0 - 1.0, physical.y as f32 + gy0 - 1.0, physical.x as f32 + gx1 + 1.0, physical.y as f32 + gy1 + 1.0));
+                if let Some((gx0, gy0, gx1, gy1)) = ink {
                     // One pixel more on each side for the sub-pixel offset and anti-aliasing.
-                    x0 = x0.min(physical.x as f32 + gx0 - 1.0);
-                    x1 = x1.max(physical.x as f32 + gx1 + 1.0);
-                    y0 = y0.min(physical.y as f32 + gy0 - 1.0);
-                    y1 = y1.max(physical.y as f32 + gy1 + 1.0);
+                    x0 = x0.min(gx0);
+                    x1 = x1.max(gx1);
+                    y0 = y0.min(gy0);
+                    y1 = y1.max(gy1);
                 }
+                layout.glyph_ink.push(ink);
                 layout.glyphs.push(physical);
             }
         }
@@ -552,9 +588,6 @@ impl TextRasterizer {
         }
         let font_px = layout.font_px;
         let (left, top) = layout.origin;
-        let (text_w, text_h) = layout.text_size;
-        let (outline_px, pad_px) = (layout.outline_px, layout.pad_px);
-        let (shadow_dx, shadow_dy, shadow_blur) = layout.shadow;
 
         // Glyph coverage.
         let mut fill = Mask::new(width, height);
@@ -591,25 +624,8 @@ impl TextRasterizer {
             }
         }
 
-        // One squared distance field serves the outline and the glow.
-        let glow = text.glow.filter(|_| layout.glow_px > 0.0);
-        let wants_outline = text.outline.is_some() && outline_px > 0.0;
-        let squared = (wants_outline || glow.is_some()).then(|| fill.squared_distances());
-        let outline = text.outline.filter(|_| wants_outline).zip(squared.as_deref()).map(|(o, squared)| (o.color, fill.dilated(squared, outline_px)));
-        let silhouette = outline.as_ref().map(|(_, m)| m).unwrap_or(&fill);
-
         let mut canvas = vec![[0f32; 4]; width * height];
-        if let Some(bg) = text.background {
-            let radius = (bg.radius * font_px).max(0.0);
-            let rect = (left - pad_px, top - pad_px, left + text_w + pad_px, top + text_h + pad_px);
-            let color = premultiplied(bg.color);
-            for y in 0..height {
-                for x in 0..width {
-                    let a = rounded_rect_coverage(x as f32 + 0.5, y as f32 + 0.5, rect, radius);
-                    over(&mut canvas[y * width + x], color, a);
-                }
-            }
-        }
+        draw_background(text, layout, &mut canvas);
         // The box behind each word that has one, such as the active word in karaoke `box` mode.
         let box_pad = KARAOKE_BOX_PADDING * font_px;
         let box_radius = KARAOKE_BOX_RADIUS * font_px;
@@ -626,19 +642,7 @@ impl TextRasterizer {
                 }
             }
         }
-        if let (Some(glow), Some(squared)) = (glow, squared.as_deref()) {
-            draw_glow(&mut canvas, squared, &glow, if outline.is_some() { outline_px } else { 0.0 }, layout.glow_px);
-        }
-        if let Some(shadow) = text.shadow {
-            let mut mask = silhouette.shifted(shadow_dx.round() as i32, shadow_dy.round() as i32);
-            if shadow_blur > 0.0 {
-                mask.blur(shadow_blur);
-            }
-            draw_mask(&mut canvas, &mask, premultiplied(shadow.color));
-        }
-        if let Some((color, mask)) = &outline {
-            draw_mask(&mut canvas, mask, premultiplied(*color));
-        }
+        draw_under(text, layout, &fill, &mut canvas);
         if tinted.is_empty() {
             draw_mask(&mut canvas, &fill, premultiplied(text.color));
         } else {
@@ -658,11 +662,60 @@ impl TextRasterizer {
     }
 }
 
+/// Draws the background box of `text` into `canvas`, a picture of the size of `layout`.
+fn draw_background(text: &TextContent, layout: &Layout, canvas: &mut [[f32; 4]]) {
+    let Some(bg) = text.background else { return };
+    let (width, height) = (layout.width as usize, layout.height as usize);
+    let (left, top) = layout.origin;
+    let (text_w, text_h) = layout.text_size;
+    let pad_px = layout.pad_px;
+    let radius = (bg.radius * layout.font_px).max(0.0);
+    let rect = (left - pad_px, top - pad_px, left + text_w + pad_px, top + text_h + pad_px);
+    let color = premultiplied(bg.color);
+    for y in 0..height {
+        for x in 0..width {
+            let a = rounded_rect_coverage(x as f32 + 0.5, y as f32 + 0.5, rect, radius);
+            over(&mut canvas[y * width + x], color, a);
+        }
+    }
+}
+
+/// Draws what lies under the fill of the glyph coverage `fill` into `canvas` of the same size: the
+/// glow, the shadow and the outline, in that order.
+fn draw_under(text: &TextContent, layout: &Layout, fill: &Mask, canvas: &mut [[f32; 4]]) {
+    let outline_px = layout.outline_px;
+    let (shadow_dx, shadow_dy, shadow_blur) = layout.shadow;
+    // One squared distance field serves the outline and the glow.
+    let glow = text.glow.filter(|_| layout.glow_px > 0.0);
+    let wants_outline = text.outline.is_some() && outline_px > 0.0;
+    let squared = (wants_outline || glow.is_some()).then(|| fill.squared_distances());
+    let outline = text.outline.filter(|_| wants_outline).zip(squared.as_deref()).map(|(o, squared)| (o.color, fill.dilated(squared, outline_px)));
+    let silhouette = outline.as_ref().map(|(_, m)| m).unwrap_or(fill);
+    if let (Some(glow), Some(squared)) = (glow, squared.as_deref()) {
+        draw_glow(canvas, squared, &glow, if outline.is_some() { outline_px } else { 0.0 }, layout.glow_px);
+    }
+    if let Some(shadow) = text.shadow {
+        let mut mask = silhouette.shifted(shadow_dx.round() as i32, shadow_dy.round() as i32);
+        if shadow_blur > 0.0 {
+            mask.blur(shadow_blur);
+        }
+        draw_mask(canvas, &mask, premultiplied(shadow.color));
+    }
+    if let Some((color, mask)) = &outline {
+        draw_mask(canvas, mask, premultiplied(*color));
+    }
+}
+
 /// A shaped and placed text, ready to draw.
 #[derive(Default)]
 struct Layout {
     font_px: f32,
     glyphs: Vec<cosmic_text::PhysicalGlyph>,
+    /// The byte of the shaped text each glyph of `glyphs` starts at.
+    glyph_starts: Vec<usize>,
+    /// The ink box of each glyph of `glyphs` (x0, y0, x1, y1) around the origin of the line boxes,
+    /// one pixel larger on each side; `None` for a glyph with no ink.
+    glyph_ink: Vec<Option<(f32, f32, f32, f32)>>,
     /// The word of each glyph of `glyphs` when the text has karaoke on.
     glyph_words: Vec<Option<usize>>,
     /// The box of each word on each line (word, line top, (x0, y0, x1, y1)), in line box
