@@ -11,7 +11,8 @@ use crate::preset_effects::resolve_item_effects;
 
 /// The presets of the accepted packs under every root. A pack in an earlier root hides one of the
 /// same id in a later one, as for the editor. An item effect whose gpufx package is under the
-/// roots plays with the item; one that is not is left out (see [`crate::preset_effects`]).
+/// roots plays with the item; one that is not is left out (see [`crate::preset_effects`]), and so
+/// is an item that has nothing else.
 pub fn read_pack_presets(roots: &[PathBuf]) -> PackPresets {
     let packs = scan_clip_animation_folders(roots).packs;
     let mut effects = resolve_item_effects(roots, &packs).ready;
@@ -22,6 +23,10 @@ pub fn read_pack_presets(roots: &[PathBuf]) -> PackPresets {
             let Some(group) = item.group() else { continue };
             let reference = format!("{id}{PACK_PRESET_SEPARATOR}{}", item.id);
             let effect = effects.remove(&reference);
+            // An item with only an effect has nothing to play without it; the problem says why.
+            if effect.is_none() && item.curve.tracks.is_empty() {
+                continue;
+            }
             presets.push(PackPreset::new(reference, group, item.curve).with_effect(effect));
         }
     }

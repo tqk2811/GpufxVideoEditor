@@ -132,8 +132,13 @@ fn library_pack(manifest: ClipAnimationManifest, effects: &mut HashMap<String, P
         .filter_map(|item| {
             let group = item.group()?;
             let reference = pack_reference(&id, &item.id);
+            let effect = effects.remove(&reference);
+            // An item with only an effect has nothing to play without it, as for an export.
+            if effect.is_none() && item.curve.tracks.is_empty() {
+                return None;
+            }
             Some(LibraryAnimation {
-                effect: effects.remove(&reference),
+                effect,
                 effect_package: item.effect.map(|effect| effect.package),
                 reference,
                 name: item.name,
@@ -215,6 +220,10 @@ mod tests {
         let broken = std::fs::read_to_string(&manifest).unwrap().replace(r#""t":1,"value":0"#, r#""t":2,"value":0"#);
         std::fs::write(&manifest, broken).unwrap();
         write_pack(&a, "only-a", "Only A");
+        // An item with only an effect whose package is not installed is offered by neither.
+        let effect_only = a.join("packages/clip-animation/effect-only");
+        std::fs::create_dir_all(&effect_only).unwrap();
+        std::fs::write(effect_only.join("manifest.json"), r#"{"format":1,"type":"clip-animation","id":"effect-only","name":"E","version":"1.0.0","license":{"spdx":"MIT","files":["LICENSE.txt"]},"items":[{"id":"wipe","name":"Wipe","kind":"in","default_duration":1,"effect":{"package":"test.absent"}}]}"#).unwrap();
 
         let roots = [a, b];
         let library = scan_clip_animation_packs(&roots);
@@ -225,7 +234,8 @@ mod tests {
         from_export.sort();
         assert_eq!(from_library, vec!["only-a/rise", "only-a/wave", "shared/rise", "shared/wave"]);
         assert_eq!(from_library, from_export);
-        assert_eq!(library.problems.len(), 1, "{:?}", library.problems);
+        assert!(library.packs.iter().all(|pack| pack.animations.iter().all(|animation| animation.reference != "effect-only/wipe")));
+        assert_eq!(library.problems.len(), 2, "the refused pack and the missing package: {:?}", library.problems);
         assert!(library.packs.iter().any(|pack| pack.name == "From B"));
         let _ = std::fs::remove_dir_all(&dir);
     }

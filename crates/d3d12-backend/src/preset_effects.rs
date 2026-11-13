@@ -18,6 +18,9 @@ use crate::packages::{read_package_info, PackageInfo, ParamKind};
 
 /// How deep the groups of `packages/gpufx` may nest, as for the editor's package list.
 const MAX_DEPTH: usize = 8;
+/// The largest manifest read to learn the id of a package; gpufx sets no limit of its own, and a
+/// real manifest is a few kilobytes.
+const MAX_MANIFEST_BYTES: u64 = 1 << 20;
 
 /// The effects of the items that can play, by the reference a clip names (`"<pack>/<item>"`), and
 /// the items whose effect cannot.
@@ -44,32 +47,47 @@ fn collect(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
     }
 }
 
+/// Reads all of `reader` when it holds at most [`MAX_MANIFEST_BYTES`].
+fn read_limited(reader: impl Read) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(MAX_MANIFEST_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= MAX_MANIFEST_BYTES).then_some(bytes)
+}
+
 /// The `id` of the manifest of the package at `path`, a folder or a zip, read without the rest.
+/// A manifest above [`MAX_MANIFEST_BYTES`] is not read.
 fn package_id(path: &Path) -> Option<String> {
     let bytes = if path.is_dir() {
-        std::fs::read(path.join("manifest.json")).ok()?
+        read_limited(std::fs::File::open(path.join("manifest.json")).ok()?)?
     } else {
         let mut archive = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
-        let mut entry = archive.by_name("manifest.json").ok()?;
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).ok()?;
-        bytes
+        let entry = archive.by_name("manifest.json").ok()?;
+        if entry.size() > MAX_MANIFEST_BYTES {
+            return None;
+        }
+        read_limited(entry)?
     };
     let manifest: Value = serde_json::from_slice(&bytes).ok()?;
     manifest.get("id")?.as_str().map(str::to_ascii_lowercase)
 }
 
-/// The gpufx packages under the roots by their manifest id (lower case): the name a project gives
-/// the package (its path under the root) and its path. The first root holding an id wins.
-fn index_packages(roots: &[PathBuf]) -> HashMap<String, (String, PathBuf)> {
+/// The gpufx packages under the roots with an id of `wanted` (lower case) by that id: the name an
+/// effect gives the package and its path. The name is the absolute path, so a project's paths,
+/// which look beside the project and then in each root by a relative name, cannot find another
+/// package under the same relative path. The first root holding an id wins, and the search stops
+/// once every wanted id is found.
+fn index_packages(roots: &[PathBuf], wanted: &std::collections::HashSet<String>) -> HashMap<String, (String, PathBuf)> {
     let mut index = HashMap::new();
     for root in roots {
         let mut found = Vec::new();
         collect(&root.join("packages").join("gpufx"), 0, &mut found);
         for path in found {
-            let Some(id) = package_id(&path) else { continue };
-            let name = path.strip_prefix(root).unwrap_or(&path).components().map(|part| part.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
-            index.entry(id).or_insert((name, path));
+            if index.len() == wanted.len() {
+                return index;
+            }
+            let Some(id) = package_id(&path).filter(|id| wanted.contains(id)) else { continue };
+            let Ok(absolute) = std::path::absolute(&path) else { continue };
+            index.entry(id).or_insert((absolute.to_string_lossy().into_owned(), path));
         }
     }
     index
@@ -116,7 +134,8 @@ pub fn resolve_item_effects(roots: &[PathBuf], packs: &[ClipAnimationManifest]) 
     if packs.iter().all(|pack| pack.items.iter().all(|item| item.effect.is_none())) {
         return effects;
     }
-    let index = index_packages(roots);
+    let wanted = packs.iter().flat_map(|pack| &pack.items).filter_map(|item| item.effect.as_ref()).map(|effect| effect.package.to_ascii_lowercase()).collect();
+    let index = index_packages(roots, &wanted);
     let mut infos: HashMap<PathBuf, Result<PackageInfo, String>> = HashMap::new();
     for pack in packs {
         let pack_id = pack.id.to_ascii_lowercase();
@@ -184,17 +203,25 @@ mod tests {
         assert!(check(r#"{"id":"a","name":"I","kind":"in","default_duration":1}"#).unwrap_err().contains("no track"));
     }
 
+    /// The probe package with the id `id` at `relative` under `root`: a float `amount`, an int
+    /// `count`, a vec2 `at` and an enum `side` (`left` or `right`).
+    fn write_probe(root: &Path, relative: &str, id: &str) {
+        let package = root.join(relative);
+        std::fs::create_dir_all(package.join("shaders")).unwrap();
+        let manifest = r#"{"api":1,"id":"ID","name":"Probe","used_for":["gpufx"],"inputs":[{"name":"src"}],
+            "params":[{"name":"amount","type":"float","default":0},{"name":"count","type":"int","default":0},{"name":"at","type":"vec2","default":[0,0]},
+                      {"name":"side","type":"enum","default":"left","values":["left","right"]}],
+            "groups":[{"passes":[{"shader":"shaders/p.wgsl"}]}]}"#;
+        std::fs::write(package.join("manifest.json"), manifest.replace("\"ID\"", &format!("\"{id}\""))).unwrap();
+        std::fs::write(package.join("shaders/p.wgsl"), "@compute @workgroup_size(8, 8)\nfn main(@builtin(global_invocation_id) id: vec3u) {\n    if (!gpufx_in_bounds(id)) { return; }\n    gpufx_write(id, vec4f(params.amount, 0.0, 0.0, 1.0));\n}\n").unwrap();
+    }
+
     /// A root holding the `fx` clip animation pack with `items` and a gpufx package `test/probe`
-    /// with the id `test.probe`, a float `amount`, an int `count` and a vec2 `at`.
+    /// with the id `test.probe` (see [`write_probe`]).
     fn root(tag: &str, items: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("gpufx-preset-effects-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let package = root.join("packages/gpufx/test/probe");
-        std::fs::create_dir_all(package.join("shaders")).unwrap();
-        std::fs::write(package.join("manifest.json"), r#"{"api":1,"id":"Test.Probe","name":"Probe","used_for":["gpufx"],"inputs":[{"name":"src"}],
-            "params":[{"name":"amount","type":"float","default":0},{"name":"count","type":"int","default":0},{"name":"at","type":"vec2","default":[0,0]}],
-            "groups":[{"passes":[{"shader":"shaders/p.wgsl"}]}]}"#).unwrap();
-        std::fs::write(package.join("shaders/p.wgsl"), "@compute @workgroup_size(8, 8)\nfn main(@builtin(global_invocation_id) id: vec3u) {\n    if (!gpufx_in_bounds(id)) { return; }\n    gpufx_write(id, vec4f(params.amount, 0.0, 0.0, 1.0));\n}\n").unwrap();
+        write_probe(&root, "packages/gpufx/test/probe", "Test.Probe");
         let pack = root.join("packages/clip-animation/fx");
         std::fs::create_dir_all(&pack).unwrap();
         std::fs::write(pack.join("manifest.json"), manifest(items)).unwrap();
@@ -218,7 +245,7 @@ mod tests {
         assert!(scan.problems.is_empty(), "a missing package is not an error of the pack: {:?}", scan.problems);
         let effects = resolve_item_effects(&roots, &scan.packs);
         let ready = &effects.ready["fx/ready"];
-        assert_eq!((ready.package.as_str(), ready.progress.as_str()), ("packages/gpufx/test/probe", "amount"));
+        assert_eq!((Path::new(&ready.package), ready.progress.as_str()), (std::path::absolute(root.join("packages/gpufx/test/probe")).unwrap().as_path(), "amount"));
         assert_eq!(effects.ready.len(), 1);
         let messages: Vec<&str> = effects.problems.iter().map(|problem| problem.message.as_str()).collect();
         assert_eq!(messages.len(), 5, "{messages:?}");
@@ -226,10 +253,59 @@ mod tests {
             assert!(messages.iter().any(|message| message.contains(&format!("\"{item}\"")) && message.contains(wanted)), "{item}: {messages:?}");
         }
 
-        // The curves of every item still play; only the ready one has an effect.
+        // An item with only an effect plays nothing without it, so only the ready one is offered.
         let presets = crate::read_pack_presets(&roots);
-        assert_eq!(presets.presets().len(), 6);
-        assert_eq!(presets.presets().iter().filter(|preset| preset.effect.is_some()).count(), 1);
+        assert_eq!(presets.presets().iter().map(|preset| preset.reference.as_str()).collect::<Vec<_>>(), vec!["fx/ready"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_item_with_a_curve_keeps_it_when_its_effect_is_left_out() {
+        let curve = r#"{"id":"moving","name":"I","kind":"in","default_duration":1,"curve":{"tracks":{"opacity":[{"t":0,"value":0},{"t":1,"value":1}]}},"effect":{"package":"test.absent"}}"#;
+        let root = root("curve-kept", &[curve.to_owned(), item("bare", r#"{"package":"test.absent"}"#)].join(","));
+        let roots = [root.clone()];
+        let presets = crate::read_pack_presets(&roots);
+        assert_eq!(presets.presets().iter().map(|preset| (preset.reference.as_str(), preset.effect.is_some())).collect::<Vec<_>>(), vec![("fx/moving", false)]);
+        let scan = scan_clip_animation_folders(&roots);
+        assert_eq!(resolve_item_effects(&roots, &scan.packs).problems.len(), 2, "both still say why");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same relative path under two roots, each with another package: the preset plays the one
+    /// whose id it named, whatever a project's paths would find first by that relative path.
+    #[test]
+    fn the_package_found_by_id_is_the_one_that_plays() {
+        let first = std::env::temp_dir().join(format!("gpufx-preset-effects-shadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&first);
+        write_probe(&first, "packages/gpufx/test/probe", "test.other");
+        let second = root("shadowed", &item("ready", r#"{"package":"test.probe","progress":"amount"}"#));
+        let roots = [first.clone(), second.clone()];
+        let scan = scan_clip_animation_folders(&roots);
+        let effects = resolve_item_effects(&roots, &scan.packs);
+        let package = &effects.ready["fx/ready"].package;
+        let wanted = std::fs::canonicalize(second.join("packages/gpufx/test/probe")).unwrap();
+        for paths in [crate::ProjectPaths::new(&first.join("project.json"), roots.to_vec()), crate::ProjectPaths::roots_only(Path::new("project.json"), roots.to_vec())] {
+            let found = paths.package_path(package).expect("the package resolves");
+            assert_eq!(std::fs::canonicalize(found).unwrap(), wanted);
+        }
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
+    }
+
+    #[test]
+    fn a_zip_with_an_oversized_manifest_is_skipped() {
+        use std::io::Write;
+        let root = root("oversized", &item("ready", r#"{"package":"test.big","progress":"amount"}"#));
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(root.join("packages/gpufx/big.zip")).unwrap());
+        writer.start_file("manifest.json", zip::write::SimpleFileOptions::default()).unwrap();
+        let padding = " ".repeat(2 << 20);
+        writer.write_all(format!(r#"{{"id":"test.big","name":"Big"{padding}}}"#).as_bytes()).unwrap();
+        writer.finish().unwrap();
+        let roots = [root.clone()];
+        let scan = scan_clip_animation_folders(&roots);
+        let effects = resolve_item_effects(&roots, &scan.packs);
+        assert!(effects.ready.is_empty());
+        assert!(effects.problems[0].message.contains("not installed"), "{:?}", effects.problems);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
