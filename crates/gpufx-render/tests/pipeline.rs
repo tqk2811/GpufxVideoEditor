@@ -109,7 +109,7 @@ fn the_mixed_pcm_repeats_exactly_between_renders() {
         r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
             {{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":120000,"fade_in":9000}},
                        {{"source":"{source}","start":120000,"source_in":270000,"duration":120000,"gain_db":-3.0}}],
-              "transitions":[{{"after_clip":0,"package":"mix","duration":30000}}]}}]}}"#
+              "transitions":[{{"after_clip":0,"package":"xfade","duration":30000}}]}}]}}"#
     );
     let first = render_pcm(&gpu, &json);
     let second = render_pcm(&gpu, &json);
@@ -123,7 +123,7 @@ fn rendering_twice_gives_identical_frames() {
     let _lock = gpu_lock();
     let (a, b) = test_clips();
     let Some(gpu) = gpu() else { return };
-    let transition = r#""transitions":[{"after_clip":0,"package":"mix","duration":30000}]"#;
+    let transition = r#""transitions":[{"after_clip":0,"package":"xfade","duration":30000}]"#;
     let tracks = format!(
         r#"{{"clips":[{},{}],{transition}}},{{"clips":[{}]}}"#,
         clip_json(&a, 0, 10, 40),
@@ -310,7 +310,7 @@ fn transition_frames_follow_the_schedule() {
     let (a, b) = test_clips();
     let Some(gpu) = gpu() else { return };
     // Clips cut at frame 40; the transition lasts 20 frames, so frames 30..50 blend.
-    let transition = format!(r#""transitions":[{{"after_clip":0,"package":"mix","duration":{}}}]"#, 20 * FRAME);
+    let transition = format!(r#""transitions":[{{"after_clip":0,"package":"xfade","duration":{}}}]"#, 20 * FRAME);
     let tracks = format!(r#"{{"clips":[{},{}],{transition}}}"#, clip_json(&a, 0, 100, 40), clip_json(&b, 40, 10, 40));
     let window: Vec<i64> = (30..50).collect();
     let mut wanted = window.clone();

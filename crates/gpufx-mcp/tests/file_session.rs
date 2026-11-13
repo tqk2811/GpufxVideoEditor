@@ -98,17 +98,17 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         step(&mut session, "clip_split", json!({"clip": clip0, "at": SECOND}), next)
     };
     expected = {
-        let next = engine::add_effect(&expected, key(0, 0), Effect { package: "mix".into(), params: Map::new(), keyframes: Default::default() }).unwrap();
-        step(&mut session, "effect_add", json!({"clip": clip0, "package": "mix"}), next)
+        let next = engine::add_effect(&expected, key(0, 0), Effect { package: "invert".into(), params: Map::new(), keyframes: Default::default() }).unwrap();
+        step(&mut session, "effect_add", json!({"clip": clip0, "package": "invert"}), next)
     };
     expected = {
         let next = engine::remove_effect(&expected, key(0, 0), 0).unwrap();
         step(&mut session, "effect_remove", json!({"clip": clip0, "effect": 0}), next)
     };
     expected = {
-        let transition = Transition { after_clip: 0, package: "mix".into(), duration: Time::from_ticks(18000), params: Map::new() };
+        let transition = Transition { after_clip: 0, package: "xfade".into(), duration: Time::from_ticks(18000), params: Map::new() };
         let next = engine::add_transition(&expected, 0, transition).unwrap();
-        step(&mut session, "transition_add", json!({"track": 0, "after_clip": 0, "package": "mix", "duration": 18000}), next)
+        step(&mut session, "transition_add", json!({"track": 0, "after_clip": 0, "package": "xfade", "duration": 18000}), next)
     };
     expected = {
         let next = engine::remove_transition(&expected, 0, 0).unwrap();
@@ -334,7 +334,7 @@ fn bad_arguments_are_a_parameter_error_and_packages_can_be_listed() {
     assert_eq!(call_err(&mut session, "clip_split", json!({"expected_revision": 0})).code, "invalid_params");
     assert_eq!(call_err(&mut session, "project_new", json!({"discard": true})).code, "invalid_params", "a misnamed parameter");
     assert_eq!(call_err(&mut session, "clip_delete", json!({"expected_revision": 0, "clip": {"track": 0, "clip": 0, "extra": 1}})).code, "invalid_params", "a misnamed field of a clip");
-    let listed = call_ok(&mut session, "packages_list", json!({"filter": "mix"}));
-    assert!(listed["transitions"].as_array().unwrap().iter().any(|entry| entry["package"].as_str().unwrap().contains("mix")), "{listed}");
+    let listed = call_ok(&mut session, "packages_list", json!({"filter": "xfade"}));
+    assert!(listed["transitions"].as_array().unwrap().iter().any(|entry| entry["package"].as_str().unwrap().contains("xfade")), "{listed}");
 }
 

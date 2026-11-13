@@ -174,7 +174,7 @@ fn build(session: &mut dyn EditorSession) -> Value {
     step(session, "clip_add", json!({"track": 0, "source": b, "start": 2 * SECOND, "duration": 2 * SECOND}));
     step(session, "clip_split", json!({"clip": {"track": 0, "clip": 0}, "at": SECOND}));
     step(session, "clip_set_gain", json!({"clip": {"track": 0, "clip": 1}, "gain_db": -3.0}));
-    step(session, "transition_add", json!({"track": 0, "after_clip": 1, "package": "mix", "duration": 18000}));
+    step(session, "transition_add", json!({"track": 0, "after_clip": 1, "package": "xfade", "duration": 18000}));
     step(session, "track_set_hidden", json!({"track": 0, "hidden": false}));
     step(session, "undo", json!({}));
     step(session, "redo", json!({}));
