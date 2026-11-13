@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 use crate::keyframe::effects_at;
+use crate::per_unit::{unit_poses, PerUnit, TextUnit, UnitOrder};
 use crate::project::{ClipAnimation, AnimationRef, Effect};
 use crate::schedule::SourceSample;
 use crate::schedule::ClipClock;
@@ -324,6 +325,9 @@ pub struct AnimationPreset {
     /// The duration a new animation of this preset gets (for a repeat preset, one cycle).
     pub default_duration: Time,
     build: fn() -> AnimationCurve,
+    /// The per-unit part of a preset that moves the units of a text one by one; such a preset
+    /// is for text clips only.
+    build_per_unit: Option<fn() -> PerUnit>,
 }
 
 impl PartialEq for AnimationPreset {
@@ -335,6 +339,7 @@ impl PartialEq for AnimationPreset {
 /// What the presets know once their curves are built.
 struct Built {
     curve: AnimationCurve,
+    per_unit: Option<PerUnit>,
     rotates: bool,
     max_scale: f64,
 }
@@ -362,7 +367,7 @@ fn built() -> &'static [Built] {
             .map(|preset| {
                 let curve = (preset.build)();
                 let (rotates, max_scale) = measure(&curve);
-                Built { curve, rotates, max_scale }
+                Built { curve, per_unit: preset.build_per_unit.map(|build| build()), rotates, max_scale }
             })
             .collect()
     })
@@ -377,6 +382,11 @@ impl AnimationPreset {
     /// The curve of the preset.
     pub fn curve(&self) -> &'static AnimationCurve {
         &self.built().curve
+    }
+
+    /// The per-unit part of the preset, for text clips.
+    pub fn per_unit(&self) -> Option<&'static PerUnit> {
+        self.built().per_unit.as_ref()
     }
 
     /// Whether the preset turns the picture.
@@ -399,6 +409,8 @@ pub struct PackPreset {
     pub curve: AnimationCurve,
     /// The effect the preset runs on top of its curve, when its package is installed.
     pub effect: Option<PresetEffect>,
+    /// The per-unit part of the preset, for text clips.
+    pub per_unit: Option<PerUnit>,
     rotates: bool,
     max_scale: f64,
 }
@@ -426,7 +438,13 @@ impl PresetEffect {
 impl PackPreset {
     pub fn new(reference: String, group: AnimationGroup, curve: AnimationCurve) -> Self {
         let (rotates, max_scale) = measure(&curve);
-        PackPreset { reference, group, curve, effect: None, rotates, max_scale }
+        PackPreset { reference, group, curve, effect: None, per_unit: None, rotates, max_scale }
+    }
+
+    /// The preset with `per_unit` moving the units of a text.
+    pub fn with_per_unit(mut self, per_unit: Option<PerUnit>) -> Self {
+        self.per_unit = per_unit;
+        self
     }
 
     /// The preset with `effect` run on top of its curve.
@@ -491,15 +509,16 @@ pub fn is_pack_preset(id: &str) -> bool {
 #[derive(Clone, Copy)]
 struct Resolved<'a> {
     curve: &'a AnimationCurve,
+    per_unit: Option<&'a PerUnit>,
     rotates: bool,
     max_scale: f64,
 }
 
 fn resolve<'a>(group: AnimationGroup, id: &str, packs: &'a PackPresets) -> Option<Resolved<'a>> {
     if let Some(preset) = find_preset(group, id) {
-        return Some(Resolved { curve: preset.curve(), rotates: preset.rotates(), max_scale: preset.max_scale() });
+        return Some(Resolved { curve: preset.curve(), per_unit: preset.per_unit(), rotates: preset.rotates(), max_scale: preset.max_scale() });
     }
-    packs.find(group, id).map(|preset| Resolved { curve: &preset.curve, rotates: preset.rotates, max_scale: preset.max_scale })
+    packs.find(group, id).map(|preset| Resolved { curve: &preset.curve, per_unit: preset.per_unit.as_ref(), rotates: preset.rotates, max_scale: preset.max_scale })
 }
 
 /// How a preset changes the picture at one moment, on top of the clip's own motion.
@@ -550,6 +569,15 @@ const SHAKE_DISTANCE: f64 = 0.01;
 /// How many times a shake goes back and forth in one cycle.
 const SHAKE_TIMES: usize = 3;
 
+/// Of the time of a typewriter, the part over which the characters start.
+const TYPEWRITER_STAGGER: f64 = 0.9;
+/// Of the time of a tumble, the part over which the characters start; each one turns in the rest.
+const TUMBLE_STAGGER: f64 = 0.6;
+/// How far a tumbling character rises into place, in font sizes.
+const TUMBLE_RISE: f64 = 0.3;
+/// The overshoot of a tumbling character.
+const TUMBLE_OVERSHOOT: f64 = 1.8;
+
 /// Half a second, the default duration of an enter or exit preset.
 const HALF_SECOND: Time = Time::from_ticks(TICKS_PER_SECOND / 2);
 /// One second, the default cycle of a repeat preset.
@@ -560,7 +588,38 @@ const fn preset(id: &'static str, group: AnimationGroup, build: fn() -> Animatio
         AnimationGroup::Repeat => ONE_SECOND,
         _ => HALF_SECOND,
     };
-    AnimationPreset { id, group, default_duration, build }
+    AnimationPreset { id, group, default_duration, build, build_per_unit: None }
+}
+
+/// A preset that moves the units of a text one by one, `ticks` long by default.
+const fn unit_preset(id: &'static str, group: AnimationGroup, ticks: i64, build_per_unit: fn() -> PerUnit) -> AnimationPreset {
+    AnimationPreset { id, group, default_duration: Time::from_ticks(ticks), build: curve, build_per_unit: Some(build_per_unit) }
+}
+
+/// Typewriter: each character shows at once, in turn; the last one at 90 % of the time, so the
+/// whole text holds a moment before the animation ends.
+fn typewriter_in() -> PerUnit {
+    PerUnit { unit: TextUnit::Char, order: UnitOrder::Forward, seed: 0, stagger: Some(TYPEWRITER_STAGGER), selector: None, curve: curve().with(Opacity, vec![key(0.0, 0.0, Ease::Hold), key(0.0, 1.0, Ease::Linear)]) }
+}
+/// The typewriter backwards: the last character goes first.
+fn typewriter_out() -> PerUnit {
+    PerUnit { unit: TextUnit::Char, order: UnitOrder::Backward, seed: 0, stagger: Some(TYPEWRITER_STAGGER), selector: None, curve: curve().with(Opacity, vec![key(0.0, 1.0, Ease::Hold), key(0.0, 0.0, Ease::Linear)]) }
+}
+/// Tumble: each character flips up into place in turn, rising a little and overshooting, as the
+/// `tumble` of the AI video studio (a 3D turn about the line, drawn here as a squash of the height).
+fn tumble_in() -> PerUnit {
+    let settle = Ease::BackOut { amplitude: TUMBLE_OVERSHOOT };
+    PerUnit {
+        unit: TextUnit::Char,
+        order: UnitOrder::Forward,
+        seed: 0,
+        stagger: Some(TUMBLE_STAGGER),
+        selector: None,
+        curve: curve()
+            .with(CurveProperty::ScaleY, ramp(0.0, 1.0, settle))
+            .with(Dy, ramp(TUMBLE_RISE, 0.0, settle))
+            .with(Opacity, vec![key(0.0, 0.0, Ease::Linear), key(1.0 / 3.0, 1.0, Ease::Linear)]),
+    }
 }
 
 /// A track from `from` to `to` over the whole curve with `ease`.
@@ -670,6 +729,8 @@ pub const ANIMATION_PRESETS: &[AnimationPreset] = &[
     preset("zoom", AnimationGroup::Enter, zoom_in),
     preset("pop", AnimationGroup::Enter, pop_in),
     preset("spin", AnimationGroup::Enter, spin_in),
+    unit_preset("typewriter", AnimationGroup::Enter, TICKS_PER_SECOND, typewriter_in),
+    unit_preset("tumble", AnimationGroup::Enter, TICKS_PER_SECOND, tumble_in),
     preset("fade", AnimationGroup::Exit, fade_out),
     preset("slide-left", AnimationGroup::Exit, slide_left_out),
     preset("slide-right", AnimationGroup::Exit, slide_right_out),
@@ -678,6 +739,7 @@ pub const ANIMATION_PRESETS: &[AnimationPreset] = &[
     preset("zoom", AnimationGroup::Exit, zoom_out),
     preset("pop", AnimationGroup::Exit, pop_out),
     preset("spin", AnimationGroup::Exit, spin_out),
+    unit_preset("typewriter", AnimationGroup::Exit, TICKS_PER_SECOND, typewriter_out),
     preset("bounce", AnimationGroup::Repeat, bounce),
     preset("pulse", AnimationGroup::Repeat, pulse),
     preset("shake", AnimationGroup::Repeat, shake),
@@ -804,6 +866,45 @@ pub fn effects_with_animation<'a>(sample: &SourceSample<'a>, frame: Time) -> Cow
     let mut all = own.into_owned();
     all.extend(added);
     Cow::Owned(all)
+}
+
+/// The pose of each unit of a text, by the kind of unit, of every per-unit preset of `animation`
+/// that runs at `clock`, in the order enter, exit, repeat. `count` gives how many units of a kind
+/// the text has. Empty when none runs, so the text is drawn as it is.
+pub fn animation_unit_poses(animation: &ClipAnimation, clock: ClipClock, count: impl Fn(TextUnit) -> usize) -> Vec<(TextUnit, Vec<AnimationPose>)> {
+    if animation.is_empty() || clock.duration.ticks() <= 0 {
+        return Vec::new();
+    }
+    let packs = pack_presets();
+    let poses = running(animation, clock, &packs)
+        .into_iter()
+        .filter_map(|(group, id, progress, _)| {
+            let per_unit = resolve(group, id, &packs)?.per_unit?;
+            let t = match group {
+                AnimationGroup::Repeat => progress.rem_euclid(1.0),
+                _ => progress.clamp(0.0, 1.0),
+            };
+            Some((per_unit.unit, unit_poses(per_unit, count(per_unit.unit), t)))
+        })
+        .collect();
+    poses
+}
+
+/// Whether a preset of `animation` moves the units of a text one by one.
+pub fn animation_has_per_unit(animation: &ClipAnimation) -> bool {
+    if animation.is_empty() {
+        return false;
+    }
+    let packs = pack_presets();
+    let found = presets_of(animation, &packs).any(|(_, preset)| preset.per_unit.is_some());
+    found
+}
+
+/// Whether the preset `id` of `group`, built in or of a pack, moves the units of a text.
+pub fn preset_is_per_unit(group: AnimationGroup, id: &str) -> bool {
+    let packs = pack_presets();
+    let found = resolve(group, id, &packs).is_some_and(|preset| preset.per_unit.is_some());
+    found
 }
 
 fn presets_of<'a>(animation: &'a ClipAnimation, packs: &'a PackPresets) -> impl Iterator<Item = (AnimationGroup, Resolved<'a>)> + 'a {
@@ -970,7 +1071,7 @@ mod tests {
 
     #[test]
     fn curves_give_the_poses_of_the_old_presets() {
-        for preset in ANIMATION_PRESETS {
+        for preset in ANIMATION_PRESETS.iter().filter(|preset| preset.per_unit().is_none()) {
             for step in -20..=4020 {
                 let progress = f64::from(step) / 4000.0;
                 let old = match preset.group {
@@ -985,6 +1086,30 @@ mod tests {
                 assert_eq!((new.scale_x, new.scale_y, new.blur), (1.0, 1.0, 0.0));
             }
         }
+    }
+
+    #[test]
+    fn per_unit_presets_settle_every_unit_and_stop_after_their_window() {
+        use crate::per_unit::unit_poses;
+        let units = 7;
+        for preset in ANIMATION_PRESETS.iter().filter(|preset| preset.per_unit().is_some()) {
+            let per_unit = preset.per_unit().unwrap();
+            let at = if preset.group == AnimationGroup::Enter { 1.0 } else { 0.0 };
+            for pose in unit_poses(per_unit, units, at) {
+                assert!(pose.dx.abs() < 1e-9 && pose.dy.abs() < 1e-9 && (pose.scale_y - 1.0).abs() < 1e-9 && (pose.opacity - 1.0).abs() < 1e-9, "{} {:?}: {pose:?}", preset.id, preset.group);
+            }
+            assert_eq!(preset_pose(preset.group, preset.id, 0.5), Some(AnimationPose::IDENTITY), "the whole clip stays");
+        }
+        let animation = ClipAnimation { enter: Some(AnimationRef { preset: "typewriter".to_owned(), duration: Time::from_ticks(90_000) }), ..ClipAnimation::default() };
+        assert!(animation_has_per_unit(&animation));
+        assert!(preset_is_per_unit(AnimationGroup::Enter, "typewriter") && !preset_is_per_unit(AnimationGroup::Enter, "fade"));
+        let clock = |elapsed| ClipClock { elapsed: Time::from_ticks(elapsed), duration: Time::from_ticks(900_000) };
+        let middle = animation_unit_poses(&animation, clock(45_000), |_| units);
+        assert_eq!(middle.len(), 1);
+        let shown: Vec<f64> = middle[0].1.iter().map(|pose| pose.opacity).collect();
+        assert!(shown[0] == 1.0 && shown[units - 1] == 0.0, "the first character shows before the last: {shown:?}");
+        assert!(animation_unit_poses(&animation, clock(90_000), |_| units).is_empty(), "drawn as it is once the enter has played");
+        assert!(animation_unit_poses(&animation, clock(0), |_| units)[0].1.iter().all(|pose| pose.opacity == 0.0), "nothing typed yet");
     }
 
     #[test]

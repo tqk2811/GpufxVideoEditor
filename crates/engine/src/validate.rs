@@ -235,6 +235,9 @@ pub enum ValidationError {
     InvalidAnimationDuration { track: usize, clip: usize, group: &'static str, duration: Time },
     /// A clip on a track of kind `audio` has a preset animation, which has no picture to move.
     AnimationOnAudioTrack { track: usize, clip: usize },
+    /// A clip that is not text names a built-in preset that moves the units of a text, such as
+    /// `typewriter`.
+    PerUnitAnimationNotText { track: usize, clip: usize, group: &'static str, preset: String },
     /// The source of a clip on a track of kind `audio` has no audio stream.
     SourceHasNoAudio {
         track: usize,
@@ -382,6 +385,7 @@ impl fmt::Display for ValidationError {
             }
             InvalidAnimationDuration { track, clip, group, duration } => write!(f, "track {track}, clip {clip}: the '{group}' animation lasts {duration}, which must be above 0"),
             AnimationOnAudioTrack { track, clip } => write!(f, "track {track}, clip {clip}: a clip on an audio track has no picture to animate"),
+            PerUnitAnimationNotText { track, clip, group, preset } => write!(f, "track {track}, clip {clip}: the '{group}' animation '{preset}' moves the characters of a text, and the clip is not text"),
             SourceHasNoAudio { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: source '{source}' has no audio stream")
             }
@@ -489,8 +493,12 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             for (group, reference) in [(AnimationGroup::Enter, &animation.enter), (AnimationGroup::Exit, &animation.exit), (AnimationGroup::Repeat, &animation.repeat)] {
                 let Some(reference) = reference else { continue };
                 // A preset of a pack may be missing on this machine: it is left out, not refused.
-                if !is_pack_preset(&reference.preset) && find_preset(group, &reference.preset).is_none() {
-                    errors.push(UnknownAnimation { track: t, clip: c, group: group.name(), preset: reference.preset.clone() });
+                if !is_pack_preset(&reference.preset) {
+                    match find_preset(group, &reference.preset) {
+                        None => errors.push(UnknownAnimation { track: t, clip: c, group: group.name(), preset: reference.preset.clone() }),
+                        Some(preset) if preset.per_unit().is_some() && !clip.is_text() => errors.push(PerUnitAnimationNotText { track: t, clip: c, group: group.name(), preset: reference.preset.clone() }),
+                        Some(_) => {}
+                    }
                 }
                 if reference.duration <= Time::ZERO {
                     errors.push(InvalidAnimationDuration { track: t, clip: c, group: group.name(), duration: reference.duration });

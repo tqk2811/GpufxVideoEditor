@@ -359,3 +359,14 @@ fn a_start_trim_of_a_karaoke_text_keeps_its_words_in_place() {
 fn assert_valid(p: &Project) {
     assert_eq!(validate(p, &AcceptAll), vec![]);
 }
+
+#[test]
+fn validate_rejects_a_per_unit_preset_on_a_clip_that_is_not_text() {
+    let mut c = text_clip("Hi", 0, 9000);
+    c.animation.enter = Some(AnimationRef { preset: "typewriter".into(), duration: t(9000) });
+    let mut p = project_with(vec![c]);
+    assert_eq!(validate(&p, &AcceptAll), vec![], "typewriter is for text");
+    p.tracks[0].clips[0].text = None;
+    p.tracks[0].clips[0].source = "a.png".into();
+    assert_eq!(validate(&p, &AcceptAll), vec![ValidationError::PerUnitAnimationNotText { track: 0, clip: 0, group: "in", preset: "typewriter".into() }]);
+}
