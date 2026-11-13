@@ -50,12 +50,24 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(family) = state.missing_font(key) {
         missing_font_warning(ui, &language.t(Message::FontMissing(family)));
     }
+    let mut next = text.clone();
+    if state.project().tracks.get(key.track).is_some_and(|track| track.is_subtitle()) {
+        match subtitle_section(ui, id, state, key.track, text, language) {
+            Some(SubtitleAction::TrackStyle(reference)) => {
+                state.set_subtitle_style(key.track, &reference);
+                return;
+            }
+            Some(SubtitleAction::Export) => state.ui.subtitle_export_request = Some(key.track),
+            Some(SubtitleAction::OwnStyle(own)) => next.own_style = own,
+            None => {}
+        }
+        ui.separator();
+    }
     if let Some(reference) = style_combo(ui, id, state, language) {
         // The style is one undo step of its own; the rest of the panel shows it on the next frame.
         state.apply_text_style(key, &reference);
         return;
     }
-    let mut next = text.clone();
     if let Some(content) = content_box(ui, id, text, language) {
         next.content = content;
     }
@@ -80,6 +92,41 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if next != *text {
         state.live_text(next);
     }
+}
+
+enum SubtitleAction {
+    TrackStyle(String),
+    OwnStyle(bool),
+    Export,
+}
+
+/// What a cue of a subtitle track adds to the panel: the style of the whole track, whether this
+/// cue keeps its own, and exporting the track as an SRT file.
+fn subtitle_section(ui: &mut egui::Ui, id: egui::Id, state: &EditorState, track: usize, text: &TextContent, language: Language) -> Option<SubtitleAction> {
+    let library = &state.text_style_library;
+    let current = state.project().tracks.get(track).and_then(|track| track.subtitle.as_ref()).and_then(|subtitle| subtitle.style.clone());
+    let shown = current.as_deref().map_or_else(|| language.t(Message::SubtitleStyleNone), |reference| library.find(reference).map_or_else(|| reference.to_owned(), |style| style.name.clone()));
+    let mut action = None;
+    ui.label(egui::RichText::new(language.t(Message::SubtitleTrack)).strong());
+    ui.horizontal(|ui| {
+        ui.colored_label(theme::text_dim(), language.t(Message::SubtitleTrackStyle));
+        egui::ComboBox::from_id_salt(id.with("subtitle-style")).selected_text(shown).width(ui.available_width()).height(FONT_LIST_HEIGHT).show_ui(ui, |ui| {
+            for (pack, style) in library.styles(Some(StyleKind::Subtitle)) {
+                let selected = current.as_deref() == Some(style.reference.as_str());
+                if ui.selectable_label(selected, format!("{} \u{b7} {}", style.name, pack.name)).clicked() {
+                    action = Some(SubtitleAction::TrackStyle(style.reference.clone()));
+                }
+            }
+        });
+    });
+    let mut own = text.own_style;
+    if ui.checkbox(&mut own, language.t(Message::SubtitleOwnStyle)).changed() {
+        action = Some(SubtitleAction::OwnStyle(own));
+    }
+    if ui.button(language.t(Message::ExportSubtitles)).clicked() {
+        action = Some(SubtitleAction::Export);
+    }
+    action
 }
 
 /// The combo that applies a style of an installed pack to the clip; the reference of the style

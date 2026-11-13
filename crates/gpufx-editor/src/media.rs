@@ -123,7 +123,7 @@ mod tests {
     }
 
     fn track(kind: TrackKind, spans: &[(i64, i64)]) -> Track {
-        Track { kind, clips: spans.iter().map(|&(start, length)| new_clip("x.mp4", seconds(start), seconds(length))).collect(), transitions: Vec::new(), locked: false, hidden: false }
+        Track { kind, clips: spans.iter().map(|&(start, length)| new_clip("x.mp4", seconds(start), seconds(length))).collect(), transitions: Vec::new(), locked: false, hidden: false, subtitle: None }
     }
 
     fn project(tracks: Vec<Track>) -> Project {

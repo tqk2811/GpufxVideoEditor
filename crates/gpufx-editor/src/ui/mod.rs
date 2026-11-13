@@ -26,6 +26,7 @@ pub enum UiRequest {
     PickClipFile { track: usize },
     ImportMedia { audio_only: bool },
     ImportPackage,
+    ImportSubtitles,
     NewProject,
     OpenProject,
     SaveProject,
@@ -877,7 +878,7 @@ mod tests {
     #[test]
     fn selecting_a_clip_with_an_out_of_range_gain_makes_no_edit() {
         let mut project = EditorState::default().project().clone();
-        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![crate::editor::new_clip("a.mp4", Time::ZERO, seconds(5))], transitions: Vec::new(), locked: false, hidden: false });
+        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![crate::editor::new_clip("a.mp4", Time::ZERO, seconds(5))], transitions: Vec::new(), locked: false, hidden: false, subtitle: None });
         project.tracks[0].clips[0].gain_db = -80.0;
         let mut state = EditorState::new(project);
         state.select(Some(ClipKey { track: 0, clip: 0 }));

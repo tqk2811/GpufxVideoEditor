@@ -19,7 +19,7 @@ fn reference(preset: &str, ticks: i64) -> Option<AnimationRef> {
 fn project_with(clips: Vec<Clip>) -> Project {
     let mut p = project(FRAME, vec![]);
     p.version = engine::SUPPORTED_VERSION;
-    p.tracks.push(Track { kind: TrackKind::Video, clips, transitions: vec![], locked: false, hidden: false });
+    p.tracks.push(Track { kind: TrackKind::Video, clips, transitions: vec![], locked: false, hidden: false, subtitle: None });
     p
 }
 

@@ -78,6 +78,23 @@ pub struct Track {
     /// of the project, so hiding a track does not change where anything ends.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
+    /// Present on a subtitle track: a video track made by importing subtitles, with one text clip
+    /// per cue. Absent on every other track, so older projects load and save unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<SubtitleTrack>,
+}
+
+/// What makes a track a subtitle track.
+///
+/// The style of its clips is copied into each clip's [`TextContent`], as any text style is, so the
+/// project opens the same without the style's pack. `style` only remembers which style the track
+/// was last given, for the editor to show and to give new cues.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SubtitleTrack {
+    /// `"<pack id>/<item id>"` of the subtitle style the track was last given; `None` when it has
+    /// none yet. Must not be empty or blank when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 /// A piece of a source file placed on the timeline.
@@ -175,6 +192,10 @@ pub struct TextContent {
     /// Extra space after each character, in parts of the font size; may be negative.
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub letter_spacing: f32,
+    /// On a subtitle track: the clip keeps its own style when the track is given another one. The
+    /// editor sets it when a style is applied to this clip alone.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub own_style: bool,
 }
 
 impl TextContent {
@@ -195,6 +216,7 @@ impl TextContent {
             italic: false,
             transform: TextTransform::None,
             letter_spacing: 0.0,
+            own_style: false,
         }
     }
 
@@ -650,6 +672,7 @@ impl From<ProjectV1> for Project {
                     transitions: track.transitions,
                     locked: false,
                     hidden: false,
+                    subtitle: None,
                 })
                 .collect(),
         }
@@ -758,5 +781,10 @@ impl Track {
     /// Whether this track only contributes sound.
     pub fn is_audio(&self) -> bool {
         self.kind == TrackKind::Audio
+    }
+
+    /// Whether this track holds imported subtitles.
+    pub fn is_subtitle(&self) -> bool {
+        self.subtitle.is_some()
     }
 }

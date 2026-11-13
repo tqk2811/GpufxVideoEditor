@@ -17,7 +17,7 @@ fn project_of(clips: Vec<engine::Clip>) -> Project {
     Project {
         version: SUPPORTED_VERSION,
         output: Output { width: 16, height: 16, frame_duration: t(FRAME), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 128_000 }) },
-        tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false }],
+        tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
     }
 }
 

@@ -18,7 +18,8 @@ use crate::clip_animation_install::InstalledClipAnimationPack;
 use crate::clip_animation_library::ClipAnimationLibrary;
 use crate::subtitle_style_install::SubtitleLayout;
 use crate::text_shapes::available_families;
-use crate::text_style_library::{subtitle_placement, TextStyleLibrary};
+use crate::subtitle_track::{cue_spans, track_srt, CueNote, DEFAULT_SUBTITLE_LAYOUT};
+use crate::text_style_library::{subtitle_placement, LibraryTextStyle, TextStyleLibrary};
 use crate::sticker_install::InstalledStickerPack;
 use crate::sticker_library::StickerLibrary;
 use crate::effect_previews::PreviewManager;
@@ -224,6 +225,8 @@ pub enum LeftTab {
 pub struct UiState {
     /// The text clip whose font file the inspector asked to choose; the window opens the dialog.
     pub font_file_request: Option<ClipKey>,
+    /// The subtitle track the inspector asked to export; the window opens the Save dialog.
+    pub subtitle_export_request: Option<usize>,
     pub left_tab: LeftTab,
     pub media_search: String,
     pub audio_search: String,
@@ -1602,7 +1605,9 @@ impl EditorState {
         let Some(style) = self.text_style_library.find(reference).cloned() else { return };
         let Some(clip) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).cloned() else { return };
         let Some(current) = clip.text.as_ref() else { return };
-        let text = style.apply(current, &available_families());
+        let mut text = style.apply(current, &available_families());
+        // A cue given a style of its own keeps it when its subtitle track is given another.
+        text.own_style = self.history.current().tracks.get(key.track).is_some_and(|track| track.is_subtitle());
         let animation = style.animation_for(&clip.animation);
         let placement = self.styled_text_placement(key, &text, style.layout.as_ref());
         if text == *current && animation == clip.animation && placement.is_none_or(|placement| clip.placement == Some(placement)) {
@@ -1616,6 +1621,116 @@ impl EditorState {
                 None => Ok(next),
             }
         });
+    }
+
+    /// The clips of a subtitle track for the SRT text `srt`, one text clip per cue, and the notes
+    /// about its cues. Each shows its cue in `style`, or as the default text when there is none,
+    /// placed where the style's layout says (near the bottom without one).
+    pub fn subtitle_clips(&self, srt: &str, style: Option<&LibraryTextStyle>) -> (Vec<engine::Clip>, Vec<CueNote>) {
+        let (spans, notes) = cue_spans(srt);
+        let families = if style.is_some() { available_families() } else { Default::default() };
+        let layout = style.and_then(|style| style.layout).unwrap_or(DEFAULT_SUBTITLE_LAYOUT);
+        let output = self.output_pixels();
+        let clips = spans
+            .into_iter()
+            .map(|span| {
+                let text = match style {
+                    Some(style) => style.new_text(span.text, &families),
+                    None => default_text(span.text),
+                };
+                let placement = subtitle_placement(self.text_pixels(&text), output, &layout);
+                let mut clip = engine::text_clip(span.start, span.end.saturating_sub(span.start), text);
+                clip.placement = placement;
+                if let Some(style) = style {
+                    clip.animation = style.animation_for(&engine::ClipAnimation::default());
+                }
+                clip
+            })
+            .collect();
+        (clips, notes)
+    }
+
+    /// The new look of the clips of `track` in the subtitle `style`: the style is copied into each
+    /// text, which keeps its content, and each goes where the style's layout says unless it has
+    /// keyframes of its place. A clip with its own style ([`TextContent::own_style`]) is left as it
+    /// is, unless `all`, which gives it the track's style back.
+    pub fn subtitle_restyle(&self, track: usize, style: &LibraryTextStyle, all: bool) -> Result<Vec<engine::ClipRestyle>, EditError> {
+        let target = self.project().tracks.get(track).ok_or(EditError::TrackNotFound { track })?;
+        let families = available_families();
+        let layout = style.layout.unwrap_or(DEFAULT_SUBTITLE_LAYOUT);
+        let output = self.output_pixels();
+        Ok(target
+            .clips
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clip)| {
+                let current = clip.text.as_ref().filter(|text| all || !text.own_style)?;
+                let mut text = style.apply(current, &families);
+                text.own_style = false;
+                let keyframed = ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property));
+                let placement = if keyframed { None } else { subtitle_placement(self.text_pixels(&text), output, &layout) };
+                Some(engine::ClipRestyle { clip: index, text, animation: style.animation_for(&clip.animation), placement })
+            })
+            .collect())
+    }
+
+    /// Adds the cues of the SRT text `srt` as a new subtitle track, as one undo step, in the
+    /// subtitle style `style` when it is given and installed. Says on the status line how many cues
+    /// came in and how many were left out. `None` when nothing was added.
+    pub fn import_subtitles(&mut self, srt: &str, style: Option<&str>) -> Option<(usize, Vec<CueNote>)> {
+        let style = style.and_then(|reference| self.text_style_library.find(reference).cloned());
+        let (clips, notes) = self.subtitle_clips(srt, style.as_ref());
+        if clips.is_empty() {
+            self.status = Status::Refused(Message::SubtitlesNone);
+            return None;
+        }
+        let cues = clips.len();
+        let track = self.project().tracks.len();
+        let subtitle = engine::SubtitleTrack { style: style.map(|style| style.reference) };
+        if !self.run(|project| engine::add_subtitle_track(project, subtitle, clips)) {
+            return None;
+        }
+        self.selection = Some(ClipKey { track, clip: 0 });
+        self.status = Status::Info(Message::SubtitlesImported { cues, skipped: notes.iter().filter(|note| note.skipped()).count() });
+        Some((track, notes))
+    }
+
+    /// Reads the SRT file at `path` and imports it as [`Self::import_subtitles`] does, with no
+    /// style. A file that cannot be read or is not UTF-8 is said on the status line.
+    pub fn import_subtitles_file(&mut self, path: &Path) {
+        match read_subtitle_file(path) {
+            Ok(srt) => {
+                self.import_subtitles(&srt, None);
+            }
+            Err(reason) => self.status = Status::Error(Message::SubtitleFileUnreadable(reason)),
+        }
+    }
+
+    /// Gives subtitle track `track` the subtitle style `reference`, as one undo step: every clip
+    /// without its own style takes it (see [`Self::subtitle_restyle`]). Nothing for a track that is
+    /// not a subtitle track or a style that is not installed.
+    pub fn set_subtitle_style(&mut self, track: usize, reference: &str) {
+        let Some(style) = self.text_style_library.find(reference).cloned() else { return };
+        if !self.project().tracks.get(track).is_some_and(|track| track.is_subtitle()) {
+            return;
+        }
+        let Ok(restyled) = self.subtitle_restyle(track, &style, false) else { return };
+        let subtitle = Some(engine::SubtitleTrack { style: Some(style.reference.clone()) });
+        self.run(|project| engine::restyle_track(project, track, subtitle, restyled));
+    }
+
+    /// The text clips of `track` as an SRT file. `None` for a track that is not there.
+    pub fn subtitle_srt(&self, track: usize) -> Option<String> {
+        self.project().tracks.get(track).map(track_srt)
+    }
+
+    /// Writes the text clips of `track` to `path` as an SRT file and says so on the status line.
+    pub fn export_subtitles_file(&mut self, track: usize, path: &Path) {
+        let Some(srt) = self.subtitle_srt(track) else { return };
+        self.status = match std::fs::write(path, srt) {
+            Ok(()) => Status::Info(Message::SubtitlesExported(path.display().to_string())),
+            Err(error) => Status::Error(Message::SubtitleExportFailed(error.to_string())),
+        };
     }
 
     /// The place the text clip `key` takes when it shows `text` in a style: where a subtitle
@@ -1943,6 +2058,13 @@ pub fn clip_name(clip: &Clip) -> std::borrow::Cow<'_, str> {
     let mut name: String = line.chars().take(TEXT_NAME_CHARS).collect();
     name.push('…');
     name.into()
+}
+
+/// The text of the subtitle file at `path`, without a byte order mark; the reason when it cannot
+/// be read or is not UTF-8.
+pub fn read_subtitle_file(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    String::from_utf8(bytes).map_err(|_| "the file is not UTF-8 text".to_owned())
 }
 
 #[cfg(test)]
@@ -2396,7 +2518,7 @@ mod tests {
     fn every_edit_refusal_has_text_and_names_its_track_as_the_timeline_does() {
         let mut project = EditorState::default().project().clone();
         for kind in [TrackKind::Video, TrackKind::Audio, TrackKind::Video] {
-            project.tracks.push(engine::Track { kind, clips: Vec::new(), transitions: Vec::new(), locked: false, hidden: false });
+            project.tracks.push(engine::Track { kind, clips: Vec::new(), transitions: Vec::new(), locked: false, hidden: false, subtitle: None });
         }
         let key = ClipKey { track: 2, clip: 0 };
         let at = Time::from_seconds(3).unwrap();
@@ -2446,7 +2568,7 @@ mod tests {
         for offset in 1000..1040 {
             let project = {
                 let mut base = default_project();
-                base.tracks.push(engine::Track { kind: TrackKind::Video, clips: Vec::new(), transitions: Vec::new(), locked: false, hidden: false });
+                base.tracks.push(engine::Track { kind: TrackKind::Video, clips: Vec::new(), transitions: Vec::new(), locked: false, hidden: false, subtitle: None });
                 let mut clip = new_clip("a.mp4", Time::ZERO, DEFAULT_CLIP_DURATION);
                 clip.source_in = Time::from_ticks(1);
                 base.tracks[0].clips.push(clip);
@@ -3692,7 +3814,7 @@ mod tests {
     fn opening_a_project_lists_its_media() {
         let mut state = EditorState::default();
         let mut project = default_project();
-        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![new_clip("C:/v/x.mp4", Time::ZERO, seconds(4))], transitions: Vec::new(), locked: false, hidden: false });
+        project.tracks.push(engine::Track { kind: TrackKind::Video, clips: vec![new_clip("C:/v/x.mp4", Time::ZERO, seconds(4))], transitions: Vec::new(), locked: false, hidden: false, subtitle: None });
         state.replace_project(project, Some(PathBuf::from("p.json")));
         let listed = state.library.visible(crate::media::MediaKind::Video, "");
         assert_eq!(listed.len(), 1);
@@ -3784,6 +3906,67 @@ second line")), "Title…");
         let (x, y) = centre_of(&state, &clip);
         assert!((x - 0.5).abs() < 1e-6 && (y - 0.85).abs() < 1e-6, "{x} {y}");
         assert!(clip.animation.is_empty(), "a style without animations keeps the clip's");
+    }
+
+    const SRT: &str = "1\n00:00:01,000 --> 00:00:02,000\nOne\n\n2\n00:00:03,000 --> 00:00:04,500\n<i>Two</i>\nlines\n\n3\nbroken\n";
+
+    #[test]
+    fn importing_subtitles_adds_one_text_clip_per_cue_as_one_undo_step() {
+        let mut state = EditorState::default();
+        let before = state.project().clone();
+        let (track, notes) = state.import_subtitles(SRT, None).expect("imported");
+        assert_eq!(notes.iter().filter(|note| note.skipped()).count(), 1, "{notes:?}");
+        let added = &state.project().tracks[track];
+        assert_eq!(added.subtitle, Some(engine::SubtitleTrack { style: None }));
+        let cues: Vec<(i64, i64, &str)> = added.clips.iter().map(|clip| (clip.start.ticks(), clip.duration.ticks(), clip.text.as_ref().unwrap().content.as_str())).collect();
+        assert_eq!(cues, vec![(90_000, 90_000, "One"), (270_000, 135_000, "Two\nlines")]);
+        let (x, y) = centre_of(&state, &added.clips[0]);
+        assert!((x - 0.5).abs() < 1e-6 && (y - DEFAULT_SUBTITLE_LAYOUT.anchor_y).abs() < 1e-6, "{x} {y}");
+        assert_eq!(state.status, Status::Info(Message::SubtitlesImported { cues: 2, skipped: 1 }));
+        assert_eq!(state.subtitle_srt(track).unwrap(), "1\r\n00:00:01,000 --> 00:00:02,000\r\nOne\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,500\r\nTwo\r\nlines\r\n\r\n");
+        state.undo();
+        assert_eq!(*state.project(), before, "one undo step takes the whole track back");
+
+        assert!(state.import_subtitles("garbage", None).is_none());
+        assert_eq!(state.status, Status::Refused(Message::SubtitlesNone));
+        assert_eq!(*state.project(), before);
+    }
+
+    #[test]
+    fn a_styled_import_copies_the_style_and_remembers_it_on_the_track() {
+        let mut state = EditorState::default();
+        state.text_style_library = style_library();
+        let (track, _) = state.import_subtitles(SRT, Some("s/low")).unwrap();
+        let added = &state.project().tracks[track];
+        assert_eq!(added.subtitle.as_ref().and_then(|subtitle| subtitle.style.as_deref()), Some("s/low"));
+        assert!(added.clips.iter().all(|clip| clip.text.as_ref().is_some_and(|text| text.weight == 800 && !text.own_style)));
+        let (_, y) = centre_of(&state, &added.clips[1]);
+        assert!((y - 0.85).abs() < 1e-6, "{y}");
+    }
+
+    #[test]
+    fn a_track_style_skips_cues_with_their_own_style() {
+        let mut state = EditorState::default();
+        state.text_style_library = style_library();
+        let (track, _) = state.import_subtitles(SRT, None).unwrap();
+        let first = ClipKey { track, clip: 0 };
+        state.apply_text_style(first, "p/bold");
+        assert!(state.project().tracks[track].clips[0].text.as_ref().unwrap().own_style, "a style given to one cue is its own");
+        let own = state.project().tracks[track].clips[0].clone();
+
+        state.set_subtitle_style(track, "s/low");
+
+        let restyled = &state.project().tracks[track];
+        assert_eq!(restyled.subtitle.as_ref().and_then(|subtitle| subtitle.style.as_deref()), Some("s/low"));
+        assert_eq!(restyled.clips[0], own, "the cue with its own style stays");
+        let second = restyled.clips[1].text.as_ref().unwrap();
+        assert_eq!((second.content.as_str(), second.weight), ("Two\nlines", 800));
+        state.undo();
+        assert_eq!(state.project().tracks[track].subtitle, Some(engine::SubtitleTrack { style: None }), "one undo step");
+
+        let all = state.subtitle_restyle(track, state.text_style_library.find("s/low").unwrap(), true).unwrap();
+        assert_eq!(all.len(), 2, "all: the cue with its own style takes the track's too");
+        assert!(all.iter().all(|change| !change.text.own_style));
     }
 
     #[test]

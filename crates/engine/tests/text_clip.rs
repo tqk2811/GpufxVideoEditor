@@ -10,7 +10,7 @@ pub fn text_clip(content: &str, start: i64, duration: i64) -> Clip {
 fn project_with(clips: Vec<Clip>) -> Project {
     let mut p = project(3003, vec![]);
     p.version = engine::SUPPORTED_VERSION;
-    p.tracks.push(Track { kind: TrackKind::Video, clips, transitions: vec![], locked: false, hidden: false });
+    p.tracks.push(Track { kind: TrackKind::Video, clips, transitions: vec![], locked: false, hidden: false, subtitle: None });
     p
 }
 

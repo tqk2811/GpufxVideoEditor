@@ -68,7 +68,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
         }
         LeftTab::Text => {
             state.ui.tile_hover.clear();
-            text_tab(ui, state);
+            text_tab(ui, state, requests);
         }
     });
 }
@@ -200,11 +200,16 @@ fn sticker_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
     }
 }
 
-/// The Text tab: a button that adds a default text at the playhead.
-fn text_tab(ui: &mut egui::Ui, state: &mut EditorState) {
+/// The Text tab: a button that adds a default text at the playhead, one that imports an SRT file
+/// as a subtitle track, and the styles of the installed packs.
+fn text_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let language = state.language();
     if icons::label_button(ui, Icon::Plus, &language.t(Message::AddText), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
         state.add_text_at_playhead();
+    }
+    ui.add_space(4.0);
+    if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportSubtitles), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
+        requests.push(UiRequest::ImportSubtitles);
     }
     ui.add_space(6.0);
     ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TextAddHint)).color(theme::text_dim())).wrap());

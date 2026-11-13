@@ -643,6 +643,9 @@ impl Session {
         if let Some(clip) = self.state.ui.font_file_request.take() {
             self.begin_task(Request::PickFont { clip });
         }
+        if let Some(track) = self.state.ui.subtitle_export_request.take() {
+            self.begin_task(Request::ExportSubtitles { track });
+        }
         #[cfg(debug_assertions)]
         self.record_smoke_ui(ui_time);
         #[cfg(not(debug_assertions))]
@@ -767,11 +770,13 @@ impl Session {
             FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
             FileDialog::SaveProject => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
+            FileDialog::ImportSubtitles => base().add_filter(language.t(Message::FilterSubtitles), &["srt"]).add_filter(language.t(Message::FilterAllFiles), &["*"]),
+            FileDialog::ExportSubtitles { .. } => base().add_filter(language.t(Message::FilterSubtitles), &["srt"]).set_file_name("subtitles.srt"),
         };
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
-                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::OpenProject => picker.pick_file(),
-                FileDialog::SaveProject | FileDialog::Export => picker.save_file(),
+                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
+                FileDialog::SaveProject | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
         });
@@ -937,6 +942,7 @@ impl Session {
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
             UiRequest::ImportPackage => self.begin_task(Request::ImportPackage),
+            UiRequest::ImportSubtitles => self.begin_task(Request::ImportSubtitles),
             UiRequest::SetLanguage(language) => self.set_language(language),
             UiRequest::SetTheme(choice) => self.set_theme(choice),
             UiRequest::SetAgentAccess(enabled) => {

@@ -37,7 +37,7 @@
 use crate::audio_schedule::sample_position;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
-use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, Effect, Project, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, Effect, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -296,7 +296,60 @@ pub fn add_track(project: &Project, kind: TrackKind) -> Result<Project, EditErro
         transitions: Vec::new(),
         locked: false,
         hidden: false,
+        subtitle: None,
     });
+    finish(next)
+}
+
+/// Appends a subtitle track above the others holding `clips`, as one command: an import of a
+/// whole subtitle file is one undo step. Refused when two clips overlap, and as invalid like
+/// [`add_clip`].
+pub fn add_subtitle_track(project: &Project, subtitle: SubtitleTrack, clips: Vec<Clip>) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    let track = next.tracks.len();
+    let mut target = Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: Some(subtitle) };
+    sort_track(&mut target);
+    for pair in target.clips.windows(2) {
+        let end = pair[0].start.saturating_add(pair[0].duration);
+        if pair[1].start < end {
+            return Err(EditError::Overlap { track, start: pair[1].start, end: pair[1].start.saturating_add(pair[1].duration) });
+        }
+    }
+    next.tracks.push(target);
+    finish(next)
+}
+
+/// The new look of one clip of a track, for [`restyle_track`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipRestyle {
+    /// Index of the clip in its track.
+    pub clip: usize,
+    pub text: TextContent,
+    pub animation: ClipAnimation,
+    /// The new place; `None` leaves it as it is.
+    pub placement: Option<ClipPlacement>,
+}
+
+/// Sets what makes `track` a subtitle track and gives the clips `restyled` their new look, as
+/// one command. The time of every clip stays. Refused on a locked track, for a clip that is not
+/// there or is not a text.
+pub fn restyle_track(project: &Project, track: usize, subtitle: Option<SubtitleTrack>, restyled: Vec<ClipRestyle>) -> Result<Project, EditError> {
+    unlocked(project, track)?;
+    let mut next = project.clone();
+    let target = track_mut(&mut next, track)?;
+    target.subtitle = subtitle;
+    for change in restyled {
+        let key = ClipKey { track, clip: change.clip };
+        let clip = target.clips.get_mut(change.clip).ok_or(EditError::ClipNotFound { key })?;
+        if !clip.is_text() {
+            return Err(EditError::NotText { key });
+        }
+        clip.text = Some(change.text);
+        clip.animation = change.animation;
+        if let Some(placement) = change.placement {
+            clip.placement = Some(placement);
+        }
+    }
     finish(next)
 }
 
@@ -337,7 +390,12 @@ pub fn add_clip(project: &Project, track: usize, clip: Clip) -> Result<Project, 
 /// Adds a text clip showing `text` to `track`, from `start` for `duration`. Refused like
 /// [`add_clip`] where another clip is, and as invalid on an audio track or with bad text.
 pub fn add_text_clip(project: &Project, track: usize, start: Time, duration: Time, text: TextContent) -> Result<Project, EditError> {
-    let clip = Clip {
+    add_clip(project, track, text_clip(start, duration, text))
+}
+
+/// A text clip showing `text` from `start` for `duration`, with nothing else set.
+pub fn text_clip(start: Time, duration: Time, text: TextContent) -> Clip {
+    Clip {
         source: TEXT_SOURCE.to_owned(),
         start,
         source_in: Time::ZERO,
@@ -352,8 +410,7 @@ pub fn add_text_clip(project: &Project, track: usize, start: Time, duration: Tim
         motion: ClipMotion::default(),
         text: Some(text),
         animation: ClipAnimation::default(),
-    };
-    add_clip(project, track, clip)
+    }
 }
 
 /// Replaces the content and style of a text clip. Its time on the timeline does not change.

@@ -11,7 +11,7 @@ fn clip(source: &str, start: i64, duration: i64) -> Clip {
 }
 
 fn project(kind: TrackKind, clips: Vec<Clip>) -> Project {
-    Project { version: SUPPORTED_VERSION, output: Output { width: 320, height: 180, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind, clips, transitions: Vec::new(), locked: false, hidden: false }] }
+    Project { version: SUPPORTED_VERSION, output: Output { width: 320, height: 180, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }] }
 }
 
 const KEY: ClipKey = ClipKey { track: 0, clip: 0 };

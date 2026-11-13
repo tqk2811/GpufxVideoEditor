@@ -210,6 +210,10 @@ pub enum ValidationError {
         clip: usize,
         source: String,
     },
+    /// A track of kind `audio` is marked as a subtitle track.
+    SubtitleOnAudioTrack { track: usize },
+    /// The `subtitle.style` of a track is empty or blank.
+    EmptySubtitleStyle { track: usize },
     /// A text clip is on a track of kind `audio`.
     TextOnAudioTrack { track: usize, clip: usize },
     /// A text clip has no text, or its `source` is not [`crate::project::TEXT_SOURCE`].
@@ -355,6 +359,8 @@ impl fmt::Display for ValidationError {
             ImageOnAudioTrack { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: the image '{source}' cannot go on an audio track")
             }
+            SubtitleOnAudioTrack { track } => write!(f, "track {track}: an audio track cannot hold subtitles"),
+            EmptySubtitleStyle { track } => write!(f, "track {track}: the subtitle style is empty"),
             TextOnAudioTrack { track, clip } => write!(f, "track {track}, clip {clip}: text cannot go on an audio track"),
             EmptyText { track, clip } => write!(f, "track {track}, clip {clip}: the text is empty or its source is not '{TEXT_SOURCE}'"),
             InvalidTextSize { track, clip, size } => write!(f, "track {track}, clip {clip}: text size {size} must be above 0"),
@@ -452,6 +458,14 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
     }
 
     for (t, track) in project.tracks.iter().enumerate() {
+        if let Some(subtitle) = &track.subtitle {
+            if track.is_audio() {
+                errors.push(SubtitleOnAudioTrack { track: t });
+            }
+            if subtitle.style.as_deref().is_some_and(|style| style.trim().is_empty()) {
+                errors.push(EmptySubtitleStyle { track: t });
+            }
+        }
         // Clips whose own fields are sound enough to take part in overlap/transition checks.
         let mut sound: Vec<(usize, Time, Time)> = Vec::new();
         for (c, clip) in track.clips.iter().enumerate() {

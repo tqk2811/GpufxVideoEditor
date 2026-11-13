@@ -252,6 +252,25 @@ pub enum Message {
     FontMissing(String),
     /// The project changed while the font file dialog was up, so the file chosen is not used.
     FontTargetChanged,
+    /// The button that imports an SRT file as a subtitle track.
+    ImportSubtitles,
+    FilterSubtitles,
+    /// A subtitle track was added with this many cues; this many cues of the file were left out.
+    SubtitlesImported { cues: usize, skipped: usize },
+    /// The file holds no cue that can be read.
+    SubtitlesNone,
+    /// The subtitle file could not be read or is not UTF-8 text.
+    SubtitleFileUnreadable(String),
+    SubtitleTrack,
+    /// The combo of the style of a subtitle track.
+    SubtitleTrackStyle,
+    /// Shown in that combo while the track has no style.
+    SubtitleStyleNone,
+    /// The check box that keeps the style of one cue when the track's style changes.
+    SubtitleOwnStyle,
+    ExportSubtitles,
+    SubtitlesExported(String),
+    SubtitleExportFailed(String),
     FieldTextSize,
     FieldTextColor,
     TextOutline,
@@ -471,6 +490,18 @@ mod tests {
             Message::LoadingFonts,
             Message::FontMissing(name()),
             Message::FontTargetChanged,
+            Message::ImportSubtitles,
+            Message::FilterSubtitles,
+            Message::SubtitlesImported { cues: 3, skipped: 1 },
+            Message::SubtitlesNone,
+            Message::SubtitleFileUnreadable(name()),
+            Message::SubtitleTrack,
+            Message::SubtitleTrackStyle,
+            Message::SubtitleStyleNone,
+            Message::SubtitleOwnStyle,
+            Message::ExportSubtitles,
+            Message::SubtitlesExported(name()),
+            Message::SubtitleExportFailed(name()),
             Message::FieldTextSize,
             Message::FieldTextColor,
             Message::TextOutline,

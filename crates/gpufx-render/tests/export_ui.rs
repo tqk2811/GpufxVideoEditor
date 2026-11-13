@@ -48,7 +48,7 @@ fn project_with_transition_and_sound() -> Project {
     Project {
         version: SUPPORTED_VERSION,
         output: Output { width: CLIP_WIDTH, height: CLIP_HEIGHT, frame_duration: Time::from_ticks(FRAME), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
-        tracks: vec![Track { kind: TrackKind::Video, clips, transitions, locked: false, hidden: false }],
+        tracks: vec![Track { kind: TrackKind::Video, clips, transitions, locked: false, hidden: false, subtitle: None }],
     }
 }
 

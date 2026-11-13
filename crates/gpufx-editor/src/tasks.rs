@@ -25,6 +25,11 @@ pub enum FileDialog {
     OpenProject,
     SaveProject,
     Export,
+    /// An SRT file to import as a subtitle track.
+    ImportSubtitles,
+    /// Where to save subtitle track `track` as an SRT file. Tracks are only ever appended, so the
+    /// index still names it when the dialog closes.
+    ExportSubtitles { track: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +75,8 @@ pub enum Request {
     Export,
     /// A font file for the text clip, through the file dialog.
     PickFont { clip: ClipKey },
+    ImportSubtitles,
+    ExportSubtitles { track: usize },
 }
 
 /// Which task a failure belongs to. A load carries the id it was started with, so the result of
@@ -258,6 +265,8 @@ impl Tasks {
             Request::ImportPackage => self.start_dialog(FileDialog::ImportPackage),
             Request::Export => self.start_dialog(FileDialog::Export),
             Request::PickFont { clip } => self.start_dialog(FileDialog::PickFont { clip, revision: state.revision() }),
+            Request::ImportSubtitles => self.start_dialog(FileDialog::ImportSubtitles),
+            Request::ExportSubtitles { track } => self.start_dialog(FileDialog::ExportSubtitles { track }),
         }
     }
 
@@ -372,6 +381,14 @@ impl Tasks {
                         Action::Nothing
                     }
                     FileDialog::Export => Action::StartExport(path),
+                    FileDialog::ImportSubtitles => {
+                        state.import_subtitles_file(&path);
+                        Action::Nothing
+                    }
+                    FileDialog::ExportSubtitles { track } => {
+                        state.export_subtitles_file(track, &path);
+                        Action::Nothing
+                    }
                 }
             }
             Arrival::PromptAnswered { prompt, accepted } => {
