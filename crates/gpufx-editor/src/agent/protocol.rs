@@ -86,22 +86,22 @@ impl TextPatch {
     }
 }
 
-/// What to change of the karaoke of a text. A field that is absent stays; a look given replaces
-/// that state's look whole. `words` gives one time per word of the text as shaped (an empty list
+/// What to change of the karaoke of a text. A field that is absent stays; a look given is merged
+/// into that state's look field by field, and `null` takes the state's look off. `words` gives one time per word of the text as shaped (an empty list
 /// shares the cue by characters again).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KaraokePatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<engine::KaraokeMode>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active: Option<engine::KaraokeLook>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spoken: Option<engine::KaraokeLook>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upcoming: Option<engine::KaraokeLook>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub emphasis: Option<engine::KaraokeLook>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub active: Option<Option<engine::KaraokeLook>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub spoken: Option<Option<engine::KaraokeLook>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub upcoming: Option<Option<engine::KaraokeLook>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub emphasis: Option<Option<engine::KaraokeLook>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub words: Option<Vec<engine::KaraokeWord>>,
 }

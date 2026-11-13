@@ -31,6 +31,11 @@ fn not_negative(name: &str, value: f32) -> Result<(), AgentError> {
     }
 }
 
+/// `look` with the fields `change` gives replaced.
+fn merge_look(look: engine::KaraokeLook, change: engine::KaraokeLook) -> engine::KaraokeLook {
+    engine::KaraokeLook { color: change.color.or(look.color), background: change.background.or(look.background), scale: change.scale.or(look.scale), opacity: change.opacity.or(look.opacity) }
+}
+
 /// `text` with the fields of `patch` replaced, or `invalid_params` for a value no text can have.
 pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent, AgentError> {
     let mut next = text.clone();
@@ -38,7 +43,7 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         if content.is_empty() {
             return Err(invalid("content must not be empty"));
         }
-        next.content.clone_from(content);
+        next.set_content(content.as_str());
     }
     if let Some(font) = &patch.font {
         check_font(font)?;
@@ -105,19 +110,13 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         next.italic = italic;
     }
     if let Some(transform) = patch.transform {
-        next.transform = transform;
+        next.set_transform(transform);
     }
     if let Some(letter_spacing) = patch.letter_spacing {
         if !(letter_spacing.is_finite() && letter_spacing.abs() <= gpufx_text::MAX_LETTER_SPACING) {
             return Err(invalid(format!("letter_spacing must be from -{0} to {0}, not {letter_spacing}", gpufx_text::MAX_LETTER_SPACING)));
         }
         next.letter_spacing = letter_spacing;
-    }
-    // New content has other words, so times set for the old ones go unless new ones are given.
-    if patch.content.as_ref().is_some_and(|content| *content != text.content) {
-        if let Some(karaoke) = next.karaoke.as_mut() {
-            karaoke.words.clear();
-        }
     }
     if let Some(karaoke) = &patch.karaoke {
         next.karaoke = karaoke.as_ref().map(|change| {
@@ -126,8 +125,10 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
                 karaoke.mode = mode;
             }
             for (look, value) in [(&mut karaoke.active, change.active), (&mut karaoke.spoken, change.spoken), (&mut karaoke.upcoming, change.upcoming), (&mut karaoke.emphasis, change.emphasis)] {
-                if value.is_some() {
-                    *look = value;
+                match value {
+                    Some(Some(value)) => *look = Some(merge_look(look.unwrap_or_default(), value)),
+                    Some(None) => *look = None,
+                    None => {}
                 }
             }
             if let Some(words) = &change.words {
@@ -328,7 +329,7 @@ mod tests {
         let karaoke = patched.karaoke.clone().unwrap();
         assert_eq!((karaoke.mode, karaoke.words.len()), (engine::KaraokeMode::Box, 2));
 
-        let look = TextPatch { karaoke: Some(Some(KaraokePatch { active: Some(engine::KaraokeLook { color: Some([255, 0, 0, 255]), ..Default::default() }), ..KaraokePatch::default() })), ..TextPatch::default() };
+        let look = TextPatch { karaoke: Some(Some(KaraokePatch { active: Some(Some(engine::KaraokeLook { color: Some([255, 0, 0, 255]), ..Default::default() })), ..KaraokePatch::default() })), ..TextPatch::default() };
         let looked = apply_patch(&patched, &look).unwrap();
         assert_eq!(looked.karaoke.as_ref().unwrap().mode, engine::KaraokeMode::Box, "what is absent stays");
         assert_eq!(looked.karaoke.as_ref().unwrap().words.len(), 2);
@@ -341,6 +342,20 @@ mod tests {
 
         let off = apply_patch(&patched, &TextPatch { karaoke: Some(None), ..TextPatch::default() }).unwrap();
         assert_eq!(off.karaoke, None);
+    }
+
+    #[test]
+    fn a_karaoke_look_is_merged_field_by_field() {
+        use super::super::protocol::KaraokePatch;
+        let text = TextContent::new("one two", 0.1);
+        let red = TextPatch { karaoke: Some(Some(KaraokePatch { mode: Some(engine::KaraokeMode::Color), active: Some(Some(engine::KaraokeLook { color: Some([255, 0, 0, 255]), ..Default::default() })), ..KaraokePatch::default() })), ..TextPatch::default() };
+        let colored = apply_patch(&text, &red).unwrap();
+        let faded = TextPatch { karaoke: Some(Some(KaraokePatch { active: Some(Some(engine::KaraokeLook { opacity: Some(0.5), ..Default::default() })), ..KaraokePatch::default() })), ..TextPatch::default() };
+        let faded = apply_patch(&colored, &faded).unwrap();
+        let active = faded.karaoke.clone().unwrap().active.unwrap();
+        assert_eq!((active.color, active.opacity), (Some([255, 0, 0, 255]), Some(0.5)), "the colour set before stays");
+        let cleared = TextPatch { karaoke: Some(Some(KaraokePatch { active: Some(None), ..KaraokePatch::default() })), ..TextPatch::default() };
+        assert_eq!(apply_patch(&faded, &cleared).unwrap().karaoke.unwrap().active, None, "null takes the look off");
     }
 
     #[test]

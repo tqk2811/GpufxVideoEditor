@@ -288,14 +288,18 @@ pub struct KaraokeWordParam {
 #[serde(deny_unknown_fields)]
 pub struct KaraokeParam {
     pub mode: Option<KaraokeModeParam>,
-    /// The word being spoken.
-    pub active: Option<KaraokeLookParam>,
-    /// The words already spoken.
-    pub spoken: Option<KaraokeLookParam>,
-    /// The words still to come.
-    pub upcoming: Option<KaraokeLookParam>,
-    /// Words marked emphasis, on top of their state's look.
-    pub emphasis: Option<KaraokeLookParam>,
+    /// The word being spoken. Merged into the look it has field by field; null takes it off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub active: Option<Option<KaraokeLookParam>>,
+    /// The words already spoken. Merged into the look it has field by field; null takes it off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub spoken: Option<Option<KaraokeLookParam>>,
+    /// The words still to come. Merged into the look it has field by field; null takes it off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub upcoming: Option<Option<KaraokeLookParam>>,
+    /// Words marked emphasis, on top of their state's look. Merged into the look it has field by field; null takes it off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub emphasis: Option<Option<KaraokeLookParam>>,
     /// One time per word (words are runs without white space, after the case change), in order
     /// and not overlapping. An empty list shares the cue among the words by their characters,
     /// which is what a text without times does. New content without words drops the old times.
@@ -306,10 +310,10 @@ impl From<KaraokeParam> for KaraokePatch {
     fn from(karaoke: KaraokeParam) -> Self {
         Self {
             mode: karaoke.mode.map(Into::into),
-            active: karaoke.active.map(Into::into),
-            spoken: karaoke.spoken.map(Into::into),
-            upcoming: karaoke.upcoming.map(Into::into),
-            emphasis: karaoke.emphasis.map(Into::into),
+            active: karaoke.active.map(|look| look.map(Into::into)),
+            spoken: karaoke.spoken.map(|look| look.map(Into::into)),
+            upcoming: karaoke.upcoming.map(|look| look.map(Into::into)),
+            emphasis: karaoke.emphasis.map(|look| look.map(Into::into)),
             words: karaoke.words.map(|words| words.into_iter().map(|word| engine::KaraokeWord { start: ticks(word.start), end: ticks(word.end), emphasis: word.emphasis }).collect()),
         }
     }

@@ -70,7 +70,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
         return;
     }
     if let Some(content) = content_box(ui, id, text, language) {
-        next.content = content;
+        next.set_content(content);
     }
     if font_combo(ui, id, &mut next, language) {
         state.ui.font_file_request = Some(key);
@@ -85,6 +85,9 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
         next.line_spacing = spacing as f32;
     }
     style_rows(ui, &mut next, language);
+    if next.transform != text.transform {
+        next.set_transform(next.transform);
+    }
     ui.separator();
     outline_rows(ui, &mut next, language);
     background_rows(ui, &mut next, language);

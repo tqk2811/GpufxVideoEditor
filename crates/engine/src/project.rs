@@ -233,6 +233,29 @@ impl TextContent {
             TextTransform::Lowercase => std::borrow::Cow::Owned(self.content.to_lowercase()),
         }
     }
+
+    /// Changes the content. Karaoke word times set for the old content go, since the new one has
+    /// other words: its cue is shared by characters again until new times are set.
+    pub fn set_content(&mut self, content: impl Into<String>) {
+        let content = content.into();
+        if content == self.content {
+            return;
+        }
+        self.content = content;
+        if let Some(karaoke) = self.karaoke.as_mut() {
+            karaoke.words.clear();
+        }
+    }
+
+    /// Changes the case change. Karaoke word times go if the shaped text no longer has one word
+    /// per time (no case change in use splits or joins words today, so this is a guard).
+    pub fn set_transform(&mut self, transform: TextTransform) {
+        self.transform = transform;
+        let words = crate::karaoke::word_ranges(&self.shaped_content()).len();
+        if let Some(karaoke) = self.karaoke.as_mut().filter(|karaoke| !karaoke.words.is_empty() && karaoke.words.len() != words) {
+            karaoke.words.clear();
+        }
+    }
 }
 
 /// The weight of regular text.

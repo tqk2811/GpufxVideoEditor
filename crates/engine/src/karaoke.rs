@@ -376,4 +376,17 @@ mod tests {
         text.karaoke.as_mut().unwrap().active.as_mut().unwrap().background = Some([0, 0, 255, 255]);
         assert_eq!(word_styles(&text, &words, &[WordState::Active])[0].background, Some([0, 0, 255, 255]));
     }
+    #[test]
+    fn new_content_drops_the_word_times_and_a_case_change_keeps_them() {
+        let mut text = karaoke_text("one two");
+        let word = |start: i64, end: i64| KaraokeWord { start: Time::from_ticks(start), end: Time::from_ticks(end), emphasis: false };
+        text.karaoke.as_mut().unwrap().words = vec![word(0, 10), word(10, 20)];
+        text.set_content("one two");
+        assert_eq!(text.karaoke.as_ref().unwrap().words.len(), 2, "the same content keeps them");
+        text.set_transform(crate::project::TextTransform::Uppercase);
+        assert_eq!(text.karaoke.as_ref().unwrap().words.len(), 2, "the case change keeps the words");
+        text.set_content("one two three");
+        assert!(text.karaoke.as_ref().unwrap().words.is_empty());
+        assert_eq!(karaoke_problem(&text), None);
+    }
 }
