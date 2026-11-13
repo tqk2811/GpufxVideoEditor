@@ -8,35 +8,23 @@
 //! A shared module for every pack type was considered; the user chose one install module per pack
 //! type, which share only the helpers of [`crate::asset_install`].
 
-use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::Path;
 
-use d3d12_backend::is_safe_id;
-use engine::{check_curve, AnimationCurve, AnimationGroup};
-use serde::Deserialize;
+use d3d12_backend as shared;
+pub use d3d12_backend::{is_clip_animation_type, ClipAnimationManifest, ClipAnimationManifestItem, CLIP_KINDS, MAX_DEFAULT_DURATION};
+use d3d12_backend::{ManifestProblem, CLIP_ANIMATION_FOLDER};
 use zip::ZipArchive;
 
-use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
+use crate::asset_install::{check_entry_extensions, check_named_files, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem, Limits, MIB};
 
 /// What the `type` of a clip animation pack says, and the folder it goes to.
-pub const CLIP_ANIMATION_TYPE: &str = "clip-animation";
-/// The older name of the type, still accepted.
-pub const CLIP_ANIMATION_TYPE_ALIAS: &str = "text-animation";
+pub const CLIP_ANIMATION_TYPE: &str = CLIP_ANIMATION_FOLDER;
 /// A pack is a manifest and a few licence files.
 pub const CLIP_ANIMATION_LIMITS: Limits = Limits { files: 64, total_bytes: 16 * MIB, file_bytes: 8 * MIB };
 const CLIP_ANIMATION_EXTRACT: ExtractLimits = ExtractLimits { limits: CLIP_ANIMATION_LIMITS, max_ratio: MAX_COMPRESSION_RATIO };
-/// The longest default duration an item may ask for, in seconds.
-pub const MAX_DEFAULT_DURATION: f64 = 60.0;
-/// The kinds of clip an item may apply to.
-pub const CLIP_KINDS: [&str; 4] = ["text", "image", "video", "sticker"];
-
-/// Whether `kind` is the type of a clip animation pack.
-pub fn is_clip_animation_type(kind: &str) -> bool {
-    kind == CLIP_ANIMATION_TYPE || kind == CLIP_ANIMATION_TYPE_ALIAS
-}
 
 /// A clip animation pack that was installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,90 +34,23 @@ pub struct InstalledClipAnimationPack {
     pub replaced: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClipAnimationManifest {
-    pub format: u32,
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub id: String,
-    pub name: String,
-    pub version: String,
-    pub license: AudioLicense,
-    pub items: Vec<ClipAnimationManifestItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClipAnimationManifestItem {
-    pub id: String,
-    pub name: String,
-    /// `in`, `out` or `loop`.
-    pub kind: String,
-    /// Seconds; for a loop item, one cycle.
-    pub default_duration: f64,
-    /// The kinds of clip (see [`CLIP_KINDS`]) the item is offered for; every kind when absent.
-    #[serde(default)]
-    pub applies_to: Option<Vec<String>>,
-    pub curve: AnimationCurve,
-    /// Reserved for a gpufx shader the item will run on top of its curve. It is read and kept, but
-    /// not used yet.
-    #[serde(default)]
-    pub effect: Option<serde_json::Value>,
-}
-
-impl ClipAnimationManifestItem {
-    /// The group of the item, `None` for a kind that is not one.
-    pub fn group(&self) -> Option<AnimationGroup> {
-        [AnimationGroup::Enter, AnimationGroup::Exit, AnimationGroup::Repeat].into_iter().find(|group| group.name() == self.kind)
-    }
-}
-
 /// Parses a manifest. The fields are exactly those of the format.
 pub fn parse_clip_animation_manifest(bytes: &[u8]) -> Result<ClipAnimationManifest, ImportProblem> {
-    serde_json::from_slice(bytes).map_err(|e| ImportProblem::BadManifest(e.to_string()))
+    shared::parse_clip_animation_manifest(bytes).map_err(import_problem)
 }
 
-fn bad<T>(message: String) -> Result<T, ImportProblem> {
-    Err(ImportProblem::BadManifest(message))
-}
-
-fn check_item(item: &ClipAnimationManifestItem) -> Result<(), ImportProblem> {
-    let id = &item.id;
-    if !is_safe_id(id) {
-        return bad(format!("the item id \"{id}\" may only hold letters, digits, '.', '-' and '_'"));
-    }
-    if item.group().is_none() {
-        return bad(format!("the item \"{id}\" has the kind \"{}\", not in, out or loop", item.kind));
-    }
-    if !(item.default_duration.is_finite() && item.default_duration > 0.0 && item.default_duration <= MAX_DEFAULT_DURATION) {
-        return bad(format!("the item \"{id}\" must last more than 0 and at most {MAX_DEFAULT_DURATION} seconds"));
-    }
-    if let Some(kinds) = &item.applies_to {
-        if kinds.is_empty() {
-            return bad(format!("applies_to of the item \"{id}\" is empty"));
-        }
-        let mut seen = HashSet::new();
-        for kind in kinds {
-            if !CLIP_KINDS.contains(&kind.as_str()) {
-                return bad(format!("the item \"{id}\" applies to \"{kind}\", which is not text, image, video or sticker"));
-            }
-            if !seen.insert(kind) {
-                return bad(format!("the item \"{id}\" lists \"{kind}\" twice in applies_to"));
-            }
-        }
-    }
-    check_curve(&item.curve).or_else(|message| bad(format!("the item \"{id}\": {message}")))
-}
-
-/// Checks what a manifest says, apart from the files.
+/// Checks what a manifest says, apart from the files. It is the check the reader of installed packs
+/// makes (see [`d3d12_backend::scan_clip_animation_folders`]), so a pack that installs reads.
 pub fn check_clip_animation_fields(manifest: &ClipAnimationManifest) -> Result<(), ImportProblem> {
-    if !is_clip_animation_type(&manifest.kind) {
-        return Err(ImportProblem::UnknownType(manifest.kind.clone()));
+    shared::check_clip_animation_fields(manifest).map_err(import_problem)
+}
+
+fn import_problem(problem: ManifestProblem) -> ImportProblem {
+    match problem {
+        ManifestProblem::UnknownType(kind) => ImportProblem::UnknownType(kind),
+        ManifestProblem::BadId(id) => ImportProblem::BadId(id),
+        ManifestProblem::BadManifest(message) => ImportProblem::BadManifest(message),
     }
-    check_pack_header(manifest.format, &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "animations")?;
-    check_item_ids(manifest.items.iter().map(|item| (item.id.as_str(), item.name.as_str())))?;
-    manifest.items.iter().try_for_each(check_item)
 }
 
 /// A pack holds no media file.
@@ -176,6 +97,7 @@ mod tests {
     use super::*;
     use crate::asset_install::recover_interrupted_install_with;
     use crate::package_import::{install_zip, EntryProblem};
+    use engine::AnimationGroup;
     use std::io::{Cursor, Write};
     use std::path::PathBuf;
     use zip::write::SimpleFileOptions;

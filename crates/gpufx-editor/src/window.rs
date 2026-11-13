@@ -149,7 +149,7 @@ struct Session {
     catalog: Option<Receiver<Catalog>>,
     audio_library: Option<Receiver<AudioLibrary>>,
     sticker_library: Option<Receiver<StickerLibrary>>,
-    clip_animation_library: Option<Receiver<ClipAnimationLibrary>>,
+    clip_animation_library: Option<Receiver<(ClipAnimationLibrary, engine::PackPresets)>>,
     tasks: Tasks,
     arrivals: Receiver<Arrival>,
     arrival_sender: Sender<Arrival>,
@@ -319,9 +319,10 @@ impl Session {
 
     /// Takes the installed clip animation packs once their scan has finished.
     fn collect_clip_animation_library(&mut self) {
-        if let Some(Ok(library)) = self.clip_animation_library.as_ref().map(Receiver::try_recv) {
-            // The engine never reads a pack: it plays the curves the editor hands it.
-            engine::set_pack_presets(library.preset_table());
+        if let Some(Ok((library, table))) = self.clip_animation_library.as_ref().map(Receiver::try_recv) {
+            // The engine never reads a pack: it plays the curves the editor hands it. The table was
+            // built on the scan thread, where the curves were measured.
+            engine::set_pack_presets(table);
             self.state.clip_animation_library = library;
             self.clip_animation_library = None;
             // Frames drawn without the new curves must be drawn again.
@@ -1032,13 +1033,15 @@ fn spawn_audio_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<AudioL
 }
 
 /// Reads the manifests of the installed clip animation packs away from the UI thread.
-fn spawn_clip_animation_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<ClipAnimationLibrary> {
+fn spawn_clip_animation_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<(ClipAnimationLibrary, engine::PackPresets)> {
     let (sender, receiver) = channel();
     let scanner = std::thread::Builder::new().name("clip-animation-packs".to_owned()).spawn(move || {
         if let Some(user_root) = user_package_root() {
             recover_interrupted_install(&user_root);
         }
-        let _ = sender.send(scan_clip_animation_packs(&roots));
+        let library = scan_clip_animation_packs(&roots);
+        let table = library.preset_table();
+        let _ = sender.send((library, table));
         window.request_redraw();
     });
     if let Err(e) = scanner {

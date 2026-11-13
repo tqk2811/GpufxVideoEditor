@@ -1,66 +1,22 @@
 //! The curves of the installed clip animation packs, for a process that renders without the editor
-//! (an export). The editor reads the same packs, with every check of their manifest, for its
-//! inspector; here only what a curve needs is read, and an item that cannot play is left out.
+//! (an export). The packs are read by [`crate::clip_animation_pack`], the same reader as the
+//! editor's, so both see the same packs.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use engine::{check_curve, AnimationCurve, AnimationGroup, PackPreset, PackPresets, PACK_PRESET_SEPARATOR};
-use serde::Deserialize;
+use engine::{PackPreset, PackPresets, PACK_PRESET_SEPARATOR};
 
-use crate::paths::is_safe_id;
+use crate::clip_animation_pack::scan_clip_animation_folders;
 
-/// The folder under `packages` the clip animation packs are installed to.
-pub const CLIP_ANIMATION_FOLDER: &str = "clip-animation";
-
-#[derive(Deserialize)]
-struct Manifest {
-    id: String,
-    items: Vec<Item>,
-}
-
-#[derive(Deserialize)]
-struct Item {
-    id: String,
-    kind: String,
-    curve: AnimationCurve,
-}
-
-fn group_of(kind: &str) -> Option<AnimationGroup> {
-    [AnimationGroup::Enter, AnimationGroup::Exit, AnimationGroup::Repeat].into_iter().find(|group| group.name() == kind)
-}
-
-fn read_pack(folder: &Path) -> Option<(String, Vec<PackPreset>)> {
-    let manifest: Manifest = serde_json::from_slice(&std::fs::read(folder.join("manifest.json")).ok()?).ok()?;
-    let id = manifest.id.to_ascii_lowercase();
-    let label = folder.file_name()?.to_string_lossy().to_ascii_lowercase();
-    if !is_safe_id(&id) || id != label {
-        return None;
-    }
-    let presets = manifest
-        .items
-        .into_iter()
-        .filter(|item| is_safe_id(&item.id) && check_curve(&item.curve).is_ok())
-        .filter_map(|item| Some(PackPreset::new(format!("{id}{PACK_PRESET_SEPARATOR}{}", item.id), group_of(&item.kind)?, item.curve)))
-        .collect();
-    Some((id, presets))
-}
-
-/// The presets of the packs under every root. A pack in an earlier root hides one of the same id
-/// in a later one, as for the editor.
+/// The presets of the accepted packs under every root. A pack in an earlier root hides one of the
+/// same id in a later one, as for the editor.
 pub fn read_pack_presets(roots: &[PathBuf]) -> PackPresets {
-    let mut seen = HashSet::new();
     let mut presets = Vec::new();
-    for root in roots {
-        let Ok(entries) = std::fs::read_dir(root.join("packages").join(CLIP_ANIMATION_FOLDER)) else { continue };
-        let mut folders: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
-        folders.sort();
-        for folder in folders {
-            if let Some((id, pack)) = read_pack(&folder) {
-                if seen.insert(id) {
-                    presets.extend(pack);
-                }
-            }
+    for manifest in scan_clip_animation_folders(roots).packs {
+        let id = manifest.id.to_ascii_lowercase();
+        for item in manifest.items {
+            let Some(group) = item.group() else { continue };
+            presets.push(PackPreset::new(format!("{id}{PACK_PRESET_SEPARATOR}{}", item.id), group, item.curve));
         }
     }
     PackPresets::new(presets)
@@ -69,28 +25,41 @@ pub fn read_pack_presets(roots: &[PathBuf]) -> PackPresets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::AnimationGroup;
+
+    fn manifest(id: &str, items: &str) -> String {
+        format!(r#"{{"format":1,"type":"clip-animation","id":"{id}","name":"N","version":"1.0.0","license":{{"spdx":"MIT","files":["LICENSE.txt"]}},"items":[{items}]}}"#)
+    }
+
+    fn write(dir: &std::path::Path, root: &str, folder: &str, text: &str) {
+        let path = dir.join(root).join("packages/clip-animation").join(folder);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("manifest.json"), text).unwrap();
+    }
+
+    const GOOD: &str = r#"{"id":"rise","name":"Rise","kind":"in","default_duration":1,"curve":{"tracks":{"opacity":[{"t":0,"value":0},{"t":1,"value":1}]}}}"#;
+    const BAD_T: &str = r#"{"id":"bad","name":"Bad","kind":"in","default_duration":1,"curve":{"tracks":{"opacity":[{"t":2,"value":0}]}}}"#;
 
     #[test]
-    fn the_first_root_wins_and_a_broken_item_is_left_out() {
+    fn the_first_accepted_pack_wins_and_a_broken_pack_is_refused_whole() {
         let dir = std::env::temp_dir().join(format!("gpufx-pack-presets-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let write = |root: &str, folder: &str, items: &str| {
-            let path = dir.join(root).join("packages/clip-animation").join(folder);
-            std::fs::create_dir_all(&path).unwrap();
-            std::fs::write(path.join("manifest.json"), format!(r#"{{"format":1,"type":"clip-animation","id":"{folder}","name":"N","items":[{items}]}}"#)).unwrap();
-        };
-        let good = r#"{"id":"rise","name":"Rise","kind":"in","default_duration":1,"curve":{"tracks":{"opacity":[{"t":0,"value":0},{"t":1,"value":1}]}}}"#;
-        let bad_t = r#"{"id":"bad","name":"Bad","kind":"in","default_duration":1,"curve":{"tracks":{"opacity":[{"t":2,"value":0}]}}}"#;
-        let bad_kind = r#"{"id":"odd","name":"Odd","kind":"middle","default_duration":1,"curve":{"tracks":{"opacity":[{"t":0,"value":0}]}}}"#;
-        write("a", "Moves", &format!("{good},{bad_t},{bad_kind}"));
-        write("b", "moves", r#"{"id":"other","name":"O","kind":"out","default_duration":1,"curve":{"tracks":{"dx":[{"t":0,"value":0}]}}}"#);
-        write("b", "mismatch", "");
-        std::fs::rename(dir.join("b/packages/clip-animation/mismatch"), dir.join("b/packages/clip-animation/elsewhere")).unwrap();
+        // Root a: "moves" has one item that cannot play, so the whole pack is refused and root b's
+        // "moves" is the one used. "good" is accepted in a and hides b's.
+        write(&dir, "a", "Moves", &manifest("Moves", &format!("{GOOD},{BAD_T}")));
+        write(&dir, "a", "good", &manifest("good", GOOD));
+        write(&dir, "b", "moves", &manifest("moves", r#"{"id":"other","name":"O","kind":"out","default_duration":1,"curve":{"tracks":{"dx":[{"t":0,"value":0}]}}}"#));
+        write(&dir, "b", "good", &manifest("good", &GOOD.replace("rise", "other")));
+        // A folder whose manifest names another id is refused.
+        write(&dir, "b", "elsewhere", &manifest("mismatch", GOOD));
 
+        let scan = scan_clip_animation_folders(&[dir.join("a"), dir.join("b")]);
+        assert_eq!(scan.problems.iter().map(|problem| problem.pack.as_str()).collect::<Vec<_>>(), vec!["Moves", "elsewhere"]);
         let presets = read_pack_presets(&[dir.join("a"), dir.join("b")]);
-        let names: Vec<&str> = presets.presets().iter().map(|preset| preset.reference.as_str()).collect();
-        assert_eq!(names, vec!["moves/rise"]);
-        assert!(presets.find(AnimationGroup::Enter, "moves/rise").is_some());
+        let mut names: Vec<&str> = presets.presets().iter().map(|preset| preset.reference.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["good/rise", "moves/other"]);
+        assert!(presets.find(AnimationGroup::Exit, "moves/other").is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

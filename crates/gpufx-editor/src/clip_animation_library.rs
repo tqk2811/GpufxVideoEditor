@@ -4,13 +4,12 @@
 //! The scan only reads manifests; the engine gets the curves as a table (see
 //! [`ClipAnimationLibrary::preset_table`]) and never reads a pack itself.
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+use d3d12_backend::{scan_clip_animation_folders, ClipAnimationManifest};
 use engine::{AnimationCurve, AnimationGroup, Clip, PackPreset, PackPresets, Time};
 
 use crate::audio_library::LibraryProblem;
-use crate::clip_animation_install::{check_clip_animation_fields, parse_clip_animation_manifest, CLIP_ANIMATION_TYPE};
 use crate::timecode::from_seconds;
 
 /// The kind of clip an animation can be offered for.
@@ -117,27 +116,7 @@ pub fn pack_reference(pack: &str, item: &str) -> String {
     format!("{}{}{item}", pack.to_ascii_lowercase(), engine::PACK_PRESET_SEPARATOR)
 }
 
-fn read_pack(folder: &Path, library: &mut ClipAnimationLibrary) -> Option<ClipAnimationPack> {
-    let label = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-    let mut problem = |message: String| library.problems.push(LibraryProblem { pack: label.clone(), message });
-    let bytes = match std::fs::read(folder.join("manifest.json")) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            problem(error.to_string());
-            return None;
-        }
-    };
-    let manifest = match parse_clip_animation_manifest(&bytes).and_then(|manifest| check_clip_animation_fields(&manifest).map(|()| manifest)) {
-        Ok(manifest) => manifest,
-        Err(error) => {
-            problem(format!("{error:?}"));
-            return None;
-        }
-    };
-    if manifest.id.to_ascii_lowercase() != label.to_ascii_lowercase() {
-        problem(format!("its manifest does not match the folder ({})", manifest.id));
-        return None;
-    }
+fn library_pack(manifest: ClipAnimationManifest) -> ClipAnimationPack {
     let id = manifest.id.to_ascii_lowercase();
     let animations = manifest
         .items
@@ -154,36 +133,24 @@ fn read_pack(folder: &Path, library: &mut ClipAnimationLibrary) -> Option<ClipAn
             })
         })
         .collect();
-    Some(ClipAnimationPack { id, name: manifest.name, animations })
+    ClipAnimationPack { id, name: manifest.name, animations }
 }
 
-/// Reads the packs under every root. A pack in an earlier root hides one of the same id in a later
-/// one, as for sticker packs.
+/// Reads the packs under every root with the reader an export uses
+/// ([`d3d12_backend::scan_clip_animation_folders`]): a pack is accepted whole or reported, and a
+/// pack in an earlier root hides one of the same id in a later one only when it is accepted.
 pub fn scan_clip_animation_packs(roots: &[PathBuf]) -> ClipAnimationLibrary {
-    let mut library = ClipAnimationLibrary { loaded: true, ..ClipAnimationLibrary::default() };
-    let mut seen: HashSet<String> = HashSet::new();
-    for root in roots {
-        let Ok(entries) = std::fs::read_dir(root.join("packages").join(CLIP_ANIMATION_TYPE)) else { continue };
-        let mut folders: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
-        folders.sort();
-        for folder in folders {
-            let id = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().to_ascii_lowercase());
-            if seen.contains(&id) {
-                continue;
-            }
-            if let Some(pack) = read_pack(&folder, &mut library) {
-                seen.insert(id);
-                library.packs.push(pack);
-            }
-        }
-    }
-    library.packs.sort_by_key(|pack| pack.name.to_lowercase());
-    library
+    let scan = scan_clip_animation_folders(roots);
+    let problems = scan.problems.into_iter().map(|problem| LibraryProblem { pack: problem.pack, message: problem.message }).collect();
+    let mut packs: Vec<ClipAnimationPack> = scan.packs.into_iter().map(library_pack).collect();
+    packs.sort_by_key(|pack| pack.name.to_lowercase());
+    ClipAnimationLibrary { packs, problems, loaded: true }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gpufx-clip-animation-library-{name}-{}", std::process::id()));
@@ -219,6 +186,33 @@ mod tests {
         let rise = &library.packs[0].animations[0];
         assert_eq!((rise.reference.as_str(), rise.group, rise.default_duration), ("shared/rise", AnimationGroup::Enter, from_seconds(0.5)));
         assert_eq!(library.problems.len(), 1, "{:?}", library.problems);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_editor_and_an_export_read_the_same_packs() {
+        let dir = scratch("same-reader");
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        // The pack in root a has one item whose curve cannot play, so it is refused whole and the
+        // pack of the same id in root b is the one both readers use.
+        write_pack(&b, "shared", "From B");
+        write_pack(&a, "shared", "From A");
+        let manifest = a.join("packages/clip-animation/shared/manifest.json");
+        let broken = std::fs::read_to_string(&manifest).unwrap().replace(r#""t":1,"value":0"#, r#""t":2,"value":0"#);
+        std::fs::write(&manifest, broken).unwrap();
+        write_pack(&a, "only-a", "Only A");
+
+        let roots = [a, b];
+        let library = scan_clip_animation_packs(&roots);
+        let exported = d3d12_backend::read_pack_presets(&roots);
+        let mut from_library: Vec<String> = library.preset_table().presets().iter().map(|preset| preset.reference.clone()).collect();
+        let mut from_export: Vec<String> = exported.presets().iter().map(|preset| preset.reference.clone()).collect();
+        from_library.sort();
+        from_export.sort();
+        assert_eq!(from_library, vec!["only-a/rise", "only-a/wave", "shared/rise", "shared/wave"]);
+        assert_eq!(from_library, from_export);
+        assert_eq!(library.problems.len(), 1, "{:?}", library.problems);
+        assert!(library.packs.iter().any(|pack| pack.name == "From B"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
