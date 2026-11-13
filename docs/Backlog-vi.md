@@ -546,3 +546,19 @@ Clip chữ chỉ thêm bằng nút "Thêm chữ" ở tab Chữ (`EditorState::ad
 ### [Thấp] Gói gpufx của effect preset bị gỡ ngoài editor thì danh sách animation vẫn báo có
 
 Editor chỉ đọc lại các gói clip-animation (và tìm lại gói effect gpufx của chúng) khi một gói được cài qua editor (`package_installed` ở `crates/gpufx-editor/src/window.rs`). Gói gpufx bị xoá khỏi thư mục ngoài editor thì bảng preset vẫn giữ effect đó và inspector vẫn báo có; lúc render, `prepare_sample` (`crates/engine/src/render.rs`) dựng lại clip không có effect nên clip vẫn hiện, nhưng mỗi frame trong cửa sổ in/out lại thử nạp gói hỏng một lần. Hướng sửa: theo dõi thư mục `packages/gpufx` (hoặc nút đọc lại gói) để quét lại, và nhớ gói nạp hỏng để không thử lại mỗi frame. Ghi ngày 2026-11-14.
+
+### [Vừa] Animation theo ký tự: kiểu sóng lặp (bước 11c) chưa có
+
+`crates/engine/src/per_unit.rs` (`unit_poses`, `staggered_time`) đã có thứ tự `random` theo seed và range selector đủ 6 shape, nhưng preset nhóm `loop` có `stagger` chỉ lệch điểm bắt đầu: đơn vị sau khi hết cửa sổ đứng ở giá trị cuối, không ra sóng chạy vòng. Cần một cách tính lệch pha bọc vòng (vd `phase`: t của đơn vị = (t − place·phase) mod 1) cho `loop`, kèm preset dựng sẵn `wave` và test. Ghi ngày 2026-11-14.
+
+### [Thấp] Ký tự chạy ra ngoài khung ảnh chữ bị cắt
+
+`rasterize_units` (`crates/gpufx-text/src/lib.rs:318`) giữ đúng kích thước ảnh chữ tĩnh để khung cuối trùng ảnh tĩnh và vị trí clip không nhảy, nên ký tự dịch `dy`/phóng to vượt lề (vd trượt lên từ 1 cỡ chữ) bị cắt ở mép ảnh. Hướng sửa: cộng một lề cố định cho mọi ảnh của clip có preset per_unit, tính từ biên độ lớn nhất của curve (cả ở `measure` để tỉ lệ khung không đổi) và bù vị trí đặt clip. Ghi ngày 2026-11-14.
+
+### [Thấp] Karaoke và animation theo ký tự không chạy cùng nhau
+
+`open_decoder` (`crates/d3d12-backend/src/compositor.rs:1280`): clip chữ có karaoke đi đường bước karaoke và bỏ qua preset per_unit; `draw_units` (`crates/gpufx-text/src/units.rs`) cũng không nhận màu từng từ. Muốn dùng chung thì mỗi khung cần cả kiểu từ (`WordStyle`) lẫn pose đơn vị, và ảnh từng ký tự phải tô theo màu từ. Cùng hạ tầng này mở được mục "Karaoke mode `scale`/pop theo từ chưa vẽ (12c)". Ghi ngày 2026-11-14.
+
+### [Thấp] Preset `type` của AVS chưa có con trỏ nhấp nháy
+
+Preset dựng sẵn `typewriter` (`crates/engine/src/clip_animation.rs`, `typewriter_in`) chỉ hiện từng ký tự; bản `type` của AI video studio còn vẽ con trỏ sau ký tự cuối. Cần một lớp vẽ thêm (một vạch theo vị trí ký tự cuối đã hiện) trong `draw_units`. Ghi ngày 2026-11-14.
