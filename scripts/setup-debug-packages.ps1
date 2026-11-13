@@ -71,7 +71,11 @@ foreach ($capcut in $capcutRepos) {
         if ($LASTEXITCODE -ne 0) { throw "cloning $($capcut.Repo) failed ($LASTEXITCODE)" }
     }
     $groupDir = Join-Path $packagesDir "gpufx\$($capcut.Group)"
-    if (Test-Path -LiteralPath $groupDir) {
+    $existing = Get-Item -LiteralPath $groupDir -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existing -and ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        # A junction left from when the group was a folder of FFmpegGpuFilter-packages, maybe dangling.
+        Remove-Junction $groupDir
+    } elseif ($null -ne $existing) {
         foreach ($old in Get-ChildItem -LiteralPath $groupDir -Directory) { Remove-Junction $old.FullName }
     }
     New-Item -ItemType Directory -Force -Path $groupDir | Out-Null
