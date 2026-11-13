@@ -2,7 +2,7 @@
 //! placed, how its place follows a change of its size, and which animation presets each combo
 //! offers.
 
-use engine::{AnimationGroup, ClipPlacement, ClipAnimation, AnimationRef, TextContent, TextBackground, TextOutline, TextShadow, Time, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH, ANIMATION_PRESETS};
+use engine::{AnimationGroup, ClipPlacement, ClipAnimation, AnimationRef, TextContent, TextBackground, TextGlow, TextOutline, TextShadow, Time, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH, ANIMATION_PRESETS};
 
 /// The font size of a new text, in parts of the output height.
 pub const DEFAULT_TEXT_SIZE: f32 = 0.08;
@@ -91,6 +91,11 @@ pub fn default_background() -> TextBackground {
 /// The shadow a text gets when it is turned on: soft, down and to the right.
 pub fn default_shadow() -> TextShadow {
     TextShadow { color: [0, 0, 0, 180], offset: [0.05, 0.05], blur: 0.05 }
+}
+
+/// The glow a text gets when it is turned on: a soft warm halo a third of the font size wide.
+pub fn default_glow() -> TextGlow {
+    TextGlow { color: [255, 220, 120, 255], outer_color: None, radius: 0.35, intensity: 1.0, falloff: 2.0 }
 }
 
 #[cfg(test)]

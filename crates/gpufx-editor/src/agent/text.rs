@@ -71,6 +71,21 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         }
         next.shadow = shadow;
     }
+    if let Some(glow) = patch.glow {
+        if let Some(glow) = &glow {
+            not_negative("glow.radius", glow.radius)?;
+            if !(glow.radius <= gpufx_text::MAX_GLOW_RATIO) {
+                return Err(invalid(format!("glow.radius must be at most {}, not {}", gpufx_text::MAX_GLOW_RATIO, glow.radius)));
+            }
+            if !(glow.intensity.is_finite() && (0.0..=engine::MAX_GLOW_INTENSITY).contains(&glow.intensity)) {
+                return Err(invalid(format!("glow.intensity must be from 0 to {}, not {}", engine::MAX_GLOW_INTENSITY, glow.intensity)));
+            }
+            if !engine::GLOW_FALLOFF_RANGE.contains(&glow.falloff) {
+                return Err(invalid(format!("glow.falloff must be from {} to {}, not {}", engine::GLOW_FALLOFF_RANGE.start(), engine::GLOW_FALLOFF_RANGE.end(), glow.falloff)));
+            }
+        }
+        next.glow = glow;
+    }
     if let Some(align) = patch.align {
         next.align = align;
     }
@@ -255,6 +270,20 @@ mod tests {
         for bad in [TextPatch { weight: Some(50), ..TextPatch::default() }, TextPatch { weight: Some(1000), ..TextPatch::default() }, TextPatch { letter_spacing: Some(f32::NAN), ..TextPatch::default() }, TextPatch { letter_spacing: Some(3.0), ..TextPatch::default() }] {
             assert_eq!(apply_patch(&text, &bad).unwrap_err().code, "invalid_params", "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_glow_is_patched_checked_and_taken_off_with_null() {
+        let text = TextContent::new("Hi", 0.1);
+        let glow = engine::TextGlow { color: [0, 255, 255, 255], outer_color: Some([0, 0, 255, 0]), radius: 0.5, intensity: 1.5, falloff: 1.0 };
+        let next = apply_patch(&text, &TextPatch { glow: Some(Some(glow)), ..TextPatch::default() }).unwrap();
+        assert_eq!(next.glow, Some(glow));
+        assert_eq!(apply_patch(&next, &TextPatch { glow: Some(None), ..TextPatch::default() }).unwrap().glow, None);
+        for bad in [engine::TextGlow { radius: -1.0, ..glow }, engine::TextGlow { radius: 9.0, ..glow }, engine::TextGlow { intensity: 5.0, ..glow }, engine::TextGlow { intensity: f32::NAN, ..glow }, engine::TextGlow { falloff: 0.0, ..glow }] {
+            assert_eq!(apply_patch(&text, &TextPatch { glow: Some(Some(bad)), ..TextPatch::default() }).unwrap_err().code, "invalid_params", "{bad:?}");
+        }
+        let parsed: TextPatch = serde_json::from_value(json!({"glow": null})).unwrap();
+        assert_eq!(parsed.glow, Some(None));
     }
 
     fn file(path: &str) -> FontRef {

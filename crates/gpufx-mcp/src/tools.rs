@@ -207,6 +207,23 @@ pub struct ShadowParam {
     pub blur: f32,
 }
 
+/// A glow around the glyphs, fading with the distance from them.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct GlowParam {
+    /// [r, g, b, a] next to the glyphs, each 0 to 255.
+    pub color: [u8; 4],
+    /// [r, g, b, a] at the far edge; the glow blends from color to it. Absent keeps color.
+    pub outer_color: Option<[u8; 4]>,
+    /// How far it reaches past the glyphs (or the outline), in parts of the font size, 0 to 2.
+    pub radius: f32,
+    /// Opacity next to the glyphs, 0 to 4 (1 by default); above 1 the inner part stays solid longer.
+    pub intensity: Option<f32>,
+    /// Fade: opacity goes as (1 - distance / radius) ^ falloff, 0.1 to 8 (2 by default).
+    pub falloff: Option<f32>,
+}
+
 /// One preset animation of a clip with a picture.
 #[derive(Deserialize, JsonSchema, Clone)]
 #[schemars(inline)]
@@ -266,6 +283,9 @@ pub struct TextStyleParam {
     /// null takes the shadow off.
     #[serde(default, deserialize_with = "double_option")]
     pub shadow: Option<Option<ShadowParam>>,
+    /// null takes the glow off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub glow: Option<Option<GlowParam>>,
     pub align: Option<AlignParam>,
     /// Line height as a multiple of the font size, above 0.
     pub line_spacing: Option<f32>,
@@ -290,6 +310,7 @@ impl TextStyleParam {
             outline: self.outline.map(|value| value.map(|v| engine::TextOutline { color: v.color, width: v.width })),
             background: self.background.map(|value| value.map(|v| engine::TextBackground { color: v.color, padding: v.padding, radius: v.radius })),
             shadow: self.shadow.map(|value| value.map(|v| engine::TextShadow { color: v.color, offset: v.offset, blur: v.blur })),
+            glow: self.glow.map(|value| value.map(|v| engine::TextGlow { color: v.color, outer_color: v.outer_color, radius: v.radius, intensity: v.intensity.unwrap_or(1.0), falloff: v.falloff.unwrap_or(2.0) })),
             align: self.align.map(Into::into),
             line_spacing: self.line_spacing,
             weight: self.weight,
@@ -341,6 +362,8 @@ params!(TextSetParams {
     background: Option<Option<BackgroundParam>>,
     #[serde(default, deserialize_with = "double_option")]
     shadow: Option<Option<ShadowParam>>,
+    #[serde(default, deserialize_with = "double_option")]
+    glow: Option<Option<GlowParam>>,
     align: Option<AlignParam>,
     line_spacing: Option<f32>,
     weight: Option<u16>,
@@ -451,7 +474,7 @@ fn text_add(p: TextAddParams) -> Result<AgentRequest, AgentError> {
 }
 
 fn text_set(p: TextSetParams) -> Result<AgentRequest, AgentError> {
-    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation };
+    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, glow: p.glow, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation };
     edit(p.expected_revision, AgentEdit::TextSet { clip: p.clip.into(), patch: style.patch(p.content) })
 }
 
@@ -484,8 +507,8 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("track_set_locked", "Locks or unlocks a track. Edits of a locked track fail with track_locked.", TrackLockedParams, |p| edit(p.expected_revision, AgentEdit::TrackSetLocked { track: p.track, locked: p.locked })),
         tool!("track_set_hidden", "Hides or shows a track in picture and sound.", TrackHiddenParams, |p| edit(p.expected_revision, AgentEdit::TrackSetHidden { track: p.track, hidden: p.hidden })),
         tool!("clip_add", "Adds a source file, a still image (png, jpg, webp, on a video track only), or a file of an installed pack as asset:<type>/<id>/<file> (type sfx, music or sticker), as a clip at start (ticks). duration defaults to what the stream the track plays still holds at that speed, and to 5 seconds for an image, whose end can be set freely. speed defaults to 1, between 0.1 and 10, and does not apply to an image. Returns the new clip.", ClipAddParams, |p| edit(p.expected_revision, AgentEdit::ClipAdd { track: p.track, source: p.source, start: ticks(p.start), source_in: p.source_in.map(ticks), duration: p.duration.map(ticks), speed: p.speed })),
-        tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track or, when track is absent, on the first video track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, align, line_spacing, weight, italic, transform, letter_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
-        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow or an animation group off. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
+        tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track or, when track is absent, on the first video track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, glow, align, line_spacing, weight, italic, transform, letter_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
+        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow, glow or an animation group off. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
         tool!("font_list", "The fonts a text can name, each as the font value to give: the default font first (the system UI font, such as Segoe UI), then the installed families. state is loading while the installed fonts are still being read; ask again then.", NoParams, |_| Ok(AgentRequest::FontList)),
         tool!("clip_animation_list", "The preset animations a clip with a picture (video, image, sticker or text) can name: each with its id, its group (in, out or loop) and default_duration in ticks (for loop, one cycle). Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::ClipAnimationList)),
         tool!("clip_animation_set", "Sets the preset animations of a clip with a picture (video, image, sticker or text): in plays as it appears, out as it goes away, loop the whole time it shows. Each is {preset, duration in ticks}, with a preset clip_animation_list names for that group; a group that is absent stays, and null takes its animation off. Refused with invalid_params for a clip on an audio track.", ClipAnimationSetParams, clip_animation_set),

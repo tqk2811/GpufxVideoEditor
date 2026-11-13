@@ -7,7 +7,7 @@ use super::numeric::drag_field;
 use super::theme;
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
-use crate::text_clip::{default_background, default_outline, default_shadow, TEXT_SIZE_RANGE};
+use crate::text_clip::{default_background, default_glow, default_outline, default_shadow, TEXT_SIZE_RANGE};
 use crate::text_shapes::available_families;
 use egui::{Rect, Vec2};
 use engine::{ClipKey, FontRef, Rgba, TextAlign, TextContent, TextTransform, TEXT_WEIGHT_RANGE};
@@ -29,6 +29,10 @@ const PADDING_RANGE: RangeInclusive<f64> = 0.0..=100.0;
 const RADIUS_RANGE: RangeInclusive<f64> = 0.0..=100.0;
 const OFFSET_RANGE: RangeInclusive<f64> = -50.0..=50.0;
 const BLUR_RANGE: RangeInclusive<f64> = 0.0..=50.0;
+/// Glow reach in percent of the font size, intensity in percent, and falloff as the exponent.
+const GLOW_RADIUS_RANGE: RangeInclusive<f64> = 0.0..=200.0;
+const GLOW_INTENSITY_RANGE: RangeInclusive<f64> = 0.0..=400.0;
+const GLOW_FALLOFF_RANGE: RangeInclusive<f64> = 0.1..=8.0;
 const PERCENT: f64 = 100.0;
 const WARNING_ICON_SIDE: f32 = 14.0;
 
@@ -65,6 +69,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     ui.separator();
     outline_rows(ui, &mut next, language);
     background_rows(ui, &mut next, language);
+    glow_rows(ui, &mut next, language);
     shadow_rows(ui, &mut next, language);
     if next != *text {
         state.live_text(next);
@@ -228,6 +233,26 @@ fn background_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language
             color_row(ui, &language.t(Message::FieldColor), &mut background.color);
             percent_row(ui, &language.t(Message::FieldPadding), &mut background.padding, PADDING_RANGE);
             percent_row(ui, &language.t(Message::FieldCornerRadius), &mut background.radius, RADIUS_RANGE);
+        });
+    }
+}
+
+fn glow_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
+    toggle(ui, &language.t(Message::TextGlow), &mut text.glow, default_glow);
+    if let Some(glow) = text.glow.as_mut() {
+        ui.indent("glow", |ui| {
+            color_row(ui, &language.t(Message::FieldColor), &mut glow.color);
+            let mut outer = glow.outer_color;
+            toggle(ui, &language.t(Message::FieldOuterColor), &mut outer, || [0, 0, 0, 0]);
+            if let Some(color) = outer.as_mut() {
+                color_row(ui, &language.t(Message::FieldOuterColor), color);
+            }
+            glow.outer_color = outer;
+            percent_row(ui, &language.t(Message::FieldGlowRadius), &mut glow.radius, GLOW_RADIUS_RANGE);
+            percent_row(ui, &language.t(Message::FieldIntensity), &mut glow.intensity, GLOW_INTENSITY_RANGE);
+            if let Some(falloff) = slider_row(ui, &language.t(Message::FieldFalloff), f64::from(glow.falloff), GLOW_FALLOFF_RANGE, 1, "") {
+                glow.falloff = falloff as f32;
+            }
         });
     }
 }

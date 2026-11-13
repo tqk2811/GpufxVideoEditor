@@ -1,7 +1,12 @@
 //! Rasterizes the text of a text clip into a premultiplied RGBA picture on the CPU.
 //!
 //! Shaping, bidi and font fallback come from `cosmic-text`, glyph pictures from its swash cache.
-//! Outline, background box and drop shadow are drawn here on alpha masks.
+//! Outline, background box, glow and drop shadow are drawn here on alpha masks.
+//!
+//! Layers, bottom to top: background box, glow, shadow, outline, fill. The outline and the glow
+//! both come from one squared distance field of the glyph coverage, computed once per picture into
+//! one buffer; the glow is blended straight into the picture from it, so it costs no mask of its
+//! own and the picture grows only by the glow's reach.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -70,6 +75,8 @@ pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 /// The widest an outline may be, as a part of the font size. Wider would bury the letters, and
 /// the room around the text grows with it.
 pub const MAX_OUTLINE_RATIO: f32 = 0.25;
+/// The farthest a glow may reach past the ink, as a part of the font size.
+pub const MAX_GLOW_RATIO: f32 = 2.0;
 /// The most letter spacing, either way, as a part of the font size.
 pub const MAX_LETTER_SPACING: f32 = 2.0;
 
@@ -386,12 +393,16 @@ impl TextRasterizer {
         // A blur too small to move a pixel is no blur, and needs no room.
         let shadow_blur = if blur_half(shadow_blur) == 0 { 0.0 } else { shadow_blur };
         let blur_room = if text.shadow.is_some() { shadow_blur.ceil() * 2.0 } else { 0.0 };
+        let glow_px = glow_reach(text, font_px);
         let (x0, y0, x1, y1) = (x0.floor(), y0.floor(), x1.ceil(), y1.ceil());
         let base = outline_px.max(pad_px).ceil() + 1.0;
-        let left = base + (-shadow_dx).max(0.0).ceil() + blur_room;
-        let right = base + shadow_dx.max(0.0).ceil() + blur_room;
-        let top = base + (-shadow_dy).max(0.0).ceil() + blur_room;
-        let bottom = base + shadow_dy.max(0.0).ceil() + blur_room;
+        // The glow spreads evenly past the outline, the shadow to one side: each side takes the
+        // larger of the two.
+        let glow_room = (outline_px + glow_px).ceil() + 1.0 - base;
+        let left = base + ((-shadow_dx).max(0.0).ceil() + blur_room).max(glow_room);
+        let right = base + (shadow_dx.max(0.0).ceil() + blur_room).max(glow_room);
+        let top = base + ((-shadow_dy).max(0.0).ceil() + blur_room).max(glow_room);
+        let bottom = base + (shadow_dy.max(0.0).ceil() + blur_room).max(glow_room);
         layout.width = (left + (x1 - x0) + right) as u32;
         layout.height = (top + (y1 - y0) + bottom) as u32;
         layout.origin = (left - x0, top - y0);
@@ -399,6 +410,7 @@ impl TextRasterizer {
         layout.outline_px = outline_px;
         layout.pad_px = pad_px;
         layout.shadow = (shadow_dx, shadow_dy, shadow_blur);
+        layout.glow_px = glow_px;
         layout
     }
 
@@ -491,7 +503,11 @@ impl TextRasterizer {
             }
         }
 
-        let outline = text.outline.filter(|_| outline_px > 0.0).map(|o| (o.color, fill.dilate(outline_px)));
+        // One squared distance field serves the outline and the glow.
+        let glow = text.glow.filter(|_| layout.glow_px > 0.0);
+        let wants_outline = text.outline.is_some() && outline_px > 0.0;
+        let squared = (wants_outline || glow.is_some()).then(|| fill.squared_distances());
+        let outline = text.outline.filter(|_| wants_outline).zip(squared.as_deref()).map(|(o, squared)| (o.color, fill.dilated(squared, outline_px)));
         let silhouette = outline.as_ref().map(|(_, m)| m).unwrap_or(&fill);
 
         let mut canvas = vec![[0f32; 4]; width * height];
@@ -505,6 +521,9 @@ impl TextRasterizer {
                     over(&mut canvas[y * width + x], color, a);
                 }
             }
+        }
+        if let (Some(glow), Some(squared)) = (glow, squared.as_deref()) {
+            draw_glow(&mut canvas, squared, &glow, if outline.is_some() { outline_px } else { 0.0 }, layout.glow_px);
         }
         if let Some(shadow) = text.shadow {
             let mut mask = silhouette.shifted(shadow_dx.round() as i32, shadow_dy.round() as i32);
@@ -538,6 +557,8 @@ struct Layout {
     pad_px: f32,
     /// Shadow offset x, y and blur, in pixels.
     shadow: (f32, f32, f32),
+    /// How far the glow reaches past the outline, in pixels; 0 for no glow.
+    glow_px: f32,
     missing_family: Option<String>,
     no_font: bool,
     missing_glyphs: usize,
@@ -581,6 +602,42 @@ fn over(dst: &mut [f32; 4], color: [f32; 4], coverage: f32) {
     let k = 1.0 - color[3] * coverage;
     for c in 0..4 {
         dst[c] = color[c] * coverage + dst[c] * k;
+    }
+}
+
+/// How far the glow of `text` reaches past its outline at `font_px`, in pixels: 0 when there is no
+/// glow or it would not show (no intensity, or a reach under half a pixel), so such a glow costs
+/// nothing and leaves the picture as it is without one.
+fn glow_reach(text: &TextContent, font_px: f32) -> f32 {
+    let Some(glow) = text.glow else { return 0.0 };
+    if !(glow.intensity.is_finite() && glow.intensity > 0.0 && glow.radius.is_finite()) {
+        return 0.0;
+    }
+    let reach = (glow.radius * font_px).clamp(0.0, font_px * MAX_GLOW_RATIO);
+    if reach < 0.5 { 0.0 } else { reach }
+}
+
+/// Blends a glow into `canvas` from the squared distances to the glyph coverage (see
+/// [`Mask::squared_distances`]). A pixel `inset` pixels from the ink (the outline width) or nearer
+/// is at the ink; past it the glow fades to nothing at `reach`.
+fn draw_glow(canvas: &mut [[f32; 4]], squared: &[f64], glow: &engine::project::TextGlow, inset: f32, reach: f32) {
+    let intensity = glow.intensity.clamp(0.0, engine::MAX_GLOW_INTENSITY);
+    let falloff = if glow.falloff.is_finite() { glow.falloff.clamp(*engine::GLOW_FALLOFF_RANGE.start(), *engine::GLOW_FALLOFF_RANGE.end()) } else { 2.0 };
+    let core = premultiplied(glow.color);
+    let outer = glow.outer_color.map(premultiplied);
+    for (dst, &d2) in canvas.iter_mut().zip(squared) {
+        // The edge of the ink lies about half a pixel past the centre of its last covered pixel.
+        let distance = (d2.sqrt() as f32 - 0.5 - inset).max(0.0);
+        if distance >= reach {
+            continue;
+        }
+        let t = distance / reach;
+        let alpha = (intensity * (1.0 - t).powf(falloff)).min(1.0);
+        let color = match outer {
+            Some(outer) => std::array::from_fn(|c| core[c] + (outer[c] - core[c]) * t),
+            None => core,
+        };
+        over(dst, color, alpha);
     }
 }
 
@@ -641,11 +698,11 @@ impl Mask {
         out
     }
 
-    /// The glyphs grown by `radius` pixels: each pixel is covered by how far it is from the
-    /// nearest covered pixel, through an exact Euclidean distance transform, so the cost does not
-    /// grow with the radius. A pixel under half covered starts that far short of the edge, so thin
-    /// strokes with no pixel half covered still grow. Never less than the coverage itself.
-    fn dilate(&self, radius: f32) -> Mask {
+    /// The squared distance of each pixel from the nearest covered pixel, through an exact
+    /// Euclidean distance transform, so the cost does not grow with any radius drawn from it. A
+    /// pixel under half covered starts that far short of the edge, so thin strokes with no pixel
+    /// half covered still count.
+    fn squared_distances(&self) -> Vec<f64> {
         let (w, h) = (self.width, self.height);
         let mut squared: Vec<f64> = self
             .data
@@ -674,9 +731,15 @@ impl Mask {
         for row in squared.chunks_exact_mut(w) {
             scratch.transform(row);
         }
+        squared
+    }
+
+    /// The glyphs grown by `radius` pixels, from [`Self::squared_distances`]. Never less than the
+    /// coverage itself.
+    fn dilated(&self, squared: &[f64], radius: f32) -> Mask {
         // The edge of the glyph lies about half a pixel past the centre of its last covered pixel.
         let data = squared.iter().zip(&self.data).map(|(&d2, &a)| a.max((radius + 1.0 - d2.sqrt() as f32).clamp(0.0, 1.0))).collect();
-        Mask { width: w, height: h, data }
+        Mask { width: self.width, height: self.height, data }
     }
 
     /// Approximates a Gaussian blur of about `radius` pixels with three box blurs.

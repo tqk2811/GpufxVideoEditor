@@ -481,3 +481,62 @@ fn letter_spacing_widens_the_text() {
     text.letter_spacing = f32::NAN;
     assert_eq!(r.measure(&text, HEIGHT, 1.0), plain, "a spacing that is not a number is none");
 }
+
+fn glow(radius: f32, intensity: f32) -> engine::TextGlow {
+    engine::TextGlow { color: [0, 255, 255, 255], outer_color: None, radius, intensity, falloff: 1.0 }
+}
+
+#[test]
+fn a_glow_without_intensity_or_reach_is_no_glow() {
+    let Some(mut r) = rasterizer() else { return };
+    let plain = r.rasterize(&TextContent::new("Glow", 0.1), HEIGHT, 1.0);
+    for g in [glow(0.5, 0.0), glow(0.0, 1.0), glow(0.001, 1.0), glow(f32::NAN, 1.0)] {
+        let mut text = TextContent::new("Glow", 0.1);
+        text.glow = Some(g);
+        assert_eq!(r.rasterize(&text, HEIGHT, 1.0), plain, "{g:?}");
+    }
+}
+
+#[test]
+fn a_glow_fades_with_the_distance_from_the_ink_and_grows_the_picture_by_its_reach() {
+    let Some(mut r) = rasterizer() else { return };
+    let plain = r.rasterize(&TextContent::new("I", 0.2), HEIGHT, 1.0);
+    let mut text = TextContent::new("I", 0.2);
+    text.glow = Some(glow(0.5, 1.0));
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    // 144 px font, half of it: 72 px each side, plus the pixel of room every picture has.
+    let grown = image.width - plain.width;
+    assert!((140..=150).contains(&grown), "grown by {grown}");
+    // Walk left from the stem along the middle row: the glow is cyan and fades out.
+    let y = image.height / 2;
+    let stem = (0..image.width).find(|&x| alpha(&image, x, y) == 255 && image.pixels[((y * image.width + x) * 4) as usize] == 255).expect("white stem");
+    let samples: Vec<u8> = [4, 20, 40, 60].iter().map(|&d| alpha(&image, stem - d, y)).collect();
+    assert!(samples.windows(2).all(|pair| pair[0] > pair[1]), "decays: {samples:?}");
+    assert!(samples[0] > 180 && samples[3] < 60, "{samples:?}");
+    assert_eq!(alpha(&image, 0, y), 0, "nothing past the reach");
+    let p = ((y * image.width + stem - 20) * 4) as usize;
+    assert_eq!(image.pixels[p], 0, "cyan glow has no red");
+    assert!(image.pixels[p + 1] > 0 && image.pixels[p + 1] == image.pixels[p + 2], "premultiplied cyan: {:?}", &image.pixels[p..p + 4]);
+}
+
+#[test]
+fn a_glow_blends_to_its_outer_colour_and_stays_under_the_shadow_room() {
+    let Some(mut r) = rasterizer() else { return };
+    let mut text = TextContent::new("I", 0.2);
+    text.glow = Some(engine::TextGlow { color: [255, 0, 0, 255], outer_color: Some([0, 0, 255, 255]), radius: 0.5, intensity: 4.0, falloff: 0.5 });
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let y = image.height / 2;
+    let stem = (0..image.width).find(|&x| alpha(&image, x, y) == 255 && image.pixels[((y * image.width + x) * 4 + 1) as usize] == 255).expect("white stem");
+    let at = |x: u32| &image.pixels[((y * image.width + x) * 4) as usize..((y * image.width + x) * 4 + 3) as usize];
+    let near = at(stem - 4).to_vec();
+    let far = at(stem - 60).to_vec();
+    assert!(near[0] > near[2] && far[2] > far[0], "red near, blue far: {near:?} {far:?}");
+    // A shadow that reaches farther than the glow sets that side; the glow does not add to it.
+    let mut both = text.clone();
+    both.shadow = Some(TextShadow { color: [0, 0, 0, 255], offset: [1.0, 0.0], blur: 0.0 });
+    let mut shadow_only = TextContent::new("I", 0.2);
+    shadow_only.shadow = both.shadow;
+    let (both, shadow_only) = (r.rasterize(&both, HEIGHT, 1.0), r.rasterize(&shadow_only, HEIGHT, 1.0));
+    let glow_side = (image.width - r.rasterize(&TextContent::new("I", 0.2), HEIGHT, 1.0).width) / 2;
+    assert_eq!(both.width, shadow_only.width + glow_side, "right side from the shadow, left side from the glow");
+}

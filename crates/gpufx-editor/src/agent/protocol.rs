@@ -1,7 +1,7 @@
 //! The requests an agent can make and the errors it can get, as JSON. The same types go over the
 //! pipe to an open window.
 
-use engine::{ClipPlacement, Easing, EditError, FontRef, KeyframeTarget, Rgba, TextAlign, AnimationRef, TextBackground, TextOutline, TextShadow, TextTransform, Time, TrackKind};
+use engine::{ClipPlacement, Easing, EditError, FontRef, KeyframeTarget, Rgba, TextAlign, AnimationRef, TextBackground, TextOutline, TextShadow, TextGlow, TextTransform, Time, TrackKind};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
@@ -36,7 +36,7 @@ where
 }
 
 /// What to change of a text. A field that is absent stays; `null` takes off an outline, a box, a
-/// shadow or an animation.
+/// shadow, a glow or an animation.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextPatch {
@@ -54,6 +54,8 @@ pub struct TextPatch {
     pub background: Option<Option<TextBackground>>,
     #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
     pub shadow: Option<Option<TextShadow>>,
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub glow: Option<Option<TextGlow>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<TextAlign>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

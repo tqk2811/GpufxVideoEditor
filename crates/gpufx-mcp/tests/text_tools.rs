@@ -65,6 +65,7 @@ fn a_text_added_with_a_style_keeps_every_field_and_a_second_one_shares_a_free_tr
         "weight": 700, "italic": true, "transform": "uppercase", "letter_spacing": 0.1,
         "outline": {"color": [0, 0, 0, 255], "width": 0.05},
         "shadow": {"color": [0, 0, 0, 128], "offset": [0.05, 0.05], "blur": 0.1},
+        "glow": {"color": [0, 255, 255, 255], "outer_color": [0, 0, 255, 0], "radius": 0.4},
         "animation": {"in": {"preset": "fade", "duration": 45_000}, "loop": {"preset": "pulse", "duration": SECOND}}
     });
     let first = call_ok(&mut session, "text_add", json!({"expected_revision": 0, "start": 0, "duration": SECOND, "content": "Title", "style": style}));
@@ -78,6 +79,7 @@ fn a_text_added_with_a_style_keeps_every_field_and_a_second_one_shares_a_free_tr
     assert_eq!((text.weight, text.italic, text.transform, text.letter_spacing), (700, true, engine::TextTransform::Uppercase, 0.1));
     assert_eq!(text.outline.map(|outline| outline.width), Some(0.05));
     assert_eq!(text.shadow.map(|shadow| shadow.blur), Some(0.1));
+    assert_eq!(text.glow, Some(engine::TextGlow { color: [0, 255, 255, 255], outer_color: Some([0, 0, 255, 0]), radius: 0.4, intensity: 1.0, falloff: 2.0 }));
     assert_eq!(text.background, None);
     let animation = animation_of(&mut session, 0, 0);
     assert_eq!(animation.enter.map(|animation| (animation.preset, animation.duration.ticks())), Some(("fade".to_owned(), 45_000)));
@@ -358,7 +360,7 @@ fn the_schemas_of_the_text_tools_name_every_field_an_agent_may_give() {
     let tools = gpufx_mcp::tools::all_tools();
     let schema = |name: &str| Value::Object(tools.iter().find(|tool| tool.name == name).unwrap().tool().input_schema.as_ref().clone());
     let set = schema("text_set");
-    for field in ["expected_revision", "clip", "content", "font", "size", "color", "outline", "background", "shadow", "align", "line_spacing", "weight", "italic", "transform", "letter_spacing", "animation"] {
+    for field in ["expected_revision", "clip", "content", "font", "size", "color", "outline", "background", "shadow", "glow", "align", "line_spacing", "weight", "italic", "transform", "letter_spacing", "animation"] {
         assert!(set["properties"][field].is_object(), "text_set has no {field}: {set}");
     }
     let add = schema("text_add");

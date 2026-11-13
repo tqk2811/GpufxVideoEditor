@@ -154,6 +154,9 @@ pub struct TextContent {
     /// Drop shadow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<TextShadow>,
+    /// Glow around the glyphs, under the shadow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glow: Option<TextGlow>,
     /// Horizontal alignment of the lines.
     #[serde(default)]
     pub align: TextAlign,
@@ -185,6 +188,7 @@ impl TextContent {
             outline: None,
             background: None,
             shadow: None,
+            glow: None,
             align: TextAlign::Center,
             line_spacing: 1.0,
             weight: NORMAL_WEIGHT,
@@ -332,6 +336,36 @@ pub struct TextShadow {
     pub offset: [f32; 2],
     /// Blur radius, in parts of the font size.
     pub blur: f32,
+}
+
+/// A glow around the glyphs (or around the outline when there is one), drawn from how far each
+/// pixel is from the ink: full `intensity` at the ink, fading to nothing at `radius`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TextGlow {
+    /// Colour next to the ink.
+    pub color: Rgba,
+    /// Colour at the far edge; the glow blends from `color` to it with the distance. `None` keeps
+    /// `color` all the way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer_color: Option<Rgba>,
+    /// How far the glow reaches past the ink, in parts of the font size.
+    pub radius: f32,
+    /// Opacity at the ink, 0 to [`MAX_GLOW_INTENSITY`]; above 1 the inner part stays solid longer.
+    #[serde(default = "unit_f32")]
+    pub intensity: f32,
+    /// How fast it fades: the opacity goes as `(1 - distance / radius) ^ falloff`, so 1 fades
+    /// evenly and larger numbers hug the ink.
+    #[serde(default = "default_glow_falloff")]
+    pub falloff: f32,
+}
+
+/// The most a glow's intensity may be.
+pub const MAX_GLOW_INTENSITY: f32 = 4.0;
+/// The least and most a glow's falloff may be.
+pub const GLOW_FALLOFF_RANGE: std::ops::RangeInclusive<f32> = 0.1..=8.0;
+
+fn default_glow_falloff() -> f32 {
+    2.0
 }
 
 /// The preset animations of a clip: one to enter, one to leave and one that repeats.
