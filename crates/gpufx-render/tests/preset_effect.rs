@@ -111,15 +111,18 @@ fn a_preset_effect_paints_only_inside_its_windows() {
             {{"source":"{}","start":0,"source_in":0,"duration":{},"animation":{{"in":{{"preset":"fx/in","duration":{}}},"out":{{"preset":"fx/out","duration":{}}}}}}}]}}]}}"#,
         json_path(&a), 60 * FRAME, 10 * FRAME, 10 * FRAME
     );
-    let capture = render_frames(&gpu, &json, &root.0, &[0, 5, 10, 30, 50, 55, 59]);
+    let capture = render_frames(&gpu, &json, &root.0, &[0, 5, 9, 10, 30, 50, 55, 59]);
     let near = |frame: i64, red: i32| {
         let got = red_green_blue(capture.frame(frame));
         assert!((got.0 - red).abs() <= 1 && (got.1 - 64).abs() <= 1 && got.2 == 0, "frame {frame}: got {got:?}, expected red {red} and the static green 64");
     };
     near(0, 0);
-    near(5, 128);
-    near(55, 128);
-    near(59, 26);
+    // Progress counts frames: the in runs frames 0 to 9 and ends settled on 9, the out runs frames
+    // 51 to 59 and ends at 0 on 59, the last drawn frame.
+    near(5, 142);
+    near(9, 255);
+    near(55, 113);
+    near(59, 0);
     for frame in [10, 30, 50] {
         assert_grey(capture.frame(frame), frame);
     }
