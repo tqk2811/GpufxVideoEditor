@@ -279,7 +279,9 @@ fn a_zoom_in_clip_shorter_than_its_duration_keeps_the_zoom_in_its_transition() {
     for frame in frames {
         assert_eq!(zoomed.frame(frame), held.frame(frame), "frame {frame}: the zoom stays at its end, it does not jump back to scale 1");
     }
-    assert_ne!(zoomed.frame(14), plain.frame(14), "the zoom is visible past the end of the clip");
+    // fade-grays shows only the second clip from 2/3 of its progress (frame 13.7) on, so the zoom of
+    // clip 0 is judged at frame 12, past the end of the clip and halfway through the transition.
+    assert_ne!(zoomed.frame(12), plain.frame(12), "the zoom is visible past the end of the clip");
 }
 
 #[test]
