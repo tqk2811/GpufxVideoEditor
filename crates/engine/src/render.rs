@@ -11,7 +11,8 @@
 use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
 use crate::stretch::StretchStates;
 use crate::audio_schedule::{sample_position, MIX_CHANNELS};
-use crate::clip_animation::effects_with_animation;
+use crate::clip_animation::animation_effects;
+use crate::keyframe::effects_at;
 use crate::keyframe::ClipTransform;
 use crate::keyframe::ClipProperty;
 use crate::project::{text_step_up, Clip, Effect, Project, TextContent};
@@ -287,6 +288,27 @@ fn decode_sample<C: Compositor>(
     decoder.frame_at(sample.source_time)
 }
 
+/// Prepares `sample` with its own effects and those of its preset animations (see
+/// [`animation_effects`]). When that fails and a preset added an effect, the clip is prepared again
+/// with its own effects only: a preset effect whose package went away since the packs were read
+/// leaves the clip drawn without it, as a missing package does when the packs are read.
+fn prepare_sample<C: Compositor>(compositor: &mut C, key: ClipKey, frame: &mut <C::Decoder as Decoder>::Frame, sample: &SourceSample<'_>, at: FrameContext, frame_duration: Time) -> Result<C::Image, RenderError> {
+    let own = effects_at(sample.effects, sample.offset);
+    let added = animation_effects(&sample.model.animation, sample.clock, frame_duration);
+    with_preset_fallback(&own, added, |effects| compositor.prepare_clip(key, frame, effects, sample.transform, sample.clock, at))
+}
+
+/// Runs `prepare` with `own` then `added`, and with `own` alone when that fails and `added` is not
+/// empty.
+fn with_preset_fallback<T, E>(own: &[Effect], added: Vec<Effect>, mut prepare: impl FnMut(&[Effect]) -> Result<T, E>) -> Result<T, E> {
+    if added.is_empty() {
+        return prepare(own);
+    }
+    let mut all = own.to_vec();
+    all.extend(added);
+    prepare(&all).or_else(|_| prepare(own))
+}
+
 /// Decodes the one or two samples of a layer and makes the decoders idle, then prepares them.
 fn render_layer<C: Compositor>(
     compositor: &mut C,
@@ -305,7 +327,7 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(sample.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let image = compositor.prepare_clip(key(sample.clip), &mut frame, &effects_with_animation(sample, frame_duration), sample.transform, sample.clock, at)?;
+            let image = prepare_sample(compositor, key(sample.clip), &mut frame, sample, at, frame_duration)?;
             kept.0.push(frame);
             Ok(image)
         }
@@ -326,9 +348,9 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(to.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let from_image = compositor.prepare_clip(key(from.clip), &mut from_frame, &effects_with_animation(from, frame_duration), from.transform, from.clock, at)?;
+            let from_image = prepare_sample(compositor, key(from.clip), &mut from_frame, from, at, frame_duration)?;
             let to_image =
-                match compositor.prepare_clip(key(to.clip), &mut to_frame, &effects_with_animation(to, frame_duration), to.transform, to.clock, at) {
+                match prepare_sample(compositor, key(to.clip), &mut to_frame, to, at, frame_duration) {
                     Ok(image) => image,
                     Err(e) => {
                         compositor.release(from_image);
@@ -989,6 +1011,27 @@ mod tests {
         assert!(cache.get_or_build(key(0), "b", || Err::<i32, _>(())).is_err());
         assert_eq!(cache.get_mut(key(0)), None, "must not leave a's value under b");
         assert_eq!(*cache.get_or_build(key(0), "b", || Ok::<_, ()>(3)).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_failing_preset_effect_leaves_the_clip_drawn_with_its_own_effects() {
+        let effect = |package: &str| Effect { package: package.to_owned(), params: Map::new(), keyframes: Default::default() };
+        let own = [effect("blur")];
+        let mut tried = Vec::new();
+        let drawn = with_preset_fallback(&own, vec![effect("gone")], |effects| {
+            tried.push(effects.iter().map(|e| e.package.clone()).collect::<Vec<_>>());
+            if effects.iter().any(|e| e.package == "gone") { Err("missing package") } else { Ok(effects.len()) }
+        });
+        assert_eq!(drawn, Ok(1));
+        assert_eq!(tried, vec![vec!["blur".to_owned(), "gone".to_owned()], vec!["blur".to_owned()]]);
+        // Without a preset effect, a failure is the clip's own and is not tried again.
+        let mut calls = 0;
+        assert!(with_preset_fallback(&own, Vec::new(), |_| {
+            calls += 1;
+            Err::<(), _>("broken")
+        })
+        .is_err());
+        assert_eq!(calls, 1);
     }
 
     /// A clip whose preset animation has an effect in and out: its graph shape changes at each

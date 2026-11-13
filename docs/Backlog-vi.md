@@ -542,3 +542,7 @@ Clip chữ chỉ thêm bằng nút "Thêm chữ" ở tab Chữ (`EditorState::ad
 ### [Thấp] Phụ đề: nhập/đổi kiểu nghìn cue shape đồng bộ trên luồng UI, và ba việc còn lại của phần SRT
 
 `EditorState::subtitle_clips` và `EditorState::subtitle_restyle` (`crates/gpufx-editor/src/editor.rs:1630`, `:1658`) shape chữ từng cue ngay trên luồng UI để tính placement, nên file SRT hoặc track vài nghìn cue làm giao diện đứng hình khi nhập hoặc đổi kiểu. Hướng sửa: cache kết quả shape theo (nội dung, kiểu) vì phần lớn cue cùng kiểu, hoặc chuyển sang task nền như các tác vụ nạp khác. Việc còn lại của phần SRT: (1) kéo thả file `.srt` vào cửa sổ để nhập; (2) nút xuất SRT ở header track phụ đề (hiện chỉ có trong inspector của cue, `crates/gpufx-editor/src/ui/text_inspector.rs`); (3) cue thêm tay vào track phụ đề (`add_text_at_playhead`) chưa nhận kiểu của track. Ghi ngày 2026-11-13.
+
+### [Thấp] Gói gpufx của effect preset bị gỡ ngoài editor thì danh sách animation vẫn báo có
+
+Editor chỉ đọc lại các gói clip-animation (và tìm lại gói effect gpufx của chúng) khi một gói được cài qua editor (`package_installed` ở `crates/gpufx-editor/src/window.rs`). Gói gpufx bị xoá khỏi thư mục ngoài editor thì bảng preset vẫn giữ effect đó và inspector vẫn báo có; lúc render, `prepare_sample` (`crates/engine/src/render.rs`) dựng lại clip không có effect nên clip vẫn hiện, nhưng mỗi frame trong cửa sổ in/out lại thử nạp gói hỏng một lần. Hướng sửa: theo dõi thư mục `packages/gpufx` (hoặc nút đọc lại gói) để quét lại, và nhớ gói nạp hỏng để không thử lại mỗi frame. Ghi ngày 2026-11-14.

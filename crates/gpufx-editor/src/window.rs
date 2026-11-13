@@ -858,6 +858,8 @@ impl Session {
     /// make the preview worker drop its compositor, whose graphs are cached by package name.
     fn package_installed(&mut self, package: &str) {
         self.catalog = Some(spawn_catalog_scan(self.package_roots.clone(), self.window.clone()));
+        // The effects of clip animation items are found among the gpufx packages.
+        self.clip_animation_library = Some(spawn_clip_animation_scan(self.package_roots.clone(), self.window.clone()));
         self.state.previews.get_mut().forget(package);
         self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
         self.state.visuals.get_mut().set_paths(self.paths.clone());
