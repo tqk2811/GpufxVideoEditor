@@ -96,6 +96,19 @@ fn validate_rejects_text_on_an_audio_track() {
     assert_eq!(validate(&p, &AcceptAll), vec![ValidationError::TextOnAudioTrack { track: 0, clip: 0 }]);
 }
 
+#[test]
+fn validate_rejects_an_animation_on_an_audio_track() {
+    let mut c = text_clip("Hi", 0, 9000);
+    c.text = None;
+    c.source = "a.mp3".into();
+    c.animation.enter = Some(AnimationRef { preset: "fade".into(), duration: t(9000) });
+    let mut p = project_with(vec![c]);
+    p.tracks[0].kind = TrackKind::Audio;
+    assert_eq!(validate(&p, &AcceptAll), vec![ValidationError::AnimationOnAudioTrack { track: 0, clip: 0 }]);
+    p.tracks[0].clips[0].animation = Default::default();
+    assert_eq!(validate(&p, &AcceptAll), vec![]);
+}
+
 const KEY: ClipKey = ClipKey { track: 0, clip: 0 };
 
 #[test]

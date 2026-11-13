@@ -195,6 +195,8 @@ pub enum ValidationError {
     UnknownAnimation { track: usize, clip: usize, group: &'static str, preset: String },
     /// A preset animation of a text clip lasts zero ticks or less.
     InvalidAnimationDuration { track: usize, clip: usize, group: &'static str, duration: Time },
+    /// A clip on a track of kind `audio` has a preset animation, which has no picture to move.
+    AnimationOnAudioTrack { track: usize, clip: usize },
     /// The source of a clip on a track of kind `audio` has no audio stream.
     SourceHasNoAudio {
         track: usize,
@@ -337,6 +339,7 @@ impl fmt::Display for ValidationError {
                 }
             }
             InvalidAnimationDuration { track, clip, group, duration } => write!(f, "track {track}, clip {clip}: the '{group}' animation lasts {duration}, which must be above 0"),
+            AnimationOnAudioTrack { track, clip } => write!(f, "track {track}, clip {clip}: a clip on an audio track has no picture to animate"),
             SourceHasNoAudio { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: source '{source}' has no audio stream")
             }
@@ -430,6 +433,9 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 ok = false;
             }
             let animation = &clip.animation;
+            if track.is_audio() && !animation.is_empty() {
+                errors.push(AnimationOnAudioTrack { track: t, clip: c });
+            }
             for (group, reference) in [(AnimationGroup::Enter, &animation.enter), (AnimationGroup::Exit, &animation.exit), (AnimationGroup::Repeat, &animation.repeat)] {
                 let Some(reference) = reference else { continue };
                 if find_preset(group, &reference.preset).is_none() {
