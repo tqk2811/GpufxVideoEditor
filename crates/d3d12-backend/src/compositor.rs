@@ -420,8 +420,13 @@ fn decoded_input(frame: &DecodedFrame) -> Result<D3d12Frame, String> {
 pub struct StillImage {
     image: Image,
     fence_value: AtomicU64,
+    /// Width over height of the picture without its margin.
     aspect: f64,
     has_alpha: bool,
+    /// What the picture has past its middle on each side, as parts of the middle's width and
+    /// height: a frame of a moving text grown so its units fit (see [`gpufx_text::TextImage::margin`]).
+    /// The middle is placed where the still text would be.
+    margin: (f64, f64),
 }
 
 impl StillImage {
@@ -439,9 +444,19 @@ pub enum SourceFrame {
     /// A step of a karaoke text not drawn yet. The compositor draws it, through its still cache,
     /// before it reads the frame (see [`D3d12Compositor::resolve_frame`]).
     Step { steps: Arc<KaraokeSteps>, step: usize },
-    /// A frame of a text whose characters move one by one, not drawn yet; drawn like a karaoke
-    /// step, with the poses of its units at the clip's clock.
-    Units(Arc<Clip>),
+    /// A frame of a text whose characters move one by one, not drawn yet; drawn with the poses of
+    /// its units at the clip's clock (see [`D3d12Compositor::resolve_frame`]).
+    Units(Arc<MovingText>),
+}
+
+/// A text whose characters move one by one. Its frames never go into the still cache: each would
+/// be used for one frame and push out the pictures of other clips. The last one drawn is kept here
+/// for a pose held over several frames, so a clip holds at most two pictures (that one and the one
+/// a frame still shows); once its units rest the text is the still picture, from the cache.
+pub struct MovingText {
+    clip: Clip,
+    /// The key of the poses and scale of the last frame drawn, and its picture.
+    shown: Mutex<Option<(String, Arc<StillImage>)>>,
 }
 
 /// The steps of a karaoke text: the step at `times[i]` is step `i + 1`, and the time before the
@@ -473,6 +488,14 @@ impl SourceFrame {
         }
     }
 
+    /// See [`StillImage::margin`]; none for any other picture.
+    fn margin(&self) -> (f64, f64) {
+        match self {
+            Self::Still(still) => still.margin,
+            _ => (0.0, 0.0),
+        }
+    }
+
     fn raise_fence_value(&mut self, value: u64) {
         match self {
             Self::Video(frame) => frame.raise_fence_value(value),
@@ -500,7 +523,7 @@ pub enum SourceDecoder {
     /// A karaoke text, a picture per step.
     Steps(Arc<KaraokeSteps>),
     /// A text whose characters move one by one, a picture per frame while they move.
-    Units(Arc<Clip>),
+    Units(Arc<MovingText>),
 }
 
 impl Decoder for SourceDecoder {
@@ -515,7 +538,7 @@ impl Decoder for SourceDecoder {
                 let shown = steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().filter(|(shown, _)| *shown == step).and_then(|(_, still)| still.upgrade());
                 Ok(shown.map_or_else(|| SourceFrame::Step { steps: steps.clone(), step }, SourceFrame::Still))
             }
-            Self::Units(clip) => Ok(SourceFrame::Units(clip.clone())),
+            Self::Units(moving) => Ok(SourceFrame::Units(moving.clone())),
         }
     }
 
@@ -527,10 +550,21 @@ impl Decoder for SourceDecoder {
     }
 }
 
+/// `rect`, the place of a picture's middle, grown by `margin` (parts of its width and height) on
+/// each side around the same middle: the place of the whole picture.
+fn with_margin(rect: engine::PlacedRect, margin: (f64, f64)) -> engine::PlacedRect {
+    if margin == (0.0, 0.0) {
+        return rect;
+    }
+    let (grow_x, grow_y) = (rect.width * margin.0, rect.height * margin.1);
+    engine::PlacedRect { x: rect.x - grow_x, y: rect.y - grow_y, width: rect.width + 2.0 * grow_x, height: rect.height + 2.0 * grow_y }
+}
+
 /// The poses of the units of a text on one frame, by kind of unit.
 type UnitPoses = (engine::TextUnit, Vec<engine::AnimationPose>);
 
-/// A key of `poses` that does not tell apart poses closer than a pixel of a large text.
+/// A key of `poses`, each number to four decimals: poses that agree that far (a hundredth of a pixel
+/// on a 100 pixel font) are the same picture, so a held pose is drawn once.
 fn poses_key(poses: &[UnitPoses]) -> String {
     let mut key = String::new();
     for (unit, poses) in poses {
@@ -888,6 +922,12 @@ impl D3d12Compositor {
         let mut rasterizer = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let image = if poses.is_empty() { rasterizer.rasterize_words(text, self.height, scale, styles) } else { rasterizer.rasterize_units(text, self.height, scale, poses) };
         drop(rasterizer);
+        self.text_rasterized(&image);
+        image
+    }
+
+    /// Counts a text drawn and warns once about a font family it did not find.
+    fn text_rasterized(&mut self, image: &gpufx_text::TextImage) {
         self.text_rasterizations += 1;
         if let Some(family) = &image.missing_family {
             if !self.missing_font_families.contains(family) {
@@ -895,7 +935,6 @@ impl D3d12Compositor {
                 self.missing_font_families.push(family.clone());
             }
         }
-        image
     }
 
     /// The still of a text clip, rasterized sharp enough for the widest the clip is shown (see
@@ -906,15 +945,33 @@ impl D3d12Compositor {
     /// the poses of its units on one frame of a text whose characters move (see
     /// [`gpufx_text::TextRasterizer::rasterize_units`]).
     fn load_text(&mut self, clip: &Clip, text: &TextContent, styles: &[engine::WordStyle], poses: &[UnitPoses]) -> Result<Arc<StillImage>, String> {
-        // A font file named relative to the project is read from the project folder.
-        let resolved;
-        let text = match &text.font {
-            engine::FontRef::File { path } if Path::new(path).is_relative() => {
-                resolved = TextContent { font: engine::FontRef::File { path: self.paths.source_path(path).to_string_lossy().into_owned() }, ..text.clone() };
-                &resolved
-            }
-            _ => text,
-        };
+        let text = self.resolved_text(text);
+        let text = &*text;
+        let (digest, scale) = self.text_digest_and_scale(clip, text)?;
+        let digest = if styles.is_empty() { digest } else { Sha256::new().chain_update(digest).chain_update(format!("{styles:?}").as_bytes()).finalize().into() };
+        let digest = if poses.is_empty() { digest } else { Sha256::new().chain_update(digest).chain_update(poses_key(poses).as_bytes()).finalize().into() };
+        let key = StillKey::Text { digest, output_height: self.height, scale: scale.to_bits() };
+        self.stills_used += 1;
+        if let Some(cached) = self.stills.get_mut(&key) {
+            cached.last_used = self.stills_used;
+            return Ok(cached.still.clone());
+        }
+        let image = self.rasterize(text, scale, styles, poses);
+        let picture = premultiplied_still(image.width, image.height, image.pixels);
+        self.insert_still(key, (0, None), picture)
+    }
+
+    /// `text` with a font file named relative to the project read from the project folder.
+    fn resolved_text<'a>(&self, text: &'a TextContent) -> std::borrow::Cow<'a, TextContent> {
+        match &text.font {
+            engine::FontRef::File { path } if Path::new(path).is_relative() => std::borrow::Cow::Owned(TextContent { font: engine::FontRef::File { path: self.paths.source_path(path).to_string_lossy().into_owned() }, ..text.clone() }),
+            _ => std::borrow::Cow::Borrowed(text),
+        }
+    }
+
+    /// The digest of `text` (resolved) and its font file, and the scale it is rasterized at for
+    /// `clip` (see [`Self::load_text`]).
+    fn text_digest_and_scale(&mut self, clip: &Clip, text: &TextContent) -> Result<([u8; 32], f32), String> {
         let json = serde_json::to_string(text).map_err(|e| format!("text: {e}"))?;
         // The font file's stamp is part of the key, so a changed file is drawn again.
         let stamp = format!("{:?}", gpufx_text::text_font_stamp(text));
@@ -934,32 +991,50 @@ impl D3d12Compositor {
         let source_aspect = if width == 0 || height == 0 { 1.0 } else { f64::from(width) / f64::from(height) };
         let output_aspect = f64::from(self.width) / f64::from(self.height.max(1));
         let scale = text_raster_scale(clip.widest(output_aspect, source_aspect), self.width, width);
-        let digest = if styles.is_empty() { digest } else { Sha256::new().chain_update(digest).chain_update(format!("{styles:?}").as_bytes()).finalize().into() };
-        // Poses a pixel apart are the same picture: kept to a few digits, a held pose (a character
-        // typed and waiting) is drawn once.
-        let digest = if poses.is_empty() { digest } else { Sha256::new().chain_update(digest).chain_update(poses_key(poses).as_bytes()).finalize().into() };
-        let key = StillKey::Text { digest, output_height: self.height, scale: scale.to_bits() };
-        self.stills_used += 1;
-        if let Some(cached) = self.stills.get_mut(&key) {
-            cached.last_used = self.stills_used;
-            return Ok(cached.still.clone());
+        Ok((digest, scale))
+    }
+
+    /// A frame of `moving` with its units at `poses`: the last one drawn when the poses are the
+    /// same, else drawn now and kept in `moving` only (see [`MovingText`]). The rasterizer is held
+    /// only to find or make the text's plan, not while the frame is drawn.
+    fn draw_moving(&mut self, moving: &MovingText, poses: &[UnitPoses]) -> Result<Arc<StillImage>, String> {
+        let text = moving.clip.text.as_ref().ok_or("a moving text of a clip without text")?;
+        let text = self.resolved_text(text);
+        let (_, scale) = self.text_digest_and_scale(&moving.clip, &text)?;
+        let key = format!("{} {}", scale.to_bits(), poses_key(poses));
+        if let Some((known, still)) = moving.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+            if *known == key {
+                return Ok(still.clone());
+            }
         }
-        let image = self.rasterize(text, scale, styles, poses);
+        let rasterizer = self.text_rasterizer.get_or_insert_with(gpufx_text::shared).clone();
+        let plan = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).prepare_units(&text, self.height, scale);
+        let image = plan.draw(poses);
+        self.text_rasterized(&image);
+        let (margin_x, margin_y) = image.margin;
+        let inner = (image.width.saturating_sub(2 * margin_x), image.height.saturating_sub(2 * margin_y));
+        let margin = if inner.0 == 0 || inner.1 == 0 { (0.0, 0.0) } else { (f64::from(margin_x) / f64::from(inner.0), f64::from(margin_y) / f64::from(inner.1)) };
         let picture = premultiplied_still(image.width, image.height, image.pixels);
-        self.insert_still(key, (0, None), picture)
+        let aspect = if margin == (0.0, 0.0) { picture.aspect() } else { f64::from(inner.0) / f64::from(inner.1) };
+        let uploaded = Image::upload(&self.gpu, &picture)?;
+        let still = Arc::new(StillImage { aspect, has_alpha: picture.has_alpha, fence_value: AtomicU64::new(uploaded.fence_value), image: uploaded, margin });
+        *moving.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((key, still.clone()));
+        Ok(still)
     }
 
     /// Draws a karaoke step that `frame` holds, or takes it from the still cache, and makes the
     /// frame that picture. Any other frame stays as it is.
-    /// A text whose characters move is drawn the same way, with the poses of its units at `clock`;
-    /// once they rest it is the still text.
+    /// A text whose characters move is drawn with the poses of its units at `clock`, outside the
+    /// still cache (see [`MovingText`]); once they rest it is the still text, from the cache.
     fn resolve_frame(&mut self, frame: &mut SourceFrame, clock: ClipClock) -> Result<(), String> {
-        if let SourceFrame::Units(clip) = frame {
-            let clip = clip.clone();
-            let text = clip.text.as_ref().ok_or("a moving text of a clip without text")?;
+        if let SourceFrame::Units(moving) = frame {
+            let moving = moving.clone();
+            let text = moving.clip.text.as_ref().ok_or("a moving text of a clip without text")?;
             let shaped = text.shaped_content();
-            let poses = engine::animation_unit_poses(&clip.animation, clock, |unit| engine::unit_ranges(&shaped, unit).len());
-            *frame = SourceFrame::Still(self.load_text(&clip, text, &[], &poses)?);
+            let poses = engine::animation_unit_poses(&moving.clip.animation, clock, |unit| engine::unit_ranges(&shaped, unit).len());
+            let rest = poses.iter().all(|(_, poses)| poses.iter().all(|pose| *pose == engine::AnimationPose { blur: pose.blur, ..engine::AnimationPose::IDENTITY }));
+            let still = if rest { self.load_text(&moving.clip, text, &[], &[])? } else { self.draw_moving(&moving, &poses)? };
+            *frame = SourceFrame::Still(still);
             return Ok(());
         }
         let SourceFrame::Step { steps, step } = frame else { return Ok(()) };
@@ -975,7 +1050,7 @@ impl D3d12Compositor {
     fn insert_still(&mut self, key: StillKey, stamp: (u64, Option<SystemTime>), picture: StillPicture) -> Result<Arc<StillImage>, String> {
         let image = Image::upload(&self.gpu, &picture)?;
         let bytes = u64::from(picture.width) * u64::from(picture.height) * 4;
-        let still = Arc::new(StillImage { aspect: picture.aspect(), has_alpha: picture.has_alpha, fence_value: AtomicU64::new(image.fence_value), image });
+        let still = Arc::new(StillImage { aspect: picture.aspect(), has_alpha: picture.has_alpha, fence_value: AtomicU64::new(image.fence_value), image, margin: (0.0, 0.0) });
         self.stills.insert(key, CachedStill { stamp, still: still.clone(), bytes, last_used: self.stills_used });
         self.trim_stills();
         Ok(still)
@@ -1006,8 +1081,10 @@ impl D3d12Compositor {
     /// transparent image. Gives `picture` back when it needs no moving, the usual case, at no cost, unless
     /// `through_alpha` says it has see-through parts, whose colours only count through their alpha.
     /// The overlay mixes with the zero colour of the transparent image, so the result is premultiplied.
-    fn place(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
-        let placed = self.place_sharp(picture, transform, source_aspect, through_alpha, info)?;
+    /// `margin` is the picture's room past its middle, which `transform` places (see
+    /// [`StillImage::margin`]).
+    fn place(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, margin: (f64, f64), through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
+        let placed = self.place_sharp(picture, transform, source_aspect, margin, through_alpha, info)?;
         let radius = blur_pixels(transform.blur, self.height);
         if !(radius >= MIN_BLUR_PIXELS) || self.blur_unavailable {
             return Ok(placed);
@@ -1056,9 +1133,9 @@ impl D3d12Compositor {
     }
 
     /// [`Self::place`] without the blur.
-    fn place_sharp(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
+    fn place_sharp(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, margin: (f64, f64), through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
         let (width, height) = (self.width, self.height);
-        let mut rect = transform.rect(f64::from(width) / f64::from(height), source_aspect);
+        let mut rect = with_margin(transform.rect(f64::from(width) / f64::from(height), source_aspect), margin);
         let mut transform = transform;
         // A picture with no size (a zoom at its first frame) or no opacity draws nothing. The shaders
         // divide by the size, so it is drawn as a full-frame picture at no opacity instead.
@@ -1278,7 +1355,7 @@ impl Compositor for D3d12Compositor {
             // A text whose characters move gets a picture per frame while they move. (With
             // karaoke on, karaoke wins and the characters stay still.)
             if engine::animation_has_per_unit(&clip.animation) {
-                return Ok(SourceDecoder::Units(Arc::new(clip.clone())));
+                return Ok(SourceDecoder::Units(Arc::new(MovingText { clip: clip.clone(), shown: Mutex::new(None) })));
             }
             return self.load_text(clip, text, &[], &[]).map(SourceDecoder::Still).map_err(RenderError);
         }
@@ -1303,6 +1380,7 @@ impl Compositor for D3d12Compositor {
         let (input, output) = input_then_output(|| frame.input(), || self.acquire())?;
         let (width, height) = (self.width, self.height);
         let source_aspect = frame.display_aspect();
+        let margin = frame.margin();
         let has_alpha = frame.has_alpha();
         let mut inputs = [input];
         let (gpu, paths) = (&self.gpu, &self.paths);
@@ -1364,7 +1442,7 @@ impl Compositor for D3d12Compositor {
             return Err(RenderError(e));
         }
         frame.raise_fence_value(inputs[0].fence_value);
-        let placed = match self.place(output, transform, source_aspect, has_alpha, &info) {
+        let placed = match self.place(output, transform, source_aspect, margin, has_alpha, &info) {
             Ok(placed) => placed,
             Err(message) => {
                 self.release_image(output);
@@ -1566,7 +1644,7 @@ mod tests {
         let mut draw = |blur: f64| {
             let image = ImageId(compositor.images.push(Image::upload(&compositor.gpu, &picture).expect("an upload")));
             let transform = ClipTransform { blur, ..ClipTransform::default() };
-            let placed = compositor.place(image, transform, f64::from(width) / f64::from(height), false, &FrameInfo::new(0.0, 0)).expect("placed");
+            let placed = compositor.place(image, transform, f64::from(width) / f64::from(height), (0.0, 0.0), false, &FrameInfo::new(0.0, 0)).expect("placed");
             let mut rgba = Vec::new();
             compositor.read(placed, &mut rgba).expect("read");
             compositor.release(placed);
@@ -1732,6 +1810,47 @@ mod tests {
         let (middle_pixels, still_pixels) = (read(&compositor, &middle), read(&compositor, &still));
         let ink = |pixels: &[u8]| pixels.chunks(4).filter(|p| p[3] > 64).count();
         assert!(ink(&middle_pixels) > 0 && ink(&middle_pixels) < ink(&still_pixels), "half typed: {} of {}", ink(&middle_pixels), ink(&still_pixels));
+    }
+
+    #[test]
+    fn a_tumbling_text_keeps_its_frames_out_of_the_still_cache() {
+        let Some((gpu, _)) = overlay_on_hardware() else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        let mut compositor = D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), 320, 180).expect("a compositor");
+        let text = TextContent::new("Hgjy", 0.2);
+        let mut clip = engine::edit::text_clip(Time::ZERO, Time::from_ticks(270_000), text.clone());
+        clip.animation.enter = Some(engine::AnimationRef { preset: "tumble".to_owned(), duration: Time::from_ticks(90_000) });
+        let mut decoder = compositor.open_decoder(&clip).expect("a decoder");
+        let clock = |elapsed: i64| ClipClock { elapsed: Time::from_ticks(elapsed), duration: Time::from_ticks(270_000) };
+        let mut shown: Option<SourceFrame> = None;
+        let mut grown = false;
+        for frame_number in 0..30 {
+            let elapsed = 3_000 * frame_number;
+            let mut frame = decoder.frame_at(Time::from_ticks(elapsed)).expect("a frame");
+            compositor.resolve_frame(&mut frame, clock(elapsed)).expect("a drawn frame");
+            let SourceFrame::Still(still) = &frame else { panic!("a still once drawn") };
+            grown |= still.margin.1 > 0.0;
+            assert!(Arc::strong_count(still) <= 3, "held by this frame, the clip's last frame and no more");
+            shown = Some(frame);
+        }
+        assert!(compositor.text_rasterizations() > 10, "the frames moved");
+        assert!(grown, "a tumbling character that leaves the picture grows it");
+        assert_eq!(compositor.stills.len(), 0, "no moving frame went into the still cache");
+        drop(shown);
+        let mut frame = decoder.frame_at(Time::from_ticks(200_000)).expect("a frame");
+        compositor.resolve_frame(&mut frame, clock(200_000)).expect("the rest frame");
+        let SourceFrame::Still(still) = &frame else { panic!("a still once drawn") };
+        assert_eq!(still.margin, (0.0, 0.0));
+        assert_eq!(compositor.stills.len(), 1, "at rest it is the still text, kept like an image");
+    }
+
+    #[test]
+    fn a_margin_grows_the_place_around_its_middle() {
+        let rect = engine::PlacedRect { x: 0.2, y: 0.4, width: 0.5, height: 0.1 };
+        assert_eq!(with_margin(rect, (0.0, 0.0)), rect);
+        let grown = with_margin(rect, (0.1, 0.5));
+        assert!((grown.width - 0.6).abs() < 1e-12 && (grown.height - 0.2).abs() < 1e-12, "{grown:?}");
+        assert!((grown.x + grown.width / 2.0 - 0.45).abs() < 1e-12 && (grown.y + grown.height / 2.0 - 0.45).abs() < 1e-12, "the same middle: {grown:?}");
     }
 
     #[test]

@@ -551,9 +551,13 @@ Editor chỉ đọc lại các gói clip-animation (và tìm lại gói effect g
 
 `crates/engine/src/per_unit.rs` (`unit_poses`, `staggered_time`) đã có thứ tự `random` theo seed và range selector đủ 6 shape, nhưng preset nhóm `loop` có `stagger` chỉ lệch điểm bắt đầu: đơn vị sau khi hết cửa sổ đứng ở giá trị cuối, không ra sóng chạy vòng. Cần một cách tính lệch pha bọc vòng (vd `phase`: t của đơn vị = (t − place·phase) mod 1) cho `loop`, kèm preset dựng sẵn `wave` và test. Ghi ngày 2026-11-14.
 
-### [Thấp] Ký tự chạy ra ngoài khung ảnh chữ bị cắt
+### [Thấp] Ký tự động vẽ trên CPU mỗi frame, chậm hơn ảnh tĩnh
 
-`rasterize_units` (`crates/gpufx-text/src/lib.rs:318`) giữ đúng kích thước ảnh chữ tĩnh để khung cuối trùng ảnh tĩnh và vị trí clip không nhảy, nên ký tự dịch `dy`/phóng to vượt lề (vd trượt lên từ 1 cỡ chữ) bị cắt ở mép ảnh. Hướng sửa: cộng một lề cố định cho mọi ảnh của clip có preset per_unit, tính từ biên độ lớn nhất của curve (cả ở `measure` để tỉ lệ khung không đổi) và bù vị trí đặt clip. Ghi ngày 2026-11-14.
+`UnitsPlan::draw` (`crates/gpufx-text/src/units.rs`) ghép coverage các ký tự vào một mask rồi chạy glow/bóng/viền cho cả mask mỗi frame (để khung trước lúc nghỉ khớp ảnh tĩnh). Đo release, 1 dòng 27 ký tự 1080p có viền + bóng + glow, mọi ký tự vừa dịch vừa xoay: ~15 ms/frame (ảnh tĩnh ~9 ms). Ký tự bay xa quá 2 cỡ chữ ngoài ảnh tĩnh vẫn bị cắt (lề tối đa của `margins`). Hướng làm: vẽ mỗi ký tự là một quad trên GPU (coverage làm texture, glow/bóng/viền bằng shader trên mask đã ghép), cần compositor có đường vẽ nhiều quad cho một clip. Ghi ngày 2026-11-14.
+
+### [Thấp] Mỗi frame chữ động tạo một texture mới
+
+`draw_moving` (`crates/d3d12-backend/src/compositor.rs`) upload mỗi frame vào một `Image` mới (frame cũ được thả khi không còn ai giữ, tối đa 2 ảnh mỗi clip). Ghi đè vào cùng texture khi cùng kích thước sẽ bớt tạo/huỷ resource, nhưng phải chờ fence của lần đọc trước. Ghi ngày 2026-11-14.
 
 ### [Thấp] Karaoke và animation theo ký tự không chạy cùng nhau
 
