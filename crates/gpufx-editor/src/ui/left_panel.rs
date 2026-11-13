@@ -10,6 +10,7 @@ use crate::i18n::{Language, Message};
 use crate::layout::grid_columns;
 use crate::media::{MediaItem, MediaKind};
 use crate::sticker_library::LibrarySticker;
+use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStylePack};
 use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageEntry, PackageKind};
 use crate::timecode::format_duration;
 use std::cell::RefCell;
@@ -207,6 +208,58 @@ fn text_tab(ui: &mut egui::Ui, state: &mut EditorState) {
     }
     ui.add_space(6.0);
     ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TextAddHint)).color(theme::text_dim())).wrap());
+    ui.add_space(8.0);
+    let mut chosen = None;
+    if !state.text_style_library.loaded {
+        ui.colored_label(theme::text_dim(), language.t(Message::ReadingTextStylePacks));
+    } else if state.text_style_library.packs.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TextStyleLibraryEmpty)).color(theme::text_dim())).wrap());
+    }
+    for (kind, title) in [(StyleKind::Text, Message::TextStyles), (StyleKind::Subtitle, Message::SubtitleStyles)] {
+        if state.text_style_library.styles(Some(kind)).next().is_none() {
+            continue;
+        }
+        ui.label(egui::RichText::new(language.t(title)).strong());
+        ui.horizontal_wrapped(|ui| {
+            for (pack, style) in state.text_style_library.styles(Some(kind)) {
+                if style_tile(ui, pack, style).clicked() {
+                    chosen = Some(style.reference.clone());
+                }
+            }
+        });
+        ui.add_space(6.0);
+    }
+    if !state.text_style_library.problems.is_empty() {
+        egui::CollapsingHeader::new(language.t(Message::TextStylePackProblems(state.text_style_library.problems.len()))).id_salt("text-style-pack-problems").show(ui, |ui| {
+            for problem in &state.text_style_library.problems {
+                ui.colored_label(theme::refused(), format!("{}: {}", problem.pack, problem.message));
+            }
+        });
+    }
+    if let Some(reference) = chosen {
+        state.add_styled_text_at_playhead(&reference);
+    }
+}
+
+/// One style of the Text tab: its preview text in its colour, outline as a frame, its box as the
+/// fill. Its name and pack show on hover.
+fn style_tile(ui: &mut egui::Ui, pack: &TextStylePack, style: &LibraryTextStyle) -> egui::Response {
+    let rgba = |color: engine::Rgba| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
+    let text = style.style.color.map_or(Color32::WHITE, rgba);
+    let mut preview = egui::RichText::new(&style.preview_text).color(text).size(15.0);
+    if style.style.weight.is_some_and(|weight| weight >= 600) {
+        preview = preview.strong();
+    }
+    if style.style.italic == Some(true) {
+        preview = preview.italics();
+    }
+    let fill = style.style.background.map_or(theme::thumb_bg(), |background| rgba(background.color));
+    let stroke = style.style.outline.map_or(Stroke::NONE, |outline| Stroke::new(1.5, rgba(outline.color)));
+    let hover = match &style.category {
+        Some(category) => format!("{} · {} ({category})", style.name, pack.name),
+        None => format!("{} · {}", style.name, pack.name),
+    };
+    ui.add(egui::Button::new(preview).fill(fill).stroke(stroke).min_size(Vec2::new(72.0, 36.0))).on_hover_text(hover)
 }
 
 /// What the Sticker tab says when it has nothing to show.

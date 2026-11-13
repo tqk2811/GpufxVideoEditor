@@ -9,6 +9,7 @@ use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
 use crate::text_clip::{default_background, default_glow, default_outline, default_shadow, TEXT_SIZE_RANGE};
 use crate::text_shapes::available_families;
+use crate::text_style_library::StyleKind;
 use egui::{Rect, Vec2};
 use engine::{ClipKey, FontRef, Rgba, TextAlign, TextContent, TextTransform, TEXT_WEIGHT_RANGE};
 use std::ops::RangeInclusive;
@@ -49,6 +50,11 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(family) = state.missing_font(key) {
         missing_font_warning(ui, &language.t(Message::FontMissing(family)));
     }
+    if let Some(reference) = style_combo(ui, id, state, language) {
+        // The style is one undo step of its own; the rest of the panel shows it on the next frame.
+        state.apply_text_style(key, &reference);
+        return;
+    }
     let mut next = text.clone();
     if let Some(content) = content_box(ui, id, text, language) {
         next.content = content;
@@ -74,6 +80,31 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if next != *text {
         state.live_text(next);
     }
+}
+
+/// The combo that applies a style of an installed pack to the clip; the reference of the style
+/// chosen. Not shown while no style is installed.
+fn style_combo(ui: &mut egui::Ui, id: egui::Id, state: &EditorState, language: Language) -> Option<String> {
+    let library = &state.text_style_library;
+    library.styles(None).next()?;
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.colored_label(theme::text_dim(), language.t(Message::ApplyTextStyle));
+        egui::ComboBox::from_id_salt(id.with("text-style")).selected_text("\u{2026}").width(ui.available_width()).height(FONT_LIST_HEIGHT).show_ui(ui, |ui| {
+            for (kind, title) in [(StyleKind::Text, Message::TextStyles), (StyleKind::Subtitle, Message::SubtitleStyles)] {
+                if library.styles(Some(kind)).next().is_none() {
+                    continue;
+                }
+                ui.colored_label(theme::text_dim(), language.t(title));
+                for (pack, style) in library.styles(Some(kind)) {
+                    if ui.selectable_label(false, format!("{} \u{b7} {}", style.name, pack.name)).clicked() {
+                        chosen = Some(style.reference.clone());
+                    }
+                }
+            }
+        });
+    });
+    chosen
 }
 
 fn missing_font_warning(ui: &mut egui::Ui, message: &str) {

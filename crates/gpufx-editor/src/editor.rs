@@ -16,7 +16,9 @@ use crate::asset_install::InstalledAudioPack;
 use crate::audio_library::AudioLibrary;
 use crate::clip_animation_install::InstalledClipAnimationPack;
 use crate::clip_animation_library::ClipAnimationLibrary;
-use crate::text_style_library::TextStyleLibrary;
+use crate::subtitle_style_install::SubtitleLayout;
+use crate::text_shapes::available_families;
+use crate::text_style_library::{subtitle_placement, TextStyleLibrary};
 use crate::sticker_install::InstalledStickerPack;
 use crate::sticker_library::StickerLibrary;
 use crate::effect_previews::PreviewManager;
@@ -1494,11 +1496,30 @@ impl EditorState {
     /// Adds a default text at the playhead, on a video track with room or a new one, placed at its
     /// natural size in the middle of the frame and selected, as one undo step.
     pub fn add_text_at_playhead(&mut self) {
+        let text = default_text(self.language().t(Message::DefaultTextContent));
+        self.add_text_clip_at_playhead(text, None, None);
+    }
+
+    /// Adds a text in the style `reference` of the library at the playhead, as
+    /// [`Self::add_text_at_playhead`] does: it shows the style's preview text, has the style's
+    /// animations, and a subtitle style puts it where its layout says. Nothing for a style that is
+    /// not installed.
+    pub fn add_styled_text_at_playhead(&mut self, reference: &str) {
+        let Some(style) = self.text_style_library.find(reference).cloned() else { return };
+        let text = style.new_text(style.preview_text.clone(), &available_families());
+        let animation = Some(style.animation_for(&engine::ClipAnimation::default())).filter(|animation| !animation.is_empty());
+        self.add_text_clip_at_playhead(text, animation, style.layout);
+    }
+
+    fn add_text_clip_at_playhead(&mut self, text: TextContent, animation: Option<engine::ClipAnimation>, layout: Option<SubtitleLayout>) {
         if self.edits_blocked() {
             return;
         }
-        let text = default_text(self.language().t(Message::DefaultTextContent));
-        let placement = natural_placement(self.text_pixels(&text), self.output_pixels());
+        let pixels = self.text_pixels(&text);
+        let placement = match layout {
+            Some(layout) => subtitle_placement(pixels, self.output_pixels(), &layout),
+            None => natural_placement(pixels, self.output_pixels()),
+        };
         let (start, duration) = (self.playhead, DEFAULT_IMAGE_DURATION);
         let choice = choose_track(self.project(), TrackKind::Video, duration, start);
         let track = match choice {
@@ -1508,9 +1529,14 @@ impl EditorState {
         let added = self.run(|project| {
             let with_track = if choice == TrackChoice::New { add_track(project, TrackKind::Video)? } else { project.clone() };
             let next = add_text_clip(&with_track, track, start, duration, text)?;
-            match (placement, clip_at(&next, track, start)) {
-                (Some(placement), Some(key)) => set_placement(&next, key, Some(placement)),
-                _ => Ok(next),
+            let Some(key) = clip_at(&next, track, start) else { return Ok(next) };
+            let next = match animation {
+                Some(animation) => engine::set_animation(&next, key, animation)?,
+                None => next,
+            };
+            match placement {
+                Some(placement) => set_placement(&next, key, Some(placement)),
+                None => Ok(next),
             }
         });
         if added {
@@ -1560,6 +1586,35 @@ impl EditorState {
         self.run(|project| {
             let next = set_text(project, key, text)?;
             match rescaled {
+                Some(placement) => set_placement(&next, key, Some(placement)),
+                None => Ok(next),
+            }
+        });
+    }
+
+    /// Gives text clip `key` the style `reference` of the library as one undo step: the style's
+    /// values are copied into the text, which keeps its content (see
+    /// [`crate::text_style_library::LibraryTextStyle::apply`]); its animations replace the clip's
+    /// when it has any. A subtitle style moves the text where its layout says; another keeps the
+    /// place scaled as [`Self::live_text`] does. Nothing for a clip that is gone or is not a text,
+    /// or a style that is not installed.
+    pub fn apply_text_style(&mut self, key: ClipKey, reference: &str) {
+        let Some(style) = self.text_style_library.find(reference).cloned() else { return };
+        let Some(clip) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).cloned() else { return };
+        let Some(current) = clip.text.as_ref() else { return };
+        let text = style.apply(current, &available_families());
+        let animation = style.animation_for(&clip.animation);
+        let placement = match style.layout {
+            Some(layout) => subtitle_placement(self.text_pixels(&text), self.output_pixels(), &layout),
+            None => self.rescaled_text_placement(key, &text),
+        };
+        if text == *current && animation == clip.animation && placement.is_none_or(|placement| clip.placement == Some(placement)) {
+            return;
+        }
+        self.run(|project| {
+            let next = set_text(project, key, text)?;
+            let next = if animation == clip.animation { next } else { engine::set_animation(&next, key, animation)? };
+            match placement {
                 Some(placement) => set_placement(&next, key, Some(placement)),
                 None => Ok(next),
             }
@@ -3665,6 +3720,75 @@ second line")), "Title…");
         file.text = None;
         file.source = "C:/media/a.mp4".into();
         assert_eq!(clip_name(&file), "a.mp4");
+    }
+
+    fn style_library() -> crate::text_style_library::TextStyleLibrary {
+        use crate::text_style_install::{PackOutline, PackTextStyle};
+        use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStylePack};
+        let bold = LibraryTextStyle {
+            reference: "p/bold".to_owned(),
+            name: "Bold".to_owned(),
+            category: None,
+            preview_text: "Bold!".to_owned(),
+            kind: StyleKind::Text,
+            style: PackTextStyle { weight: Some(800), color: Some([255, 0, 0, 255]), outline: Some(PackOutline { color: [0, 0, 0, 255], width: 0.1 }), ..PackTextStyle::default() },
+            animation: Some(crate::text_clip::choose_preset(&engine::ClipAnimation::default(), engine::AnimationGroup::Enter, Some("pop"))),
+            layout: None,
+            karaoke: None,
+        };
+        let subtitle = LibraryTextStyle { reference: "s/low".to_owned(), name: "Low".to_owned(), kind: StyleKind::Subtitle, animation: None, layout: Some(SubtitleLayout { anchor_y: 0.85, max_width: 0.9, max_lines: 2 }), ..bold.clone() };
+        crate::text_style_library::TextStyleLibrary {
+            packs: vec![TextStylePack { id: "p".to_owned(), name: "P".to_owned(), kind: StyleKind::Text, styles: vec![bold] }, TextStylePack { id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![subtitle] }],
+            problems: Vec::new(),
+            loaded: true,
+        }
+    }
+
+    #[test]
+    fn applying_a_style_copies_it_into_the_text_as_one_undo_step() {
+        let (mut state, key) = added_text_state();
+        state.text_style_library = style_library();
+        let before = state.project().clone();
+        let content = state.project().tracks[key.track].clips[key.clip].text.as_ref().unwrap().content.clone();
+
+        state.apply_text_style(key, "p/bold");
+
+        let clip = &state.project().tracks[key.track].clips[key.clip];
+        let text = clip.text.as_ref().unwrap();
+        assert_eq!((text.content.as_str(), text.weight, text.color), (content.as_str(), 800, [255, 0, 0, 255]));
+        assert!(text.outline.is_some());
+        assert_eq!(clip.animation.enter.as_ref().map(|value| value.preset.as_str()), Some("pop"));
+        state.undo();
+        assert_eq!(*state.project(), before, "one undo step takes it all back");
+
+        state.apply_text_style(key, "p/missing");
+        assert_eq!(*state.project(), before, "a style not installed does nothing");
+    }
+
+    #[test]
+    fn a_subtitle_style_moves_the_text_to_its_anchor() {
+        let (mut state, key) = added_text_state();
+        state.text_style_library = style_library();
+        state.apply_text_style(key, "s/low");
+        let clip = state.project().tracks[key.track].clips[key.clip].clone();
+        let (x, y) = centre_of(&state, &clip);
+        assert!((x - 0.5).abs() < 1e-6 && (y - 0.85).abs() < 1e-6, "{x} {y}");
+        assert!(clip.animation.is_empty(), "a style without animations keeps the clip's");
+    }
+
+    #[test]
+    fn a_styled_text_is_added_with_its_preview_and_animation() {
+        let mut state = EditorState::default();
+        state.text_style_library = style_library();
+        state.add_styled_text_at_playhead("p/bold");
+        let key = state.selection().expect("the new text is selected");
+        let clip = &state.project().tracks[key.track].clips[key.clip];
+        assert_eq!(clip.text.as_ref().map(|text| (text.content.as_str(), text.weight)), Some(("Bold!", 800)));
+        assert!(clip.animation.enter.is_some());
+        assert!(clip.placement.is_some());
+        let tracks = state.project().tracks.len();
+        state.add_styled_text_at_playhead("nope/none");
+        assert_eq!(state.project().tracks.len(), tracks, "nothing for a style not installed");
     }
 
     fn added_text_state() -> (EditorState, ClipKey) {
