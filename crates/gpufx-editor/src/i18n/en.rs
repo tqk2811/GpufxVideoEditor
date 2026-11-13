@@ -250,6 +250,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::AlignCenter => "Center".to_owned(),
         Message::AlignRight => "Right".to_owned(),
         Message::FieldLineSpacing => "Line spacing".to_owned(),
+        Message::TabAnimation => "Animation".to_owned(),
         Message::AnimationEnter => "In".to_owned(),
         Message::AnimationExit => "Out".to_owned(),
         Message::AnimationRepeat => "Loop".to_owned(),

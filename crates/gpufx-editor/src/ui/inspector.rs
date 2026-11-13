@@ -140,7 +140,13 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
     if let Some(text) = &clip.text {
         ui.separator();
         let id = ui.scope_id().with(("text-inspector", clip_identity(key, &clip)));
-        ui.add_enabled_ui(editable, |ui| super::text_inspector::show(ui, state, key, id, text, &clip.animation));
+        ui.add_enabled_ui(editable, |ui| super::text_inspector::show(ui, state, key, id, text));
+    }
+
+    if super::animation_inspector::shows_animation(track_kind) {
+        ui.separator();
+        let id = ui.scope_id().with(("animation-inspector", clip_identity(key, &clip)));
+        ui.add_enabled_ui(editable, |ui| super::animation_inspector::show(ui, state, id, &clip.animation));
     }
 
     if track_kind == TrackKind::Video {

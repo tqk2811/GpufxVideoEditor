@@ -1,16 +1,16 @@
 //! The Text part of the inspector: what a text clip says and how it looks. Every change goes
-//! through [`EditorState::live_text`], so a slider drag is one undo step and a click is one too.
+//! through [`EditorState::live_text`], so a slider drag is one undo step and a click is one too. The
+//! animation of the clip is its own section, in [`super::animation_inspector`].
 
 use super::icons::{self, Icon};
 use super::numeric::drag_field;
 use super::theme;
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
-use crate::text_clip::{choose_preset, default_background, default_outline, default_shadow, presets_of, with_animation, TEXT_SIZE_RANGE};
+use crate::text_clip::{default_background, default_outline, default_shadow, TEXT_SIZE_RANGE};
 use crate::text_shapes::available_families;
-use crate::timecode::{from_seconds, to_seconds};
 use egui::{Rect, Vec2};
-use engine::{AnimationGroup, ClipAnimation, ClipKey, FontRef, Rgba, TextAlign, AnimationRef, TextContent, Time};
+use engine::{ClipKey, FontRef, Rgba, TextAlign, TextContent};
 use std::ops::RangeInclusive;
 
 /// How long typing must pause before the text on screen follows, in seconds. Each pause is one
@@ -26,7 +26,6 @@ const RADIUS_RANGE: RangeInclusive<f64> = 0.0..=100.0;
 const OFFSET_RANGE: RangeInclusive<f64> = -50.0..=50.0;
 const BLUR_RANGE: RangeInclusive<f64> = 0.0..=50.0;
 const PERCENT: f64 = 100.0;
-const ANIMATION_SECONDS: RangeInclusive<f64> = 0.05..=10.0;
 const WARNING_ICON_SIDE: f32 = 14.0;
 
 /// Text typed in the content box that the clip does not show yet, and when it was last typed.
@@ -36,7 +35,7 @@ struct ContentDraft {
     typed_at: f64,
 }
 
-pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id: egui::Id, text: &TextContent, animation: &ClipAnimation) {
+pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id: egui::Id, text: &TextContent) {
     let language = state.language();
     ui.label(egui::RichText::new(language.t(Message::TabText)).strong());
     if let Some(family) = state.missing_font(key) {
@@ -62,16 +61,8 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     outline_rows(ui, &mut next, language);
     background_rows(ui, &mut next, language);
     shadow_rows(ui, &mut next, language);
-    ui.separator();
-    let mut next_animation = animation.clone();
-    for group in [AnimationGroup::Enter, AnimationGroup::Exit, AnimationGroup::Repeat] {
-        animation_row(ui, id, &mut next_animation, group, language);
-    }
-    match (next != *text, next_animation != *animation) {
-        (true, true) => state.live_text_and_animation(next, next_animation),
-        (true, false) => state.live_text(next),
-        (false, true) => state.live_animation(next_animation),
-        (false, false) => {}
+    if next != *text {
+        state.live_text(next);
     }
 }
 
@@ -228,58 +219,5 @@ fn shadow_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
             percent_row(ui, &format!("{offset} Y"), &mut shadow.offset[1], OFFSET_RANGE);
             percent_row(ui, &language.t(Message::FieldBlur), &mut shadow.blur, BLUR_RANGE);
         });
-    }
-}
-
-/// The preset of one animation group, and how long it lasts when one is set.
-fn animation_row(ui: &mut egui::Ui, id: egui::Id, animation: &mut ClipAnimation, group: AnimationGroup, language: Language) {
-    let label = match group {
-        AnimationGroup::Enter => Message::AnimationEnter,
-        AnimationGroup::Exit => Message::AnimationExit,
-        AnimationGroup::Repeat => Message::AnimationRepeat,
-    };
-    let current = crate::text_clip::animation_of(animation, group).cloned();
-    let none = language.t(Message::AnimationNone);
-    let mut chosen: Option<Option<&'static str>> = None;
-    ui.horizontal(|ui| {
-        ui.colored_label(theme::text_dim(), language.t(label));
-        let shown = current.as_ref().map_or_else(|| none.clone(), |value| language.t(preset_name(&value.preset)));
-        egui::ComboBox::from_id_salt(id.with(("animation", group as u8))).selected_text(shown).width(ui.available_width()).show_ui(ui, |ui| {
-            if ui.selectable_label(current.is_none(), none.clone()).clicked() {
-                chosen = Some(None);
-            }
-            for preset in presets_of(group) {
-                let selected = current.as_ref().is_some_and(|value| value.preset == preset);
-                if ui.selectable_label(selected, language.t(Message::AnimationPreset(preset))).clicked() {
-                    chosen = Some(Some(preset));
-                }
-            }
-        });
-    });
-    if let Some(choice) = chosen {
-        *animation = choose_preset(animation, group, choice);
-        return;
-    }
-    let Some(current) = current else { return };
-    ui.indent(("animation-duration", group as u8), |ui| {
-        ui.horizontal(|ui| {
-            ui.colored_label(theme::text_dim(), language.t(Message::FieldAnimationDuration));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut seconds = to_seconds(current.duration);
-                if drag_field(ui, &mut seconds, ANIMATION_SECONDS, 0.01, 2, " s", None).1 {
-                    let duration = from_seconds(seconds).max(Time::from_ticks(1));
-                    *animation = with_animation(animation, group, Some(AnimationRef { duration, ..current.clone() }));
-                }
-            });
-        });
-    });
-}
-
-/// The message naming preset `id`, which the engine list holds for as long as the editor runs.
-fn preset_name(id: &str) -> Message {
-    let known = engine::ANIMATION_PRESETS.iter().find(|preset| preset.id == id).map(|preset| preset.id);
-    match known {
-        Some(id) => Message::AnimationPreset(id),
-        None => Message::Technical(id.to_owned()),
     }
 }

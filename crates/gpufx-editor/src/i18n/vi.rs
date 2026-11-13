@@ -233,6 +233,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::AlignCenter => "Giữa".to_owned(),
         Message::AlignRight => "Phải".to_owned(),
         Message::FieldLineSpacing => "Giãn dòng".to_owned(),
+        Message::TabAnimation => "Hoạt ảnh".to_owned(),
         Message::AnimationEnter => "Vào".to_owned(),
         Message::AnimationExit => "Ra".to_owned(),
         Message::AnimationRepeat => "Lặp".to_owned(),
