@@ -14,7 +14,7 @@ git -C external/FFmpegGpuFilter submodule update --init packages
 git submodule update --init external/GpufxVideoEditor-Assets
 ```
 
-`scripts/setup-poc.ps1` runs all three. The CapCut transition recreations are not part of these packages: they live in their own private repository, `FFmpegGpuFilter-packages-capcut`, with its own packaging. Tests that need effects skip themselves when `packages` is empty, so an empty folder can look like a green run. `scripts/build-variants.ps1` stops in that case.
+`scripts/setup-poc.ps1` runs all three. The CapCut transition recreations are not part of these packages: they live in their own repository, `FFmpegGpuFilter-packages-capcut`, with its own packaging. `scripts/setup-debug-packages.ps1` fills `target\debug\packages` with every effect group plus the audio and sticker packs of the assets releases. Once that folder exists, a debug build reads packages only from there. Tests that need effects skip themselves when `packages` is empty, so an empty folder can look like a green run. `scripts/build-variants.ps1` stops in that case.
 
 The font tests of `gpufx-text` skip themselves when Segoe UI or Arial, or a Windows font file they draw with, is not installed. Set `GPUFX_REQUIRE_FONTS=1` to make them fail instead, on a machine that must have those fonts.
 
