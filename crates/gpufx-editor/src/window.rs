@@ -19,6 +19,7 @@ use crate::agent::gateway::{pipe_name, AgentGateway};
 use crate::agent::{check_export, execute, AgentError, AgentHost};
 use crate::audio_library::{scan_audio_packs, AudioLibrary};
 use crate::sticker_library::{scan_sticker_packs, StickerLibrary};
+use crate::clip_animation_library::{scan_clip_animation_packs, ClipAnimationLibrary};
 use crate::asset_install::recover_interrupted_install;
 use crate::editor::{EditorState, LeftTab, SoundPreviewWish, Status};
 use crate::export::{encoder_options, export_blocker, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
@@ -148,6 +149,7 @@ struct Session {
     catalog: Option<Receiver<Catalog>>,
     audio_library: Option<Receiver<AudioLibrary>>,
     sticker_library: Option<Receiver<StickerLibrary>>,
+    clip_animation_library: Option<Receiver<ClipAnimationLibrary>>,
     tasks: Tasks,
     arrivals: Receiver<Arrival>,
     arrival_sender: Sender<Arrival>,
@@ -197,6 +199,7 @@ impl Session {
         state.previews.get_mut().start_for_editor(package_roots.clone(), Arc::new(move || previews_window.request_redraw()));
         let audio_library = spawn_audio_scan(package_roots.clone(), window_for_scan.clone());
         let sticker_library = spawn_sticker_scan(package_roots.clone(), window_for_scan.clone());
+        let clip_animation_library = spawn_clip_animation_scan(package_roots.clone(), window_for_scan.clone());
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
         let (arrival_sender, arrivals) = channel();
@@ -227,6 +230,7 @@ impl Session {
             catalog: Some(catalog),
             audio_library: Some(audio_library),
             sticker_library: Some(sticker_library),
+            clip_animation_library: Some(clip_animation_library),
             tasks: Tasks::default(),
             arrivals,
             arrival_sender,
@@ -310,6 +314,14 @@ impl Session {
         if let Some(Ok(catalog)) = self.catalog.as_ref().map(Receiver::try_recv) {
             self.state.catalog = catalog;
             self.catalog = None;
+        }
+    }
+
+    /// Takes the installed clip animation packs once their scan has finished.
+    fn collect_clip_animation_library(&mut self) {
+        if let Some(Ok(library)) = self.clip_animation_library.as_ref().map(Receiver::try_recv) {
+            self.state.clip_animation_library = library;
+            self.clip_animation_library = None;
         }
     }
 
@@ -587,6 +599,7 @@ impl Session {
         self.collect_catalog();
         self.collect_audio_library();
         self.collect_sticker_library();
+        self.collect_clip_animation_library();
         self.collect_arrivals();
         self.poll_export();
         self.collect_preview();
@@ -805,6 +818,7 @@ impl Session {
             Action::PackageInstalled { package } => self.package_installed(&package),
             Action::AudioPackInstalled => self.audio_pack_installed(),
             Action::StickerPackInstalled => self.sticker_pack_installed(),
+            Action::ClipAnimationPackInstalled => self.clip_animation_library = Some(spawn_clip_animation_scan(self.package_roots.clone(), self.window.clone())),
             Action::SaveTo(path) => self.save_project(path),
             Action::StartExport(path) => self.start_export(path, None),
             Action::ProjectReplaced => {
@@ -1008,6 +1022,22 @@ fn spawn_audio_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<AudioL
     });
     if let Err(e) = scanner {
         eprintln!("gpufx-editor: the audio pack scan could not start: {e}");
+    }
+    receiver
+}
+
+/// Reads the manifests of the installed clip animation packs away from the UI thread.
+fn spawn_clip_animation_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<ClipAnimationLibrary> {
+    let (sender, receiver) = channel();
+    let scanner = std::thread::Builder::new().name("clip-animation-packs".to_owned()).spawn(move || {
+        if let Some(user_root) = user_package_root() {
+            recover_interrupted_install(&user_root);
+        }
+        let _ = sender.send(scan_clip_animation_packs(&roots));
+        window.request_redraw();
+    });
+    if let Err(e) = scanner {
+        eprintln!("gpufx-editor: the clip animation pack scan could not start: {e}");
     }
     receiver
 }

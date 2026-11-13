@@ -197,6 +197,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::StickerLibraryEmpty => "Chưa có sticker nào. Hãy nhập một gói (.zip).".to_owned(),
         Message::StickerAddHint => "Bấm để thêm sticker vào vị trí đầu phát, hoặc kéo vào một track video.".to_owned(),
         Message::StickerPackInstalled { name, replaced } => format!("Đã {} \"{name}\" vào Sticker.", if *replaced { "thay thế" } else { "cài" }),
+        Message::ClipAnimationPackInstalled { name, replaced } => format!("Đã {} \"{name}\": các hiệu ứng chuyển động nằm ở phần Animation của inspector.", if *replaced { "thay thế" } else { "cài" }),
         Message::ReadingStickerPacks => "Đang đọc các gói sticker đã cài...".to_owned(),
         Message::StickerPackProblems(count) => format!("Không đọc được {count} gói hoặc sticker"),
         Message::EditSpeedOfImage(track) => format!("{}: ảnh không có tốc độ phát", track_label(*track)),

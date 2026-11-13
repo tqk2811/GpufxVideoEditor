@@ -14,6 +14,8 @@ use crate::timeline::snap::{snap_command, snap_onto_track, snap_points, snap_spa
 use crate::timeline::view::TimelineView;
 use crate::asset_install::InstalledAudioPack;
 use crate::audio_library::AudioLibrary;
+use crate::clip_animation_install::InstalledClipAnimationPack;
+use crate::clip_animation_library::ClipAnimationLibrary;
 use crate::sticker_install::InstalledStickerPack;
 use crate::sticker_library::StickerLibrary;
 use crate::effect_previews::PreviewManager;
@@ -83,6 +85,8 @@ pub struct EditorState {
     /// The audio packs installed on this machine.
     pub audio_library: AudioLibrary,
     pub sticker_library: StickerLibrary,
+    /// The clip animation packs installed on this machine.
+    pub clip_animation_library: ClipAnimationLibrary,
     pub picker: PickerState,
     pub encoders: Vec<EncoderOption>,
     pub encoder: usize,
@@ -403,6 +407,7 @@ impl EditorState {
             catalog: Catalog::default(),
             audio_library: AudioLibrary::default(),
             sticker_library: StickerLibrary::default(),
+            clip_animation_library: ClipAnimationLibrary::default(),
             picker: PickerState::default(),
             encoders: Vec::new(),
             encoder: 0,
@@ -1657,6 +1662,10 @@ impl EditorState {
     }
 
     /// Says that a sticker pack is there and shows the Sticker tab.
+    pub fn show_installed_clip_animation_pack(&mut self, installed: &InstalledClipAnimationPack) {
+        self.report_info(Message::ClipAnimationPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
+    }
+
     pub fn show_installed_sticker_pack(&mut self, installed: &InstalledStickerPack) {
         self.report_info(Message::StickerPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
         self.ui.left_tab = LeftTab::Stickers;

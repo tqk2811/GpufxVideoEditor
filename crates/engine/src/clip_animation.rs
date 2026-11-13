@@ -25,6 +25,9 @@ use crate::project::{ClipAnimation, AnimationRef};
 use crate::schedule::ClipClock;
 use crate::time::{Time, TICKS_PER_SECOND};
 
+/// What parts a preset of a pack: `"<pack id>/<item id>"`. A built-in preset id never holds it.
+pub const PACK_PRESET_SEPARATOR: char = '/';
+
 /// Which part of a clip a preset is made for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnimationGroup {

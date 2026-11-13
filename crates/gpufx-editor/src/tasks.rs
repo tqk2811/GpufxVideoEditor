@@ -125,6 +125,8 @@ pub enum Action {
     /// An audio pack was installed: the library must be read again.
     AudioPackInstalled,
     StickerPackInstalled,
+    /// A clip animation pack was installed: the library must be read again.
+    ClipAnimationPackInstalled,
     SaveTo(PathBuf),
     StartExport(PathBuf),
     /// The project was replaced, so playback of the old one must go.
@@ -484,6 +486,10 @@ impl Tasks {
                     state.show_installed_sticker_pack(&installed);
                     Action::StickerPackInstalled
                 }
+                Ok(ImportOutcome::ClipAnimationInstalled(installed)) => {
+                    state.show_installed_clip_animation_pack(&installed);
+                    Action::ClipAnimationPackInstalled
+                }
                 Err(problem) => {
                     state.report_refused(Message::PackageImportRefused(problem));
                     Action::Nothing
@@ -546,6 +552,14 @@ mod tests {
         let installed = crate::asset_install::InstalledAudioPack { kind: crate::asset_install::AudioPackKind::Sfx, id: "p".to_owned(), name: "P".to_owned(), replaced: false };
         assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::AudioInstalled(installed)))), Action::AudioPackInstalled);
         assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Audio);
+    }
+
+    #[test]
+    fn an_installed_clip_animation_pack_asks_for_the_library() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        let load = start_package_import(&mut tasks, &mut state);
+        let installed = crate::clip_animation_install::InstalledClipAnimationPack { id: "p".to_owned(), name: "P".to_owned(), replaced: false };
+        assert_eq!(tasks.on_arrival(&mut state, imported(load, Ok(ImportOutcome::ClipAnimationInstalled(installed)))), Action::ClipAnimationPackInstalled);
     }
 
     #[test]

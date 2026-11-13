@@ -16,6 +16,7 @@ use serde_json::Value;
 use zip::result::ZipError;
 use zip::ZipArchive;
 
+use crate::clip_animation_install::{install_clip_animation_pack, is_clip_animation_type, InstalledClipAnimationPack};
 use crate::asset_install::{install_audio_pack, AudioPackKind, InstalledAudioPack};
 use crate::packages::{classify, PackageKind};
 use crate::sticker_install::{install_sticker_pack, InstalledStickerPack, STICKER_TYPE};
@@ -31,7 +32,7 @@ const MAX_ARCHIVE_BYTES: u64 = 2048 * MIB;
 /// A shader zip is read whole: its files, within [`SHADER_LIMITS`], and the zip's own headers.
 const MAX_SHADER_ARCHIVE_BYTES: u64 = 264 * MIB;
 /// The types of the packages the editor cannot use yet.
-const NON_SHADER_TYPES: [&str; 4] = ["font", "text-style", "text-animation", "subtitle-style"];
+const NON_SHADER_TYPES: [&str; 3] = ["font", "text-style", "subtitle-style"];
 
 /// What a zip may declare. Sizes are as declared: what is really read is counted where it is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +121,7 @@ pub enum ImportOutcome {
     Installed(InstalledPackage),
     AudioInstalled(InstalledAudioPack),
     StickerInstalled(InstalledStickerPack),
+    ClipAnimationInstalled(InstalledClipAnimationPack),
     /// A package with this name is there, and overwriting was not allowed.
     AlreadyInstalled { name: String },
 }
@@ -208,6 +210,7 @@ enum Declared {
     Shader(Option<String>),
     Audio(AudioPackKind),
     Sticker,
+    ClipAnimation,
 }
 
 /// What the manifest declares. A `type` the editor cannot use is an error here, so that it is
@@ -219,6 +222,7 @@ fn declared_package(manifest: &[u8]) -> Result<Declared, ImportProblem> {
         None => Ok(Declared::Shader(object.get("id").and_then(Value::as_str).map(str::to_owned))),
         Some(Value::String(kind)) if AudioPackKind::from_name(kind).is_some() => Ok(Declared::Audio(AudioPackKind::from_name(kind).unwrap_or(AudioPackKind::Sfx))),
         Some(Value::String(kind)) if kind == STICKER_TYPE => Ok(Declared::Sticker),
+        Some(Value::String(kind)) if is_clip_animation_type(kind) => Ok(Declared::ClipAnimation),
         Some(Value::String(kind)) if NON_SHADER_TYPES.contains(&kind.as_str()) => Err(ImportProblem::NotSupportedYet(kind.clone())),
         Some(Value::String(kind)) => Err(ImportProblem::UnknownType(kind.clone())),
         Some(_) => Err(ImportProblem::BadManifest("`type` is not a string".to_owned())),
@@ -311,6 +315,7 @@ pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<I
     match inspect(BufReader::new(file), ARCHIVE_LIMITS)? {
         Declared::Audio(_) => return install_audio_pack(source, user_root, overwrite),
         Declared::Sticker => return install_sticker_pack(source, user_root, overwrite),
+        Declared::ClipAnimation => return install_clip_animation_pack(source, user_root, overwrite),
         Declared::Shader(_) => {}
     }
     let bytes = read_bounded(source, MAX_SHADER_ARCHIVE_BYTES)?;
@@ -439,6 +444,8 @@ mod tests {
             assert_eq!(declared_package(manifest.as_bytes()), Err(ImportProblem::NotSupportedYet(kind.to_owned())));
         }
         assert_eq!(declared_package(br#"{"type":"sfx"}"#), Ok(Declared::Audio(AudioPackKind::Sfx)));
+        assert_eq!(declared_package(br#"{"type":"clip-animation"}"#), Ok(Declared::ClipAnimation));
+        assert_eq!(declared_package(br#"{"type":"text-animation"}"#), Ok(Declared::ClipAnimation));
         assert_eq!(declared_package(br#"{"type":"music"}"#), Ok(Declared::Audio(AudioPackKind::Music)));
         assert_eq!(declared_package(br#"{"type":"effect"}"#), Err(ImportProblem::UnknownType("effect".to_owned())), "a shader package has no type");
         assert!(matches!(declared_package(br#"{"type":3}"#), Err(ImportProblem::BadManifest(_))));
