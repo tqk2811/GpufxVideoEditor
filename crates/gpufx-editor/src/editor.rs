@@ -238,6 +238,8 @@ pub struct UiState {
     pub fullscreen_activity: Option<f64>,
     /// A time field being dragged; the clip changes on release.
     pub clip_field: Option<ClipField>,
+    /// The clip the last right click on the timeline landed on, whose menu shows.
+    pub clip_menu: Option<ClipKey>,
     /// The clip the inspector showed last, to notice when that changes.
     pub inspector_clip: Option<(ClipKey, String, i64)>,
     pub panel_sizes: PanelSizes,
@@ -890,6 +892,7 @@ impl EditorState {
         self.ui.font_file_request = None;
         self.ui.subtitle_export_request = None;
         self.ui.drop_batches.clear();
+        self.ui.clip_menu = None;
     }
 
     pub fn toggle_track_hidden(&mut self, track: usize) {
@@ -2035,6 +2038,7 @@ impl EditorState {
         self.revision += 1;
         self.audio_revision = self.revision;
         self.selection = None;
+        self.ui.clip_menu = None;
         self.status = Status::Idle;
     }
 }

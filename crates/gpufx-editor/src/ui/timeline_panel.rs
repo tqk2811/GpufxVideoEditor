@@ -268,6 +268,35 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
         }
     }
 
+    // A right click selects the clip under it and opens its menu; elsewhere it opens nothing.
+    if response.secondary_clicked() {
+        state.ui.clip_menu = response.interact_pointer_pos().and_then(|pointer| {
+            let (x, y) = local(pointer);
+            state.view.track_at_y(y, track_count, height).and_then(|track| hit_test(state.project(), &state.view, track, x)).map(|hit| hit.key)
+        });
+        if let Some(key) = state.ui.clip_menu {
+            state.select(Some(key));
+        }
+    }
+    if let Some(key) = state.ui.clip_menu {
+        let language = state.language();
+        let locked = state.is_track_locked(key.track);
+        let mut delete = false;
+        response.context_menu(|ui| {
+            let button = ui.add_enabled(!locked, egui::Button::new(language.t(Message::DeleteShortcut)));
+            let button = if locked { button.on_disabled_hover_text(language.t(Message::TrackLockedNote)) } else { button };
+            if button.clicked() {
+                delete = true;
+                ui.close();
+            }
+        });
+        if delete {
+            state.ui.clip_menu = None;
+            state.select(Some(key));
+            state.delete_selected();
+        }
+    }
+
     if response.drag_started_by(egui::PointerButton::Primary) {
         let press = ui.ctx().input(|input| input.pointer.press_origin());
         if let Some(press) = press {
