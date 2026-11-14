@@ -195,7 +195,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::SearchStickers => "Tìm sticker".to_owned(),
         Message::AllCategories => "Tất cả nhóm".to_owned(),
         Message::StickerLibraryEmpty => "Chưa có sticker nào. Hãy nhập một gói (.zip).".to_owned(),
-        Message::StickerAddHint => "Bấm đúp để thêm sticker vào vị trí đầu phát, hoặc kéo vào một track video.".to_owned(),
+        Message::StickerAddHint => "Bấm đúp để thêm sticker vào vị trí đầu phát, hoặc kéo vào một track video hay trình phát.".to_owned(),
         Message::StickerPackInstalled { name, replaced } => format!("Đã {} \"{name}\" vào Sticker.", if *replaced { "thay thế" } else { "cài" }),
         Message::TextStylePackInstalled { name, replaced } => format!("Đã {} \"{name}\": các kiểu chữ nằm ở tab Chữ.", if *replaced { "thay thế" } else { "cài" }),
         Message::ClipAnimationPackInstalled { name, replaced } => format!("Đã {} \"{name}\": các hiệu ứng chuyển động nằm ở phần Animation của inspector.", if *replaced { "thay thế" } else { "cài" }),

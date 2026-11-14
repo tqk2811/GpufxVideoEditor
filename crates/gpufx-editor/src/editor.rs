@@ -1849,8 +1849,32 @@ impl EditorState {
         clip
     }
 
+    /// Adds sticker `item` dropped on the player: on a new video track, from the playhead, centred
+    /// on `center`, the point of the frame it fell on, from 0 to 1 across and down. One undo step.
+    pub fn drop_sticker_on_player(&mut self, item: &MediaItem, center: (f64, f64)) -> Option<ClipKey> {
+        if self.edits_blocked() {
+            return None;
+        }
+        let duration = item.duration.unwrap_or(DEFAULT_IMAGE_DURATION);
+        let start = self.playhead;
+        let mut clip = self.new_library_clip(item, start, duration);
+        if let Some(placement) = clip.placement.as_mut() {
+            let output = &self.project().output;
+            let output_aspect = f64::from(output.width) / f64::from(output.height.max(1));
+            let source_aspect = self.sticker_library.aspect_of(&item.source).unwrap_or(1.0);
+            let height = PlacedRect::of(Some(*placement), output_aspect, source_aspect).height;
+            placement.x = center.0 - placement.width / 2.0;
+            placement.y = center.1 - height / 2.0;
+        }
+        self.add_dropped_clip(item, self.project().tracks.len(), start, true, TrackKind::Video, clip)
+    }
+
     fn add_dropped(&mut self, item: &MediaItem, track: usize, start: Time, new_track: bool, kind: TrackKind, duration: Time) -> Option<ClipKey> {
         let clip = self.new_library_clip(item, start, duration);
+        self.add_dropped_clip(item, track, start, new_track, kind, clip)
+    }
+
+    fn add_dropped_clip(&mut self, item: &MediaItem, track: usize, start: Time, new_track: bool, kind: TrackKind, clip: Clip) -> Option<ClipKey> {
         let added = self.run(|project| {
             let with_track = if new_track { add_track(project, kind)? } else { project.clone() };
             add_clip(&with_track, track, clip)
@@ -3868,6 +3892,23 @@ mod tests {
         assert_eq!(state.selection(), Some(ClipKey { track: 0, clip: 1 }), "the new clip is selected, so the next one follows it");
         state.add_media_to_selected_track(&media("m.wav", crate::media::MediaKind::Audio, Some(1)));
         assert_eq!(state.project().tracks[1].clips[0].start, Time::ZERO, "another kind goes to the playhead");
+    }
+
+    #[test]
+    fn a_sticker_dropped_on_the_player_gets_a_new_track_from_the_playhead_centred_where_it_fell() {
+        let mut state = state_with_clip();
+        state.set_playhead(seconds(1));
+        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None };
+        let before = state.project().clone();
+        let key = state.drop_sticker_on_player(&sticker.media_item(), (0.25, 0.75)).unwrap();
+        assert_eq!(state.project().tracks.len(), 3, "a new track");
+        let clip = &state.project().tracks[key.track].clips[key.clip];
+        assert_eq!((state.project().tracks[key.track].kind, clip.start), (TrackKind::Video, seconds(1)));
+        let placement = clip.placement.unwrap();
+        assert!((placement.x + placement.width / 2.0 - 0.25).abs() < 1e-9, "centred across on the point");
+        assert!(placement.y < 0.75 && placement.y > 0.5, "and down");
+        state.undo();
+        assert_eq!(state.project(), &before, "one undo step");
     }
 
     #[test]

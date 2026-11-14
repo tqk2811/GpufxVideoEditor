@@ -8,6 +8,7 @@ use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
 use crate::timecode::{aspect_label, format_fps, format_timecode, fps_from_frame_duration, frame_duration_from_fps};
 use crate::timeline::view::content_end;
+use crate::media::MediaItem;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
 
 const HEADER_HEIGHT: f32 = 34.0;
@@ -35,8 +36,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let output = &state.project().output;
     let frame = picture_rect(area, (output.width, output.height));
     placement::show(ui, state, area, frame);
+    handle_sticker_drop(ui, state, frame);
     painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::border()));
     ui.scope_builder(UiBuilder::new().max_rect(controls.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, controls));
+}
+
+/// Takes a sticker of the library released over the picture: it goes on a new track from the
+/// playhead, where it fell. While one is held there, the picture is outlined.
+fn handle_sticker_drop(ui: &egui::Ui, state: &mut EditorState, frame: Rect) {
+    let ctx = ui.ctx().clone();
+    let Some(item) = egui::DragAndDrop::payload::<MediaItem>(&ctx).filter(|item| crate::media::is_sticker(&item.source)) else { return };
+    let Some(pointer) = ctx.pointer_latest_pos().filter(|pointer| frame.contains(*pointer)) else { return };
+    if ctx.input(|input| input.pointer.any_released()) {
+        if egui::DragAndDrop::take_payload::<MediaItem>(&ctx).is_some() {
+            let center = (f64::from((pointer.x - frame.left()) / frame.width().max(1.0)), f64::from((pointer.y - frame.top()) / frame.height().max(1.0)));
+            state.drop_sticker_on_player(&item, center);
+        }
+        return;
+    }
+    ui.painter_at(frame).rect_stroke(frame.shrink(1.0), CornerRadius::ZERO, Stroke::new(2.0, theme::accent()), egui::StrokeKind::Inside);
 }
 
 /// Where the controls float over the picture in fullscreen.
