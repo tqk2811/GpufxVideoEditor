@@ -454,8 +454,9 @@ fn library_problems(ui: &mut egui::Ui, state: &EditorState) {
     });
 }
 
-/// One sound: a button to listen, its name and manifest length, and a button to add it. The row
-/// itself can be dragged onto a track like any media, and a double click adds it.
+/// One sound: a button to listen, its name and manifest length, and a button to add it. A click on
+/// the row listens too, or stops the sound it plays; the row can be dragged onto a track like any
+/// media, and a double click adds it.
 fn sound_row(ui: &mut egui::Ui, state: &EditorState, sound: &LibrarySound) -> SoundAction {
     let language = state.language();
     let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), SOUND_ROW_HEIGHT), Sense::click_and_drag());
@@ -479,14 +480,15 @@ fn sound_row(ui: &mut egui::Ui, state: &EditorState, sound: &LibrarySound) -> So
     painter.galley(length_at, length_text, theme::text_dim());
     painter.with_clip_rect(name_rect).text(name_rect.left_center(), Align2::LEFT_CENTER, &sound.name, FontId::proportional(12.0), theme::text());
     let response = response.on_hover_text(sound_tooltip(sound));
-    if listen.clicked() {
+    // The second click of a double click adds, and leaves the sound its first click started playing.
+    if add.clicked() || response.double_clicked() {
+        SoundAction::Add
+    } else if listen.clicked() || response.clicked() {
         if playing {
             SoundAction::Stop
         } else {
             SoundAction::Listen
         }
-    } else if add.clicked() || response.double_clicked() {
-        SoundAction::Add
     } else {
         SoundAction::None
     }
@@ -820,6 +822,38 @@ mod tests {
     }
 
     use super::*;
+
+    /// What the row of one sound asks for after each frame of `events`, the row filling a 300 point wide panel.
+    fn sound_row_actions(frames: Vec<Vec<egui::Event>>) -> Vec<SoundAction> {
+        let ctx = egui::Context::default();
+        let state = EditorState::default();
+        let sound = crate::audio_library::LibrarySound { source: "asset:music/p/a.mp3".to_owned(), name: "A".to_owned(), duration: None, tags: Vec::new(), category: String::new(), looped: false };
+        let mut actions = Vec::new();
+        for (index, events) in std::iter::once(Vec::new()).chain(frames).enumerate() {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(300.0, 200.0))), events, time: Some(index as f64 * 0.05), ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| actions.push(sound_row(ui, &state, &sound)));
+            });
+            output.textures_delta.clear();
+        }
+        actions
+    }
+
+    fn press(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE }
+    }
+
+    #[test]
+    fn a_click_on_the_name_of_a_sound_listens_and_a_double_click_adds() {
+        let name = egui::pos2(120.0, 20.0);
+        let click = vec![vec![egui::Event::PointerMoved(name)], vec![press(name, true)], vec![press(name, false)]];
+        assert_eq!(sound_row_actions(click.clone()).last(), Some(&SoundAction::Listen));
+        let mut double = click.clone();
+        double.extend([vec![press(name, true)], vec![press(name, false)]]);
+        let actions = sound_row_actions(double);
+        assert_eq!(actions.iter().filter(|action| **action == SoundAction::Listen).count(), 1, "{actions:?}");
+        assert_eq!(actions.last(), Some(&SoundAction::Add), "{actions:?}");
+    }
 
     #[test]
     fn only_the_rows_in_view_are_drawn() {

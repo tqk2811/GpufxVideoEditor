@@ -314,7 +314,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::PreviewSound => "Listen".to_owned(),
         Message::StopPreview => "Stop".to_owned(),
         Message::AddSound => "Add".to_owned(),
-        Message::AudioAddHint => "Double-click or press + to add a sound at the playhead, or drag it onto an audio track.".to_owned(),
+        Message::AudioAddHint => "Click a sound to listen. Double-click or press + to add a sound at the playhead, or drag it onto an audio track.".to_owned(),
         Message::SoundPreviewFailed(reason) => format!("The sound cannot be played: {reason}"),
         Message::SearchMedia => "Search media".to_owned(),
         Message::SearchAudio => "Search audio".to_owned(),
