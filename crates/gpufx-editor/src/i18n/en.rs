@@ -392,6 +392,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::AddClipFromFile => "Add a clip from a file".to_owned(),
         Message::LockTrack => "Lock the track".to_owned(),
         Message::UnlockTrack => "Unlock the track".to_owned(),
+        Message::DeleteTrack => "Delete track".to_owned(),
         Message::HideTrack => "Hide the track from the picture, the sound and the export".to_owned(),
         Message::ShowTrack => "Show the track".to_owned(),
         Message::TrackLockedNote => "This track is locked: its clips can be looked at, not changed".to_owned(),

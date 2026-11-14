@@ -41,7 +41,7 @@ pub use audio_schedule::{
     MIX_SAMPLE_RATE,
 };
 pub use edit::{
-    add_clip, add_effect, add_subtitle_track, add_text_clip, restyle_track, text_clip, ClipRestyle, set_text, set_animation, add_track, add_transition, clip_at, delete_clip, move_clip,
+    add_clip, add_effect, add_subtitle_track, add_text_clip, restyle_track, text_clip, ClipRestyle, set_text, set_animation, add_track, remove_track, add_transition, clip_at, delete_clip, move_clip,
     nearest_free_start, remove_effect, remove_keyframe, remove_transition, set_effect_params, set_effect_params_at, set_fades, set_gain,
     set_frame_duration, set_keyframe, set_motion_value, set_muted, set_opacity, set_output_size, set_placement, set_placement_at, set_rotation, set_speed, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, EditError, EditHistory,
 };

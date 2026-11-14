@@ -375,6 +375,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::AddClipFromFile => "Thêm clip từ tệp".to_owned(),
         Message::LockTrack => "Khoá track".to_owned(),
         Message::UnlockTrack => "Mở khoá track".to_owned(),
+        Message::DeleteTrack => "Xoá track".to_owned(),
         Message::HideTrack => "Ẩn track khỏi hình, tiếng và file xuất".to_owned(),
         Message::ShowTrack => "Hiện track".to_owned(),
         Message::TrackLockedNote => "Track này đang khoá: chỉ xem được, không sửa được".to_owned(),

@@ -28,7 +28,7 @@ use crate::text_shapes::TextShapes;
 use crate::text_clip::{default_text, natural_placement, rescaled_placement};
 use engine::{
     keyframe_neighbors, keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, Keyframe, remove_keyframe, set_effect_params_at, set_keyframe, set_motion_value, set_placement_at, ClipPlacement, ClipProperty, Easing, KeyframeTarget, PlacedRect,
-    add_clip, add_effect, add_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
+    add_clip, add_effect, add_track, remove_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
     add_text_clip, set_text, TextContent, set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
@@ -874,6 +874,22 @@ impl EditorState {
             }
             Err(error) => self.refuse(&error),
         }
+    }
+
+    /// Removes `track` with its clips, as one undo step. The selection follows its clip down a
+    /// place, or goes when its clip went with the track; requests naming tracks are dropped.
+    pub fn remove_track(&mut self, track: usize) {
+        if !self.run(|project| remove_track(project, track)) {
+            return;
+        }
+        self.selection = match self.selection {
+            Some(key) if key.track == track => None,
+            Some(key) if key.track > track => Some(ClipKey { track: key.track - 1, ..key }),
+            other => other,
+        };
+        self.ui.font_file_request = None;
+        self.ui.subtitle_export_request = None;
+        self.ui.drop_batches.clear();
     }
 
     pub fn toggle_track_hidden(&mut self, track: usize) {
@@ -2313,6 +2329,31 @@ mod tests {
         state.reset_effect(0);
         let effect = &state.project().tracks[0].clips[0].effects[0];
         assert!(effect.keyframes.is_empty() && effect.params.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_track_takes_its_clips_moves_the_selection_down_and_undoes_in_one_step() {
+        let mut state = state_with_clip();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(2, Path::new("C:/media/b.mp4"));
+        assert_eq!(state.selection, Some(ClipKey { track: 2, clip: 0 }));
+        state.remove_track(0);
+        assert_eq!(state.project().tracks.len(), 2);
+        assert_eq!(state.selection, Some(ClipKey { track: 1, clip: 0 }), "the selected clip moved down with its track");
+        state.remove_track(1);
+        assert_eq!(state.selection, None, "the selected clip went with its track");
+        state.undo();
+        assert_eq!(state.project().tracks.len(), 2);
+        assert_eq!(state.project().tracks[1].clips.len(), 1);
+    }
+
+    #[test]
+    fn a_locked_track_is_not_deleted() {
+        let mut state = state_with_clip();
+        state.toggle_track_locked(0);
+        state.remove_track(0);
+        assert_eq!(state.project().tracks.len(), 2);
+        assert_eq!(state.project().tracks[0].clips.len(), 1);
     }
 
     fn state_with_clip() -> EditorState {

@@ -425,6 +425,7 @@ pub enum Message {
     LockTrack,
     UnlockTrack,
     HideTrack,
+    DeleteTrack,
     ShowTrack,
 }
 
@@ -598,6 +599,7 @@ mod tests {
             Message::LockTrack,
             Message::UnlockTrack,
             Message::HideTrack,
+            Message::DeleteTrack,
             Message::ShowTrack,
         ];
         for language in Language::ALL {

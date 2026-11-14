@@ -589,6 +589,7 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
     let language = state.language();
     let mut toggle_lock = None;
     let mut toggle_hide = None;
+    let mut delete = None;
     ui.scope_builder(UiBuilder::new().max_rect(header_rect), |ui| {
         ui.set_clip_rect(header_rect);
         for (t, &kind) in kinds.iter().enumerate() {
@@ -598,6 +599,15 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
                 continue;
             }
             let (locked, hidden) = state.project().tracks.get(t).map_or((false, false), |track| (track.locked, track.hidden));
+            // Made before the buttons, so they stay on top and a right click anywhere else opens the menu.
+            ui.interact(row, ui.scope_id().with(("track-row", t)), Sense::click()).context_menu(|ui| {
+                let button = ui.add_enabled(!locked, egui::Button::new(language.t(Message::DeleteTrack)));
+                let button = if locked { button.on_disabled_hover_text(language.t(Message::TrackLockedNote)) } else { button };
+                if button.clicked() {
+                    delete = Some(t);
+                    ui.close();
+                }
+            });
             let tint = if hidden { theme::tick() } else { theme::text_dim() };
             let icon = if kind == TrackKind::Video { Icon::Film } else { Icon::Music };
             let (label, tip) = track_label(language, &kinds, t);
@@ -633,6 +643,9 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
     }
     if let Some(track) = toggle_hide {
         state.toggle_track_hidden(track);
+    }
+    if let Some(track) = delete {
+        state.remove_track(track);
     }
 }
 

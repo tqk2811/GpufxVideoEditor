@@ -5,7 +5,7 @@ mod common;
 use common::*;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, audio_segments, clip_at,
-    delete_clip, frame_count, layers_at_frame, move_clip, nearest_free_start, remove_effect,
+    delete_clip, frame_count, remove_track, layers_at_frame, move_clip, nearest_free_start, remove_effect,
     remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, validate,
     AcceptAll, ClipKey, ClipPlacement, PlacedRect, EditError, EditHistory, Effect, LayerContent, Project, SourceSample, Time,
     TrackKind, ValidationError,
@@ -183,6 +183,26 @@ fn add_track_appends_an_empty_track_of_the_kind() {
     assert_eq!(p.tracks[3].kind, TrackKind::Audio);
     assert!(p.tracks[3].clips.is_empty());
     assert_valid(&p);
+}
+
+#[test]
+fn remove_track_drops_the_track_with_its_clips_and_moves_the_others_down() {
+    let p = add_track(&add_track(&chain(), TrackKind::Audio).unwrap(), TrackKind::Video).unwrap();
+    let removed = remove_track(&p, 3).unwrap();
+    assert_eq!(removed.tracks.len(), 4);
+    assert_eq!(removed.tracks[3].kind, TrackKind::Video, "the track above takes its place");
+    let first = remove_track(&p, 0).unwrap();
+    assert_eq!(sources(&first, 0), ["e"], "the clips of the removed track go with it");
+    assert_eq!(sources(&first, 1), ["m"]);
+    assert_valid(&removed);
+    assert!(matches!(remove_track(&p, 9), Err(EditError::TrackNotFound { track: 9 })));
+}
+
+#[test]
+fn remove_track_is_refused_while_the_track_is_locked() {
+    let mut p = add_track(&chain(), TrackKind::Audio).unwrap();
+    p.tracks[3].locked = true;
+    assert!(matches!(remove_track(&p, 3), Err(EditError::TrackLocked { track: 3 })));
 }
 
 #[test]
