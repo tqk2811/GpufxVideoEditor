@@ -36,30 +36,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let output = &state.project().output;
     let frame = picture_rect(area, (output.width, output.height));
     placement::show(ui, state, area, frame);
-    handle_sticker_drop(ui, state, frame);
+    handle_picture_drop(ui, state, frame);
     painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::border()));
     ui.scope_builder(UiBuilder::new().max_rect(controls.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, controls));
 }
 
-/// Takes a sticker of the library released over the picture: it goes on a new track from the
-/// playhead, where it fell. While one is held there, the picture is outlined and the sticker
-/// follows the pointer at the size it will take.
-fn handle_sticker_drop(ui: &egui::Ui, state: &mut EditorState, frame: Rect) {
+/// Takes a sticker or an image of the library released over the picture: it goes on a new track
+/// from the playhead, where it fell. While one is held there, the picture is outlined and the held
+/// picture follows the pointer at the size it will take.
+fn handle_picture_drop(ui: &egui::Ui, state: &mut EditorState, frame: Rect) {
     let ctx = ui.ctx().clone();
-    let Some(item) = egui::DragAndDrop::payload::<MediaItem>(&ctx).filter(|item| crate::media::is_sticker(&item.source)) else { return };
+    let Some(item) = egui::DragAndDrop::payload::<MediaItem>(&ctx) else { return };
+    let Some(width) = EditorState::player_drop_width(&item.source) else { return };
     let Some(pointer) = ctx.pointer_latest_pos().filter(|pointer| frame.contains(*pointer)) else { return };
     if ctx.input(|input| input.pointer.any_released()) {
         if egui::DragAndDrop::take_payload::<MediaItem>(&ctx).is_some() {
             let center = (f64::from((pointer.x - frame.left()) / frame.width().max(1.0)), f64::from((pointer.y - frame.top()) / frame.height().max(1.0)));
-            state.drop_sticker_on_player(&item, center);
+            state.drop_picture_on_player(&item, center);
         }
         return;
     }
     let painter = ui.painter_at(frame);
     painter.rect_stroke(frame.shrink(1.0), CornerRadius::ZERO, Stroke::new(2.0, theme::accent()), egui::StrokeKind::Inside);
     let poster = state.visuals.borrow_mut().poster(&item.source, None);
-    let aspect = state.sticker_library.aspect_of(&item.source).map(|aspect| aspect as f32).or(poster.map(|(_, aspect)| aspect)).unwrap_or(1.0).max(0.01);
-    let width = frame.width() * crate::editor::STICKER_WIDTH as f32;
+    let aspect = state.picture_aspect(&item.source) as f32;
+    let width = frame.width() * width as f32;
     let ghost = Rect::from_center_size(pointer, Vec2::new(width, width / aspect));
     if let Some((texture, _)) = poster {
         painter.image(texture, ghost, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_white_alpha(200));
