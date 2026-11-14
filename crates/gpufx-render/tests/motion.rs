@@ -115,7 +115,7 @@ fn assert_near(actual: [i32; 3], expected: [i32; 3], tolerance: i32, what: &str)
 }
 
 fn project_json(tracks: &str) -> String {
-    format!(r#"{{"version":2,"output":{{"width":{WIDTH},"height":{HEIGHT},"frame_duration":{FRAME}}},"tracks":[{tracks}]}}"#)
+    format!(r#"{{"version":1,"output":{{"width":{WIDTH},"height":{HEIGHT},"frame_duration":{FRAME}}},"tracks":[{tracks}]}}"#)
 }
 
 fn image_track(path: &Path, frames: i64, extra: &str) -> String {

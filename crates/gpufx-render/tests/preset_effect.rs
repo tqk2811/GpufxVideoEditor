@@ -107,7 +107,7 @@ fn a_preset_effect_paints_only_inside_its_windows() {
 
     // A 60-frame clip with a 10-frame in and a 10-frame out.
     let json = format!(
-        r#"{{"version":2,"output":{{"width":64,"height":36,"frame_duration":{FRAME}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":64,"height":36,"frame_duration":{FRAME}}},"tracks":[{{"clips":[
             {{"source":"{}","start":0,"source_in":0,"duration":{},"animation":{{"in":{{"preset":"fx/in","duration":{}}},"out":{{"preset":"fx/out","duration":{}}}}}}}]}}]}}"#,
         json_path(&a), 60 * FRAME, 10 * FRAME, 10 * FRAME
     );

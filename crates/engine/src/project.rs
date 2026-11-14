@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 /// The project format version: the only one this engine reads and writes.
-pub const SUPPORTED_VERSION: u32 = 2;
+pub const SUPPORTED_VERSION: u32 = 1;
 
 /// A whole project: output settings and tracks (bottom track first).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

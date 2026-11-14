@@ -210,7 +210,7 @@ fn the_structure_of_a_hidden_track_is_still_checked() {
 
 #[test]
 fn old_project_files_load_and_new_fields_round_trip() {
-    let old = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[]}]}"#;
+    let old = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[]}]}"#;
     let loaded = Project::from_json(old).unwrap();
     assert!(!loaded.tracks[0].locked && !loaded.tracks[0].hidden);
     let written = serde_json::to_string(&loaded).unwrap();
@@ -226,8 +226,8 @@ fn old_project_files_load_and_new_fields_round_trip() {
 
 #[test]
 fn a_file_of_another_version_is_refused() {
-    let v1 = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[],"locked":true}]}"#;
-    assert!(matches!(Project::from_json(v1), Err(engine::LoadError::UnsupportedVersion(1))));
+    let other = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[],"locked":true}]}"#;
+    assert!(matches!(Project::from_json(other), Err(engine::LoadError::UnsupportedVersion(2))));
 }
 
 #[test]

@@ -48,7 +48,7 @@ fn a_project_without_motion_saves_as_it_did() {
 
 #[test]
 fn a_file_of_an_older_version_loads_with_no_motion() {
-    let text = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[{"clips":[{"source":"a","start":0,"source_in":0,"duration":200,"placement":{"x":0.25,"y":0.5,"width":0.5}}]}]}"#;
+    let text = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[{"clips":[{"source":"a","start":0,"source_in":0,"duration":200,"placement":{"x":0.25,"y":0.5,"width":0.5}}]}]}"#;
     let loaded = Project::from_json(text).unwrap();
     assert_eq!(clip_of(&loaded, 0).motion, Default::default());
     let at_zero = clip_of(&loaded, 0).transform_at(t(0));

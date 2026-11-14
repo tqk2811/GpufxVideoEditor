@@ -31,7 +31,7 @@ fn write_project(dir: &PathBuf, json: &str) -> PathBuf {
 fn two_clip_project() -> String {
     let (a, b) = test_clips();
     format!(
-        r#"{{"version":2,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
            {{"source":"{}","start":0,"source_in":0,"duration":{CLIP_DURATION}}},
            {{"source":"{}","start":{CLIP_DURATION},"source_in":0,"duration":{CLIP_DURATION}}}],
            "transitions":[{{"after_clip":0,"package":"fade-grays","duration":{transition}}}]}}]}}"#,
@@ -139,7 +139,7 @@ const AUDIO_OUTPUT: &str = r#","audio":{"sample_rate":48000,"channels":2,"bitrat
 /// One clip of `seconds`, starting `source_in` seconds into `source`.
 fn audio_project(source: &std::path::Path, source_in: i64, seconds: i64, audio_output: &str) -> String {
     format!(
-        r#"{{"version":2,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}{audio_output}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}{audio_output}}},"tracks":[{{"clips":[
            {{"source":"{}","start":0,"source_in":{},"duration":{}}}]}}]}}"#,
         json_path(source),
         source_in * 90_000,
@@ -266,7 +266,7 @@ fn a_failed_render_with_audio_leaves_existing_outputs_untouched() {
 }
 
 fn invalid_project(tracks: &str) -> String {
-    format!(r#"{{"version":2,"output":{{"width":64,"height":64,"frame_duration":3000}},"tracks":[{tracks}]}}"#)
+    format!(r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000}},"tracks":[{tracks}]}}"#)
 }
 
 fn expect_rejected(test: &str, tracks: &str, message: &str) {
@@ -282,7 +282,7 @@ fn expect_rejected(test: &str, tracks: &str, message: &str) {
 #[test]
 fn more_than_60_fps_is_rejected() {
     let dir = scratch_dir("reject-fps");
-    let project = write_project(&dir, r#"{"version":2,"output":{"width":64,"height":64,"frame_duration":1000},"tracks":[]}"#);
+    let project = write_project(&dir, r#"{"version":1,"output":{"width":64,"height":64,"frame_duration":1000},"tracks":[]}"#);
     let output = render(&project, &dir.join("out.mp4"), &dir.join("hashes.txt"));
     assert!(!output.status.success(), "the project must be rejected");
     let stderr = String::from_utf8_lossy(&output.stderr);

@@ -31,7 +31,7 @@ fn audio_clip() -> Project {
 }
 
 const SPEC_EXAMPLE: &str = r#"{
-  "version": 2,
+  "version": 1,
   "output": {
     "width": 1920, "height": 1080, "frame_duration": 3000,
     "audio": { "sample_rate": 48000, "channels": 2, "bitrate": 192000 }
@@ -43,9 +43,9 @@ const SPEC_EXAMPLE: &str = r#"{
 }"#;
 
 #[test]
-fn version_2_fields_load() {
+fn audio_fields_load() {
     let p = Project::from_json(SPEC_EXAMPLE).unwrap();
-    assert_eq!(p.version, 2);
+    assert_eq!(p.version, 1);
     assert_eq!(
         p.output.audio,
         Some(AudioOutput {
@@ -66,15 +66,15 @@ fn version_2_fields_load() {
 }
 
 #[test]
-fn version_2_round_trips_through_json() {
+fn audio_fields_round_trip_through_json() {
     let p = Project::from_json(SPEC_EXAMPLE).unwrap();
     let text = serde_json::to_string(&p).unwrap();
     assert_eq!(Project::from_json(&text).unwrap(), p);
 }
 
 #[test]
-fn malformed_version_2_field_is_a_json_error() {
-    let text = r#"{"version":2,"output":{"width":1,"height":1,"frame_duration":3000},
+fn a_malformed_audio_field_is_a_json_error() {
+    let text = r#"{"version":1,"output":{"width":1,"height":1,"frame_duration":3000},
         "tracks":[{"kind":"subtitle","clips":[]}]}"#;
     assert!(matches!(
         Project::from_json(text),

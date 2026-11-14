@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 1,
   "output": { "width": 1920, "height": 1080, "frame_duration": 3000 },
   "tracks": [
     {

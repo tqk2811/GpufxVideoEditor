@@ -71,7 +71,7 @@ impl Drop for Scratch {
 }
 
 fn project_text(source: &str) -> String {
-    format!(r#"{{"version":2,"output":{{"width":16,"height":16,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"kind":"audio","clips":[{{"source":"{source}","start":0,"source_in":0,"duration":90000}}]}}]}}"#)
+    format!(r#"{{"version":1,"output":{{"width":16,"height":16,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"kind":"audio","clips":[{{"source":"{source}","start":0,"source_in":0,"duration":90000}}]}}]}}"#)
 }
 
 fn install(scratch: &Scratch, root: &Path) -> ImportOutcome {

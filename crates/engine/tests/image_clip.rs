@@ -77,7 +77,7 @@ fn the_speed_of_an_image_cannot_be_changed() {
 
 #[test]
 fn a_file_with_an_image_loads_and_saves_without_new_fields() {
-    let json = r#"{"version":2,"output":{"width":320,"height":180,"frame_duration":3000},"tracks":[{"clips":[{"source":"a.mp4","start":0,"source_in":0,"duration":90000},{"source":"logo.png","start":90000,"source_in":0,"duration":90000}]}]}"#;
+    let json = r#"{"version":1,"output":{"width":320,"height":180,"frame_duration":3000},"tracks":[{"clips":[{"source":"a.mp4","start":0,"source_in":0,"duration":90000},{"source":"logo.png","start":90000,"source_in":0,"duration":90000}]}]}"#;
     let loaded = Project::from_json(json).expect("the file loads");
     assert!(validate(&loaded, &AcceptAll).is_empty());
     assert!(!loaded.tracks[0].clips[0].is_image());
@@ -85,5 +85,5 @@ fn a_file_with_an_image_loads_and_saves_without_new_fields() {
     let saved = serde_json::to_string(&loaded).unwrap();
     assert_eq!(Project::from_json(&saved).unwrap(), loaded, "round trip");
     assert!(!saved.contains("image"), "no field is added: {saved}");
-    assert!(saved.contains(r#""version":2"#));
+    assert!(saved.contains(r#""version":1"#));
 }

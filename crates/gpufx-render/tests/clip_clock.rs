@@ -94,7 +94,7 @@ fn a_clip_gets_its_own_clock_whatever_its_speed_or_a_stored_value() {
     // Clip 0 is 2 s long at speed 2; clip 1 starts at 2 s. Hand-written stored values must be ignored.
     let effect = r#"{"package":"packages/gpufx/test/clock-probe","params":{"clip_time":99,"clip_duration":99}}"#;
     let json = format!(
-        r#"{{"version":2,"output":{{"width":64,"height":36,"frame_duration":{FRAME}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":64,"height":36,"frame_duration":{FRAME}}},"tracks":[{{"clips":[
             {{"source":"{}","start":0,"source_in":0,"duration":{},"speed":2.0,"effects":[{effect}]}},
             {{"source":"{}","start":{},"source_in":0,"duration":{},"effects":[{effect}]}}]}}]}}"#,
         json_path(&a), 60 * FRAME, json_path(&b), 60 * FRAME, 30 * FRAME
@@ -120,7 +120,7 @@ fn a_package_without_the_clock_still_refuses_an_unknown_parameter() {
     let Some(gpu) = gpu() else { return };
     let root = ProbeRoot::new("undeclared");
     let json = format!(
-        r#"{{"version":2,"output":{{"width":64,"height":36,"frame_duration":{FRAME}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":64,"height":36,"frame_duration":{FRAME}}},"tracks":[{{"clips":[
             {{"source":"{}","start":0,"source_in":0,"duration":{},"effects":[{{"package":"packages/gpufx/ffmpeg/invert","params":{{"clip_time":1}}}}]}}]}}]}}"#,
         json_path(&a),
         30 * FRAME
@@ -165,7 +165,7 @@ fn install_pack(root: &ProbeRoot, name: &str) -> Option<String> {
 /// One clip of `frames` frames at the start of the timeline, with `effects` (JSON list items).
 fn single_clip_project(source: &Path, width: u32, height: u32, frames: i64, effects: &str) -> String {
     format!(
-        r#"{{"version":2,"output":{{"width":{width},"height":{height},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":{width},"height":{height},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
             {{"source":"{}","start":0,"source_in":0,"duration":{},"effects":[{effects}]}}]}}]}}"#,
         json_path(source),
         frames * FRAME
@@ -261,7 +261,7 @@ fn a_zoom_in_clip_shorter_than_its_duration_keeps_the_zoom_in_its_transition() {
     // never reaches the end of the zoom and the zoom must not jump back, as with `hold`.
     let project = |params: &str| {
         format!(
-            r#"{{"version":2,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
+            r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
                 {{"source":"{}","start":0,"source_in":0,"duration":{},"effects":[{{"package":"{package}","params":{params}}}]}},
                 {{"source":"{}","start":{},"source_in":0,"duration":{}}}],
                 "transitions":[{{"after_clip":0,"package":"packages/gpufx/ffmpeg/fade-grays","duration":{}}}]}}]}}"#,

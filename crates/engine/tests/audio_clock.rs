@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// One clip of 48000 samples whose source samples equal their own position.
-const PROJECT: &str = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
+const PROJECT: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
     {"clips":[{"source":"a","start":0,"source_in":0,"duration":90000}]}]}"#;
 const TOTAL: usize = 48_000;
 

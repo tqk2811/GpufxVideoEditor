@@ -342,14 +342,14 @@ mod tests {
 
     #[test]
     fn only_the_current_version_opens() {
-        let text = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[]}]}"#;
+        let text = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[]}]}"#;
         let opened = parse_project(text, Path::new(r"D:\p.json"), &AcceptAll).unwrap();
         assert_eq!(opened.version, SUPPORTED_VERSION);
-        assert!(parse_project(&text.replace(r#""version":2"#, r#""version":1"#), Path::new(r"D:\p.json"), &AcceptAll).is_err());
+        assert!(parse_project(&text.replace(r#""version":1"#, r#""version":2"#), Path::new(r"D:\p.json"), &AcceptAll).is_err());
     }
 
     fn project_at(frame_duration: i64) -> String {
-        format!(r#"{{"version":2,"output":{{"width":16,"height":16,"frame_duration":{frame_duration}}},"tracks":[]}}"#)
+        format!(r#"{{"version":1,"output":{{"width":16,"height":16,"frame_duration":{frame_duration}}},"tracks":[]}}"#)
     }
 
     #[test]
@@ -372,7 +372,7 @@ mod tests {
     fn broken_or_invalid_projects_are_reported() {
         let file = Path::new(r"D:\p.json");
         assert!(parse_project("not json", file, &AcceptAll).unwrap_err().contains("p.json"));
-        let zero_size = r#"{"version":2,"output":{"width":0,"height":16,"frame_duration":3000},"tracks":[]}"#;
+        let zero_size = r#"{"version":1,"output":{"width":0,"height":16,"frame_duration":3000},"tracks":[]}"#;
         assert!(parse_project(zero_size, file, &AcceptAll).is_err());
         assert!(parse_project(r#"{"version":9,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[]}"#, file, &AcceptAll).unwrap_err().contains("unsupported"));
     }

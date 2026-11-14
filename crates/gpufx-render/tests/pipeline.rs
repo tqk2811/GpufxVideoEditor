@@ -79,7 +79,7 @@ fn clip_json(source: &Path, start: i64, source_in: i64, duration: i64) -> String
 }
 
 fn project_json(width: u32, height: u32, tracks: &str) -> String {
-    format!(r#"{{"version":2,"output":{{"width":{width},"height":{height},"frame_duration":{FRAME}}},"tracks":[{tracks}]}}"#)
+    format!(r#"{{"version":1,"output":{{"width":{width},"height":{height},"frame_duration":{FRAME}}},"tracks":[{tracks}]}}"#)
 }
 
 const W: u32 = CLIP_WIDTH;
@@ -106,7 +106,7 @@ fn the_mixed_pcm_repeats_exactly_between_renders() {
     let Some(gpu) = gpu() else { return };
     let source = json_path(&clip);
     let json = format!(
-        r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+        r#"{{"version":1,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
             {{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":120000,"fade_in":9000}},
                        {{"source":"{source}","start":120000,"source_in":270000,"duration":120000,"gain_db":-3.0}}],
               "transitions":[{{"after_clip":0,"package":"xfade","duration":30000}}]}}]}}"#
@@ -209,7 +209,7 @@ fn a_speed_of_one_renders_exactly_as_a_project_without_the_field() {
 
     let tone = tone_clip_with_video();
     let source = json_path(&tone);
-    let audio = |speed: &str| format!(r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":90000{speed}}}]}}]}}"#);
+    let audio = |speed: &str| format!(r#"{{"version":1,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":90000{speed}}}]}}]}}"#);
     assert_eq!(render_pcm(&gpu, &audio("")), render_pcm(&gpu, &audio(r#","speed":1.0"#)), "the audio of 1x does not go through the stretcher");
 }
 
@@ -230,7 +230,7 @@ fn measured_hz(stereo: &[f32]) -> f64 {
 fn exported_pcm(gpu: &Arc<Gpu>, source_in: i64, duration: i64, speed: f64) -> Vec<f32> {
     let clip = tone_clip_with_video();
     let source = json_path(&clip);
-    let json = format!(r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":{source_in},"duration":{duration},"speed":{speed}}}]}}]}}"#);
+    let json = format!(r#"{{"version":1,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":{source_in},"duration":{duration},"speed":{speed}}}]}}]}}"#);
     let project = Project::from_json(&json).expect("project parses");
     let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
     assert!(validate(&project, paths.as_ref()).is_empty());
