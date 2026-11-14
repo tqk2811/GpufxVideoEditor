@@ -126,7 +126,7 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
 
     let tracks_response = ui.interact(tracks_rect, ui.scope_id().with("tracks"), Sense::click_and_drag());
     handle_tracks(ui, state, &tracks_response, tracks_rect);
-    let media_hint = handle_media_drop(ui, state, rect, tracks_rect);
+    let media_preview = handle_media_drop(ui, state, rect, tracks_rect);
     resolve_file_drops(ui, state, rect, tracks_rect);
     // A drop can shrink the content, so the limits are measured again.
     state.view.clamp_scroll(&view_area(state, tracks_rect));
@@ -139,10 +139,24 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     headers(ui, state, header_rect, requests);
     painter.vline(tracks_left, rect.y_range(), Stroke::new(1.0, theme::border()));
     draw_playhead(&painter, state, ruler_rect, tracks_rect);
-    let moving_out = state.drag.is_some_and(|drag| matches!(drag.kind, DragKind::Move)) && ui.ctx().pointer_latest_pos().is_some_and(|pointer| outside_the_rows(state, tracks_rect, pointer));
-    if moving_out || media_hint {
-        draw_new_track_hint(ui, tracks_rect);
+    let moving_out = state.drag.filter(|drag| matches!(drag.kind, DragKind::Move)).and_then(|drag| {
+        let pointer = ui.ctx().pointer_latest_pos().filter(|pointer| outside_the_rows(state, tracks_rect, *pointer))?;
+        let clip = state.project().tracks.get(drag.key.track)?.clips.get(drag.key.clip)?;
+        let start = state.view.x_to_time(f64::from((pointer.x - tracks_rect.left()).max(0.0))).saturating_sub(drag.grab_offset).max(Time::ZERO);
+        Some(DropPreview { track: None, start, end: start.saturating_add(clip.duration) })
+    });
+    if let Some(preview) = media_preview.or(moving_out) {
+        draw_drop_preview(ui, state, tracks_rect, preview);
     }
+}
+
+/// Where a clip held over the timeline would land: on track `track`, or on the new track a drop
+/// makes when `None`, from `start` to `end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DropPreview {
+    track: Option<usize>,
+    start: Time,
+    end: Time,
 }
 
 /// Whether `pointer` is on the ruler, which is always there, or in the track area but on no row:
@@ -157,30 +171,38 @@ fn drop_target(state: &EditorState, tracks_rect: Rect, pointer: Pos2) -> (Option
     (track, state.view.x_to_time(f64::from((pointer.x - tracks_rect.left()).max(0.0))))
 }
 
-/// Takes a file dragged from the library when it is released over the timeline. True while one is
-/// held over the place that would make a new track.
-fn handle_media_drop(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rect, tracks_rect: Rect) -> bool {
+/// Takes a file dragged from the library when it is released over the timeline. While one is held
+/// there, where it would land: nothing over a track that would refuse it.
+fn handle_media_drop(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rect, tracks_rect: Rect) -> Option<DropPreview> {
     let ctx = ui.ctx().clone();
-    let Some(item) = egui::DragAndDrop::payload::<MediaItem>(&ctx) else { return false };
-    let Some(pointer) = ctx.pointer_latest_pos() else { return false };
+    let item = egui::DragAndDrop::payload::<MediaItem>(&ctx)?;
+    let pointer = ctx.pointer_latest_pos()?;
     ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.scope_id().with("media-drag"))).text(pointer + Vec2::new(14.0, 14.0), Align2::LEFT_TOP, &item.name, FontId::proportional(13.0), theme::text());
     if !timeline_rect.contains(pointer) {
-        return false;
+        return None;
     }
     let (track, at) = drop_target(state, tracks_rect, pointer);
+    let free = ctx.input(|input| input.modifiers.shift);
+    let at = state.snapped_drop_time(at, item.duration, track, free).max(Time::ZERO);
     if ctx.input(|input| input.pointer.any_released()) {
         if egui::DragAndDrop::take_payload::<MediaItem>(&ctx).is_some() {
-            let free = ctx.input(|input| input.modifiers.shift);
-            let at = state.snapped_drop_time(at, item.duration, track, free);
             if d3d12_backend::is_asset_source(&item.source) && item.kind == crate::media::MediaKind::Audio {
                 state.place_library_audio(&item, crate::editor::LibraryTarget::Dropped { track, at });
             } else {
                 state.drop_media(&item, track, at);
             }
         }
-        return false;
+        return None;
     }
-    track.is_none()
+    let duration = item.duration.unwrap_or(crate::editor::DEFAULT_CLIP_DURATION);
+    let start = match track {
+        None => at,
+        Some(index) => {
+            let target = state.project().tracks.get(index).filter(|target| target.kind == item.kind.track_kind() && !target.locked)?;
+            engine::nearest_free_start(target, None, duration, at)?
+        }
+    };
+    Some(DropPreview { track, start, end: start.saturating_add(duration) })
 }
 
 /// Turns the files the window was given into drops at the place they fell. Files of one drop share
@@ -201,10 +223,22 @@ fn resolve_file_drops(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rec
     state.ui.drop_batches.push_back(DropBatch { files: files.into_iter().map(|(path, _)| path).collect(), track, at });
 }
 
-/// The top row of the track area, where the new track a drop here makes will appear.
-fn draw_new_track_hint(ui: &egui::Ui, tracks_rect: Rect) {
-    let row = Rect::from_min_size(tracks_rect.left_top(), Vec2::new(tracks_rect.width(), TRACK_HEIGHT as f32)).shrink(1.0);
-    ui.painter_at(tracks_rect).rect_stroke(row, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
+/// The frame of the clip a drop would add, where it would land. For a new track, the top row of the
+/// track area, where that track will appear, is outlined and tinted as well.
+fn draw_drop_preview(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect, preview: DropPreview) {
+    let painter = ui.painter_at(tracks_rect);
+    let row = match preview.track {
+        Some(track) => row_rect(state, tracks_rect, track, state.project().tracks.len()),
+        None => {
+            let row = Rect::from_min_size(tracks_rect.left_top(), Vec2::new(tracks_rect.width(), TRACK_HEIGHT as f32));
+            painter.rect_filled(row.shrink(1.0), CornerRadius::same(CLIP_RADIUS), theme::accent().gamma_multiply(0.18));
+            painter.rect_stroke(row.shrink(1.0), CornerRadius::same(CLIP_RADIUS), Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
+            row
+        }
+    };
+    let clip = span_rect(state, tracks_rect, row, preview.start, preview.end);
+    painter.rect_filled(clip, CornerRadius::same(CLIP_RADIUS), theme::accent().gamma_multiply(0.35));
+    painter.rect_stroke(clip, CornerRadius::same(CLIP_RADIUS), Stroke::new(2.0, theme::drop_outline()), StrokeKind::Inside);
 }
 
 fn add_track_menu(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
