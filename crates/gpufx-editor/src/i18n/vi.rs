@@ -297,7 +297,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::PreviewSound => "Nghe thử".to_owned(),
         Message::StopPreview => "Dừng".to_owned(),
         Message::AddSound => "Thêm".to_owned(),
-        Message::AudioAddHint => "Bấm đúp hoặc nút + để thêm âm thanh vào vị trí đầu phát, hoặc kéo vào một track âm thanh.".to_owned(),
+        Message::AudioAddHint => "Bấm vào bài để nghe thử. Bấm đúp hoặc nút + để thêm âm thanh vào vị trí đầu phát, hoặc kéo vào một track âm thanh.".to_owned(),
         Message::SoundPreviewFailed(reason) => format!("Không phát được âm thanh: {reason}"),
         Message::SearchMedia => "Tìm trong phương tiện".to_owned(),
         Message::SearchAudio => "Tìm trong âm thanh".to_owned(),
