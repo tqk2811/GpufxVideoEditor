@@ -42,7 +42,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
 }
 
 /// Takes a sticker of the library released over the picture: it goes on a new track from the
-/// playhead, where it fell. While one is held there, the picture is outlined.
+/// playhead, where it fell. While one is held there, the picture is outlined and the sticker
+/// follows the pointer at the size it will take.
 fn handle_sticker_drop(ui: &egui::Ui, state: &mut EditorState, frame: Rect) {
     let ctx = ui.ctx().clone();
     let Some(item) = egui::DragAndDrop::payload::<MediaItem>(&ctx).filter(|item| crate::media::is_sticker(&item.source)) else { return };
@@ -54,7 +55,17 @@ fn handle_sticker_drop(ui: &egui::Ui, state: &mut EditorState, frame: Rect) {
         }
         return;
     }
-    ui.painter_at(frame).rect_stroke(frame.shrink(1.0), CornerRadius::ZERO, Stroke::new(2.0, theme::accent()), egui::StrokeKind::Inside);
+    let painter = ui.painter_at(frame);
+    painter.rect_stroke(frame.shrink(1.0), CornerRadius::ZERO, Stroke::new(2.0, theme::accent()), egui::StrokeKind::Inside);
+    let poster = state.visuals.borrow_mut().poster(&item.source, None);
+    let aspect = state.sticker_library.aspect_of(&item.source).map(|aspect| aspect as f32).or(poster.map(|(_, aspect)| aspect)).unwrap_or(1.0).max(0.01);
+    let width = frame.width() * crate::editor::STICKER_WIDTH as f32;
+    let ghost = Rect::from_center_size(pointer, Vec2::new(width, width / aspect));
+    if let Some((texture, _)) = poster {
+        painter.image(texture, ghost, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::from_white_alpha(200));
+    }
+    painter.rect_stroke(ghost, CornerRadius::ZERO, Stroke::new(1.5, theme::accent()), egui::StrokeKind::Outside);
+    ctx.request_repaint();
 }
 
 /// Where the controls float over the picture in fullscreen.

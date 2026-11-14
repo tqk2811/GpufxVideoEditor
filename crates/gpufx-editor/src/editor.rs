@@ -46,7 +46,7 @@ pub const DEFAULT_CLIP_DURATION: Time = Time::from_ticks(900_000);
 /// How long a new clip of a still image runs; its end can be dragged out as far as wanted.
 pub const DEFAULT_IMAGE_DURATION: Time = Time::from_ticks(5 * engine::TICKS_PER_SECOND);
 /// How much of the frame width a new sticker takes.
-const STICKER_WIDTH: f64 = 0.25;
+pub(crate) const STICKER_WIDTH: f64 = 0.25;
 /// Length given to a new transition, until the inspector changes it.
 pub const DEFAULT_TRANSITION_DURATION: Time = Time::from_ticks(90_000);
 
