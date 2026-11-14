@@ -141,13 +141,6 @@ struct LiveEdit {
     was_clean: bool,
 }
 
-fn stream_of(kind: TrackKind) -> StreamKind {
-    match kind {
-        TrackKind::Video => StreamKind::Video,
-        TrackKind::Audio => StreamKind::Audio,
-    }
-}
-
 /// Track `index` as the timeline labels it, numbered within its kind from 1.
 fn track_label(project: &Project, index: usize) -> TrackLabel {
     let Some(track) = project.tracks.get(index) else { return TrackLabel::Position(index + 1) };
@@ -155,6 +148,8 @@ fn track_label(project: &Project, index: usize) -> TrackLabel {
     match track.kind {
         TrackKind::Video => TrackLabel::Video(number),
         TrackKind::Audio => TrackLabel::Audio(number),
+        TrackKind::Sticker => TrackLabel::Sticker(number),
+        TrackKind::Text => TrackLabel::Text(number),
     }
 }
 
@@ -174,7 +169,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::ClipNotFound { key } => Message::EditClipNotFound { track: label(key.track), clip: key.clip + 1 },
         EditError::EffectNotFound { key, effect } => Message::EditEffectNotFound { track: label(key.track), clip: key.clip + 1, effect: effect + 1 },
         EditError::TransitionNotFound { track, after_clip } => Message::EditTransitionNotFound { track: label(*track), after_clip: after_clip + 1 },
-        EditError::TrackKindMismatch { from, to } => Message::EditTrackKindMismatch { from: stream_of(*from), to: stream_of(*to) },
+        EditError::TrackKindMismatch { from, to } => Message::EditTrackKindMismatch { from: *from, to: *to },
         EditError::NoRoom { track } => Message::EditNoRoom(label(*track)),
         EditError::Overlap { track, start, end } => Message::EditOverlap { track: label(*track), start: seconds_text(*start), end: seconds_text(*end) },
         EditError::TimeOverflow { key } => Message::EditTimeOverflow { track: label(key.track), clip: key.clip + 1 },
@@ -970,7 +965,8 @@ impl EditorState {
     /// `None`, with a status, when the file has no such stream.
     fn stream_length(&mut self, kind: TrackKind, name: &str, probe: &MediaProbe) -> Option<Option<Time>> {
         let (present, stated, needed, problem) = match kind {
-            TrackKind::Video => (probe.has_video, probe.video_duration, StreamKind::Video, probe.video_problem.as_deref()),
+            // A sticker or text track shows a picture, as a video track does.
+            TrackKind::Video | TrackKind::Sticker | TrackKind::Text => (probe.has_video, probe.video_duration, StreamKind::Video, probe.video_problem.as_deref()),
             TrackKind::Audio => (probe.has_audio, probe.audio_duration, StreamKind::Audio, probe.audio_problem.as_deref()),
         };
         if !present {
@@ -994,7 +990,7 @@ impl EditorState {
         if let Some(item) = item_from_probe(&path.to_string_lossy(), probe) {
             self.library.add(item);
         }
-        let media_kind = if kind == TrackKind::Video { crate::media::MediaKind::Video } else { crate::media::MediaKind::Audio };
+        let media_kind = if kind == TrackKind::Audio { crate::media::MediaKind::Audio } else { crate::media::MediaKind::Video };
         let is_image = engine::is_image_source(&path.to_string_lossy());
         let item = MediaItem { source: path.to_string_lossy().into_owned(), name: name.clone(), kind: media_kind, duration: if is_image { Some(DEFAULT_IMAGE_DURATION) } else { duration }, estimated: is_image };
         let key = self.drop_media(&item, track, at)?;
@@ -1500,7 +1496,7 @@ impl EditorState {
             return;
         }
         let duration = item.duration.unwrap_or(DEFAULT_CLIP_DURATION);
-        let track_kind = item.kind.track_kind();
+        let track_kind = item.home_track();
         let at_end = self.selection.filter(|_| to_selected_track).and_then(|key| crate::media::end_of_selected_track(self.project(), key, item));
         let (choice, start) = match at_end {
             Some((track, end)) => (TrackChoice::Existing(track), end),
@@ -1531,7 +1527,7 @@ impl EditorState {
         (output.width, output.height)
     }
 
-    /// Adds a default text at the playhead, on a video track with room or a new one, placed at its
+    /// Adds a default text at the playhead, on a text track with room or a new one, placed at its
     /// natural size in the middle of the frame and selected, as one undo step.
     pub fn add_text_at_playhead(&mut self) {
         let text = default_text(self.language().t(Message::DefaultTextContent));
@@ -1559,13 +1555,13 @@ impl EditorState {
             None => natural_placement(pixels, self.output_pixels()),
         };
         let (start, duration) = (self.playhead, DEFAULT_IMAGE_DURATION);
-        let choice = choose_track(self.project(), TrackKind::Video, duration, start);
+        let choice = choose_track(self.project(), TrackKind::Text, duration, start);
         let track = match choice {
             TrackChoice::Existing(index) => index,
             TrackChoice::New => self.project().tracks.len(),
         };
         let added = self.run(|project| {
-            let with_track = if choice == TrackChoice::New { add_track(project, TrackKind::Video)? } else { project.clone() };
+            let with_track = if choice == TrackChoice::New { add_track(project, TrackKind::Text)? } else { project.clone() };
             let next = add_text_clip(&with_track, track, start, duration, text)?;
             let Some(key) = clip_at(&next, track, start) else { return Ok(next) };
             let next = match animation {
@@ -1808,24 +1804,27 @@ impl EditorState {
     }
 
     /// Adds `item` where it was dropped: on `track`, as near `at` as the other clips allow, or on a
-    /// new track of its kind when `track` is `None`, which is one undo step. A track of the other
-    /// kind or a locked one refuses it. The key of the new clip when it was added.
+    /// new track of its own kind ([`MediaItem::home_track`]) when `track` is `None`, which is one
+    /// undo step. A track that does not take it ([`MediaItem::fits_track`]) or a locked one refuses
+    /// it. A video file dropped on an audio track gives a clip that only plays its sound. The key
+    /// of the new clip when it was added.
     pub fn drop_media(&mut self, item: &MediaItem, track: Option<usize>, at: Time) -> Option<ClipKey> {
         if self.edits_blocked() {
             return None;
         }
         let duration = item.duration.unwrap_or(DEFAULT_CLIP_DURATION);
-        let kind = item.kind.track_kind();
+        let kind = item.home_track();
         let at = at.max(Time::ZERO);
         let (index, start) = match track {
             Some(index) => {
+                let fits = self.track_takes(item, index);
                 let found = self.project().tracks.get(index).map(|target| (target.kind, target.locked, nearest_free_start(target, None, duration, at)));
                 let error = match found {
                     None => EditError::TrackNotFound { track: index },
-                    Some((to, _, _)) if to != kind => EditError::TrackKindMismatch { from: kind, to },
+                    Some((to, _, _)) if !fits => EditError::TrackKindMismatch { from: kind, to },
                     Some((_, true, _)) => EditError::TrackLocked { track: index },
-                    Some((_, false, Some(start))) => {
-                        return self.add_dropped(item, index, start, false, kind, duration);
+                    Some((to, false, Some(start))) => {
+                        return self.add_dropped(item, index, start, false, to, duration);
                     }
                     Some((_, false, None)) => EditError::NoRoom { track: index },
                 };
@@ -1835,6 +1834,23 @@ impl EditorState {
             None => (self.project().tracks.len(), at),
         };
         self.add_dropped(item, index, start, true, kind, duration)
+    }
+
+    /// Whether track `track` takes `item` dropped on it, by [`MediaItem::fits_track`] with what
+    /// the thumbnails know of the file's sound. False when there is no such track.
+    pub fn track_takes(&self, item: &MediaItem, track: usize) -> bool {
+        let Some(kind) = self.project().tracks.get(track).map(|target| target.kind) else { return false };
+        let has_audio = if kind == TrackKind::Audio && item.kind == crate::media::MediaKind::Video {
+            let mut visuals = self.visuals.borrow_mut();
+            let slot = visuals.slot(&item.source);
+            match visuals.view(slot) {
+                SourceView::Known(facts) => Some(facts.has_audio),
+                SourceView::Failed | SourceView::Pending => None,
+            }
+        } else {
+            None
+        };
+        item.fits_track(kind, has_audio)
     }
 
     /// A clip of `item`. A sticker comes small and centred, not as large as fits like other media.
@@ -1869,8 +1885,9 @@ impl EditorState {
         self.sticker_library.aspect_of(source).or_else(|| self.visuals.borrow_mut().poster(source, None).map(|(_, aspect)| f64::from(aspect))).filter(|aspect| *aspect > 0.0).unwrap_or(1.0)
     }
 
-    /// Adds picture `item`, a sticker or an image, dropped on the player: always on a new video
-    /// track, from the playhead, centred on `center`, the point of the frame it fell on, from 0 to
+    /// Adds picture `item`, a sticker or an image, dropped on the player: always on a new track,
+    /// a sticker track for a sticker and a video track for an image, so an image never shares a
+    /// track with stickers by itself, from the playhead, centred on `center`, the point of the frame it fell on, from 0 to
     /// 1 across and down. One undo step.
     pub fn drop_picture_on_player(&mut self, item: &MediaItem, center: (f64, f64)) -> Option<ClipKey> {
         let width = Self::player_drop_width(&item.source)?;
@@ -1885,7 +1902,7 @@ impl EditorState {
         let sized = ClipPlacement { x: 0.0, y: 0.0, width };
         let height = PlacedRect::of(Some(sized), output_aspect, self.picture_aspect(&item.source)).height;
         clip.placement = Some(ClipPlacement { x: center.0 - width / 2.0, y: center.1 - height / 2.0, width });
-        self.add_dropped_clip(item, self.project().tracks.len(), start, true, TrackKind::Video, clip)
+        self.add_dropped_clip(item, self.project().tracks.len(), start, true, item.home_track(), clip)
     }
 
     fn add_dropped(&mut self, item: &MediaItem, track: usize, start: Time, new_track: bool, kind: TrackKind, duration: Time) -> Option<ClipKey> {
@@ -3660,13 +3677,42 @@ mod tests {
     fn a_drop_on_the_wrong_kind_or_a_locked_track_is_refused_and_makes_no_track() {
         let mut state = state_with_clip();
         let before = state.project().clone();
-        assert_eq!(state.drop_media(&media("b.mp4", crate::media::MediaKind::Video, Some(1)), Some(1), seconds(1)), None);
+        assert_eq!(state.drop_media(&media("m.wav", crate::media::MediaKind::Audio, Some(1)), Some(0), seconds(1)), None);
         assert!(matches!(state.status(), Status::Refused(_)));
+        assert_eq!(state.project(), &before, "a sound does not go on a video track");
         state.toggle_track_locked(0);
         let locked = state.project().clone();
         assert_eq!(state.drop_media(&media("b.mp4", crate::media::MediaKind::Video, Some(1)), Some(0), seconds(30)), None);
         assert_eq!(state.project(), &locked);
         assert_eq!(locked.tracks.len(), before.tracks.len());
+    }
+
+    #[test]
+    fn a_video_dropped_on_an_audio_track_gives_a_sound_clip_there() {
+        let mut state = state_with_clip();
+        let added = state.drop_media(&media("b.mp4", crate::media::MediaKind::Video, Some(1)), Some(1), seconds(30)).unwrap();
+        assert_eq!(state.project().tracks.len(), 2, "no new track");
+        assert_eq!((added.track, state.project().tracks[1].kind), (1, TrackKind::Audio));
+        assert_eq!(state.project().tracks[1].clips[added.clip].source, "b.mp4");
+    }
+
+    #[test]
+    fn a_sticker_goes_on_a_sticker_track_and_an_image_may_join_it() {
+        let mut state = EditorState::default();
+        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None };
+        state.add_media_at_playhead(&sticker.media_item());
+        assert_eq!(state.project().tracks.iter().map(|track| track.kind).collect::<Vec<_>>(), vec![TrackKind::Sticker]);
+        let dropped = state.drop_media(&sticker.media_item(), None, seconds(30)).unwrap();
+        assert_eq!(state.project().tracks[dropped.track].kind, TrackKind::Sticker, "a sticker dropped below the rows makes a sticker track");
+        let image = media("C:/media/logo.png", crate::media::MediaKind::Video, Some(5));
+        let joined = state.drop_media(&image, Some(0), seconds(60)).unwrap();
+        assert_eq!(joined.track, 0, "an image dragged on a sticker track joins it");
+        state.set_playhead(seconds(100));
+        state.add_media_at_playhead(&image);
+        assert_eq!(state.project().tracks.last().unwrap().kind, TrackKind::Video, "an image added by itself goes on a video track");
+        let video = media("C:/media/b.mp4", crate::media::MediaKind::Video, Some(5));
+        assert_eq!(state.drop_media(&video, Some(0), seconds(200)), None, "a video file does not go on a sticker track");
+        assert_eq!(state.drop_media(&sticker.media_item(), Some(state.project().tracks.len() - 1), seconds(200)), None, "a sticker does not go on a video track");
     }
 
     #[test]
@@ -3922,7 +3968,7 @@ mod tests {
         let key = state.drop_picture_on_player(&sticker.media_item(), (0.25, 0.75)).unwrap();
         assert_eq!(state.project().tracks.len(), 3, "a new track");
         let clip = &state.project().tracks[key.track].clips[key.clip];
-        assert_eq!((state.project().tracks[key.track].kind, clip.start), (TrackKind::Video, seconds(1)));
+        assert_eq!((state.project().tracks[key.track].kind, clip.start), (TrackKind::Sticker, seconds(1)));
         let placement = clip.placement.unwrap();
         assert!((placement.x + placement.width / 2.0 - 0.25).abs() < 1e-9, "centred across on the point");
         assert!(placement.y < 0.75 && placement.y > 0.5, "and down");
@@ -3939,6 +3985,7 @@ mod tests {
         let image = media("C:/media/logo.png", crate::media::MediaKind::Video, Some(5));
         let second = state.drop_picture_on_player(&image, (0.5, 0.5)).unwrap();
         assert_ne!(first.track, second.track, "a track of its own");
+        assert_eq!(state.project().tracks[second.track].kind, TrackKind::Video, "an image dropped on the player makes a video track");
         assert_eq!(state.project().tracks[second.track].clips[0].placement.unwrap().width, DROPPED_IMAGE_WIDTH);
         assert_eq!(state.drop_picture_on_player(&media("C:/media/b.mp4", crate::media::MediaKind::Video, Some(5)), (0.5, 0.5)), None, "a video is not dropped on the player");
     }
@@ -3977,7 +4024,7 @@ mod tests {
         let mut state = EditorState::default();
         let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None };
         state.add_media_at_playhead(&sticker.media_item());
-        let clip = state.project().tracks.iter().find(|track| track.kind == TrackKind::Video).unwrap().clips[0].clone();
+        let clip = state.project().tracks.iter().find(|track| track.kind == TrackKind::Sticker).unwrap().clips[0].clone();
         assert_eq!(clip.duration, DEFAULT_IMAGE_DURATION);
         let placement = clip.placement.expect("a sticker is not stretched over the whole frame");
         assert!((placement.width - STICKER_WIDTH).abs() < 1e-9 && placement.x > 0.0 && placement.y > 0.0, "{placement:?}");
@@ -3991,7 +4038,7 @@ mod tests {
         state.sticker_library = crate::sticker_library::StickerLibrary { packs: vec![crate::sticker_library::StickerPack { id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker.clone()] }], problems: Vec::new(), loaded: true };
         state.add_media_at_playhead(&sticker.media_item());
         let output = state.project().output.clone();
-        let clip = state.project().tracks.iter().find(|track| track.kind == TrackKind::Video).unwrap().clips[0].clone();
+        let clip = state.project().tracks.iter().find(|track| track.kind == TrackKind::Sticker).unwrap().clips[0].clone();
         let placement = clip.placement.unwrap();
         let aspect = f64::from(size.0) / f64::from(size.1);
         (placement, PlacedRect::of(Some(placement), f64::from(output.width) / f64::from(output.height), aspect).height)
@@ -4224,7 +4271,7 @@ second line")), "Title…");
     fn a_new_text_is_placed_at_its_natural_size_in_the_middle() {
         let (state, key) = added_text_state();
         let track = &state.project().tracks[key.track];
-        assert_eq!(track.kind, TrackKind::Video);
+        assert_eq!(track.kind, TrackKind::Text);
         let clip = track.clips[key.clip].clone();
         let text = clip.text.clone().expect("a text clip");
         assert_eq!(text.content, state.language().t(Message::DefaultTextContent));
@@ -4283,7 +4330,7 @@ second line")), "Title…");
     #[test]
     fn a_text_refusing_a_speed_is_not_called_an_image() {
         let (state, key) = added_text_state();
-        assert_eq!(refusal_message(state.project(), &EditError::SpeedOfImage { key }), Message::EditSpeedOfText(TrackLabel::Video(1)));
+        assert_eq!(refusal_message(state.project(), &EditError::SpeedOfImage { key }), Message::EditSpeedOfText(TrackLabel::Text(1)));
         let image = state_with_clip();
         assert_eq!(refusal_message(image.project(), &EditError::SpeedOfImage { key: ClipKey { track: 0, clip: 0 } }), Message::EditSpeedOfImage(TrackLabel::Video(1)));
     }

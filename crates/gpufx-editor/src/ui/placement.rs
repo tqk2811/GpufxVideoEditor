@@ -4,7 +4,7 @@
 use crate::editor::EditorState;
 use crate::visuals::SourceView;
 use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use engine::{ClipKey, ClipPlacement, ClipTransform, PlacedRect, TrackKind, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
+use engine::{ClipKey, ClipPlacement, ClipTransform, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 
 const FRAME_WIDTH: f32 = 1.5;
 const GRIP_SIZE: f32 = 8.0;
@@ -117,7 +117,7 @@ fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
     let key = state.selection()?;
     let track = state.project().tracks.get(key.track)?;
     let clip = track.clips.get(key.clip)?;
-    if track.kind != TrackKind::Video || track.locked || track.hidden || state.playhead() < clip.start || state.playhead() >= clip.start.saturating_add(clip.duration) {
+    if !track.kind.shows_picture() || track.locked || track.hidden || state.playhead() < clip.start || state.playhead() >= clip.start.saturating_add(clip.duration) {
         return None;
     }
     // The resting place, without the text animation's pose: dragging edits the clip's own placement,
@@ -316,7 +316,7 @@ mod tests {
     fn a_grip_dragged_past_the_panel_edge_keeps_enlarging_the_picture() {
         let ctx = egui::Context::default();
         let mut state = EditorState::default();
-        state.add_track(TrackKind::Video);
+        state.add_track(engine::TrackKind::Video);
         state.add_clip_from_file(0, std::path::Path::new("a.mp4"));
         let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 225.0));
         pass(&ctx, &mut state, area, vec![]);

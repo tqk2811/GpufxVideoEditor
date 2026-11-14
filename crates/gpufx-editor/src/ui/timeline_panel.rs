@@ -198,7 +198,7 @@ fn handle_media_drop(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rect
     let start = match track {
         None => at,
         Some(index) => {
-            let target = state.project().tracks.get(index).filter(|target| target.kind == item.kind.track_kind() && !target.locked)?;
+            let target = state.project().tracks.get(index).filter(|target| !target.locked && state.track_takes(&item, index))?;
             engine::nearest_free_start(target, None, duration, at)?
         }
     };
@@ -251,6 +251,14 @@ fn add_track_menu(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
             }
             if ui.button(language.t(Message::AddAudioTrack)).clicked() {
                 state.add_track(TrackKind::Audio);
+                ui.close();
+            }
+            if ui.button(language.t(Message::AddStickerTrack)).clicked() {
+                state.add_track(TrackKind::Sticker);
+                ui.close();
+            }
+            if ui.button(language.t(Message::AddTextTrack)).clicked() {
+                state.add_track(TrackKind::Text);
                 ui.close();
             }
         });
@@ -435,8 +443,9 @@ impl ClipPaint<'_> {
 /// Paints a clip's body, name strip, pictures, level bars and selection.
 pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     let (body, header) = match paint.kind {
-        TrackKind::Video if paint.clip.is_text() => (theme::text_clip(), theme::text_clip_header()),
-        TrackKind::Video => (theme::video_clip(), theme::video_clip_header()),
+        TrackKind::Text => (theme::text_clip(), theme::text_clip_header()),
+        _ if paint.clip.is_text() => (theme::text_clip(), theme::text_clip_header()),
+        TrackKind::Video | TrackKind::Sticker => (theme::video_clip(), theme::video_clip_header()),
         TrackKind::Audio => (theme::audio_clip(), theme::audio_clip_header()),
     };
     let dim = |color: Color32| color.gamma_multiply(paint.opacity());
@@ -463,7 +472,7 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
     if let Some(visuals) = paint.visuals.filter(|_| !paint.clip.is_text()) {
         draw_clip_media(painter, paint, &mut visuals.borrow_mut(), paint.rect.with_min_y(strip.bottom()));
     }
-    if paint.kind == TrackKind::Video {
+    if paint.kind.shows_picture() {
         draw_keyframe_marks(&text, paint);
     }
     if paint.selected {
@@ -496,12 +505,12 @@ fn draw_clip_media(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut
     let (has_picture, has_sound, aspect, length) = match view {
         SourceView::Known(facts) => (facts.has_video, facts.has_audio, facts.aspect, facts.length),
         SourceView::Failed => (false, false, DEFAULT_ASPECT, None),
-        SourceView::Pending => (paint.kind == TrackKind::Video, false, DEFAULT_ASPECT, None),
+        SourceView::Pending => (paint.kind.shows_picture(), false, DEFAULT_ASPECT, None),
     };
     // An audio track has only sound, whatever else the file holds.
-    let film = has_picture && paint.kind == TrackKind::Video;
+    let film = has_picture && paint.kind.shows_picture();
     // A source nothing can be drawn from keeps the placeholder over the whole body.
-    let placeholder = view == SourceView::Failed && paint.kind == TrackKind::Video;
+    let placeholder = view == SourceView::Failed && paint.kind.shows_picture();
     let (film_height, bars_height) = split_body(body.height(), film || placeholder, has_sound);
     if film_height > 0.0 {
         let strip = body.with_max_y(body.top() + film_height);
@@ -637,6 +646,8 @@ fn track_label(language: Language, kinds: &[TrackKind], t: usize) -> (String, St
     match kinds[t] {
         TrackKind::Video => (format!("V{number}"), language.t(Message::VideoTrackNumber(number))),
         TrackKind::Audio => (format!("A{number}"), language.t(Message::AudioTrackNumber(number))),
+        TrackKind::Sticker => (format!("S{number}"), language.t(Message::StickerTrackNumber(number))),
+        TrackKind::Text => (format!("T{number}"), language.t(Message::TextTrackNumber(number))),
     }
 }
 
@@ -672,7 +683,12 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
                 }
             });
             let tint = if hidden { theme::tick() } else { theme::text_dim() };
-            let icon = if kind == TrackKind::Video { Icon::Film } else { Icon::Music };
+            let icon = match kind {
+                TrackKind::Video => Icon::Film,
+                TrackKind::Audio => Icon::Music,
+                TrackKind::Sticker => Icon::Sticker,
+                TrackKind::Text => Icon::Text,
+            };
             let (label, tip) = track_label(language, &kinds, t);
             let icon_rect = Rect::from_center_size(Pos2::new(row.left() + 14.0, row.center().y), Vec2::splat(14.0));
             icons::paint(ui.painter(), icon_rect, icon, tint);
@@ -759,5 +775,8 @@ mod tests {
         assert_eq!(track_label(Language::Vietnamese, &kinds, 0).0, "V1");
         assert_eq!(track_label(Language::Vietnamese, &kinds, 1).0, "A1");
         assert_eq!(track_label(Language::Vietnamese, &kinds, 2), ("V2".to_owned(), "Track video 2".to_owned()));
+        let kinds = [TrackKind::Sticker, TrackKind::Text, TrackKind::Sticker];
+        assert_eq!(track_label(Language::English, &kinds, 1), ("T1".to_owned(), "Text track 1".to_owned()));
+        assert_eq!(track_label(Language::English, &kinds, 2), ("S2".to_owned(), "Sticker track 2".to_owned()));
     }
 }

@@ -11,10 +11,21 @@ fn stream_name(stream: StreamKind) -> &'static str {
     }
 }
 
+fn track_kind_name(kind: engine::TrackKind) -> &'static str {
+    match kind {
+        engine::TrackKind::Video => "video",
+        engine::TrackKind::Audio => "âm thanh",
+        engine::TrackKind::Sticker => "sticker",
+        engine::TrackKind::Text => "chữ",
+    }
+}
+
 fn track_label(track: TrackLabel) -> String {
     match track {
         TrackLabel::Video(number) => format!("Track video {number}"),
         TrackLabel::Audio(number) => format!("Track âm thanh {number}"),
+        TrackLabel::Sticker(number) => format!("Track sticker {number}"),
+        TrackLabel::Text(number) => format!("Track chữ {number}"),
         TrackLabel::Position(number) => format!("Track {number}"),
     }
 }
@@ -116,7 +127,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditClipNotFound { track, clip } => format!("{}: clip {clip} không tồn tại", track_label(*track)),
         Message::EditEffectNotFound { track, clip, effect } => format!("{}, clip {clip}: hiệu ứng {effect} không tồn tại", track_label(*track)),
         Message::EditTransitionNotFound { track, after_clip } => format!("{}: không có chuyển cảnh sau clip {after_clip}", track_label(*track)),
-        Message::EditTrackKindMismatch { from, to } => format!("Không thể chuyển clip từ track {} sang track {}", stream_name(*from), stream_name(*to)),
+        Message::EditTrackKindMismatch { from, to } => format!("Không thể chuyển clip từ track {} sang track {}", track_kind_name(*from), track_kind_name(*to)),
         Message::EditNoRoom(track) => format!("{}: không còn chỗ cho clip", track_label(*track)),
         Message::EditOverlap { track, start, end } => format!("{}: đoạn từ {start} đến {end} giây chồng lên clip khác", track_label(*track)),
         Message::EditTimeOverflow { track, clip } => format!("{}, clip {clip}: thời gian vượt quá giới hạn", track_label(*track)),
@@ -372,6 +383,10 @@ pub(super) fn text(message: &Message) -> String {
         Message::AddAudioTrack => "Thêm track âm thanh".to_owned(),
         Message::VideoTrackNumber(number) => format!("Track video {number}"),
         Message::AudioTrackNumber(number) => format!("Track âm thanh {number}"),
+        Message::AddStickerTrack => "Thêm track sticker".to_owned(),
+        Message::AddTextTrack => "Thêm track chữ".to_owned(),
+        Message::StickerTrackNumber(number) => format!("Track sticker {number}"),
+        Message::TextTrackNumber(number) => format!("Track chữ {number}"),
         Message::AddClipFromFile => "Thêm clip từ tệp".to_owned(),
         Message::LockTrack => "Khoá track".to_owned(),
         Message::UnlockTrack => "Mở khoá track".to_owned(),

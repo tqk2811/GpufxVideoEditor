@@ -53,7 +53,7 @@ pub use project::{
     ClipPlacement, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH,
     AudioOutput, Clip, Effect, LoadError, Output, Project, SubtitleTrack, Track, TrackKind, Transition,
     FontRef, Rgba, TextAlign, ClipAnimation, AnimationRef, TextBackground, TextContent, TextOutline, TextShadow, TextGlow, MAX_GLOW_INTENSITY, GLOW_FALLOFF_RANGE, TextTransform, NORMAL_WEIGHT, TEXT_WEIGHT_RANGE, MAX_LETTER_SPACING, MAX_GLOW_RADIUS, TEXT_SOURCE, text_raster_scale, text_step_up, MAX_TEXT_SCALE, MIN_TEXT_SCALE,
-    is_image_source, speed_in_range, speed_milli, IMAGE_EXTENSIONS, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MIN_SUPPORTED_VERSION, SPEED_SCALE, SUPPORTED_VERSION,
+    is_image_source, is_sticker_source, STICKER_SOURCE_PREFIX, speed_in_range, speed_milli, IMAGE_EXTENSIONS, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MIN_SUPPORTED_VERSION, SPEED_SCALE, SUPPORTED_VERSION,
 };
 pub use render::{ClipKey, DecoderSpec, RenderError};
 pub use schedule::{

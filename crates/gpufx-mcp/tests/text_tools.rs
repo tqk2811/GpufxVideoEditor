@@ -39,10 +39,10 @@ fn with_text(session: &mut FileSession) -> u64 {
 fn a_text_added_is_read_back_with_the_defaults_of_the_text_tab_and_its_natural_place() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
     let added = call_ok(&mut session, "text_add", json!({"expected_revision": 0, "start": SECOND, "duration": 3 * SECOND, "content": "Hello\nworld"}));
-    assert_eq!(added["clip"], json!({"track": 0, "clip": 0}), "a new video track took it");
+    assert_eq!(added["clip"], json!({"track": 0, "clip": 0}), "a new text track took it");
     let project = project_of(&mut session);
     assert_eq!(project.tracks.len(), 1);
-    assert_eq!(project.tracks[0].kind, engine::TrackKind::Video);
+    assert_eq!(project.tracks[0].kind, engine::TrackKind::Text);
     let clip = &project.tracks[0].clips[0];
     assert!(clip.is_text());
     assert_eq!((clip.start.ticks(), clip.duration.ticks()), (SECOND, 3 * SECOND));

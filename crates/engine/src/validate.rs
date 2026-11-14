@@ -210,8 +210,11 @@ pub enum ValidationError {
         clip: usize,
         source: String,
     },
-    /// A track of kind `audio` is marked as a subtitle track.
-    SubtitleOnAudioTrack { track: usize },
+    /// A track that is not of kind `text` is marked as a subtitle track.
+    SubtitleNotOnTextTrack { track: usize },
+    /// A clip is on a picture track whose kind does not take it; see
+    /// [`crate::TrackKind::accepts_clip`]. Audio tracks report their own errors instead.
+    ClipNotAllowedOnTrack { track: usize, clip: usize, kind: crate::TrackKind, source: String },
     /// The `subtitle.style` of a track is empty or blank.
     EmptySubtitleStyle { track: usize },
     /// A text clip is on a track of kind `audio`.
@@ -365,7 +368,10 @@ impl fmt::Display for ValidationError {
             ImageOnAudioTrack { track, clip, source } => {
                 write!(f, "track {track}, clip {clip}: the image '{source}' cannot go on an audio track")
             }
-            SubtitleOnAudioTrack { track } => write!(f, "track {track}: an audio track cannot hold subtitles"),
+            SubtitleNotOnTextTrack { track } => write!(f, "track {track}: only a text track can hold subtitles"),
+            ClipNotAllowedOnTrack { track, clip, kind, source } => {
+                write!(f, "track {track}, clip {clip}: '{source}' cannot go on a {} track", format!("{kind:?}").to_lowercase())
+            }
             EmptySubtitleStyle { track } => write!(f, "track {track}: the subtitle style is empty"),
             TextOnAudioTrack { track, clip } => write!(f, "track {track}, clip {clip}: text cannot go on an audio track"),
             EmptyText { track, clip } => write!(f, "track {track}, clip {clip}: the text is empty or its source is not '{TEXT_SOURCE}'"),
@@ -467,8 +473,8 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
 
     for (t, track) in project.tracks.iter().enumerate() {
         if let Some(subtitle) = &track.subtitle {
-            if track.is_audio() {
-                errors.push(SubtitleOnAudioTrack { track: t });
+            if track.kind != crate::TrackKind::Text {
+                errors.push(SubtitleNotOnTextTrack { track: t });
             }
             if subtitle.style.as_deref().is_some_and(|style| style.trim().is_empty()) {
                 errors.push(EmptySubtitleStyle { track: t });
@@ -485,6 +491,9 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                     duration: clip.duration,
                 });
                 ok = false;
+            }
+            if track.kind.shows_picture() && !track.kind.accepts_clip(clip) {
+                errors.push(ClipNotAllowedOnTrack { track: t, clip: c, kind: track.kind, source: clip.source.clone() });
             }
             let animation = &clip.animation;
             if track.is_audio() && !animation.is_empty() {

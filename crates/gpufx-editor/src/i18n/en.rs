@@ -19,6 +19,16 @@ fn stream_with_article(stream: StreamKind) -> &'static str {
     }
 }
 
+/// A kind of track with its article, for "a video track" and "an audio track".
+fn track_kind_with_article(kind: engine::TrackKind) -> &'static str {
+    match kind {
+        engine::TrackKind::Video => "a video",
+        engine::TrackKind::Audio => "an audio",
+        engine::TrackKind::Sticker => "a sticker",
+        engine::TrackKind::Text => "a text",
+    }
+}
+
 /// `count` and `noun`, plural unless the count is one.
 fn counted(count: i64, noun: &str) -> String {
     if count == 1 {
@@ -32,6 +42,8 @@ fn track_label(track: TrackLabel) -> String {
     match track {
         TrackLabel::Video(number) => format!("Video track {number}"),
         TrackLabel::Audio(number) => format!("Audio track {number}"),
+        TrackLabel::Sticker(number) => format!("Sticker track {number}"),
+        TrackLabel::Text(number) => format!("Text track {number}"),
         TrackLabel::Position(number) => format!("Track {number}"),
     }
 }
@@ -133,7 +145,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditClipNotFound { track, clip } => format!("{}: clip {clip} does not exist", track_label(*track)),
         Message::EditEffectNotFound { track, clip, effect } => format!("{}, clip {clip}: effect {effect} does not exist", track_label(*track)),
         Message::EditTransitionNotFound { track, after_clip } => format!("{}: no transition after clip {after_clip}", track_label(*track)),
-        Message::EditTrackKindMismatch { from, to } => format!("A clip cannot move from {} track to {} track", stream_with_article(*from), stream_with_article(*to)),
+        Message::EditTrackKindMismatch { from, to } => format!("A clip cannot move from {} track to {} track", track_kind_with_article(*from), track_kind_with_article(*to)),
         Message::EditNoRoom(track) => format!("{}: no room for the clip", track_label(*track)),
         Message::EditOverlap { track, start, end } => format!("{}: {start} s to {end} s overlaps another clip", track_label(*track)),
         Message::EditTimeOverflow { track, clip } => format!("{}, clip {clip}: the time is out of range", track_label(*track)),
@@ -389,6 +401,10 @@ pub(super) fn text(message: &Message) -> String {
         Message::AddAudioTrack => "Add audio track".to_owned(),
         Message::VideoTrackNumber(number) => format!("Video track {number}"),
         Message::AudioTrackNumber(number) => format!("Audio track {number}"),
+        Message::AddStickerTrack => "Add sticker track".to_owned(),
+        Message::AddTextTrack => "Add text track".to_owned(),
+        Message::StickerTrackNumber(number) => format!("Sticker track {number}"),
+        Message::TextTrackNumber(number) => format!("Text track {number}"),
         Message::AddClipFromFile => "Add a clip from a file".to_owned(),
         Message::LockTrack => "Lock the track".to_owned(),
         Message::UnlockTrack => "Unlock the track".to_owned(),

@@ -58,6 +58,47 @@ pub enum TrackKind {
     Video,
     /// Clips that only contribute sound. The video scheduler ignores these tracks.
     Audio,
+    /// Still images and stickers, drawn like the clips of a video track.
+    Sticker,
+    /// Text clips only, drawn like the clips of a video track. Subtitle tracks are of this kind.
+    Text,
+}
+
+impl TrackKind {
+    /// Every kind, in the order the editor offers them.
+    pub const ALL: [TrackKind; 4] = [TrackKind::Video, TrackKind::Audio, TrackKind::Sticker, TrackKind::Text];
+
+    /// Whether clips of this kind are drawn into the picture: every kind but audio.
+    pub fn shows_picture(self) -> bool {
+        self != TrackKind::Audio
+    }
+
+    /// Whether a clip of `source` may go on a track of this kind, judged from the source alone;
+    /// [`TEXT_SOURCE`] stands for a text clip. The one rule every caller shares:
+    ///
+    /// - video: video files and images, not stickers and not text;
+    /// - audio: media files that are not images and not text (whether the file really has sound
+    ///   is up to the resolver, see [`crate::SourceResolver::source_has_audio`]);
+    /// - sticker: images and stickers;
+    /// - text: text clips only.
+    pub fn accepts_source(self, source: &str) -> bool {
+        let text = source == TEXT_SOURCE;
+        match self {
+            TrackKind::Video => !text && !is_sticker_source(source),
+            TrackKind::Audio => !text && !is_image_source(source) && !is_sticker_source(source),
+            TrackKind::Sticker => !text && (is_image_source(source) || is_sticker_source(source)),
+            TrackKind::Text => text,
+        }
+    }
+
+    /// Whether `clip` may go on a track of this kind; see [`TrackKind::accepts_source`].
+    pub fn accepts_clip(self, clip: &Clip) -> bool {
+        if clip.is_text() {
+            self == TrackKind::Text
+        } else {
+            self.accepts_source(&clip.source)
+        }
+    }
 }
 
 /// One track: clips plus the transitions between neighbouring clips.
@@ -78,7 +119,7 @@ pub struct Track {
     /// of the project, so hiding a track does not change where anything ends.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
-    /// Present on a subtitle track: a video track made by importing subtitles, with one text clip
+    /// Present on a subtitle track: a text track made by importing subtitles, with one text clip
     /// per cue. Absent on every other track, so older projects load and save unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<SubtitleTrack>,
@@ -722,6 +763,14 @@ impl Project {
 
 /// The extensions of the still images a clip may show, lower-cased.
 pub const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+
+/// The start of the source of every sticker: `asset:sticker/<pack id>/<file>`.
+pub const STICKER_SOURCE_PREFIX: &str = "asset:sticker/";
+
+/// Whether `source` is a sticker of an installed sticker pack.
+pub fn is_sticker_source(source: &str) -> bool {
+    source.starts_with(STICKER_SOURCE_PREFIX)
+}
 
 /// Whether `source`, a path or an `asset:` source, names a still image, by its extension.
 pub fn is_image_source(source: &str) -> bool {

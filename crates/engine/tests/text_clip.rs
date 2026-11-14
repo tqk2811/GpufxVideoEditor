@@ -10,7 +10,9 @@ pub fn text_clip(content: &str, start: i64, duration: i64) -> Clip {
 fn project_with(clips: Vec<Clip>) -> Project {
     let mut p = project(3003, vec![]);
     p.version = engine::SUPPORTED_VERSION;
-    p.tracks.push(Track { kind: TrackKind::Video, clips, transitions: vec![], locked: false, hidden: false, subtitle: None });
+    // A track of text clips is a text track; anything else goes on a video track.
+    let kind = if !clips.is_empty() && clips.iter().all(|clip| clip.source == engine::TEXT_SOURCE) { TrackKind::Text } else { TrackKind::Video };
+    p.tracks.push(Track { kind, clips, transitions: vec![], locked: false, hidden: false, subtitle: None });
     p
 }
 
@@ -148,7 +150,8 @@ const KEY: ClipKey = ClipKey { track: 0, clip: 0 };
 
 #[test]
 fn add_text_clip_is_one_undo_step() {
-    let base = project_with(vec![]);
+    let mut base = project_with(vec![]);
+    base.tracks[0].kind = TrackKind::Text;
     let mut history = EditHistory::new(base.clone(), 10);
     history.apply(|p| add_text_clip(p, 0, t(9000), t(18000), TextContent::new("Hi", 0.1))).unwrap();
     let added = history.current().tracks[0].clips[0].clone();
@@ -368,5 +371,6 @@ fn validate_rejects_a_per_unit_preset_on_a_clip_that_is_not_text() {
     assert_eq!(validate(&p, &AcceptAll), vec![], "typewriter is for text");
     p.tracks[0].clips[0].text = None;
     p.tracks[0].clips[0].source = "a.png".into();
+    p.tracks[0].kind = TrackKind::Video;
     assert_eq!(validate(&p, &AcceptAll), vec![ValidationError::PerUnitAnimationNotText { track: 0, clip: 0, group: "in", preset: "typewriter".into() }]);
 }
