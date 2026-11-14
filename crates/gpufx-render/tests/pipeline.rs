@@ -106,7 +106,7 @@ fn the_mixed_pcm_repeats_exactly_between_renders() {
     let Some(gpu) = gpu() else { return };
     let source = json_path(&clip);
     let json = format!(
-        r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+        r#"{{"version":1,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
             {{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":120000,"fade_in":9000}},
                        {{"source":"{source}","start":120000,"source_in":270000,"duration":120000,"gain_db":-3.0}}],
               "transitions":[{{"after_clip":0,"package":"xfade","duration":30000}}]}}]}}"#
@@ -158,11 +158,6 @@ fn trims_clips_exactly_and_cuts_between_them() {
     assert!((sample(capture.frame(30), W, W / 2, H / 2) - GREY_B).abs() <= 4);
 }
 
-/// A version 2 project: version 1 files are frozen and have no `speed`.
-fn speed_project_json(tracks: &str) -> String {
-    project_json(W, H, tracks).replace(r#""version":1"#, r#""version":2"#)
-}
-
 /// A clip at `speed`, in frames of the output.
 fn sped_clip_json(source: &Path, start: i64, source_in: i64, duration: i64, speed: f64) -> String {
     format!(r#"{{"source":"{}","start":{},"source_in":{},"duration":{},"speed":{speed}}}"#, json_path(source), start * FRAME, source_in * FRAME, duration * FRAME)
@@ -176,7 +171,7 @@ fn double_speed_shows_every_second_source_frame_and_keeps_the_timeline_length() 
     let tracks = format!(r#"{{"clips":[{}]}}"#, sped_clip_json(&a, 0, 10, 40, 2.0));
     let wanted = [0, 1, 7, 39];
     let mut capture = Capture::new(&wanted);
-    render_project(&gpu, &speed_project_json(&tracks), &mut capture).expect("render");
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
     assert_eq!(capture.hashes.len(), 40, "the clip lasts its timeline length");
     for frame in wanted {
         assert_eq!(read_frame_number(capture.frame(frame), W), 10 + 2 * frame, "output frame {frame}");
@@ -191,7 +186,7 @@ fn half_speed_repeats_source_frames() {
     let tracks = format!(r#"{{"clips":[{}]}}"#, sped_clip_json(&a, 0, 10, 40, 0.5));
     let wanted = [0, 1, 2, 3, 39];
     let mut capture = Capture::new(&wanted);
-    render_project(&gpu, &speed_project_json(&tracks), &mut capture).expect("render");
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
     assert_eq!(capture.hashes.len(), 40);
     for (frame, expected) in [(0, 10), (1, 10), (2, 11), (3, 11), (39, 29)] {
         assert_eq!(read_frame_number(capture.frame(frame), W), expected, "output frame {frame}");
@@ -207,14 +202,14 @@ fn a_speed_of_one_renders_exactly_as_a_project_without_the_field() {
     let plain = format!(r#"{{"clips":[{}]}}"#, clip_json(&a, 0, 5, 30));
     let explicit = format!(r#"{{"clips":[{}]}}"#, sped_clip_json(&a, 0, 5, 30, 1.0));
     let mut first = Capture::new(&[]);
-    render_project(&gpu, &speed_project_json(&plain), &mut first).expect("render");
+    render_project(&gpu, &project_json(W, H, &plain), &mut first).expect("render");
     let mut second = Capture::new(&[]);
-    render_project(&gpu, &speed_project_json(&explicit), &mut second).expect("render");
+    render_project(&gpu, &project_json(W, H, &explicit), &mut second).expect("render");
     assert_eq!(first.hashes, second.hashes);
 
     let tone = tone_clip_with_video();
     let source = json_path(&tone);
-    let audio = |speed: &str| format!(r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":90000{speed}}}]}}]}}"#);
+    let audio = |speed: &str| format!(r#"{{"version":1,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":90000{speed}}}]}}]}}"#);
     assert_eq!(render_pcm(&gpu, &audio("")), render_pcm(&gpu, &audio(r#","speed":1.0"#)), "the audio of 1x does not go through the stretcher");
 }
 
@@ -235,7 +230,7 @@ fn measured_hz(stereo: &[f32]) -> f64 {
 fn exported_pcm(gpu: &Arc<Gpu>, source_in: i64, duration: i64, speed: f64) -> Vec<f32> {
     let clip = tone_clip_with_video();
     let source = json_path(&clip);
-    let json = format!(r#"{{"version":2,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":{source_in},"duration":{duration},"speed":{speed}}}]}}]}}"#);
+    let json = format!(r#"{{"version":1,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"clips":[{{"source":"{source}","start":0,"source_in":{source_in},"duration":{duration},"speed":{speed}}}]}}]}}"#);
     let project = Project::from_json(&json).expect("project parses");
     let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
     assert!(validate(&project, paths.as_ref()).is_empty());
@@ -358,13 +353,9 @@ fn top_track_covers_the_bottom_one() {
     assert_eq!(read_frame_number(capture.frame(25), W), 25, "the bottom track again");
 }
 
-/// A clip placed by `placement` (a JSON object), needing a version 2 project.
+/// A clip placed by `placement` (a JSON object).
 fn placed_clip_json(source: &Path, start: i64, source_in: i64, duration: i64, placement: &str) -> String {
     format!(r#"{{"source":"{}","start":{},"source_in":{},"duration":{},"effects":[],"placement":{}}}"#, json_path(source), start * FRAME, source_in * FRAME, duration * FRAME, placement)
-}
-
-fn project_json_v2(width: u32, height: u32, tracks: &str) -> String {
-    project_json(width, height, tracks).replacen(r#""version":1"#, r#""version":2"#, 1)
 }
 
 const RIGHT_TOP_QUARTER: &str = r#"{"x":0.5,"y":0,"width":0.5}"#;
@@ -376,7 +367,7 @@ fn a_placed_clip_fills_only_its_rectangle_and_the_rest_is_black() {
     let Some(gpu) = gpu() else { return };
     let tracks = format!(r#"{{"clips":[{}]}}"#, placed_clip_json(&a, 0, 0, 3, RIGHT_TOP_QUARTER));
     let mut capture = Capture::new(&[1]);
-    render_project(&gpu, &project_json_v2(W, H, &tracks), &mut capture).expect("render");
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
     let frame = capture.frame(1);
     for (x, y) in [(40, 40), (160, 90), (160, 300), (300, 340)] {
         assert!(sample(frame, W, x, y) <= 4, "({x}, {y}) is outside the rectangle: {}", sample(frame, W, x, y));
@@ -394,7 +385,7 @@ fn a_lower_track_shows_through_where_a_placed_clip_does_not_cover() {
     let Some(gpu) = gpu() else { return };
     let tracks = format!(r#"{{"clips":[{}]}},{{"clips":[{}]}}"#, clip_json(&a, 0, 0, 3), placed_clip_json(&b, 0, 0, 3, RIGHT_TOP_QUARTER));
     let mut capture = Capture::new(&[1]);
-    render_project(&gpu, &project_json_v2(W, H, &tracks), &mut capture).expect("render");
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
     let frame = capture.frame(1);
     for (x, y) in [(40, 100), (160, 300), (480, 270), (600, 340)] {
         assert!((sample(frame, W, x, y) - GREY_A).abs() <= 6, "({x}, {y}) shows the lower track: {}", sample(frame, W, x, y));

@@ -158,7 +158,7 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
     let mut chosen = None;
     egui::ScrollArea::vertical().id_salt("media-grid").auto_shrink([false, false]).show(ui, |ui| chosen = media_grid(ui, state, &items, kind));
     if let Some(item) = chosen {
-        state.add_media_at_playhead(&item);
+        state.add_media_to_selected_track(&item);
     }
 }
 
@@ -196,7 +196,7 @@ fn sticker_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
     });
     sticker_problems(ui, state);
     if let Some(item) = chosen {
-        state.add_media_at_playhead(&item);
+        state.add_media_to_selected_track(&item);
     }
 }
 
@@ -304,7 +304,7 @@ fn sticker_problems(ui: &mut egui::Ui, state: &EditorState) {
 }
 
 /// One square tile of the Sticker tab: the picture on a checker-free dark background, its name below.
-/// Can be dragged onto a track like any media. True on a first click.
+/// Can be dragged onto a track like any media. True on a double click.
 fn sticker_tile(ui: &mut egui::Ui, state: &EditorState, sticker: &LibrarySticker, side: f32) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(side, side + TILE_CAPTION), Sense::click_and_drag());
     response.dnd_set_drag_payload(sticker.media_item());
@@ -328,7 +328,8 @@ fn sticker_tile(ui: &mut egui::Ui, state: &EditorState, sticker: &LibrarySticker
     let galley = painter.layout_job(job);
     painter.galley(egui::pos2(rect.left() + 2.0, picture.bottom() + (TILE_CAPTION - galley.size().y) / 2.0), galley, theme::text());
     let response = response.on_hover_text(sticker_tooltip(sticker));
-    response.clicked() && !response.double_clicked() && !response.triple_clicked()
+    // A single click is too easy to make by accident, so adding needs a double click.
+    response.double_clicked()
 }
 
 fn sticker_tooltip(sticker: &LibrarySticker) -> String {
@@ -409,7 +410,7 @@ fn audio_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
         library_problems(ui, state);
     });
     if let Some(item) = chosen {
-        state.add_media_at_playhead(&item);
+        state.add_media_to_selected_track(&item);
     }
     match acted {
         Some((sound, SoundAction::Listen)) => state.ui.preview_wish = Some(SoundPreviewWish::Play { source: sound.source, duration: sound.duration }),
@@ -509,8 +510,8 @@ fn empty_message(search: &str) -> Message {
     }
 }
 
-/// One tile of the grid, with a thumbnail of the file once it is made. True on a first click: the
-/// later clicks of a double click do not add the file again.
+/// One tile of the grid, with a thumbnail of the file once it is made. True on a double click of the
+/// tile or a click of its +.
 fn media_cell(ui: &mut egui::Ui, state: &EditorState, item: &MediaItem, size: Vec2, kind: MediaKind) -> bool {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
     response.dnd_set_drag_payload(item.clone());
@@ -545,7 +546,10 @@ fn media_cell(ui: &mut egui::Ui, state: &EditorState, item: &MediaItem, size: Ve
     let caption = rect.with_min_y(rect.bottom() - CELL_CAPTION).shrink2(Vec2::new(8.0, 0.0));
     painter.with_clip_rect(caption).text(caption.left_center(), Align2::LEFT_CENTER, &item.name, FontId::proportional(12.0), theme::text());
     let response = response.on_hover_text(&item.source);
-    response.clicked() && !response.double_clicked() && !response.triple_clicked()
+    // A single click on the tile is too easy to make by accident, so the tile needs a double click;
+    // its + still adds on a single click.
+    let on_plus = response.clicked() && response.interact_pointer_pos().is_some_and(|pos| plus.contains(pos));
+    on_plus || response.double_clicked()
 }
 
 /// The largest size of shape `aspect` inside `room`.

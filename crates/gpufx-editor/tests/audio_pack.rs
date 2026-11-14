@@ -71,7 +71,7 @@ impl Drop for Scratch {
 }
 
 fn project_text(source: &str) -> String {
-    format!(r#"{{"version":2,"output":{{"width":16,"height":16,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"kind":"audio","clips":[{{"source":"{source}","start":0,"source_in":0,"duration":90000}}]}}]}}"#)
+    format!(r#"{{"version":1,"output":{{"width":16,"height":16,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[{{"kind":"audio","clips":[{{"source":"{source}","start":0,"source_in":0,"duration":90000}}]}}]}}"#)
 }
 
 fn install(scratch: &Scratch, root: &Path) -> ImportOutcome {
@@ -132,7 +132,7 @@ fn a_project_missing_its_pack_says_which_one_and_an_escape_is_refused_for_agents
 }
 
 #[test]
-fn an_older_project_with_plain_sources_still_loads_unchanged() {
+fn a_project_with_plain_sources_loads_unchanged() {
     let scratch = Scratch::new("plain");
     let media = scratch.file("a.wav");
     std::fs::write(&media, wav_bytes()).unwrap();

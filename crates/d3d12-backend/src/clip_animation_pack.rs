@@ -18,8 +18,6 @@ use crate::paths::is_safe_id;
 
 /// What the `type` of a clip animation pack says, and the folder under `packages` it goes to.
 pub const CLIP_ANIMATION_FOLDER: &str = "clip-animation";
-/// The older name of the type, still accepted.
-pub const CLIP_ANIMATION_TYPE_ALIAS: &str = "text-animation";
 /// The longest default duration an item may ask for, in seconds.
 pub const MAX_DEFAULT_DURATION: f64 = 60.0;
 /// The kinds of clip an item may apply to.
@@ -31,7 +29,7 @@ pub const MAX_MANIFEST_ITEMS: usize = 16_384;
 
 /// Whether `kind` is the type of a clip animation pack.
 pub fn is_clip_animation_type(kind: &str) -> bool {
-    kind == CLIP_ANIMATION_FOLDER || kind == CLIP_ANIMATION_TYPE_ALIAS
+    kind == CLIP_ANIMATION_FOLDER
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

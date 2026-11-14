@@ -19,7 +19,9 @@ fn reference(preset: &str, ticks: i64) -> Option<AnimationRef> {
 fn project_with(clips: Vec<Clip>) -> Project {
     let mut p = project(FRAME, vec![]);
     p.version = engine::SUPPORTED_VERSION;
-    p.tracks.push(Track { kind: TrackKind::Video, clips, transitions: vec![], locked: false, hidden: false, subtitle: None });
+    // A track of text clips is a text track; anything else goes on a video track.
+    let kind = if !clips.is_empty() && clips.iter().all(|clip| clip.source == engine::TEXT_SOURCE) { TrackKind::Text } else { TrackKind::Video };
+    p.tracks.push(Track { kind, clips, transitions: vec![], locked: false, hidden: false, subtitle: None });
     p
 }
 

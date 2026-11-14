@@ -10,7 +10,7 @@ use crate::packages::short_name;
 use crate::timecode::{aspect_label, format_fps, format_timecode, from_seconds, to_seconds};
 use crate::timeline::view::content_end;
 use egui::{Rect, Stroke, UiBuilder, Vec2};
-use engine::{ClipKey, ClipProperty, Easing, Keyframe, KeyframeTarget, Time, Transition, TrackKind, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MAX_ROTATION, MIN_PLACEMENT_WIDTH};
+use engine::{ClipKey, ClipProperty, Easing, Keyframe, KeyframeTarget, Time, Transition, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MAX_ROTATION, MIN_PLACEMENT_WIDTH};
 use serde_json::{Map, Value};
 
 const HEADER_HEIGHT: f32 = 34.0;
@@ -149,7 +149,7 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         ui.add_enabled_ui(editable, |ui| super::animation_inspector::show(ui, state, id, &clip));
     }
 
-    if track_kind == TrackKind::Video {
+    if track_kind.shows_picture() {
         ui.separator();
         ui.add_enabled_ui(editable, |ui| {
             placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some() || ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)));
@@ -503,7 +503,7 @@ mod tests {
 
     fn selected_clip() -> EditorState {
         let mut state = EditorState::default();
-        state.add_track(TrackKind::Video);
+        state.add_track(engine::TrackKind::Video);
         state.add_clip_from_file(0, Path::new("a.mp4"));
         state.select(Some(ClipKey { track: 0, clip: 0 }));
         state

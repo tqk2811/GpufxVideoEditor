@@ -99,7 +99,7 @@ fn opens_a_project_edits_it_and_captures_by_time_and_by_frame() {
     let (a, b) = clip_paths();
     let dir = scratch("stdio");
     let file = dir.join("project.json");
-    let project = json!({"version": 2, "output": {"width": 640, "height": 360, "frame_duration": FRAME}, "tracks": [{"clips": [{"source": a, "start": 0, "source_in": 0, "duration": 60 * FRAME}]}]});
+    let project = json!({"version": 1, "output": {"width": 640, "height": 360, "frame_duration": FRAME}, "tracks": [{"clips": [{"source": a, "start": 0, "source_in": 0, "duration": 60 * FRAME}]}]});
     std::fs::write(&file, project.to_string()).unwrap();
 
     let mut client = Client::start();
@@ -149,7 +149,7 @@ fn clip_set_speed_changes_what_a_capture_shows() {
     let (a, _) = clip_paths();
     let dir = scratch("speed");
     let file = dir.join("project.json");
-    let project = json!({"version": 2, "output": {"width": 640, "height": 360, "frame_duration": FRAME}, "tracks": [{"clips": [{"source": a, "start": 0, "source_in": 0, "duration": 60 * FRAME}]}]});
+    let project = json!({"version": 1, "output": {"width": 640, "height": 360, "frame_duration": FRAME}, "tracks": [{"clips": [{"source": a, "start": 0, "source_in": 0, "duration": 60 * FRAME}]}]});
     std::fs::write(&file, project.to_string()).unwrap();
 
     let mut client = Client::start();
@@ -208,7 +208,7 @@ fn render_tool() -> std::path::PathBuf {
 fn long_project(file: &std::path::Path, clips: i64) {
     let (a, _) = clip_paths();
     let clips: Vec<Value> = (0..clips).map(|i| json!({"source": a, "start": i * 150 * FRAME, "source_in": 0, "duration": 150 * FRAME})).collect();
-    let project = json!({"version": 2, "output": {"width": 640, "height": 360, "frame_duration": FRAME}, "tracks": [{"clips": clips}]});
+    let project = json!({"version": 1, "output": {"width": 640, "height": 360, "frame_duration": FRAME}, "tracks": [{"clips": clips}]});
     std::fs::write(file, project.to_string()).unwrap();
 }
 

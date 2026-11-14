@@ -17,7 +17,7 @@ fn empty() -> Project {
 fn a_subtitle_track_is_added_with_its_cues_in_order() {
     let next = add_subtitle_track(&empty(), SubtitleTrack { style: Some("s/low".into()) }, vec![cue("B", 9000, 9000), cue("A", 0, 9000)]).unwrap();
     let track = &next.tracks[0];
-    assert!(track.is_subtitle() && track.kind == TrackKind::Video);
+    assert!(track.is_subtitle() && track.kind == TrackKind::Text);
     assert_eq!(track.clips.iter().map(|clip| clip.text.as_ref().unwrap().content.as_str()).collect::<Vec<_>>(), vec!["A", "B"]);
 }
 
@@ -46,7 +46,11 @@ fn a_bad_subtitle_track_is_invalid() {
     let mut audio = empty();
     audio.tracks.push(audio_track(vec![]));
     audio.tracks[0].subtitle = Some(SubtitleTrack::default());
-    assert_eq!(validate(&audio, &AcceptAll), vec![ValidationError::SubtitleOnAudioTrack { track: 0 }]);
+    assert_eq!(validate(&audio, &AcceptAll), vec![ValidationError::SubtitleNotOnTextTrack { track: 0 }]);
+    let mut video = empty();
+    video.tracks.push(track(vec![], vec![]));
+    video.tracks[0].subtitle = Some(SubtitleTrack::default());
+    assert_eq!(validate(&video, &AcceptAll), vec![ValidationError::SubtitleNotOnTextTrack { track: 0 }]);
 }
 
 #[test]

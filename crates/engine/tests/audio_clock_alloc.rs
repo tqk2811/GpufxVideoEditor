@@ -41,7 +41,7 @@ impl AudioSource for Silence {
 #[test]
 fn pull_does_not_allocate() {
     let project = Project::from_json(
-        r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
+        r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":90000}]}]}"#,
     )
     .expect("valid project");
@@ -61,7 +61,7 @@ fn pull_does_not_allocate() {
 #[test]
 fn discard_stale_does_not_allocate() {
     let project = Project::from_json(
-        r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
+        r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":90000}]}]}"#,
     )
     .expect("valid project");

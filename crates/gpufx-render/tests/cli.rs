@@ -139,7 +139,7 @@ const AUDIO_OUTPUT: &str = r#","audio":{"sample_rate":48000,"channels":2,"bitrat
 /// One clip of `seconds`, starting `source_in` seconds into `source`.
 fn audio_project(source: &std::path::Path, source_in: i64, seconds: i64, audio_output: &str) -> String {
     format!(
-        r#"{{"version":2,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}{audio_output}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}{audio_output}}},"tracks":[{{"clips":[
            {{"source":"{}","start":0,"source_in":{},"duration":{}}}]}}]}}"#,
         json_path(source),
         source_in * 90_000,

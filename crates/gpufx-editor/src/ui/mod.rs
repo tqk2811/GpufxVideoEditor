@@ -979,17 +979,20 @@ mod tests {
     }
 
     #[test]
-    fn double_clicking_a_media_tile_adds_one_clip() {
+    fn a_media_tile_adds_one_clip_on_a_double_click_only() {
         let mut state = state();
         state.library.add(crate::media::MediaItem { source: "b.mp4".to_owned(), name: "b.mp4".to_owned(), kind: crate::media::MediaKind::Video, duration: Some(seconds(2)), estimated: false });
         let left = panels(egui::vec2(1280.0, 720.0)).left;
         let at = egui::pos2(left.left() + 40.0 + 68.0, left.top() + 200.0);
+        let clips = |state: &EditorState| state.project().tracks.iter().map(|track| track.clips.len()).sum::<usize>();
         let ctx = egui::Context::default();
         click(&ctx, &mut state, at);
-        assert_eq!(state.project().tracks.iter().map(|track| track.clips.len()).sum::<usize>(), 2, "the first click adds the file");
+        assert_eq!(clips(&state), 1, "a single click adds nothing");
+        click(&ctx, &mut state, at);
+        assert_eq!(clips(&state), 2, "the double click adds the file");
         let tracks = state.project().tracks.len();
         click(&ctx, &mut state, at);
-        assert_eq!(state.project().tracks.iter().map(|track| track.clips.len()).sum::<usize>(), 2, "the second click of the double click adds nothing");
+        assert_eq!(clips(&state), 2, "the third click of a triple click adds nothing more");
         assert_eq!(state.project().tracks.len(), tracks, "and no spare track");
     }
 

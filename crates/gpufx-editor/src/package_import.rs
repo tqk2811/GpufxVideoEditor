@@ -455,7 +455,6 @@ mod tests {
         }
         assert_eq!(declared_package(br#"{"type":"sfx"}"#), Ok(Declared::Audio(AudioPackKind::Sfx)));
         assert_eq!(declared_package(br#"{"type":"clip-animation"}"#), Ok(Declared::ClipAnimation));
-        assert_eq!(declared_package(br#"{"type":"text-animation"}"#), Ok(Declared::ClipAnimation));
         assert_eq!(declared_package(br#"{"type":"text-style"}"#), Ok(Declared::TextStyle));
         assert_eq!(declared_package(br#"{"type":"subtitle-style"}"#), Ok(Declared::SubtitleStyle));
         assert_eq!(declared_package(br#"{"type":"music"}"#), Ok(Declared::Audio(AudioPackKind::Music)));

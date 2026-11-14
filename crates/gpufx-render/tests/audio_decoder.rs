@@ -253,7 +253,7 @@ fn a_mix_of_cuts_reads_the_right_seconds_of_the_source() {
         let source = path.file_name().and_then(|n| n.to_str()).expect("name").to_owned();
         // Two cuts of one file, the second earlier in the source than the first ended.
         let json = format!(
-            r#"{{"version":2,"output":{{"width":64,"height":64,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
                 {{"kind":"audio","clips":[
                   {{"source":"{source}","start":0,"source_in":315000,"duration":45000}},
                   {{"source":"{source}","start":45000,"source_in":157500,"duration":45000}}]}}]}}"#

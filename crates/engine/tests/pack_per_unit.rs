@@ -19,9 +19,11 @@ fn validate_rejects_a_per_unit_pack_preset_on_a_clip_that_is_not_text() {
     assert_eq!(validate(&p, &AcceptAll), vec![ValidationError::PerUnitAnimationNotText { track: 0, clip: 0, group: "in", preset: "pack/rise".into() }]);
     p.tracks[0].clips[0].source = TEXT_SOURCE.to_owned();
     p.tracks[0].clips[0].text = Some(engine::TextContent::new("Hi", 0.08));
+    p.tracks[0].kind = TrackKind::Text;
     assert_eq!(validate(&p, &AcceptAll), vec![], "for text it is fine");
     engine::set_pack_presets(PackPresets::default());
     p.tracks[0].clips[0].text = None;
     p.tracks[0].clips[0].source = "a.png".into();
+    p.tracks[0].kind = TrackKind::Video;
     assert_eq!(validate(&p, &AcceptAll), vec![], "a pack missing on this machine is left out, not refused");
 }

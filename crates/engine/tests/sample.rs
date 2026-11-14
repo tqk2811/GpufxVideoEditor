@@ -10,7 +10,7 @@ const SAMPLE: &str = include_str!("data/sample.json");
 #[test]
 fn sample_project_parses() {
     let p = Project::from_json(SAMPLE).expect("sample parses");
-    assert_eq!(p.version, 2, "a version 1 file loads as the current version");
+    assert_eq!(p.version, engine::SUPPORTED_VERSION);
     assert_eq!(
         (p.output.width, p.output.height, p.output.frame_duration),
         (1920, 1080, t(3000))

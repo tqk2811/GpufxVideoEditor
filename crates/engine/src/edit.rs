@@ -56,7 +56,8 @@ pub enum EditError {
     EffectNotFound { key: ClipKey, effect: usize },
     /// The track has no transition after this clip.
     TransitionNotFound { track: usize, after_clip: usize },
-    /// A clip can only move between tracks of the same kind.
+    /// The target track does not take this clip: between an audio track and a picture track, or
+    /// onto a picture track of a kind that refuses it (see [`TrackKind::accepts_clip`]).
     TrackKindMismatch { from: TrackKind, to: TrackKind },
     /// The target track has no valid position for the clip.
     NoRoom { track: usize },
@@ -316,7 +317,7 @@ pub fn remove_track(project: &Project, track: usize) -> Result<Project, EditErro
 pub fn add_subtitle_track(project: &Project, subtitle: SubtitleTrack, clips: Vec<Clip>) -> Result<Project, EditError> {
     let mut next = project.clone();
     let track = next.tracks.len();
-    let mut target = Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: Some(subtitle) };
+    let mut target = Track { kind: TrackKind::Text, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: Some(subtitle) };
     sort_track(&mut target);
     for pair in target.clips.windows(2) {
         let end = pair[0].start.saturating_add(pair[0].duration);
@@ -454,7 +455,7 @@ pub fn move_clip(
     let clip = clip_of(project, key)?;
     let from = project.tracks[key.track].kind;
     let target = track_of(project, target_track)?;
-    if from != target.kind {
+    if from != target.kind && (!from.shows_picture() || !target.kind.shows_picture() || !target.kind.accepts_clip(clip)) {
         return Err(EditError::TrackKindMismatch { from, to: target.kind });
     }
     let same_track = target_track == key.track;

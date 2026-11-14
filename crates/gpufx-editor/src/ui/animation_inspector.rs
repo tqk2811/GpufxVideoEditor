@@ -21,7 +21,7 @@ const GROUPS: [AnimationGroup; 3] = [AnimationGroup::Enter, AnimationGroup::Exit
 /// Whether a clip on a track of `kind` has a picture to animate: video, image, sticker and text
 /// clips do, sound does not.
 pub(super) fn shows_animation(kind: TrackKind) -> bool {
-    kind == TrackKind::Video
+    kind.shows_picture()
 }
 
 pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, id: egui::Id, clip: &Clip) {

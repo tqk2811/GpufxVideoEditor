@@ -61,9 +61,9 @@ fn the_mapping_does_not_drift_over_a_long_clip() {
 }
 
 #[test]
-fn a_speed_of_one_writes_no_field_and_an_old_file_round_trips_unchanged() {
-    let old = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[{"source":"a","start":0,"source_in":10,"duration":90000,"effects":[]}]}]}"#;
-    let parsed = Project::from_json(old).expect("old file");
+fn a_speed_of_one_writes_no_field_and_a_file_without_it_round_trips_unchanged() {
+    let old = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[{"source":"a","start":0,"source_in":10,"duration":90000,"effects":[]}]}]}"#;
+    let parsed = Project::from_json(old).expect("a file without speed");
     assert_eq!(parsed.tracks[0].clips[0].speed, 1.0);
     let saved = serde_json::to_string(&parsed).unwrap();
     assert!(!saved.contains("speed"), "{saved}");

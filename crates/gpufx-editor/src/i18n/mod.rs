@@ -65,6 +65,8 @@ pub enum StreamKind {
 pub enum TrackLabel {
     Video(usize),
     Audio(usize),
+    Sticker(usize),
+    Text(usize),
     Position(usize),
 }
 
@@ -129,7 +131,7 @@ pub enum Message {
     EditClipNotFound { track: TrackLabel, clip: usize },
     EditEffectNotFound { track: TrackLabel, clip: usize, effect: usize },
     EditTransitionNotFound { track: TrackLabel, after_clip: usize },
-    EditTrackKindMismatch { from: StreamKind, to: StreamKind },
+    EditTrackKindMismatch { from: engine::TrackKind, to: engine::TrackKind },
     EditNoRoom(TrackLabel),
     EditOverlap { track: TrackLabel, start: String, end: String },
     EditTimeOverflow { track: TrackLabel, clip: usize },
@@ -419,8 +421,12 @@ pub enum Message {
     AddTrack,
     AddVideoTrack,
     AddAudioTrack,
+    AddStickerTrack,
+    AddTextTrack,
     VideoTrackNumber(usize),
     AudioTrackNumber(usize),
+    StickerTrackNumber(usize),
+    TextTrackNumber(usize),
     AddClipFromFile,
     LockTrack,
     UnlockTrack,

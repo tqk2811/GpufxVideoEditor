@@ -815,7 +815,7 @@ mod tests {
         }
     }
 
-    const WITH_AUDIO: &str = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":100,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
+    const WITH_AUDIO: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":300}]}]}"#;
 
     fn run_audio(json: &str, source: &mut dyn AudioSource) -> Result<(AudioSink, RenderSummary), RenderError> {
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(opened, ["open a", "open c"]);
     }
 
-    const TEXT: &str = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const TEXT: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
         {"clips":[{"source":"text:","start":0,"source_in":0,"duration":300,"text":{"content":"Hi","size":0.1}}]}]}"#;
 
     #[test]

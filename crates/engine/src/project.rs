@@ -1,4 +1,4 @@
-//! Project model, matching the project JSON of the phase 1 and phase 2 specifications.
+//! Project model: the project JSON, in its one current format version.
 
 use crate::keyframe::{ClipMotion, Keyframe};
 use crate::time::Time;
@@ -7,16 +7,13 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// The newest project format version this engine understands.
-pub const SUPPORTED_VERSION: u32 = 2;
-
-/// The oldest project format version this engine still loads.
-pub const MIN_SUPPORTED_VERSION: u32 = 1;
+/// The project format version: the only one this engine reads and writes.
+pub const SUPPORTED_VERSION: u32 = 1;
 
 /// A whole project: output settings and tracks (bottom track first).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
-    /// Format version, from [`MIN_SUPPORTED_VERSION`] to [`SUPPORTED_VERSION`].
+    /// Format version; must be [`SUPPORTED_VERSION`].
     pub version: u32,
     /// Output frame size and cadence.
     pub output: Output,
@@ -58,6 +55,47 @@ pub enum TrackKind {
     Video,
     /// Clips that only contribute sound. The video scheduler ignores these tracks.
     Audio,
+    /// Still images and stickers, drawn like the clips of a video track.
+    Sticker,
+    /// Text clips only, drawn like the clips of a video track. Subtitle tracks are of this kind.
+    Text,
+}
+
+impl TrackKind {
+    /// Every kind, in the order the editor offers them.
+    pub const ALL: [TrackKind; 4] = [TrackKind::Video, TrackKind::Audio, TrackKind::Sticker, TrackKind::Text];
+
+    /// Whether clips of this kind are drawn into the picture: every kind but audio.
+    pub fn shows_picture(self) -> bool {
+        self != TrackKind::Audio
+    }
+
+    /// Whether a clip of `source` may go on a track of this kind, judged from the source alone;
+    /// [`TEXT_SOURCE`] stands for a text clip. The one rule every caller shares:
+    ///
+    /// - video: video files and images, not stickers and not text;
+    /// - audio: media files that are not images and not text (whether the file really has sound
+    ///   is up to the resolver, see [`crate::SourceResolver::source_has_audio`]);
+    /// - sticker: images and stickers;
+    /// - text: text clips only.
+    pub fn accepts_source(self, source: &str) -> bool {
+        let text = source == TEXT_SOURCE;
+        match self {
+            TrackKind::Video => !text && !is_sticker_source(source),
+            TrackKind::Audio => !text && !is_image_source(source) && !is_sticker_source(source),
+            TrackKind::Sticker => !text && (is_image_source(source) || is_sticker_source(source)),
+            TrackKind::Text => text,
+        }
+    }
+
+    /// Whether `clip` may go on a track of this kind; see [`TrackKind::accepts_source`].
+    pub fn accepts_clip(self, clip: &Clip) -> bool {
+        if clip.is_text() {
+            self == TrackKind::Text
+        } else {
+            self.accepts_source(&clip.source)
+        }
+    }
 }
 
 /// One track: clips plus the transitions between neighbouring clips.
@@ -78,8 +116,8 @@ pub struct Track {
     /// of the project, so hiding a track does not change where anything ends.
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
-    /// Present on a subtitle track: a video track made by importing subtitles, with one text clip
-    /// per cue. Absent on every other track, so older projects load and save unchanged.
+    /// Present on a subtitle track: a text track made by importing subtitles, with one text clip
+    /// per cue. Absent on every other track.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<SubtitleTrack>,
 }
@@ -125,7 +163,7 @@ pub struct Clip {
     pub fade_out: Time,
     /// Playback speed: a timeline tick reads `speed` source ticks, so `duration` is the length on
     /// the timeline and `duration * speed` is the source consumed. 1 when absent, and left out of
-    /// the file when 1, so older projects load and save unchanged.
+    /// the file when 1.
     #[serde(default = "default_speed", skip_serializing_if = "is_unit_speed")]
     pub speed: f64,
     /// Where the picture sits in the frame. Absent: as large as fits, centred, in its own shape.
@@ -135,7 +173,7 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "ClipMotion::is_default")]
     pub motion: ClipMotion,
     /// What a text clip shows and how. Present only on text clips, whose `source` is
-    /// [`TEXT_SOURCE`]; absent on media clips, so older projects load and save unchanged.
+    /// [`TEXT_SOURCE`]; absent on media clips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<TextContent>,
     /// Preset animations of the picture of the clip (video, image, sticker or text). Left out of
@@ -196,8 +234,7 @@ pub struct TextContent {
     /// editor sets it when a style is applied to this clip alone.
     #[serde(default, skip_serializing_if = "is_false")]
     pub own_style: bool,
-    /// Marks each word as it is spoken. Absent on texts without karaoke, so older projects load
-    /// and save unchanged.
+    /// Marks each word as it is spoken. Absent on texts without karaoke.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub karaoke: Option<crate::karaoke::TextKaraoke>,
 }
@@ -619,7 +656,7 @@ impl fmt::Display for LoadError {
             LoadError::UnsupportedVersion(v) => {
                 write!(
                     f,
-                    "unsupported project version {v} (supported: {MIN_SUPPORTED_VERSION} to {SUPPORTED_VERSION})"
+                    "unsupported project version {v} (supported: {SUPPORTED_VERSION})"
                 )
             }
         }
@@ -628,100 +665,33 @@ impl fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-/// The version 1 format, frozen. Unknown fields are ignored, so a version 1 file that happens to
-/// contain fields named like the version 2 ones still loads exactly as it always did.
-#[derive(Deserialize)]
-struct ProjectV1 {
-    version: u32,
-    output: OutputV1,
-    tracks: Vec<TrackV1>,
-}
-
-#[derive(Deserialize)]
-struct OutputV1 {
-    width: u32,
-    height: u32,
-    frame_duration: Time,
-}
-
-#[derive(Deserialize)]
-struct TrackV1 {
-    clips: Vec<ClipV1>,
-    #[serde(default)]
-    transitions: Vec<Transition>,
-}
-
-#[derive(Deserialize)]
-struct ClipV1 {
-    source: String,
-    start: Time,
-    source_in: Time,
-    duration: Time,
-    #[serde(default)]
-    effects: Vec<Effect>,
-}
-
-impl From<ProjectV1> for Project {
-    fn from(project: ProjectV1) -> Project {
-        Project {
-            version: SUPPORTED_VERSION,
-            output: Output {
-                width: project.output.width,
-                height: project.output.height,
-                frame_duration: project.output.frame_duration,
-                audio: None,
-            },
-            tracks: project
-                .tracks
-                .into_iter()
-                .map(|track| Track {
-                    kind: TrackKind::Video,
-                    clips: track
-                        .clips
-                        .into_iter()
-                        .map(|clip| Clip {
-                            source: clip.source,
-                            start: clip.start,
-                            source_in: clip.source_in,
-                            duration: clip.duration,
-                            // Version 1 has no keyframes, whatever such a field may say.
-                            effects: clip.effects.into_iter().map(|effect| Effect { keyframes: BTreeMap::new(), ..effect }).collect(),
-                            gain_db: 0.0,
-                            muted: false,
-                            fade_in: Time::ZERO,
-                            fade_out: Time::ZERO,
-                            speed: 1.0,
-                            placement: None,
-                            motion: ClipMotion::default(),
-                            text: None,
-                            animation: ClipAnimation::default(),
-                        })
-                        .collect(),
-                    transitions: track.transitions,
-                    locked: false,
-                    hidden: false,
-                    subtitle: None,
-                })
-                .collect(),
-        }
-    }
-}
-
 impl Project {
     /// Parses a project and rejects unknown versions. Does not run [`crate::validate`].
     pub fn from_json(text: &str) -> Result<Project, LoadError> {
-        // Every version has at least the version 1 fields, so this also finds the version.
-        let v1: ProjectV1 = serde_json::from_str(text).map_err(LoadError::Json)?;
-        match v1.version {
-            1 => Ok(v1.into()),
-            SUPPORTED_VERSION => serde_json::from_str(text).map_err(LoadError::Json),
-            other => Err(LoadError::UnsupportedVersion(other)),
+        /// Only the version, read first, so a file of another version is refused as such and not
+        /// as a field that does not parse.
+        #[derive(Deserialize)]
+        struct Versioned {
+            version: u32,
         }
+        let versioned: Versioned = serde_json::from_str(text).map_err(LoadError::Json)?;
+        if versioned.version != SUPPORTED_VERSION {
+            return Err(LoadError::UnsupportedVersion(versioned.version));
+        }
+        serde_json::from_str(text).map_err(LoadError::Json)
     }
 }
 
 /// The extensions of the still images a clip may show, lower-cased.
 pub const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+
+/// The start of the source of every sticker: `asset:sticker/<pack id>/<file>`.
+pub const STICKER_SOURCE_PREFIX: &str = "asset:sticker/";
+
+/// Whether `source` is a sticker of an installed sticker pack.
+pub fn is_sticker_source(source: &str) -> bool {
+    source.starts_with(STICKER_SOURCE_PREFIX)
+}
 
 /// Whether `source`, a path or an `asset:` source, names a still image, by its extension.
 pub fn is_image_source(source: &str) -> bool {

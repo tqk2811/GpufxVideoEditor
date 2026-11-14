@@ -186,7 +186,7 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
         return Err(AgentError::from_edit(&engine::EditError::TrackNotFound { track }));
     };
     let (present, stated, stream, problem) = match target.kind {
-        TrackKind::Video => (probe.has_video, probe.video_duration, "video", probe.video_problem),
+        TrackKind::Video | TrackKind::Sticker | TrackKind::Text => (probe.has_video, probe.video_duration, "video", probe.video_problem),
         TrackKind::Audio => (probe.has_audio, probe.audio_duration, "audio", probe.audio_problem),
     };
     if !present {
@@ -281,14 +281,14 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             };
             let (track, new_track) = match track {
                 Some(track) => (track, false),
-                None => match choose_track(state.project(), TrackKind::Video, duration, start) {
+                None => match choose_track(state.project(), TrackKind::Text, duration, start) {
                     TrackChoice::Existing(track) => (track, false),
                     TrackChoice::New => (state.project().tracks.len(), true),
                 },
             };
             state
                 .apply_agent_command(|project| {
-                    let with_track = if new_track { engine::add_track(project, TrackKind::Video)? } else { project.clone() };
+                    let with_track = if new_track { engine::add_track(project, TrackKind::Text)? } else { project.clone() };
                     let next = engine::add_text_clip(&with_track, track, start, duration, text)?;
                     let Some(key) = clip_at(&next, track, start) else { return Ok(next) };
                     let next = match animation {
