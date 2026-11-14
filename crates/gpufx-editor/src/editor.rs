@@ -1483,13 +1483,27 @@ impl EditorState {
 
     /// Adds `item` at the playhead, on a track with room or a new one, as one undo step.
     pub fn add_media_at_playhead(&mut self, item: &MediaItem) {
+        self.add_media(item, false);
+    }
+
+    /// Adds `item` at the end of the selected clip's track when the selected clip is of the same
+    /// sort (video, sound or sticker); else at the playhead like
+    /// [`Self::add_media_at_playhead`].
+    pub fn add_media_to_selected_track(&mut self, item: &MediaItem) {
+        self.add_media(item, true);
+    }
+
+    fn add_media(&mut self, item: &MediaItem, to_selected_track: bool) {
         if self.edits_blocked() {
             return;
         }
         let duration = item.duration.unwrap_or(DEFAULT_CLIP_DURATION);
-        let start = self.playhead;
         let track_kind = item.kind.track_kind();
-        let choice = choose_track(self.project(), track_kind, duration, start);
+        let at_end = self.selection.filter(|_| to_selected_track).and_then(|key| crate::media::end_of_selected_track(self.project(), key, item));
+        let (choice, start) = match at_end {
+            Some((track, end)) => (TrackChoice::Existing(track), end),
+            None => (choose_track(self.project(), track_kind, duration, self.playhead), self.playhead),
+        };
         let track = match choice {
             TrackChoice::Existing(index) => index,
             TrackChoice::New => self.project().tracks.len(),
@@ -1824,7 +1838,7 @@ impl EditorState {
     /// A clip of `item`. A sticker comes small and centred, not as large as fits like other media.
     fn new_library_clip(&self, item: &MediaItem, start: Time, duration: Time) -> Clip {
         let mut clip = new_clip(&item.source, start, duration);
-        if item.source.starts_with("asset:sticker/") {
+        if crate::media::is_sticker(&item.source) {
             let output = &self.project().output;
             let output_aspect = f64::from(output.width) / f64::from(output.height.max(1));
             let source_aspect = self.sticker_library.aspect_of(&item.source).unwrap_or(1.0);
@@ -3840,6 +3854,20 @@ mod tests {
         assert_eq!(state.selection(), Some(key(0)));
         state.undo();
         assert_eq!(state.project(), &before, "the track and the clip are one step");
+    }
+
+    #[test]
+    fn media_of_the_selected_track_kind_goes_at_the_end_of_that_track() {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        let end = state.project().tracks[0].clips[0].end().unwrap();
+        state.set_playhead(Time::ZERO);
+        state.add_media_to_selected_track(&media("b.mp4", crate::media::MediaKind::Video, Some(3)));
+        assert_eq!(state.project().tracks.len(), 2, "no new track");
+        assert_eq!(clips(state.project(), 0)[1], (end, seconds(3)));
+        assert_eq!(state.selection(), Some(ClipKey { track: 0, clip: 1 }), "the new clip is selected, so the next one follows it");
+        state.add_media_to_selected_track(&media("m.wav", crate::media::MediaKind::Audio, Some(1)));
+        assert_eq!(state.project().tracks[1].clips[0].start, Time::ZERO, "another kind goes to the playhead");
     }
 
     #[test]

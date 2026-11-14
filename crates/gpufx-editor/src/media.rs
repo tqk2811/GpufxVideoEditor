@@ -1,7 +1,7 @@
 //! The media imported in this session and where a new clip lands. No window here.
 
 use d3d12_backend::MediaProbe;
-use engine::{nearest_free_start, Project, Time, TrackKind};
+use engine::{nearest_free_start, ClipKey, Project, Time, TrackKind};
 
 use crate::editor::{clip_label, DEFAULT_IMAGE_DURATION};
 use crate::project_file::same_source;
@@ -112,6 +112,24 @@ pub fn choose_track(project: &Project, kind: TrackKind, duration: Time, playhead
     found.map_or(TrackChoice::New, TrackChoice::Existing)
 }
 
+/// True for the source of a sticker of the library.
+pub fn is_sticker(source: &str) -> bool {
+    source.starts_with("asset:sticker/")
+}
+
+/// Where a clip of `item` goes when clip `selected` is selected: at the end of the selected clip's
+/// track, after its last clip, when the selected clip is of the same sort: a video file after a
+/// video, a sound after a sound, a sticker after a sticker. `None` otherwise, or when that track is
+/// locked or hidden, so the clip goes to the playhead instead.
+pub fn end_of_selected_track(project: &Project, selected: ClipKey, item: &MediaItem) -> Option<(usize, Time)> {
+    let track = project.tracks.get(selected.track).filter(|track| track.kind == item.kind.track_kind() && !track.locked && !track.hidden)?;
+    if is_sticker(&track.clips.get(selected.clip)?.source) != is_sticker(&item.source) {
+        return None;
+    }
+    let end = track.clips.iter().filter_map(|clip| clip.end()).max()?;
+    Some((selected.track, end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +150,27 @@ mod tests {
 
     fn probe(video: Option<i64>, audio: Option<i64>) -> MediaProbe {
         MediaProbe { has_video: video.is_some(), has_audio: audio.is_some(), video_duration: video.map(seconds), audio_duration: audio.map(seconds), video_problem: None, audio_problem: None }
+    }
+
+    #[test]
+    fn a_clip_goes_at_the_end_of_the_selected_clip_track() {
+        let item = |source: &str, kind| MediaItem { source: source.to_owned(), name: String::new(), kind, duration: None, estimated: false };
+        let video = item("b.mp4", MediaKind::Video);
+        let timeline = project(vec![track(TrackKind::Video, &[(0, 2), (5, 2)])]);
+        let first = ClipKey { track: 0, clip: 0 };
+        assert_eq!(end_of_selected_track(&timeline, first, &video), Some((0, seconds(7))), "after the last clip, not the selected one");
+        assert_eq!(end_of_selected_track(&timeline, first, &item("m.wav", MediaKind::Audio)), None, "another kind");
+        assert_eq!(end_of_selected_track(&timeline, first, &item("asset:sticker/p/a.png", MediaKind::Video)), None, "a sticker after a video");
+        let mut stickers = timeline.clone();
+        stickers.tracks[0].clips[0].source = "asset:sticker/p/b.png".to_owned();
+        assert_eq!(end_of_selected_track(&stickers, first, &item("asset:sticker/p/a.png", MediaKind::Video)), Some((0, seconds(7))), "a sticker after a sticker");
+        assert_eq!(end_of_selected_track(&stickers, first, &video), None, "a video after a sticker");
+        let mut locked = timeline.clone();
+        locked.tracks[0].locked = true;
+        assert_eq!(end_of_selected_track(&locked, first, &video), None, "a locked track");
+        locked.tracks[0].locked = false;
+        locked.tracks[0].hidden = true;
+        assert_eq!(end_of_selected_track(&locked, first, &video), None, "a hidden track");
     }
 
     #[test]

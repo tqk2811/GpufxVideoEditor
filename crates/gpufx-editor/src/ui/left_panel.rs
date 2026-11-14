@@ -158,7 +158,7 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
     let mut chosen = None;
     egui::ScrollArea::vertical().id_salt("media-grid").auto_shrink([false, false]).show(ui, |ui| chosen = media_grid(ui, state, &items, kind));
     if let Some(item) = chosen {
-        state.add_media_at_playhead(&item);
+        state.add_media_to_selected_track(&item);
     }
 }
 
@@ -196,7 +196,7 @@ fn sticker_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
     });
     sticker_problems(ui, state);
     if let Some(item) = chosen {
-        state.add_media_at_playhead(&item);
+        state.add_media_to_selected_track(&item);
     }
 }
 
@@ -410,7 +410,7 @@ fn audio_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
         library_problems(ui, state);
     });
     if let Some(item) = chosen {
-        state.add_media_at_playhead(&item);
+        state.add_media_to_selected_track(&item);
     }
     match acted {
         Some((sound, SoundAction::Listen)) => state.ui.preview_wish = Some(SoundPreviewWish::Play { source: sound.source, duration: sound.duration }),
