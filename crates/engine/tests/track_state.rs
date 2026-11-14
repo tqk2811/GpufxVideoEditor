@@ -225,9 +225,9 @@ fn old_project_files_load_and_new_fields_round_trip() {
 }
 
 #[test]
-fn a_version_1_file_gets_no_flags() {
+fn a_file_of_another_version_is_refused() {
     let v1 = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[],"locked":true}]}"#;
-    assert!(!Project::from_json(v1).unwrap().tracks[0].locked, "version 1 has no such field");
+    assert!(matches!(Project::from_json(v1), Err(engine::LoadError::UnsupportedVersion(1))));
 }
 
 #[test]

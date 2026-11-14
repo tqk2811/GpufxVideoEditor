@@ -57,14 +57,6 @@ fn a_file_of_an_older_version_loads_with_no_motion() {
 }
 
 #[test]
-fn a_version_one_file_ignores_motion_and_effect_keyframes_as_it_always_did() {
-    let text = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[{"clips":[{"source":"a","start":0,"source_in":0,"duration":200,"motion":{"opacity":0.5},"effects":[{"package":"blur","params":{},"keyframes":{"radius":[{"at":0,"value":1}]}}]}]}]}"#;
-    let loaded = Project::from_json(text).unwrap();
-    assert_eq!(clip_of(&loaded, 0).motion, Default::default());
-    assert!(clip_of(&loaded, 0).effects[0].keyframes.is_empty());
-}
-
-#[test]
 fn motion_survives_a_save_and_a_load() {
     let mut original = animated();
     original.version = engine::SUPPORTED_VERSION;

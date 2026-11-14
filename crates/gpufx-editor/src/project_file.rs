@@ -341,10 +341,11 @@ mod tests {
     }
 
     #[test]
-    fn an_older_version_opens() {
-        let text = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[]}]}"#;
+    fn only_the_current_version_opens() {
+        let text = r#"{"version":2,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[]}]}"#;
         let opened = parse_project(text, Path::new(r"D:\p.json"), &AcceptAll).unwrap();
         assert_eq!(opened.version, SUPPORTED_VERSION);
+        assert!(parse_project(&text.replace(r#""version":2"#, r#""version":1"#), Path::new(r"D:\p.json"), &AcceptAll).is_err());
     }
 
     fn project_at(frame_duration: i64) -> String {

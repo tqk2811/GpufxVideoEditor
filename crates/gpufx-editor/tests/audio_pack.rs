@@ -132,7 +132,7 @@ fn a_project_missing_its_pack_says_which_one_and_an_escape_is_refused_for_agents
 }
 
 #[test]
-fn an_older_project_with_plain_sources_still_loads_unchanged() {
+fn a_project_with_plain_sources_loads_unchanged() {
     let scratch = Scratch::new("plain");
     let media = scratch.file("a.wav");
     std::fs::write(&media, wav_bytes()).unwrap();

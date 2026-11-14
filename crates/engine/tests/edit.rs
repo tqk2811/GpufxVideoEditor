@@ -88,8 +88,7 @@ fn a_new_output_shape_keeps_the_position_and_width_and_not_the_stretch() {
 
 #[test]
 fn a_placement_is_left_out_of_the_file_when_absent_and_read_back_when_set() {
-    let mut start = project(3_000, vec![track(vec![clip("a", 0, 0, 9_000)], vec![])]);
-    start.version = 2; // a version 1 file has no placement, so the editor always saves version 2
+    let start = project(3_000, vec![track(vec![clip("a", 0, 0, 9_000)], vec![])]);
     let text = serde_json::to_string(&start).unwrap();
     assert!(!text.contains("placement"), "{text}");
     let placed = set_placement(&start, ClipKey { track: 0, clip: 0 }, Some(ClipPlacement { x: 0.5, y: 0.5, width: 0.25 })).unwrap();

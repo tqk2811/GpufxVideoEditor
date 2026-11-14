@@ -45,7 +45,7 @@ pub fn transition(after_clip: usize, duration: i64) -> Transition {
 
 pub fn project(frame_duration: i64, tracks: Vec<Track>) -> Project {
     Project {
-        version: 1,
+        version: engine::SUPPORTED_VERSION,
         output: Output {
             width: 1920,
             height: 1080,

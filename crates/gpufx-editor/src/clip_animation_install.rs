@@ -1,6 +1,6 @@
 //! Installing a clip animation pack from a `.zip`. No window here.
 //!
-//! A zip with `"type": "clip-animation"` (or its older name `text-animation`) is unpacked once to
+//! A zip with `"type": "clip-animation"` is unpacked once to
 //! `<user root>/packages/clip-animation/<id lower-cased>/` through the same path as a sticker pack.
 //! It holds no media: only the manifest, whose items are animation curves, and its licence files.
 //! A clip names an item as `"<pack id>/<item id>"` (see [`crate::clip_animation_library`]).
@@ -144,16 +144,6 @@ mod tests {
         let manifest = parse_clip_animation_manifest(&fs::read(installed_folder(&root).join("manifest.json")).unwrap()).unwrap();
         assert_eq!(manifest.items[0].group(), Some(AnimationGroup::Enter));
         assert!(!root.join("packages/.install-tmp").exists(), "no working folder stays");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn the_older_type_name_installs_to_the_same_folder() {
-        let dir = scratch("alias");
-        let root = dir.join("root");
-        let manifest = MANIFEST_JSON.replace(r#""type":"clip-animation""#, r#""type":"text-animation""#);
-        assert!(matches!(install_zip(&written(&dir, &pack(&manifest)), &root, false), Ok(ImportOutcome::ClipAnimationInstalled(_))));
-        assert!(installed_folder(&root).join("manifest.json").is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 

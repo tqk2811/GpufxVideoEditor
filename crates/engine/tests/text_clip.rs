@@ -40,15 +40,15 @@ fn text_clip_round_trips_through_json() {
 }
 
 #[test]
-fn a_font_file_round_trips_and_an_older_font_still_loads() {
+fn a_font_file_and_a_system_font_round_trip() {
     let mut c = text_clip("Hi", 0, 9000);
     c.text.as_mut().unwrap().font = FontRef::File { path: "fonts/My Font.ttf".into() };
     let p = project_with(vec![c]);
     let json = serde_json::to_string(&p).unwrap();
     assert!(json.contains(r#""font":{"kind":"file","path":"fonts/My Font.ttf"}"#), "{json}");
     assert_eq!(Project::from_json(&json).unwrap(), p);
-    let older: FontRef = serde_json::from_str(r#"{"kind":"system","family":"Arial"}"#).unwrap();
-    assert_eq!(older, FontRef::System { family: "Arial".into() });
+    let system: FontRef = serde_json::from_str(r#"{"kind":"system","family":"Arial"}"#).unwrap();
+    assert_eq!(system, FontRef::System { family: "Arial".into() });
     assert_eq!(serde_json::from_str::<FontRef>(r#"{"kind":"default"}"#).unwrap(), FontRef::Default);
 }
 

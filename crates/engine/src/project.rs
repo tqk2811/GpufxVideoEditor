@@ -1,4 +1,4 @@
-//! Project model, matching the project JSON of the phase 1 and phase 2 specifications.
+//! Project model: the project JSON, in its one current format version.
 
 use crate::keyframe::{ClipMotion, Keyframe};
 use crate::time::Time;
@@ -7,16 +7,13 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// The newest project format version this engine understands.
+/// The project format version: the only one this engine reads and writes.
 pub const SUPPORTED_VERSION: u32 = 2;
-
-/// The oldest project format version this engine still loads.
-pub const MIN_SUPPORTED_VERSION: u32 = 1;
 
 /// A whole project: output settings and tracks (bottom track first).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
-    /// Format version, from [`MIN_SUPPORTED_VERSION`] to [`SUPPORTED_VERSION`].
+    /// Format version; must be [`SUPPORTED_VERSION`].
     pub version: u32,
     /// Output frame size and cadence.
     pub output: Output,
@@ -120,7 +117,7 @@ pub struct Track {
     #[serde(default, skip_serializing_if = "is_false")]
     pub hidden: bool,
     /// Present on a subtitle track: a text track made by importing subtitles, with one text clip
-    /// per cue. Absent on every other track, so older projects load and save unchanged.
+    /// per cue. Absent on every other track.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<SubtitleTrack>,
 }
@@ -166,7 +163,7 @@ pub struct Clip {
     pub fade_out: Time,
     /// Playback speed: a timeline tick reads `speed` source ticks, so `duration` is the length on
     /// the timeline and `duration * speed` is the source consumed. 1 when absent, and left out of
-    /// the file when 1, so older projects load and save unchanged.
+    /// the file when 1.
     #[serde(default = "default_speed", skip_serializing_if = "is_unit_speed")]
     pub speed: f64,
     /// Where the picture sits in the frame. Absent: as large as fits, centred, in its own shape.
@@ -176,7 +173,7 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "ClipMotion::is_default")]
     pub motion: ClipMotion,
     /// What a text clip shows and how. Present only on text clips, whose `source` is
-    /// [`TEXT_SOURCE`]; absent on media clips, so older projects load and save unchanged.
+    /// [`TEXT_SOURCE`]; absent on media clips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<TextContent>,
     /// Preset animations of the picture of the clip (video, image, sticker or text). Left out of
@@ -237,8 +234,7 @@ pub struct TextContent {
     /// editor sets it when a style is applied to this clip alone.
     #[serde(default, skip_serializing_if = "is_false")]
     pub own_style: bool,
-    /// Marks each word as it is spoken. Absent on texts without karaoke, so older projects load
-    /// and save unchanged.
+    /// Marks each word as it is spoken. Absent on texts without karaoke.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub karaoke: Option<crate::karaoke::TextKaraoke>,
 }
@@ -660,7 +656,7 @@ impl fmt::Display for LoadError {
             LoadError::UnsupportedVersion(v) => {
                 write!(
                     f,
-                    "unsupported project version {v} (supported: {MIN_SUPPORTED_VERSION} to {SUPPORTED_VERSION})"
+                    "unsupported project version {v} (supported: {SUPPORTED_VERSION})"
                 )
             }
         }
@@ -669,95 +665,20 @@ impl fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
-/// The version 1 format, frozen. Unknown fields are ignored, so a version 1 file that happens to
-/// contain fields named like the version 2 ones still loads exactly as it always did.
-#[derive(Deserialize)]
-struct ProjectV1 {
-    version: u32,
-    output: OutputV1,
-    tracks: Vec<TrackV1>,
-}
-
-#[derive(Deserialize)]
-struct OutputV1 {
-    width: u32,
-    height: u32,
-    frame_duration: Time,
-}
-
-#[derive(Deserialize)]
-struct TrackV1 {
-    clips: Vec<ClipV1>,
-    #[serde(default)]
-    transitions: Vec<Transition>,
-}
-
-#[derive(Deserialize)]
-struct ClipV1 {
-    source: String,
-    start: Time,
-    source_in: Time,
-    duration: Time,
-    #[serde(default)]
-    effects: Vec<Effect>,
-}
-
-impl From<ProjectV1> for Project {
-    fn from(project: ProjectV1) -> Project {
-        Project {
-            version: SUPPORTED_VERSION,
-            output: Output {
-                width: project.output.width,
-                height: project.output.height,
-                frame_duration: project.output.frame_duration,
-                audio: None,
-            },
-            tracks: project
-                .tracks
-                .into_iter()
-                .map(|track| Track {
-                    kind: TrackKind::Video,
-                    clips: track
-                        .clips
-                        .into_iter()
-                        .map(|clip| Clip {
-                            source: clip.source,
-                            start: clip.start,
-                            source_in: clip.source_in,
-                            duration: clip.duration,
-                            // Version 1 has no keyframes, whatever such a field may say.
-                            effects: clip.effects.into_iter().map(|effect| Effect { keyframes: BTreeMap::new(), ..effect }).collect(),
-                            gain_db: 0.0,
-                            muted: false,
-                            fade_in: Time::ZERO,
-                            fade_out: Time::ZERO,
-                            speed: 1.0,
-                            placement: None,
-                            motion: ClipMotion::default(),
-                            text: None,
-                            animation: ClipAnimation::default(),
-                        })
-                        .collect(),
-                    transitions: track.transitions,
-                    locked: false,
-                    hidden: false,
-                    subtitle: None,
-                })
-                .collect(),
-        }
-    }
-}
-
 impl Project {
     /// Parses a project and rejects unknown versions. Does not run [`crate::validate`].
     pub fn from_json(text: &str) -> Result<Project, LoadError> {
-        // Every version has at least the version 1 fields, so this also finds the version.
-        let v1: ProjectV1 = serde_json::from_str(text).map_err(LoadError::Json)?;
-        match v1.version {
-            1 => Ok(v1.into()),
-            SUPPORTED_VERSION => serde_json::from_str(text).map_err(LoadError::Json),
-            other => Err(LoadError::UnsupportedVersion(other)),
+        /// Only the version, read first, so a file of another version is refused as such and not
+        /// as a field that does not parse.
+        #[derive(Deserialize)]
+        struct Versioned {
+            version: u32,
         }
+        let versioned: Versioned = serde_json::from_str(text).map_err(LoadError::Json)?;
+        if versioned.version != SUPPORTED_VERSION {
+            return Err(LoadError::UnsupportedVersion(versioned.version));
+        }
+        serde_json::from_str(text).map_err(LoadError::Json)
     }
 }
 

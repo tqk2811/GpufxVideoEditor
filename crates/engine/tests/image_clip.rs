@@ -76,9 +76,9 @@ fn the_speed_of_an_image_cannot_be_changed() {
 }
 
 #[test]
-fn a_file_of_the_previous_format_with_an_image_loads_and_saves_without_new_fields() {
+fn a_file_with_an_image_loads_and_saves_without_new_fields() {
     let json = r#"{"version":2,"output":{"width":320,"height":180,"frame_duration":3000},"tracks":[{"clips":[{"source":"a.mp4","start":0,"source_in":0,"duration":90000},{"source":"logo.png","start":90000,"source_in":0,"duration":90000}]}]}"#;
-    let loaded = Project::from_json(json).expect("a version 2 file loads");
+    let loaded = Project::from_json(json).expect("the file loads");
     assert!(validate(&loaded, &AcceptAll).is_empty());
     assert!(!loaded.tracks[0].clips[0].is_image());
     assert!(loaded.tracks[0].clips[1].is_image());
@@ -86,12 +86,4 @@ fn a_file_of_the_previous_format_with_an_image_loads_and_saves_without_new_field
     assert_eq!(Project::from_json(&saved).unwrap(), loaded, "round trip");
     assert!(!saved.contains("image"), "no field is added: {saved}");
     assert!(saved.contains(r#""version":2"#));
-}
-
-#[test]
-fn a_version_one_project_with_no_images_is_read_as_before() {
-    let json = r#"{"version":1,"output":{"width":320,"height":180,"frame_duration":3000},"tracks":[{"clips":[{"source":"a.mp4","start":0,"source_in":0,"duration":90000}]}]}"#;
-    let loaded = Project::from_json(json).expect("a version 1 file loads");
-    assert_eq!(loaded.tracks[0].clips[0].source, "a.mp4");
-    assert!(validate(&loaded, &AcceptAll).is_empty());
 }

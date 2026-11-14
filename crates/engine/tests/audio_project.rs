@@ -1,5 +1,4 @@
-//! Audio fields of the project model: version 2 loading, version 1 compatibility and the
-//! validation errors of the audio specification, one test per error.
+//! Audio fields of the project model: loading and the validation errors of the audio specification, one test per error.
 
 mod common;
 
@@ -71,33 +70,6 @@ fn version_2_round_trips_through_json() {
     let p = Project::from_json(SPEC_EXAMPLE).unwrap();
     let text = serde_json::to_string(&p).unwrap();
     assert_eq!(Project::from_json(&text).unwrap(), p);
-}
-
-#[test]
-fn version_1_ignores_fields_of_version_2() {
-    // Version 1 never read these fields, so neither their values nor their shape may matter.
-    let text = r#"{"version":1,"output":{"width":1,"height":1,"frame_duration":3000,"audio":"x"},
-        "tracks":[{"kind":"audio","clips":[{"source":"a","start":0,"source_in":0,"duration":3000,
-        "gain_db":"loud","muted":1,"fade_in":-5,"fade_out":[]}]}]}"#;
-    let p = Project::from_json(text).unwrap();
-    assert_eq!(p.output.audio, None);
-    assert_eq!(p.tracks[0].kind, TrackKind::Video);
-    let c = &p.tracks[0].clips[0];
-    assert_eq!((c.gain_db, c.muted, c.fade_in, c.fade_out), (0.0, false, t(0), t(0)));
-    assert_eq!(validate(&p, &AcceptAll), vec![]);
-    assert_eq!(frame_count(&p), 1, "the track still counts as video");
-}
-
-#[test]
-fn version_1_serializes_without_audio_fields() {
-    let v1 = r#"{"version":1,"output":{"width":1,"height":1,"frame_duration":3000},
-        "tracks":[{"clips":[{"source":"a","start":0,"source_in":0,"duration":3000}]}]}"#;
-    let p = Project::from_json(v1).unwrap();
-    assert_eq!(p.version, 2, "a loaded version 1 project is saved as the current version");
-    let text = serde_json::to_string(&p).unwrap();
-    for field in ["audio", "kind", "gain_db", "muted", "fade_in", "fade_out"] {
-        assert!(!text.contains(field), "{field} must not appear in {text}");
-    }
 }
 
 #[test]
