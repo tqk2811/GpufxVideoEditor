@@ -24,13 +24,15 @@ pub fn preview_length(manifest: Option<Time>, probed: Option<Time>) -> Time {
     [manifest, probed].into_iter().flatten().filter(|length| *length > Time::ZERO).min().unwrap_or(FALLBACK_LENGTH)
 }
 
-/// A project that plays `source` once from its start, for `duration`.
+/// A project that plays `source` once from its start, for `duration`. The clip sits on a video
+/// track: the timeline is only as long as its video tracks, so on an audio track the preview would
+/// last no time at all. A video clip is heard all the same.
 pub fn preview_project(source: &str, duration: Option<Time>) -> Project {
     let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration: duration.filter(|length| *length > Time::ZERO).unwrap_or(FALLBACK_LENGTH), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default() };
     Project {
         version: SUPPORTED_VERSION,
         output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 128_000 }) },
-        tracks: vec![Track { kind: TrackKind::Audio, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
+        tracks: vec![Track { kind: TrackKind::Video, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
     }
 }
 
@@ -156,5 +158,12 @@ mod tests {
         assert_eq!(project.tracks[0].clips[0].duration, Time::from_ticks(9000));
         assert_eq!(preview_project("a.flac", None).tracks[0].clips[0].duration, FALLBACK_LENGTH);
         assert_eq!(preview_project("a.flac", Some(Time::ZERO)).tracks[0].clips[0].duration, FALLBACK_LENGTH);
+    }
+
+    #[test]
+    fn the_preview_timeline_lasts_as_long_as_the_sound() {
+        let length = Time::from_ticks(9000);
+        let project = preview_project("asset:sfx/p/a.flac", Some(length));
+        assert_eq!(engine::audio_sample_count(&project), engine::sample_position(length), "a preview of no length stops before a sample is heard");
     }
 }

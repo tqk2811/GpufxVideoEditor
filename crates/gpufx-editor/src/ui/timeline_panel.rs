@@ -268,6 +268,35 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
         }
     }
 
+    // A right click selects the clip under it and opens its menu; elsewhere it opens nothing.
+    if response.secondary_clicked() {
+        state.ui.clip_menu = response.interact_pointer_pos().and_then(|pointer| {
+            let (x, y) = local(pointer);
+            state.view.track_at_y(y, track_count, height).and_then(|track| hit_test(state.project(), &state.view, track, x)).map(|hit| hit.key)
+        });
+        if let Some(key) = state.ui.clip_menu {
+            state.select(Some(key));
+        }
+    }
+    if let Some(key) = state.ui.clip_menu {
+        let language = state.language();
+        let locked = state.is_track_locked(key.track);
+        let mut delete = false;
+        response.context_menu(|ui| {
+            let button = ui.add_enabled(!locked, egui::Button::new(language.t(Message::DeleteShortcut)));
+            let button = if locked { button.on_disabled_hover_text(language.t(Message::TrackLockedNote)) } else { button };
+            if button.clicked() {
+                delete = true;
+                ui.close();
+            }
+        });
+        if delete {
+            state.ui.clip_menu = None;
+            state.select(Some(key));
+            state.delete_selected();
+        }
+    }
+
     if response.drag_started_by(egui::PointerButton::Primary) {
         let press = ui.ctx().input(|input| input.pointer.press_origin());
         if let Some(press) = press {
@@ -589,6 +618,7 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
     let language = state.language();
     let mut toggle_lock = None;
     let mut toggle_hide = None;
+    let mut delete = None;
     ui.scope_builder(UiBuilder::new().max_rect(header_rect), |ui| {
         ui.set_clip_rect(header_rect);
         for (t, &kind) in kinds.iter().enumerate() {
@@ -598,6 +628,15 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
                 continue;
             }
             let (locked, hidden) = state.project().tracks.get(t).map_or((false, false), |track| (track.locked, track.hidden));
+            // Made before the buttons, so they stay on top and a right click anywhere else opens the menu.
+            ui.interact(row, ui.scope_id().with(("track-row", t)), Sense::click()).context_menu(|ui| {
+                let button = ui.add_enabled(!locked, egui::Button::new(language.t(Message::DeleteTrack)));
+                let button = if locked { button.on_disabled_hover_text(language.t(Message::TrackLockedNote)) } else { button };
+                if button.clicked() {
+                    delete = Some(t);
+                    ui.close();
+                }
+            });
             let tint = if hidden { theme::tick() } else { theme::text_dim() };
             let icon = if kind == TrackKind::Video { Icon::Film } else { Icon::Music };
             let (label, tip) = track_label(language, &kinds, t);
@@ -633,6 +672,9 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
     }
     if let Some(track) = toggle_hide {
         state.toggle_track_hidden(track);
+    }
+    if let Some(track) = delete {
+        state.remove_track(track);
     }
 }
 

@@ -301,6 +301,15 @@ pub fn add_track(project: &Project, kind: TrackKind) -> Result<Project, EditErro
     finish(next)
 }
 
+/// Removes `track` with its clips and transitions; the tracks above move down one place. Refused
+/// while the track is locked.
+pub fn remove_track(project: &Project, track: usize) -> Result<Project, EditError> {
+    unlocked(project, track)?;
+    let mut next = project.clone();
+    next.tracks.remove(track);
+    finish(next)
+}
+
 /// Appends a subtitle track above the others holding `clips`, as one command: an import of a
 /// whole subtitle file is one undo step. Refused when two clips overlap, and as invalid like
 /// [`add_clip`].

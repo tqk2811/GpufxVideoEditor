@@ -740,6 +740,54 @@ mod tests {
     }
 
     #[test]
+    fn a_right_click_on_a_track_header_opens_a_menu_that_deletes_the_track() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        input_frame(&ctx, &mut state, vec![]);
+        let lock = timeline_panel::header_button_center(timeline_panel_rect(), &state, 0, 2);
+        let at = egui::pos2(timeline_panel_rect().left() + 6.0, lock.y);
+        let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE };
+        for events in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], vec![]] {
+            input_frame(&ctx, &mut state, events);
+        }
+        assert!(egui::Popup::is_any_open(&ctx), "the menu opened");
+        click(&ctx, &mut state, at + egui::vec2(30.0, 12.0));
+        assert!(state.project().tracks.is_empty(), "{:?}", state.status());
+    }
+
+    fn right_click(ctx: &egui::Context, state: &mut EditorState, at: egui::Pos2) {
+        let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE };
+        for events in [vec![Event::PointerMoved(at)], vec![button(true)], vec![button(false)], vec![]] {
+            input_frame(ctx, state, events);
+        }
+    }
+
+    #[test]
+    fn a_right_click_on_a_clip_selects_it_and_its_menu_deletes_it() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        input_frame(&ctx, &mut state, vec![]);
+        state.select(None);
+        let at = on_track(&state, state.project().tracks[0].clips[0].start.saturating_add(seconds(1)));
+        right_click(&ctx, &mut state, at);
+        assert_eq!(state.selection(), Some(ClipKey { track: 0, clip: 0 }));
+        assert!(egui::Popup::is_any_open(&ctx), "the menu opened");
+        click(&ctx, &mut state, at + egui::vec2(30.0, 12.0));
+        assert!(state.project().tracks[0].clips.is_empty(), "{:?}", state.status());
+    }
+
+    #[test]
+    fn a_right_click_beside_the_clips_opens_no_menu() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        input_frame(&ctx, &mut state, vec![]);
+        let end = state.project().tracks[0].clips.last().and_then(|clip| clip.end()).unwrap();
+        let beside = on_track(&state, end.saturating_add(seconds(3)));
+        right_click(&ctx, &mut state, beside);
+        assert!(!egui::Popup::is_any_open(&ctx));
+    }
+
+    #[test]
     fn the_add_button_of_a_locked_track_does_nothing() {
         let mut state = state();
         let ctx = egui::Context::default();
