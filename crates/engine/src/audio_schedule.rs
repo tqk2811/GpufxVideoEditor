@@ -28,6 +28,12 @@
 //!   sample has gain 0. A fade on the side of a transition is rejected by [`crate::validate`]
 //!   (`FadeBesideTransition`), because it would silence part of the window; the scheduler assumes
 //!   it does not occur.
+//! * **Reverse.** A reversed clip reads a mirrored source: source sample `v` of the formulas
+//!   above is file sample `mirror - v`, with `mirror = position(source_in) + position(source_end) - 1`,
+//!   so the clip plays the samples of its source range from the last to the first. A mirrored
+//!   position below zero (past `source_end` in the file) is silence; one past `mirror` (before
+//!   the file begins) is the end of the source. Everything below sees only the mirrored audio, so
+//!   noise reduction, stretch, pitch and voice apply to the reversed sound.
 //! * **Voice.** Per clip, in this order: noise reduction of the source audio ([`crate::denoise`]),
 //!   the stretch with the pitch shift ([`crate::stretch`]), the voice effect ([`VoiceFx`]), and
 //!   last the gain and fades.
@@ -140,6 +146,10 @@ pub struct AudioSegment<'a> {
     pub stretch: Option<Stretch>,
     /// Set for a clip with noise reduction, which applies to its source audio before the stretch.
     pub denoise: Option<DenoiseSpec>,
+    /// Set for a reversed clip: the mirror of its source positions. Every source position of this
+    /// segment, `source_start` and the stretch included, counts in the mirrored source, whose
+    /// sample `v` is file sample `mirror - v`; see the module rules.
+    pub reverse: Option<i64>,
     /// Set for a clip with a voice effect, which applies after the stretch and before the gain.
     pub voice_effect: Option<VoiceFx>,
 }
@@ -218,6 +228,7 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
                 gain: envelope(clip, clip_start, clip_end, crossfade_in, crossfade_out),
                 stretch,
                 denoise: DenoiseSpec::of(&clip.denoise),
+                reverse: clip.plays_reversed().then(|| sample_position(clip.source_in).saturating_add(sample_position(clip.source_end())).saturating_sub(1)),
                 voice_effect: (clip.voice.effect != VoiceEffect::None).then_some(VoiceFx { effect: clip.voice.effect }),
             });
         }
