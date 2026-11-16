@@ -613,6 +613,10 @@ impl EditorState {
         self.live = None;
         self.ui.clip_field = None;
         self.library.adopt_project_media(&project);
+        // Detections started in the old project are not for this one.
+        for request in std::mem::take(&mut self.beat_requests) {
+            self.beats.cancel(&request.path);
+        }
         self.history = EditHistory::new(project, UNDO_DEPTH);
         self.revision += 1;
         self.audio_revision = self.revision;
@@ -1631,7 +1635,12 @@ impl EditorState {
         }
         let source = clip.source.clone();
         let path = self.source_file(&source);
-        self.beats.start(&path);
+        // A file analysed already is written at once, as the user's own step.
+        if let BeatStatus::Ready(analysis) = self.beats.start(&path) {
+            self.beat_requests.retain(|request| request.source != source);
+            self.write_beats(&source, &analysis);
+            return;
+        }
         if !self.beat_requests.iter().any(|request| request.source == source) {
             self.beat_requests.push(BeatRequest { source, path });
         }
@@ -1662,10 +1671,21 @@ impl EditorState {
         }
     }
 
+    /// Writes the beats of `analysis` to `source` as one undo step and says so on the status line.
+    fn write_beats(&mut self, source: &str, analysis: &engine::beats::BeatAnalysis) {
+        let beats = analysis.clip_beats();
+        let (count, tempo) = (beats.beats.len(), beats.tempo);
+        if self.run(|project| engine::set_source_beats(project, source, beats)) {
+            self.status = Status::Info(if count == 0 { Message::BeatsNotFound } else { Message::BeatsFound { count, tempo: tempo_text(tempo) } });
+        }
+    }
+
     /// Writes the beats of finished detections to the sources they were started for, and says
     /// whether any still runs. A source no clip plays any more gets nothing; the result stays
     /// cached, so starting again on it is instant. While edits wait (a drag or an export) finished
-    /// results wait too.
+    /// results wait too. A result that arrives while there is a step to redo is not written either,
+    /// as that edit would throw the redo step away: the status line says so, and Detect beats
+    /// writes the cached result at once.
     pub fn poll_beats(&mut self) -> bool {
         let blocked = self.export.is_some() || self.is_holding();
         let mut index = 0;
@@ -1679,13 +1699,8 @@ impl EditorState {
             self.beat_requests.remove(index);
             let current = self.project().plays_source_sound(&request.source);
             match status {
-                BeatStatus::Ready(analysis) if current => {
-                    let beats = analysis.clip_beats();
-                    let (count, tempo) = (beats.beats.len(), beats.tempo);
-                    if self.run(|project| engine::set_source_beats(project, &request.source, beats)) {
-                        self.status = Status::Info(if count == 0 { Message::BeatsNotFound } else { Message::BeatsFound { count, tempo: tempo_text(tempo) } });
-                    }
-                }
+                BeatStatus::Ready(_) if current && self.can_redo() => self.status = Status::Info(Message::BeatsKeptForRedo),
+                BeatStatus::Ready(analysis) if current => self.write_beats(&request.source, &analysis),
                 BeatStatus::Failed(message) if current => self.status = Status::Error(Message::BeatsFailed(message)),
                 _ => {}
             }

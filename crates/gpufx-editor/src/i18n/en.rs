@@ -406,6 +406,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::BeatsNone => "No beats yet".to_owned(),
         Message::BeatsFound { count, tempo } => format!("Found {} at {tempo} BPM", counted(*count as i64, "beat")),
         Message::BeatsNotFound => "No beats were found in this sound".to_owned(),
+        Message::BeatsKeptForRedo => "Beats found, not written so that Redo still works; Detect beats writes them at once".to_owned(),
         Message::BeatsFailed(reason) => format!("Beat detection failed: {reason}"),
         Message::MarkerAddShortcut => "Add a marker at the playhead (M)".to_owned(),
         Message::MarkerHint => "Drag to move, click to go there, right-click for more".to_owned(),

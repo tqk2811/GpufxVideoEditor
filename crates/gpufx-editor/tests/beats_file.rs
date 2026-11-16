@@ -155,3 +155,52 @@ fn the_editor_writes_the_beats_to_the_source_as_one_undo_step() {
     state.clear_beats(key);
     assert!(state.project().beats.is_empty());
 }
+
+/// An editor with one audio clip of `path` and the key of that clip.
+fn editor_with(path: &Path) -> (EditorState, ClipKey) {
+    let empty = EditorState::default().project().clone();
+    let audio = add_track(&empty, TrackKind::Audio).unwrap();
+    let track = audio.tracks.len() - 1;
+    let project = add_clip(&audio, track, new_clip(&path.to_string_lossy(), Time::ZERO, Time::from_seconds(10).unwrap())).unwrap();
+    (EditorState::new(project), ClipKey { track, clip: 0 })
+}
+
+fn finish(state: &mut EditorState) {
+    let started = Instant::now();
+    while state.poll_beats() {
+        assert!(started.elapsed() < Duration::from_secs(60), "detection hangs");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    state.poll_beats();
+}
+
+#[test]
+fn a_detection_started_before_another_project_was_opened_does_not_reach_it() {
+    let path = scratch("clicks-replaced.wav");
+    write_click_wav(&path, 120.0, 10.0, 0.1);
+    let (mut state, key) = editor_with(&path);
+    state.detect_beats(key);
+    // The same file in a project opened meanwhile.
+    let (other, _) = editor_with(&path);
+    state.replace_project(other.project().clone(), None);
+    finish(&mut state);
+    assert!(state.project().beats.is_empty(), "the opened project got the beats of the old one");
+    assert!(!state.can_undo());
+}
+
+#[test]
+fn a_detection_finishing_after_an_undo_keeps_the_redo_step() {
+    let path = scratch("clicks-redo.wav");
+    write_click_wav(&path, 120.0, 10.0, 0.1);
+    let (mut state, key) = editor_with(&path);
+    state.detect_beats(key);
+    state.add_marker_at_playhead();
+    state.undo();
+    assert!(state.can_redo());
+    finish(&mut state);
+    assert!(state.can_redo(), "the finished detection threw the redo step away");
+    assert!(state.project().beats.is_empty(), "not written over the undone state");
+    // Detecting again applies the cached result at once, as the user's own step.
+    state.detect_beats(key);
+    assert!(!state.project().beats.is_empty());
+}

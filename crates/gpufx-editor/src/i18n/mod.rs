@@ -432,6 +432,8 @@ pub enum Message {
     BeatsNone,
     BeatsFound { count: usize, tempo: String },
     BeatsNotFound,
+    /// A detection finished after an undo: its beats wait in the cache so the redo step stays.
+    BeatsKeptForRedo,
     BeatsFailed(String),
     MarkerAddShortcut,
     MarkerHint,
@@ -669,6 +671,7 @@ mod tests {
             Message::BeatsNone,
             Message::BeatsFound { count: 12, tempo: "120".to_owned() },
             Message::BeatsNotFound,
+            Message::BeatsKeptForRedo,
             Message::BeatsFailed("x".to_owned()),
             Message::MarkerAddShortcut,
             Message::MarkerHint,

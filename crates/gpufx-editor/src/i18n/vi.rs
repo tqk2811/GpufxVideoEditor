@@ -388,6 +388,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::BeatsNone => "Chưa có nhịp".to_owned(),
         Message::BeatsFound { count, tempo } => format!("Đã tìm thấy {count} nhịp, {tempo} BPM"),
         Message::BeatsNotFound => "Không tìm thấy nhịp nào trong âm thanh này".to_owned(),
+        Message::BeatsKeptForRedo => "Đã dò xong nhịp nhưng chưa ghi để vẫn Làm lại được; bấm Dò nhịp để ghi ngay".to_owned(),
         Message::BeatsFailed(reason) => format!("Dò nhịp thất bại: {reason}"),
         Message::MarkerAddShortcut => "Thêm điểm đánh dấu tại đầu phát (M)".to_owned(),
         Message::MarkerHint => "Kéo để di chuyển, nhấp để tới đó, nhấp phải để xem thêm".to_owned(),
