@@ -13,6 +13,7 @@ pub fn show(ctx: &egui::Context, state: &EditorState, requests: &mut Vec<UiReque
         ui.set_width(WIDTH);
         ui.heading(language.t(Message::RecoveryTitle));
         ui.label(language.t(Message::RecoveryIntro));
+        ui.small(language.t(Message::RecoveryKeptDays(crate::recovery::KEEP_SECS / 86_400)));
         ui.add_space(6.0);
         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
             for (index, offer) in state.ui.recovery_offers.iter().enumerate() {

@@ -214,6 +214,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::RecoveryRestored(path) => format!("Đã khôi phục bản tự động lưu của {path}; dự án chưa được lưu"),
         Message::RecoveryFailed(detail) => format!("Không khôi phục được bản tự động lưu: {detail}"),
         Message::RecoveryBusy => "Hãy lưu hoặc đóng dự án hiện tại và đợi tác vụ đang chạy xong rồi mới khôi phục".to_owned(),
+        Message::RecoveryTaken(detail) => format!("Một trình biên tập khác đã nhận bản tự động lưu này: {detail}"),
+        Message::RecoveryKeptDays(days) => format!("Các bản tự động lưu để lại sẽ bị xoá sau {days} ngày."),
         Message::MenuLanguage => "Ngôn ngữ".to_owned(),
         Message::MenuTheme => "Giao diện".to_owned(),
         Message::ThemeSystem => "Theo hệ thống".to_owned(),

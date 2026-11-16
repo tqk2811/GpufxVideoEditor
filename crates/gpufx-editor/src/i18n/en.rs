@@ -238,6 +238,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::RecoveryRestored(path) => format!("Restored the autosave of {path}; it is not saved yet"),
         Message::RecoveryFailed(detail) => format!("Could not restore the autosave: {detail}"),
         Message::RecoveryBusy => "Save or close the current project, and wait for any task to finish, before restoring".to_owned(),
+        Message::RecoveryTaken(detail) => format!("Another editor has taken this autosave: {detail}"),
+        Message::RecoveryKeptDays(days) => format!("Autosaves left here are deleted after {days} days."),
         Message::MenuLanguage => "Language".to_owned(),
         Message::MenuTheme => "Theme".to_owned(),
         Message::ThemeSystem => "System".to_owned(),

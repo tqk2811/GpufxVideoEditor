@@ -229,6 +229,10 @@ pub enum Message {
     RecoveryFailed(String),
     /// A restore must not replace unsaved changes or race a running task.
     RecoveryBusy,
+    /// Another editor restored or discarded the autosave first.
+    RecoveryTaken(String),
+    /// Autosaves are kept this many days.
+    RecoveryKeptDays(u64),
     Cancel,
     ExportVideo,
 
@@ -637,6 +641,8 @@ mod tests {
             Message::RecoveryRestored(name()),
             Message::RecoveryFailed(name()),
             Message::RecoveryBusy,
+            Message::RecoveryTaken(name()),
+            Message::RecoveryKeptDays(14),
             Message::TabMedia,
             Message::FieldDuration,
             Message::FieldSourceIn,

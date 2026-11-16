@@ -215,8 +215,7 @@ impl Session {
         #[cfg(not(debug_assertions))]
         let store = RecoveryStore::default_location();
         let orphans = store.as_ref().map(|store| store.prune_and_list_orphans(&SystemProbe, unix_now())).unwrap_or_default();
-        let mut autosave = Autosave::start(store, current_process(), state.ui.autosave_seconds, Instant::now());
-        autosave.reserve(orphans.iter().map(|orphan| orphan.id.clone()));
+        let autosave = Autosave::start(store, current_process(), state.ui.autosave_seconds, Instant::now());
         state.ui.recovery_offers = orphans.into_iter().map(|orphan| RecoveryOffer { id: orphan.id, original: orphan.meta.original, saved_at: orphan.meta.saved_at, original_newer: orphan.original_newer }).collect();
         let (arrival_sender, arrivals) = channel();
         let mut session = Self {
@@ -749,7 +748,8 @@ impl Session {
 
     /// Writes the recovery copy when due, and wakes the loop for the next one.
     fn tick_autosave(&mut self) {
-        let blocked = self.state.is_holding() || !self.tasks.is_idle() || !self.state.ui.recovery_offers.is_empty();
+        // Offers still open do not block: this window only ever writes entries named for itself.
+        let blocked = self.state.is_holding() || !self.tasks.is_idle();
         if let Some(at) = self.autosave.tick(&self.state, blocked, Instant::now()) {
             self.next_repaint = Some(self.next_repaint.map_or(at, |next| next.min(at)));
         }
@@ -763,7 +763,12 @@ impl Session {
         let Some(offer) = self.state.ui.recovery_offers.get(index).cloned() else { return };
         match choice {
             RecoveryChoice::Later => {}
-            RecoveryChoice::Discard => self.autosave.discard(&offer.id),
+            RecoveryChoice::Discard => {
+                if let Err(message) = self.autosave.discard(&offer.id) {
+                    // Another editor took it first: it is no longer this one's to offer.
+                    self.state.report_refused(Message::RecoveryTaken(message));
+                }
+            }
             RecoveryChoice::Restore => {
                 if !self.restore(&offer) {
                     return;
@@ -786,23 +791,40 @@ impl Session {
                 return false;
             }
         }
+        // Taken over on disk first, so no other editor restores or discards it meanwhile.
+        let claimed = match self.autosave.claim(&offer.id) {
+            Ok(claimed) => claimed,
+            Err(message) => {
+                self.state.report_refused(Message::RecoveryTaken(message));
+                // Dropped from the offers: another editor has it now.
+                return true;
+            }
+        };
         // The copy holds absolute sources; missing ones are refused as when opening a project.
-        let loaded = store.project_text(&offer.id).and_then(|text| {
-            let file = offer.original.clone().unwrap_or_else(|| store.project_file(&offer.id));
+        let loaded = store.project_text(&claimed).and_then(|text| {
+            let file = offer.original.clone().unwrap_or_else(|| store.project_file(&claimed));
             parse_project(&text, &file, &project_paths(offer.original.as_deref(), &self.package_roots))
         });
-        match loaded {
-            Ok(project) => {
-                self.state.restore_project(project, offer.original.clone());
-                self.perform(Action::ProjectReplaced);
-                self.autosave.adopt(&offer.id, offer.original.is_none(), &self.state, Instant::now());
-                true
-            }
+        let project = match loaded {
+            Ok(project) => project,
             Err(message) => {
+                self.autosave.unclaim(&claimed, &offer.id);
                 self.state.report_error(Message::RecoveryFailed(message));
-                false
+                return false;
+            }
+        };
+        // Locked as opening a project locks it; the check above may have raced another process.
+        if let Some(file) = &offer.original {
+            if !self.state.claim_project_lock(file) {
+                self.autosave.unclaim(&claimed, &offer.id);
+                self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
+                return false;
             }
         }
+        self.state.restore_project(project, offer.original.clone());
+        self.perform(Action::ProjectReplaced);
+        self.autosave.adopt(&claimed, offer.original.as_deref(), &self.state, Instant::now());
+        true
     }
 
     fn save_project(&mut self, file: PathBuf) {

@@ -7,7 +7,6 @@
 //! clean exit together with its entry. An entry whose owner is no longer running, or ran without
 //! removing its marker, is orphaned: the editor that starts next offers to restore it.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::JoinHandle;
@@ -38,15 +37,29 @@ pub struct ProcessInfo {
     pub started: u64,
 }
 
+/// What the system says about a process id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState {
+    /// It runs, created at this time.
+    Running(u64),
+    /// No process with this id runs.
+    Gone,
+    /// It may run, but the system will not say more (access denied): taken as alive.
+    Unknown,
+}
+
 /// Asks the system about processes; tests give their own answers.
 pub trait ProcessProbe {
-    /// The creation time of the running process `pid`; `None` when no such process runs.
-    fn started(&self, pid: u32) -> Option<u64>;
+    fn state(&self, pid: u32) -> ProcessState;
 }
 
 impl ProcessInfo {
     pub fn is_running(&self, probe: &dyn ProcessProbe) -> bool {
-        probe.started(self.pid) == Some(self.started)
+        match probe.state(self.pid) {
+            ProcessState::Running(started) => started == self.started,
+            ProcessState::Gone => false,
+            ProcessState::Unknown => true,
+        }
     }
 }
 
@@ -54,8 +67,8 @@ impl ProcessInfo {
 pub struct SystemProbe;
 
 impl ProcessProbe for SystemProbe {
-    fn started(&self, pid: u32) -> Option<u64> {
-        use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    fn state(&self, pid: u32) -> ProcessState {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, FILETIME};
         use windows_sys::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
         /// `STILL_ACTIVE`: the exit code of a process that has not ended.
         const STILL_ACTIVE: u32 = 259;
@@ -64,7 +77,8 @@ impl ProcessProbe for SystemProbe {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if handle.is_null() {
-                return None;
+                // Only "no such process" (invalid parameter) means it is gone.
+                return if GetLastError() == ERROR_ACCESS_DENIED { ProcessState::Unknown } else { ProcessState::Gone };
             }
             let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
             let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
@@ -72,10 +86,13 @@ impl ProcessProbe for SystemProbe {
             let times = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
             let status = GetExitCodeProcess(handle, &mut code);
             CloseHandle(handle);
-            if times == 0 || status == 0 || code != STILL_ACTIVE {
-                return None;
+            if times == 0 || status == 0 {
+                return ProcessState::Unknown;
             }
-            Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+            if code != STILL_ACTIVE {
+                return ProcessState::Gone;
+            }
+            ProcessState::Running((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
         }
     }
 }
@@ -83,7 +100,11 @@ impl ProcessProbe for SystemProbe {
 /// This process.
 pub fn current_process() -> ProcessInfo {
     let pid = std::process::id();
-    ProcessInfo { pid, started: SystemProbe.started(pid).unwrap_or(0) }
+    let started = match SystemProbe.state(pid) {
+        ProcessState::Running(started) => started,
+        _ => 0,
+    };
+    ProcessInfo { pid, started }
 }
 
 /// Seconds since 1970, the time kept in `meta.json`.
@@ -130,6 +151,28 @@ pub fn untitled_id(me: ProcessInfo, nanos: u128, serial: u64) -> String {
     let seed = format!("{}:{}:{nanos}:{serial}", me.pid, me.started);
     format!("u-{}", hex(&Sha256::digest(seed.as_bytes())[..8]))
 }
+
+/// The folder name of entry `base` owned by `owner`: `<base>.<pid>-<started>` in hex, then
+/// `-c<claim>` for an entry taken over from a dead editor. The owner is in the name so that a
+/// rename hands an entry over at once, and no two editors ever write to the same folder.
+pub fn owned_id(base: &str, owner: ProcessInfo, claim: Option<u64>) -> String {
+    let base = base.split_once('.').map_or(base, |(base, _)| base);
+    match claim {
+        Some(claim) => format!("{base}.{:x}-{:x}-c{claim}", owner.pid, owner.started),
+        None => format!("{base}.{:x}-{:x}", owner.pid, owner.started),
+    }
+}
+
+/// The owner named by an entry folder of [`owned_id`] (or its `.tmp` twin).
+pub fn owner_of(id: &str) -> Option<ProcessInfo> {
+    let (_, rest) = id.split_once('.')?;
+    let mut parts = rest.split(['-', '.']);
+    let pid = u32::from_str_radix(parts.next()?, 16).ok()?;
+    let started = u64::from_str_radix(parts.next()?, 16).ok()?;
+    Some(ProcessInfo { pid, started })
+}
+
+const TMP_SUFFIX: &str = ".tmp";
 
 /// An entry another editor left behind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,13 +240,30 @@ impl RecoveryStore {
         self.read_session(owner.pid) == Some(owner) && owner.is_running(probe)
     }
 
-    /// Writes entry `id`: the project first, then the meta that makes it complete.
+    /// Writes entry `id`. The first write fills `<id>.tmp` and renames it into place, so an
+    /// entry never exists without its meta; later writes replace the project, then the meta.
     pub fn write_entry(&self, id: &str, project_text: &str, meta: &Meta) -> Result<(), String> {
         let dir = self.entry_dir(id);
-        std::fs::create_dir_all(&dir).map_err(|e| format!("creating {} failed: {e}", dir.display()))?;
-        write_file_atomically(&dir.join(PROJECT_FILE), project_text.as_bytes())?;
         let meta_text = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
-        write_file_atomically(&dir.join(META_FILE), meta_text.as_bytes())
+        if dir.join(META_FILE).is_file() {
+            write_file_atomically(&dir.join(PROJECT_FILE), project_text.as_bytes())?;
+            return write_file_atomically(&dir.join(META_FILE), meta_text.as_bytes());
+        }
+        let tmp = self.root.join(format!("{id}{TMP_SUFFIX}"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).map_err(|e| format!("creating {} failed: {e}", tmp.display()))?;
+        write_file_atomically(&tmp.join(PROJECT_FILE), project_text.as_bytes())?;
+        write_file_atomically(&tmp.join(META_FILE), meta_text.as_bytes())?;
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        std::fs::rename(&tmp, &dir).map_err(|e| format!("moving {} into place failed: {e}", tmp.display()))
+    }
+
+    /// Takes entry `from`, left by a dead editor, over as `to` by renaming its folder. The rename
+    /// is atomic, so when two editors try, one fails: the entry is gone or already taken.
+    pub fn claim(&self, from: &str, to: &str) -> Result<(), String> {
+        std::fs::rename(self.entry_dir(from), self.entry_dir(to)).map_err(|e| format!("{from}: {e}"))
     }
 
     pub fn remove_entry(&self, id: &str) {
@@ -249,8 +309,18 @@ impl RecoveryStore {
     pub fn prune_and_list_orphans(&self, probe: &dyn ProcessProbe, now: u64) -> Vec<Orphan> {
         let mut orphans = Vec::new();
         for id in self.entry_ids() {
+            // The folder name says who owns the entry; the meta may still name an earlier owner.
+            let owner = owner_of(&id);
+            if owner.is_some_and(|owner| self.session_alive(owner, probe)) {
+                continue;
+            }
+            if id.ends_with(TMP_SUFFIX) {
+                // A first write its owner did not finish.
+                self.remove_entry(&id);
+                continue;
+            }
             match self.read_meta(&id) {
-                Some(meta) if self.session_alive(meta.owner(), probe) => {}
+                Some(meta) if owner.is_none() && self.session_alive(meta.owner(), probe) => {}
                 Some(meta) if now.saturating_sub(meta.saved_at) > KEEP_SECS => self.remove_entry(&id),
                 Some(meta) => {
                     let original_newer = meta.original.as_deref().and_then(modified_secs).is_some_and(|modified| modified > meta.saved_at);
@@ -363,10 +433,13 @@ pub struct Autosave {
     /// The entry of the project while it has no file.
     untitled: String,
     untitled_serial: u64,
+    /// A restored entry of a project file, written to while that file is the project's:
+    /// its normalised path and the entry.
+    adopted: Option<(String, String)>,
+    /// How many entries this process has claimed, for unique claimed names.
+    claims: u64,
     /// The entry this window last wrote, which it removes once the project is clean.
     written: Option<String>,
-    /// Entries offered for recovery and not dealt with; never written over.
-    reserved: HashSet<String>,
     writer: Option<Writer>,
 }
 
@@ -381,7 +454,7 @@ impl Autosave {
             }
         });
         let writer = store.clone().and_then(Writer::spawn);
-        let mut autosave = Self { store, me, timer: AutosaveTimer::new(interval_secs, now), untitled: String::new(), untitled_serial: 0, written: None, reserved: HashSet::new(), writer };
+        let mut autosave = Self { store, me, timer: AutosaveTimer::new(interval_secs, now), untitled: String::new(), untitled_serial: 0, adopted: None, claims: 0, written: None, writer };
         autosave.untitled = autosave.next_untitled();
         autosave
     }
@@ -389,7 +462,7 @@ impl Autosave {
     fn next_untitled(&mut self) -> String {
         self.untitled_serial += 1;
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
-        untitled_id(self.me, nanos, self.untitled_serial)
+        owned_id(&untitled_id(self.me, nanos, self.untitled_serial), self.me, None)
     }
 
     pub fn store(&self) -> Option<&RecoveryStore> {
@@ -400,38 +473,56 @@ impl Autosave {
         self.timer.set_interval(interval_secs);
     }
 
-    /// Keeps `ids`, offered for recovery, from being written over until dealt with.
-    pub fn reserve(&mut self, ids: impl IntoIterator<Item = String>) {
-        self.reserved.extend(ids);
-    }
-
-    /// The entry for the project in `file`, or for the unsaved one.
+    /// The entry for the project in `file`, or for the unsaved one. Always named for this
+    /// process, so it never meets an entry of another editor.
     pub fn id_for(&self, file: Option<&Path>) -> String {
-        let base = file.map_or_else(|| self.untitled.clone(), id_for_path);
-        if self.reserved.contains(&base) {
-            format!("{base}-{:x}", self.me.pid)
-        } else {
-            base
+        match file {
+            None => self.untitled.clone(),
+            Some(file) => {
+                let key = normalized(file);
+                match &self.adopted {
+                    Some((path, id)) if *path == key => id.clone(),
+                    _ => owned_id(&id_for_path(file), self.me, None),
+                }
+            }
         }
     }
 
-    /// Drops the offered entry `id`.
-    pub fn discard(&mut self, id: &str) {
-        self.reserved.remove(id);
+    /// Takes the offered entry `id` over for this process; its new id, or why it could not be
+    /// taken (another editor took or removed it first).
+    pub fn claim(&mut self, id: &str) -> Result<String, String> {
+        let Some(store) = &self.store else { return Err("autosave is off".to_owned()) };
+        self.claims += 1;
+        let claimed = owned_id(id, self.me, Some(self.claims));
+        store.claim(id, &claimed)?;
+        Ok(claimed)
+    }
+
+    /// Hands a claimed entry back under its old id, after a restore that failed.
+    pub fn unclaim(&self, claimed: &str, id: &str) {
         if let Some(store) = &self.store {
-            store.remove_entry(id);
+            let _ = store.claim(claimed, id);
         }
     }
 
-    /// Makes the restored entry `id` this window's own and writes it at once under this process,
-    /// so another editor starting now does not offer it too.
-    pub fn adopt(&mut self, id: &str, untitled: bool, state: &EditorState, now: Instant) {
-        self.reserved.remove(id);
-        if untitled {
-            self.untitled = id.to_owned();
+    /// Claims the offered entry `id` and deletes it; an error when another editor took it first.
+    pub fn discard(&mut self, id: &str) -> Result<(), String> {
+        let claimed = self.claim(id)?;
+        if let Some(store) = &self.store {
+            store.remove_entry(&claimed);
+        }
+        Ok(())
+    }
+
+    /// Makes the claimed entry `claimed`, restored for `original` (`None`: never saved), the
+    /// entry this window writes to and removes once clean, and writes it at once.
+    pub fn adopt(&mut self, claimed: &str, original: Option<&Path>, state: &EditorState, now: Instant) {
+        match original {
+            None => self.untitled = claimed.to_owned(),
+            Some(file) => self.adopted = Some((normalized(file), claimed.to_owned())),
         }
         self.timer.forget();
-        if let Some(old) = self.written.take().filter(|old| old != id) {
+        if let Some(old) = self.written.replace(claimed.to_owned()).filter(|old| old != claimed) {
             self.send(Job::Remove(old));
         }
         self.write(state, now);
@@ -515,8 +606,12 @@ mod tests {
     struct FakeProbe(HashMap<u32, u64>);
 
     impl ProcessProbe for FakeProbe {
-        fn started(&self, pid: u32) -> Option<u64> {
-            self.0.get(&pid).copied()
+        fn state(&self, pid: u32) -> ProcessState {
+            match self.0.get(&pid) {
+                Some(&u64::MAX) => ProcessState::Unknown,
+                Some(&started) => ProcessState::Running(started),
+                None => ProcessState::Gone,
+            }
         }
     }
 
@@ -686,7 +781,7 @@ mod tests {
         let mut autosave = Autosave::start(Some(store.clone()), me, 60, start);
         assert_eq!(autosave.tick(&state, false, start), Some(start + Duration::from_secs(60)));
         autosave.tick(&state, false, start + Duration::from_secs(61));
-        let id = id_for_path(&original);
+        let id = autosave.id_for(Some(&original));
         // The writer runs on its thread: stop it so what it wrote can be checked.
         let writer = autosave.writer.take().unwrap();
         drop(writer.jobs);
@@ -732,7 +827,6 @@ mod tests {
 
         let next = ProcessInfo { pid: 79, started: 9 };
         let mut closing = Autosave::start(Some(store.clone()), next, 60, start);
-        closing.reserve([id.clone()]);
         assert_ne!(closing.id_for(None), id);
         closing.tick(&state, false, later);
         let own = closing.id_for(None);
@@ -741,18 +835,114 @@ mod tests {
         assert!(store.entry_dir(&id).exists(), "the offered entry is left alone");
     }
 
+    fn stop_writer(autosave: &mut Autosave) {
+        let writer = autosave.writer.take().unwrap();
+        drop(writer.jobs);
+        writer.thread.join().unwrap();
+    }
+
+    /// An orphan of a dead editor for `file` (`None`: untitled), as the store lists it.
+    fn orphan(store: &RecoveryStore, file: Option<&Path>) -> String {
+        let dead = ProcessInfo { pid: 2, started: 200 };
+        let base = file.map_or_else(|| untitled_id(dead, 1, 1), id_for_path);
+        let id = owned_id(&base, dead, None);
+        store.write_entry(&id, "{}", &meta(dead, NOW, file.map(Path::to_path_buf))).unwrap();
+        id
+    }
+
     #[test]
-    fn a_reserved_path_entry_is_not_written_over_and_adoption_takes_it() {
-        let me = ProcessInfo { pid: 0x2a, started: 1 };
-        let mut autosave = Autosave::start(None, me, 60, Instant::now());
-        let file = Path::new(r"C:\x\p.json");
-        let id = id_for_path(file);
-        autosave.reserve([id.clone()]);
-        assert_eq!(autosave.id_for(Some(file)), format!("{id}-2a"));
-        autosave.adopt(&id, false, &dirty_state(), Instant::now());
-        assert_eq!(autosave.id_for(Some(file)), id);
-        let untitled = "u-0123456789abcdef";
-        autosave.adopt(untitled, true, &dirty_state(), Instant::now());
-        assert_eq!(autosave.id_for(None), untitled);
+    fn a_restored_entry_is_written_over_and_removed_once_clean() {
+        let dir = folder("adopt");
+        let store = RecoveryStore::new(dir.clone());
+        let file = dir.join("p.json");
+        for original in [Some(file.as_path()), None] {
+            let id = orphan(&store, original);
+            let me = ProcessInfo { pid: 0x2a, started: 1 };
+            let start = Instant::now();
+            let mut autosave = Autosave::start(Some(store.clone()), me, 60, start);
+            let claimed = autosave.claim(&id).unwrap();
+            assert!(!store.entry_dir(&id).exists());
+            let mut state = dirty_state();
+            if let Some(file) = original {
+                state.mark_saved(file.to_path_buf());
+                state.add_track(engine::TrackKind::Audio);
+            }
+            autosave.adopt(&claimed, original, &state, start);
+            assert_eq!(autosave.id_for(original), claimed);
+            stop_writer(&mut autosave);
+            assert_eq!(store.read_meta(&claimed).unwrap().owner(), me, "rewritten under this process");
+            let listed = store.prune_and_list_orphans(&FakeProbe(HashMap::from([(0x2a, 1)])), NOW);
+            assert!(listed.is_empty(), "owned by a live editor: {listed:?}");
+            autosave.writer = Writer::spawn(store.clone());
+            match original {
+                Some(file) => state.mark_saved(file.to_path_buf()),
+                None => state.new_project(),
+            }
+            autosave.tick(&state, false, start);
+            autosave.finish_clean();
+            assert!(!store.entry_dir(&claimed).exists(), "removed once clean");
+            assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "nothing left behind");
+        }
+    }
+
+    #[test]
+    fn only_one_of_two_editors_claims_an_orphan() {
+        let store = RecoveryStore::new(folder("claim"));
+        let id = orphan(&store, None);
+        let mut first = Autosave::start(Some(store.clone()), ProcessInfo { pid: 10, started: 1 }, 60, Instant::now());
+        let mut second = Autosave::start(Some(store.clone()), ProcessInfo { pid: 11, started: 1 }, 60, Instant::now());
+        let claimed = first.claim(&id).unwrap();
+        assert!(second.claim(&id).is_err(), "taken already");
+        assert!(second.discard(&id).is_err(), "a discard cannot delete what another editor restored");
+        assert!(store.entry_dir(&claimed).exists());
+        // A failed restore hands it back.
+        first.unclaim(&claimed, &id);
+        assert!(store.entry_dir(&id).exists());
+        second.discard(&id).unwrap();
+        assert!(!store.entry_dir(&id).exists());
+    }
+
+    #[test]
+    fn an_unfinished_first_write_never_leaves_an_entry_without_meta() {
+        let store = RecoveryStore::new(folder("first-write"));
+        let dead = ProcessInfo { pid: 2, started: 200 };
+        let id = owned_id("u-1", dead, None);
+        // Died after the project and before the meta of the first write.
+        let tmp = store.root().join(format!("{id}{TMP_SUFFIX}"));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join(PROJECT_FILE), "{}").unwrap();
+        assert!(!store.entry_dir(&id).exists(), "nothing half-written under the entry's name");
+        assert!(store.prune_and_list_orphans(&FakeProbe(HashMap::new()), NOW).is_empty());
+        assert!(!tmp.exists(), "the leftover of a dead editor goes");
+        // Every completed write is offered, and a later write that died midway still has its meta.
+        store.write_entry(&id, "{}", &meta(dead, NOW - 5, None)).unwrap();
+        std::fs::write(store.project_file(&id), "{\"newer\":1}").unwrap();
+        let orphans = store.prune_and_list_orphans(&FakeProbe(HashMap::new()), NOW);
+        assert_eq!(orphans.iter().map(|orphan| orphan.id.as_str()).collect::<Vec<_>>(), [id.as_str()]);
+        assert!(!store.root().join(format!("{id}{TMP_SUFFIX}")).exists());
+    }
+
+    #[test]
+    fn a_process_the_system_will_not_open_counts_as_alive() {
+        let store = RecoveryStore::new(folder("denied"));
+        let owner = ProcessInfo { pid: 5, started: 50 };
+        store.write_session(owner).unwrap();
+        let id = owned_id("u-1", owner, None);
+        store.write_entry(&id, "{}", &meta(owner, NOW, None)).unwrap();
+        let denied = FakeProbe(HashMap::from([(5, u64::MAX)]));
+        assert!(owner.is_running(&denied));
+        assert!(store.prune_and_list_orphans(&denied, NOW).is_empty());
+        assert!(store.session_file(5).exists());
+        assert_eq!(store.prune_and_list_orphans(&FakeProbe(HashMap::new()), NOW).len(), 1, "gone is dead");
+    }
+
+    #[test]
+    fn owned_ids_name_their_owner() {
+        let owner = ProcessInfo { pid: 0x2a, started: 0x1234 };
+        assert_eq!(owned_id("p-ab", owner, None), "p-ab.2a-1234");
+        assert_eq!(owned_id("p-ab.3-4", owner, Some(2)), "p-ab.2a-1234-c2");
+        assert_eq!(owner_of("p-ab.2a-1234-c2"), Some(owner));
+        assert_eq!(owner_of("p-ab.2a-1234.tmp"), Some(owner));
+        assert_eq!(owner_of("p-ab"), None);
     }
 }
