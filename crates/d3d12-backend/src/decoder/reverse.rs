@@ -434,7 +434,7 @@ fn upload(decoder: &SequentialDecoder, copy: &CpuFrame) -> Result<DecodedFrame, 
         if frames.is_null() {
             return Err("the decoder has no frame pool to upload into".to_owned());
         }
-        let frame = DecodedFrame { frame: ffi::av_frame_alloc(), pts: copy.pts, format: copy.format, turns: decoder.turns };
+        let frame = DecodedFrame { frame: ffi::av_frame_alloc(), pts: copy.pts, format: copy.format, turns: decoder.turns, aspect: None };
         if frame.frame.is_null() {
             return Err("av_frame_alloc failed".to_owned());
         }
