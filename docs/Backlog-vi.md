@@ -1,5 +1,17 @@
 # Backlog
 
+### [Cao] Bản phát hành phải kèm `dxcompiler.dll` và release model xoá nền
+
+Shader nn của xoá nền (`gpufx-core` nn) chỉ biên dịch được bằng DXC; thiếu `dxcompiler.dll` thì model nạp lỗi và clip hiện chưa xoá nền (`D3d12Compositor::matte_problems`). `crates/d3d12-backend/build.rs` đã chép `dxcompiler*.dll` từ `third_party/ffmpeg/bin`, nhưng `scripts/setup-poc.ps1` chưa tải nó (bản FFmpeg release không có): phải tự chép từ bản FFmpegGpuFilter (`build/dxc`) vào `third_party/ffmpeg/bin`, và gói phát hành editor phải kèm DLL cùng giấy phép. Ngoài ra release `models-matting-v1` của `tqk2811/FFmpegGpuFilter` chưa tạo: tải model trong editor (`crates/gpufx-editor/src/matting_models.rs`) sẽ lỗi 404 tới khi có, và phải upload đúng các zip có SHA-256 ở `expected_zip_sha256` (dựng lại zip thì cập nhật hằng số; nên đưa `sha256_zip` vào `source.json`). Ghi ngày 2026-11-17.
+
+### [Vừa] Xoá nền: tải model chạy đồng bộ một luồng, không có tiến độ hay huỷ
+
+`matting_models::fetch` gọi `curl.exe` và chờ hết; giao diện chỉ hiện dòng "đang tải", không có phần trăm, không huỷ được, và chiếm slot load nên các thao tác mở/nhập khác phải chờ. Ghi ngày 2026-11-17.
+
+### [Thấp] Xoá nền: matte chạy trên ảnh đã kéo giãn theo khung project, ảnh tĩnh không cache
+
+`crates/d3d12-backend/src/compositor.rs` (`matted_picture`) đưa model ảnh nguồn đã scale méo về kích thước project rồi mới đặt đúng tỉ lệ, nên MODNet (giữ tỉ lệ) thấy ảnh méo; nên chạy ở kích thước theo tỉ lệ nguồn. Ảnh tĩnh không có khoá cache nên chạy model mỗi khung. Làm mượt theo thời gian giả định nguồn CFR (cửa sổ tính bằng `pts - i*frame_step`); nguồn VFR có thể lấy trùng khung. Mỗi clip có temporal mở thêm một decoder thứ hai. Ghi ngày 2026-11-17.
+
 ### [Vừa] Giải mã ảnh không huỷ được và ảnh hỏng được giải mã lại mỗi lần render
 
 `crates/d3d12-backend/src/compositor.rs` `load_still` (khối gọi `read_still` và `Image::upload`) và `open_decoder` chạy đồng bộ, bỏ qua cờ abort/closing; `Image::upload` chờ `PollType::Wait` không có timeout. Ảnh lớn hoặc GPU kẹt làm preview và lệnh đóng phải chờ hết. Ảnh hỏng không có negative cache nên mỗi lần render lại đọc và giải mã file từ đầu. Nên kiểm cờ trước khi giải mã, thêm timeout chờ, và nhớ lỗi theo dấu (cỡ + mtime) của file. Ghi ngày 2026-11-10.

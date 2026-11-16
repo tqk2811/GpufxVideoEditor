@@ -31,6 +31,8 @@ pub enum FileDialog {
     /// `revision`: an undo or another project may have removed or replaced the track meanwhile, so
     /// a change while the dialog is up drops the choice.
     ExportSubtitles { track: usize, revision: u64 },
+    /// A zip of the matting model `model` to install.
+    ImportMatteModel { model: engine::MatteModel },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +80,10 @@ pub enum Request {
     PickFont { clip: ClipKey },
     ImportSubtitles,
     ExportSubtitles { track: usize },
+    /// The zip of a matting model, through the file dialog.
+    ImportMatteModel { model: engine::MatteModel },
+    /// Downloads a matting model from its release.
+    FetchMatteModel { model: engine::MatteModel },
 }
 
 /// Which task a failure belongs to. A load carries the id it was started with, so the result of
@@ -99,6 +105,8 @@ pub enum Arrival {
     DropProbed { load: u64, path: PathBuf, result: Result<MediaProbe, String> },
     ProjectRead { load: u64, file: PathBuf, result: Result<Project, String> },
     PackageImported { load: u64, path: PathBuf, result: Result<ImportOutcome, ImportProblem> },
+    /// A matting model was imported or downloaded, or failed to be.
+    MatteModelInstalled { load: u64, result: Result<PathBuf, String> },
     LibraryItemProbed { load: u64, item: MediaItem, target: LibraryTarget, result: Result<MediaProbe, String> },
     /// The thread of a task panicked, so it will never deliver a result.
     TaskFailed { task: TaskId, message: String },
@@ -126,6 +134,10 @@ pub enum Action {
     ProbeMedia { load: u64, path: PathBuf },
     ReadProject { load: u64, file: PathBuf },
     ImportPackage { load: u64, path: PathBuf, overwrite: bool },
+    /// Installs the matting model `model` from the zip `path`, or downloads it when `path` is `None`.
+    InstallMatteModel { load: u64, model: engine::MatteModel, path: Option<PathBuf> },
+    /// A matting model was installed: what looked for models must look again.
+    MatteModelInstalled,
     /// A sound of the library must be measured before it becomes a clip.
     ProbeLibraryItem { load: u64, item: MediaItem, target: LibraryTarget },
     /// A package was installed: the list must be read again and what was built from it dropped.
@@ -268,6 +280,11 @@ impl Tasks {
             Request::PickFont { clip } => self.start_dialog(FileDialog::PickFont { clip, revision: state.revision() }),
             Request::ImportSubtitles => self.start_dialog(FileDialog::ImportSubtitles),
             Request::ExportSubtitles { track } => self.start_dialog(FileDialog::ExportSubtitles { track, revision: state.revision() }),
+            Request::ImportMatteModel { model } => self.start_dialog(FileDialog::ImportMatteModel { model }),
+            Request::FetchMatteModel { model } => {
+                let load = self.start_load(state, Path::new(model.package_id().unwrap_or("model")), None);
+                Action::InstallMatteModel { load, model, path: None }
+            }
         }
     }
 
@@ -370,6 +387,10 @@ impl Tasks {
                         let load = self.start_load(state, &path, None);
                         Action::ImportPackage { load, path, overwrite: false }
                     }
+                    FileDialog::ImportMatteModel { model } => {
+                        let load = self.start_load(state, &path, None);
+                        Action::InstallMatteModel { load, model, path: Some(path) }
+                    }
                     FileDialog::OpenProject => {
                         let base = self.open_base.take();
                         let load = self.start_load(state, &path, base);
@@ -427,6 +448,22 @@ impl Tasks {
             Arrival::MediaProbed { load, path, result } => self.load_finished(state, load, Finished::Media { path, result }),
             Arrival::DropProbed { load, path, result } => self.load_finished(state, load, Finished::Drop { path, result }),
             Arrival::PackageImported { load, path, result } => self.load_finished(state, load, Finished::Package { path, result }),
+            Arrival::MatteModelInstalled { load, result } => {
+                if self.load.is_none_or(|running| running.id != load) {
+                    return Action::Nothing;
+                }
+                self.drop_load(state);
+                match result {
+                    Ok(_) => {
+                        state.report_info(Message::MatteImported);
+                        Action::MatteModelInstalled
+                    }
+                    Err(problem) => {
+                        state.report_error(Message::MatteImportFailed(problem));
+                        Action::Nothing
+                    }
+                }
+            }
             Arrival::LibraryItemProbed { load, item, target, result } => self.load_finished(state, load, Finished::LibraryItem { item, target, result }),
             Arrival::ProjectRead { load, file, result } => {
                 let base_revision = self.load.filter(|running| running.id == load).and_then(|running| running.base_revision);

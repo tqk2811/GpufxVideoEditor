@@ -701,6 +701,12 @@ impl Session {
         if let Some(clip) = self.state.ui.font_file_request.take() {
             self.begin_task(Request::PickFont { clip });
         }
+        if let Some(model) = self.state.ui.matte_import_request.take() {
+            self.begin_task(Request::ImportMatteModel { model });
+        }
+        if let Some(model) = self.state.ui.matte_fetch_request.take() {
+            self.begin_task(Request::FetchMatteModel { model });
+        }
         if let Some(track) = self.state.ui.subtitle_export_request.take() {
             self.begin_task(Request::ExportSubtitles { track });
         }
@@ -919,6 +925,7 @@ impl Session {
             FileDialog::PickClip { .. } | FileDialog::ImportMedia { audio_only: false } => base().add_filter(language.t(Message::FilterMedia), &MEDIA_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportMedia { audio_only: true } => base().add_filter(language.t(Message::FilterAudio), &AUDIO_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportPackage => base().add_filter(language.t(Message::FilterPackage), &["zip"]),
+            FileDialog::ImportMatteModel { .. } => base().add_filter(language.t(Message::FilterMatteModel), &["zip"]),
             FileDialog::PickFont { .. } => base().add_filter(language.t(Message::FilterFont), &["ttf", "otf", "ttc"]),
             FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
             FileDialog::SaveProject => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
@@ -928,7 +935,7 @@ impl Session {
         };
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
-                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
+                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::ImportMatteModel { .. } | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
                 FileDialog::SaveProject | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
@@ -991,6 +998,22 @@ impl Session {
                     };
                     Arrival::LibraryItemProbed { load, item, target, result }
                 });
+            }
+            Action::InstallMatteModel { load, model, path } => {
+                if path.is_none() {
+                    self.state.report_info(Message::MatteFetching);
+                }
+                self.spawn_task("matte-model-install", TaskId::Load(load), move || {
+                    let result = crate::matting_models::install(model, path.as_deref());
+                    Arrival::MatteModelInstalled { load, result }
+                });
+            }
+            Action::MatteModelInstalled => {
+                // The compositors remember a missing model: new paths make new ones.
+                self.build_paths();
+                self.state.visuals.get_mut().set_paths(self.paths.clone());
+                self.tracker = RequestTracker::default();
+                self.shown = None;
             }
             Action::PackageInstalled { package } => self.package_installed(&package),
             Action::AudioPackInstalled => self.audio_pack_installed(),
