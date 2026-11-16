@@ -18,7 +18,23 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 
 ### [Thấp] Playback đang chạy vẫn đọc file gốc khi proxy vừa xong
 
-`crates/gpufx-editor/src/window.rs:1005` (`sync_proxies`) dựng lại `ProjectPaths` khi có proxy mới; preview tĩnh đổi sang proxy ngay, còn `Playback` đang phát giữ paths cũ tới khi dừng rồi phát lại. Nên mở lại playback từ đầu phát như `sync_project_paths` nếu muốn đổi ngay. Ghi ngày 2026-11-17.
+`crates/gpufx-editor/src/window.rs:1022` (`sync_proxies`) dựng lại `ProjectPaths` của preview khi có proxy mới; preview tĩnh đổi sang proxy ngay, còn `Playback` đang phát giữ paths cũ tới khi dừng rồi phát lại. Nên mở lại playback từ đầu phát như `sync_project_paths` nếu muốn đổi ngay. Ghi ngày 2026-11-17.
+
+### [Vừa] Hai editor cùng dọn thư mục proxy chung
+
+Hai tiến trình editor dùng chung `%LOCALAPPDATA%\gpufx-editor\proxies`: `sweep` (`crates/gpufx-editor/src/proxy.rs:144`) lúc khởi động và `remove_other_versions` sau mỗi proxy mới có thể xoá file mà editor kia đang giải mã hoặc vừa ghi vào map, làm preview bên kia báo lỗi mở file. Nên khoá thư mục (file lock) hoặc chỉ xoá file không bị mở, và để preview rơi về file gốc khi proxy biến mất. Ghi ngày 2026-11-17.
+
+### [Thấp] Một file qua nhiều chuỗi đường dẫn thành nhiều mục proxy
+
+`ProxyManager` (`crates/gpufx-editor/src/proxy.rs`) và `ProjectPaths::video_decode_source` lấy khoá map là `std::path::absolute` của đường dẫn, không chuẩn hoá hoa/thường, symlink/junction hay UNC so với ổ đã map; cùng một file qua hai chuỗi khác nhau thành hai mục và (vì `path_key` `proxy.rs:105` chỉ hạ chữ thường) có thể tạo hai proxy. Nên chuẩn hoá bằng `canonicalize`/file ID trước khi làm khoá. Ghi ngày 2026-11-17.
+
+### [Thấp] Hàng đợi proxy một luồng FIFO, không ưu tiên clip gần playhead
+
+`work` (`crates/gpufx-editor/src/proxy.rs:643`) làm từng proxy theo thứ tự yêu cầu; project nhiều video 4K thì clip đang xem có thể phải chờ cả hàng. Nên ưu tiên nguồn gần playhead/đang chọn, và cân nhắc chạy song song khi GPU còn rảnh. Recheck dấu file cũng đợi proxy đang chạy xong mới tạo lại. Ghi ngày 2026-11-17.
+
+### [Thấp] Capture của agent xen preview làm dựng lại compositor khi có proxy
+
+Khi có proxy, preview dùng `ProjectPaths` riêng còn capture của agent dùng bản gốc; `D3d12Producer::use_paths` (`crates/gpufx-editor/src/preview/backend.rs:64`) bỏ compositor mỗi khi paths đổi, nên capture xen với preview dựng lại graph mỗi lần đổi. Nên giữ compositor riêng cho capture. Ghi ngày 2026-11-17.
 
 ### [Thấp] Proxy chế độ Tự động chỉ xét chiều cao, proxy tối đa 60 fps
 
