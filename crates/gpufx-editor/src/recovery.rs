@@ -97,6 +97,21 @@ impl ProcessProbe for SystemProbe {
     }
 }
 
+/// How many more times a claim retries a folder that is still there but cannot be renamed.
+const CLAIM_RETRIES: u32 = 3;
+const CLAIM_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Why an entry could not be claimed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimError {
+    /// The entry is gone: another editor restored or discarded it.
+    Taken(String),
+    /// The entry is still there but could not be renamed; it stays offered.
+    Locked(String),
+    /// Autosave is off in this window.
+    Off,
+}
+
 /// This process.
 pub fn current_process() -> ProcessInfo {
     let pid = std::process::id();
@@ -262,8 +277,24 @@ impl RecoveryStore {
 
     /// Takes entry `from`, left by a dead editor, over as `to` by renaming its folder. The rename
     /// is atomic, so when two editors try, one fails: the entry is gone or already taken.
-    pub fn claim(&self, from: &str, to: &str) -> Result<(), String> {
-        std::fs::rename(self.entry_dir(from), self.entry_dir(to)).map_err(|e| format!("{from}: {e}"))
+    ///
+    /// A folder that is still there but cannot be renamed (a file in it held open by an antivirus,
+    /// the search indexer or another editor reading it) is tried a few more times, then reported as
+    /// [`ClaimError::Locked`], not as taken.
+    pub fn claim(&self, from: &str, to: &str) -> Result<(), ClaimError> {
+        let source = self.entry_dir(from);
+        let mut attempt = 0;
+        loop {
+            match std::fs::rename(&source, self.entry_dir(to)) {
+                Ok(()) => return Ok(()),
+                Err(e) if !source.exists() => return Err(ClaimError::Taken(format!("{from}: {e}"))),
+                Err(e) if attempt >= CLAIM_RETRIES => return Err(ClaimError::Locked(format!("{from}: {e}"))),
+                Err(_) => {
+                    attempt += 1;
+                    std::thread::sleep(CLAIM_RETRY_DELAY);
+                }
+            }
+        }
     }
 
     pub fn remove_entry(&self, id: &str) {
@@ -490,8 +521,8 @@ impl Autosave {
 
     /// Takes the offered entry `id` over for this process; its new id, or why it could not be
     /// taken (another editor took or removed it first).
-    pub fn claim(&mut self, id: &str) -> Result<String, String> {
-        let Some(store) = &self.store else { return Err("autosave is off".to_owned()) };
+    pub fn claim(&mut self, id: &str) -> Result<String, ClaimError> {
+        let Some(store) = &self.store else { return Err(ClaimError::Off) };
         self.claims += 1;
         let claimed = owned_id(id, self.me, Some(self.claims));
         store.claim(id, &claimed)?;
@@ -506,7 +537,7 @@ impl Autosave {
     }
 
     /// Claims the offered entry `id` and deletes it; an error when another editor took it first.
-    pub fn discard(&mut self, id: &str) -> Result<(), String> {
+    pub fn discard(&mut self, id: &str) -> Result<(), ClaimError> {
         let claimed = self.claim(id)?;
         if let Some(store) = &self.store {
             store.remove_entry(&claimed);
@@ -886,13 +917,29 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn an_entry_held_open_is_locked_not_taken() {
+        let store = RecoveryStore::new(folder("claim-locked"));
+        let id = orphan(&store, None);
+        let mut autosave = Autosave::start(Some(store.clone()), ProcessInfo { pid: 12, started: 1 }, 60, Instant::now());
+        // Like an antivirus or the indexer reading it: Windows will not rename a folder with an open file.
+        let held = std::fs::File::open(store.entry_dir(&id).join(META_FILE)).unwrap();
+        assert!(matches!(autosave.claim(&id), Err(ClaimError::Locked(_))), "still there, so not taken");
+        assert!(matches!(autosave.discard(&id), Err(ClaimError::Locked(_))));
+        assert!(store.entry_dir(&id).exists(), "kept on offer");
+        drop(held);
+        autosave.discard(&id).unwrap();
+        assert!(!store.entry_dir(&id).exists());
+    }
+
+    #[test]
     fn only_one_of_two_editors_claims_an_orphan() {
         let store = RecoveryStore::new(folder("claim"));
         let id = orphan(&store, None);
         let mut first = Autosave::start(Some(store.clone()), ProcessInfo { pid: 10, started: 1 }, 60, Instant::now());
         let mut second = Autosave::start(Some(store.clone()), ProcessInfo { pid: 11, started: 1 }, 60, Instant::now());
         let claimed = first.claim(&id).unwrap();
-        assert!(second.claim(&id).is_err(), "taken already");
+        assert!(matches!(second.claim(&id), Err(ClaimError::Taken(_))), "taken already");
         assert!(second.discard(&id).is_err(), "a discard cannot delete what another editor restored");
         assert!(store.entry_dir(&claimed).exists());
         // A failed restore hands it back.

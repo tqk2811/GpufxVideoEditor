@@ -35,7 +35,7 @@ use crate::preview::plan::{frame_index, is_current, PlaybackFrames, PlaybackRun,
 use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::package_import::{install_zip, ImportProblem};
 use crate::project_file::{load_project_file, package_roots, parse_project, project_paths, save_project_file, user_package_root};
-use crate::recovery::{current_process, unix_now, Autosave, RecoveryStore, SystemProbe};
+use crate::recovery::{current_process, ClaimError, unix_now, Autosave, RecoveryStore, SystemProbe};
 use crate::project_lock::held_elsewhere;
 use crate::tasks::{run_guarded, Action, Arrival, FileDialog, Prompt, Request, TaskId, Tasks};
 use crate::ui::{self, UiRequest};
@@ -764,9 +764,15 @@ impl Session {
         match choice {
             RecoveryChoice::Later => {}
             RecoveryChoice::Discard => {
-                if let Err(message) = self.autosave.discard(&offer.id) {
+                match self.autosave.discard(&offer.id) {
+                    Ok(()) | Err(ClaimError::Off) => {}
                     // Another editor took it first: it is no longer this one's to offer.
-                    self.state.report_refused(Message::RecoveryTaken(message));
+                    Err(ClaimError::Taken(message)) => self.state.report_refused(Message::RecoveryTaken(message)),
+                    // Still there but held open: kept on offer to try again.
+                    Err(ClaimError::Locked(message)) => {
+                        self.state.report_error(Message::RecoveryFailed(message));
+                        return;
+                    }
                 }
             }
             RecoveryChoice::Restore => {
@@ -794,11 +800,17 @@ impl Session {
         // Taken over on disk first, so no other editor restores or discards it meanwhile.
         let claimed = match self.autosave.claim(&offer.id) {
             Ok(claimed) => claimed,
-            Err(message) => {
+            Err(ClaimError::Taken(message)) => {
                 self.state.report_refused(Message::RecoveryTaken(message));
                 // Dropped from the offers: another editor has it now.
                 return true;
             }
+            // Still there but held open: kept on offer to try again.
+            Err(ClaimError::Locked(message)) => {
+                self.state.report_error(Message::RecoveryFailed(message));
+                return false;
+            }
+            Err(ClaimError::Off) => return false,
         };
         // The copy holds absolute sources; missing ones are refused as when opening a project.
         let loaded = store.project_text(&claimed).and_then(|text| {
