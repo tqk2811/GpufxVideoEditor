@@ -566,3 +566,11 @@ Editor chỉ đọc lại các gói clip-animation (và tìm lại gói effect g
 ### [Thấp] Preset `type` của AVS chưa có con trỏ nhấp nháy
 
 Preset dựng sẵn `typewriter` (`crates/engine/src/clip_animation.rs`, `typewriter_in`) chỉ hiện từng ký tự; bản `type` của AI video studio còn vẽ con trỏ sau ký tự cuối. Cần một lớp vẽ thêm (một vạch theo vị trí ký tự cuối đã hiện) trong `draw_units`. Ghi ngày 2026-11-14.
+
+### [Thấp] Tự lưu: không đọc được giờ khởi động của chính tiến trình thì editor khác coi nó đã chết
+
+`current_process` (`crates/gpufx-editor/src/recovery.rs`) trả `started = 0` khi probe không đọc được chính tiến trình này. Editor khác khi đó thấy giờ khởi động khác nên coi bản tự lưu của một editor còn sống là mồ côi, có thể Khôi phục hoặc Bỏ nó. Hiếm; nên tắt tự lưu khi không lấy được `started`. Ghi ngày 2026-11-16.
+
+### [Thấp] Khôi phục ghi lại ngay bản vừa đọc lên chỗ bản tự lưu gốc
+
+`Autosave::adopt` (`crates/gpufx-editor/src/recovery.rs`) ghi project vừa parse đè lên `project.json` của bản vừa giành. Nếu parse rồi serialize lại làm rơi dữ liệu (trường lạ, phiên bản khác) thì mất bản gốc. Nên giữ bản gốc tới lần tự lưu kế tiếp hoặc chép sang `.orig`. Ghi ngày 2026-11-16.
