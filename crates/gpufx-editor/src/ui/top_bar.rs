@@ -9,13 +9,15 @@ use egui::{Align, Align2, CornerRadius, FontId, Layout, Pos2, Rect, Vec2};
 
 const EXPORT_BAR_WIDTH: f32 = 200.0;
 const NAME_MARGIN: f32 = 16.0;
+/// The autosave intervals the menu offers, in seconds; zero is off.
+const AUTOSAVE_CHOICES: [u64; 6] = [0, 30, 60, 120, 300, 600];
 
 pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let rect = ui.max_rect();
     ui.allocate_ui_with_layout(rect.size(), Layout::left_to_right(Align::Center), |ui| {
         ui.add_space(10.0);
         let (language, agent_access) = (state.language(), state.agent_access);
-        file_menu(ui, language, state.ui.theme, agent_access, state.is_exporting(), requests);
+        file_menu(ui, language, state.ui.theme, agent_access, state.ui.autosave_seconds, state.is_exporting(), requests);
         if state.agent_connected {
             ui.colored_label(theme::accent(), language.t(Message::AgentConnected));
         }
@@ -57,7 +59,7 @@ fn project_name(ui: &egui::Ui, state: &EditorState, rect: Rect, free: Rect) {
 }
 
 /// During an export only the agent access stays usable, so the user can revoke it at any time.
-fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeChoice, agent_access: bool, exporting: bool, requests: &mut Vec<UiRequest>) {
+fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeChoice, agent_access: bool, autosave_seconds: u64, exporting: bool, requests: &mut Vec<UiRequest>) {
     ui.menu_button(language.t(Message::MenuFile), |ui| {
         ui.add_enabled_ui(!exporting, |ui| {
             for (label, request) in [(Message::MenuNewProject, UiRequest::NewProject), (Message::MenuOpen, UiRequest::OpenProject), (Message::MenuSave, UiRequest::SaveProject), (Message::MenuSaveAs, UiRequest::SaveProjectAs)] {
@@ -93,6 +95,15 @@ fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeCh
                     let mut current = choice == theme_choice;
                     if ui.checkbox(&mut current, label).clicked() {
                         requests.push(UiRequest::SetTheme(choice));
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button(language.t(Message::MenuAutosave), |ui| {
+                for seconds in AUTOSAVE_CHOICES {
+                    let label = language.t(if seconds == 0 { Message::AutosaveOff } else { Message::AutosaveEvery(seconds) });
+                    if ui.radio(seconds == autosave_seconds, label).clicked() {
+                        requests.push(UiRequest::SetAutosave(seconds));
                         ui.close();
                     }
                 }

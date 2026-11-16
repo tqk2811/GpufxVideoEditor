@@ -14,6 +14,7 @@ const LANGUAGE_KEY: &str = "language";
 const PANELS_KEY: &str = "panels";
 const THEME_KEY: &str = "theme";
 const AGENT_ACCESS_KEY: &str = "agent_access";
+const AUTOSAVE_KEY: &str = "autosave_seconds";
 
 /// `%APPDATA%\gpufx-editor\settings.json`, when the variable is set.
 pub fn settings_file() -> Option<PathBuf> {
@@ -186,9 +187,35 @@ pub fn save_agent_access(enabled: bool) -> Result<(), String> {
     write_setting(&file, AGENT_ACCESS_KEY, json!(enabled))
 }
 
+/// How often a changed project is autosaved, in seconds; zero is off. The default until chosen.
+fn saved_autosave_seconds(file: &Path) -> u64 {
+    read_settings(file).get(AUTOSAVE_KEY).and_then(Value::as_u64).unwrap_or(crate::recovery::DEFAULT_INTERVAL_SECS)
+}
+
+pub fn startup_autosave_seconds() -> u64 {
+    settings_file().map_or(crate::recovery::DEFAULT_INTERVAL_SECS, |file| saved_autosave_seconds(&file))
+}
+
+pub fn save_autosave_seconds(seconds: u64) -> Result<(), String> {
+    let file = settings_file().ok_or("APPDATA is not set")?;
+    write_setting(&file, AUTOSAVE_KEY, json!(seconds))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autosave_runs_every_minute_until_chosen_and_zero_turns_it_off() {
+        let file = temp_file("autosave");
+        assert_eq!(saved_autosave_seconds(&file), 60);
+        write_setting(&file, AUTOSAVE_KEY, json!(0)).unwrap();
+        assert_eq!(saved_autosave_seconds(&file), 0);
+        write_setting(&file, AUTOSAVE_KEY, json!(300)).unwrap();
+        assert_eq!(saved_autosave_seconds(&file), 300);
+        write_setting(&file, AUTOSAVE_KEY, json!("soon")).unwrap();
+        assert_eq!(saved_autosave_seconds(&file), 60, "unusable counts as not chosen");
+    }
 
     #[test]
     fn agent_access_is_off_until_chosen() {

@@ -10,6 +10,7 @@ mod placement;
 mod animation_inspector;
 mod text_inspector;
 mod player;
+mod recovery_dialog;
 pub mod theme;
 mod timeline_panel;
 mod top_bar;
@@ -38,6 +39,10 @@ pub enum UiRequest {
     SetTheme(theme::ThemeChoice),
     SavePanelSizes,
     SetAgentAccess(bool),
+    /// How often to autosave, in seconds; zero is off.
+    SetAutosave(u64),
+    /// The choice for autosave `index` of the recovery dialog.
+    Recovery { index: usize, choice: crate::editor::RecoveryChoice },
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
@@ -52,6 +57,9 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
         in_rect(root, "fullscreen-player", screen, |ui| player::show_fullscreen(ui, state, requests, preview));
     } else {
         editing_panels(root, state, requests, preview);
+    }
+    if !state.ui.recovery_offers.is_empty() {
+        recovery_dialog::show(root.ctx(), state, requests);
     }
     // A release ends a held control wherever the pointer went, and a click or key press is
     // finished in the frame that made it.

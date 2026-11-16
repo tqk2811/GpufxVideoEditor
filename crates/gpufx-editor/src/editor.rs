@@ -265,6 +265,31 @@ pub struct UiState {
     pub previewing: Option<String>,
     /// The effect picker tile the pointer stays on; cleared when the picker is not drawn.
     pub tile_hover: crate::effect_previews::play::TileHover,
+    /// How often a changed project is autosaved, in seconds; zero is off.
+    pub autosave_seconds: u64,
+    /// Autosaves of editors that did not close cleanly, offered for recovery at start.
+    pub recovery_offers: Vec<RecoveryOffer>,
+}
+
+/// An autosave left behind by an editor that did not close cleanly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryOffer {
+    pub id: String,
+    /// The project file it belongs to; `None` for a project never saved.
+    pub original: Option<PathBuf>,
+    /// When it was written, in seconds since 1970.
+    pub saved_at: u64,
+    /// Whether the project file changed after the autosave was written.
+    pub original_newer: bool,
+}
+
+/// What the user chose for one autosave of the recovery dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryChoice {
+    Restore,
+    Discard,
+    /// Ask again at the next start.
+    Later,
 }
 
 /// The files of one drop on the timeline and the place the next of them goes.
@@ -564,6 +589,16 @@ impl EditorState {
         self.no_sound = None;
         self.view = TimelineView::default();
         self.drag = None;
+    }
+
+    /// A project restored from an autosave of `file` (`None`: never saved). It stays unsaved, since
+    /// the file on disk does not hold it.
+    pub fn restore_project(&mut self, project: Project, file: Option<PathBuf>) {
+        let shown = file.as_ref().map_or_else(String::new, |file| file.display().to_string());
+        self.replace_project(project, file);
+        // Revisions only grow, so this one is never reached again.
+        self.saved_revision = self.revision.wrapping_sub(1);
+        self.status = Status::Info(Message::RecoveryRestored(shown));
     }
 
     /// An empty project, replacing the current one.
