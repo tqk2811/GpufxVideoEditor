@@ -126,9 +126,22 @@ pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
 }
 
 /// Writes `project` to `file` through a temporary file, so a failure leaves any earlier save intact.
+/// The previous save, if any, is first copied to `<file>.bak`; a failed copy does not stop the save.
 pub fn save_project_file(project: &Project, file: &Path) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&with_relative_sources(project, file)).map_err(|e| format!("serialising the project failed: {e}"))?;
+    if file.is_file() {
+        if let Err(error) = std::fs::copy(file, backup_path(file)) {
+            eprintln!("keeping the previous save of {} as .bak failed: {error}", file.display());
+        }
+    }
     write_file_atomically(file, text.as_bytes())
+}
+
+/// `<file>.bak`, beside `file`: the save before the last one.
+pub fn backup_path(file: &Path) -> std::path::PathBuf {
+    let mut name = file.as_os_str().to_owned();
+    name.push(".bak");
+    name.into()
 }
 
 /// Writes `bytes` to `file` through a temporary file beside it, synced before it replaces `file`,
@@ -314,6 +327,26 @@ mod tests {
         assert_eq!(load_project_file(&file, &package_roots()).unwrap(), original);
         let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|entry| entry.file_name()).collect();
         assert_eq!(names.len(), 2, "only the project and its clips folder remain: {names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_again_keeps_the_previous_save_as_bak() {
+        let dir = temp_folder("bak");
+        let clip = dir.join("a.mp4");
+        std::fs::write(&clip, b"x").unwrap();
+        let mut first = project(vec![clip.to_string_lossy().into_owned()]);
+        let file = dir.join("p.json");
+        save_project_file(&first, &file).unwrap();
+        assert!(!backup_path(&file).exists(), "a first save has nothing to keep");
+        let first_text = std::fs::read_to_string(&file).unwrap();
+
+        first.tracks[0].clips[0].gain_db = -6.0;
+        save_project_file(&first, &file).unwrap();
+
+        assert_eq!(backup_path(&file), dir.join("p.json.bak"));
+        assert_eq!(std::fs::read_to_string(backup_path(&file)).unwrap(), first_text);
+        assert_ne!(std::fs::read_to_string(&file).unwrap(), first_text);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
