@@ -39,7 +39,7 @@ pub use audio_clock::{
 pub use audio_mix::{mix_audio, mix_audio_with, AudioSource, MixReport};
 pub use stretch::StretchStates;
 pub use audio_schedule::{
-    audio_sample_count, audio_segments, sample_position, AudioSegment, GainEnvelope, VoiceFx, MIX_CHANNELS,
+    audio_sample_count, audio_segments, audio_segments_with, sample_position, AudioSegment, GainEnvelope, VoiceFx, MIX_CHANNELS,
     MIX_SAMPLE_RATE,
 };
 pub use edit::{

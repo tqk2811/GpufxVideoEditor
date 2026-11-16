@@ -354,7 +354,8 @@ fn audio_before_the_source_start_is_silence_and_is_not_read() {
     let mut src = levels(&[("b", 1.0)]);
     let (out, _) = mix(&p, &mut src, WINDOW_START, WINDOW_LEN as usize);
     assert_eq!(left(&out, 11_999), 0.0);
-    assert!(left(&out, 12_000) > 0.0);
+    // The crossfade starts with the audio of b, at gain 0, and b is heard from the next sample.
+    assert!(left(&out, 12_001) > 0.0);
     assert!(src.reads.iter().all(|&(_, position, _)| position >= 0));
     let b = ClipKey { track: 0, clip: 1 };
     assert!(src.reads.contains(&(b, 0, 12_000)));
@@ -487,4 +488,78 @@ fn an_odd_output_slice_zeroes_its_last_element() {
     let mut out = [9.0; 5];
     mix_audio(&p, &mut levels(&[("a", 0.5)]), 0, &mut out).unwrap();
     assert_eq!(out, [0.5, 0.5, 0.5, 0.5, 0.0]);
+}
+
+/// Like [`Levels`], and every source holds `len` samples, so a read past them is silence.
+struct Bounded {
+    levels: Vec<(&'static str, f32, i64)>,
+}
+
+impl AudioSource for Bounded {
+    fn read(&mut self, _key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        if let Some(&(_, level, len)) = self.levels.iter().find(|(name, _, _)| *name == source) {
+            let covered = (len - position).clamp(0, (out.len() / 2) as i64) as usize;
+            out[..covered * 2].fill(level);
+        }
+        Ok(())
+    }
+
+    fn source_len(&mut self, _key: ClipKey, source: &str) -> Option<i64> {
+        self.levels.iter().find(|(name, _, _)| *name == source).map(|&(_, _, len)| len)
+    }
+}
+
+/// Two whole files joined: `a` holds exactly the 48000 samples of its clip and `b` starts at its
+/// beginning, so neither has audio on the other side of the cut.
+fn whole_files() -> Project {
+    project(
+        3000,
+        vec![track(
+            vec![clip("a", 0, 0, CUT), clip("b", CUT, 0, CUT)],
+            vec![transition(0, WINDOW)],
+        )],
+    )
+}
+
+#[test]
+fn whole_files_cut_at_full_level_instead_of_dipping() {
+    let p = whole_files();
+    let mut src = Bounded { levels: vec![("a", 0.5, 48_000), ("b", 0.25, 1_000_000)] };
+    let (out, _) = mix(&p, &mut src, WINDOW_START, WINDOW_LEN as usize);
+    // Before the cut only a has audio and it keeps its level; after it only b, at its level.
+    close(left(&out, 0), 0.5);
+    close(left(&out, 11_999), 0.5);
+    close(left(&out, 12_000), 0.25);
+    close(left(&out, WINDOW_LEN as usize - 1), 0.25);
+}
+
+#[test]
+fn the_fade_shrinks_to_the_audio_both_clips_have() {
+    // b has 6000 samples before its in point and a 3000 past its out point, so both sound only in
+    // [42000, 51000): the crossfade runs there and nowhere else.
+    let mut p = whole_files();
+    p.tracks[0].clips[1].source_in = t(11_250);
+    let mut src = Bounded { levels: vec![("a", 0.5, 51_000), ("b", 0.25, 1_000_000)] };
+    let segments = engine::audio_segments_with(&p, 0, 200_000, &mut |key, source| src.source_len(key, source));
+    let (a, b) = (segments[0].gain, segments[1].gain);
+    assert_eq!((a.gain_at(41_999), b.gain_at(41_999)), (1.0, 0.0));
+    assert_eq!((a.gain_at(42_000), b.gain_at(42_000)), (1.0, 0.0));
+    close(a.gain_at(46_500), std::f32::consts::FRAC_1_SQRT_2);
+    close(b.gain_at(46_500), std::f32::consts::FRAC_1_SQRT_2);
+    assert_eq!((a.gain_at(51_000), b.gain_at(51_000)), (0.0, 1.0));
+    let (out, _) = mix(&p, &mut src, WINDOW_START, WINDOW_LEN as usize);
+    close(left(&out, 41_000 - WINDOW_START as usize), 0.5);
+    close(left(&out, 46_500 - WINDOW_START as usize), 0.75 * std::f32::consts::FRAC_1_SQRT_2);
+    close(left(&out, 55_000 - WINDOW_START as usize), 0.25);
+}
+
+#[test]
+fn material_on_both_sides_keeps_the_whole_window() {
+    // The default crossfade has audio everywhere in its window: nothing changes.
+    let p = crossfade();
+    let mut src = Bounded { levels: vec![("a", 0.5, 1_000_000), ("b", 0.25, 1_000_000)] };
+    let segments = engine::audio_segments_with(&p, 0, 200_000, &mut |key, source| src.source_len(key, source));
+    assert_eq!(segments, audio_segments(&p, 0, 200_000));
+    let mid = WINDOW_START + WINDOW_LEN / 2;
+    close(segments[0].gain.gain_at(mid), std::f32::consts::FRAC_1_SQRT_2);
 }

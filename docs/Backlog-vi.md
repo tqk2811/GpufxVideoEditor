@@ -175,9 +175,9 @@ Giải mã và ghép dùng shader gpufx, còn xuất dùng `rgba_to_nv12` ở `c
 
 `canvas` không được giải phóng trên đường lỗi (`crates/engine/src/render.rs:264-282`). `clip_graphs` không bao giờ bị loại bỏ (`crates/d3d12-backend/src/compositor.rs:186`), nên project nhiều clip giữ graph của mọi clip. Thư mục package mặc định là đường dẫn lúc build (`crates/gpufx-render/src/main.rs:68`), không chạy được khi file thực thi được chép đi. `Decoder::wait_idle` trong trait trung lập là khái niệm riêng của D3D12VA. Ghi ngày 2026-11-09.
 
-### [Vừa] Transition giữa hai clip không có thêm tiếng ngoài điểm in/out không phải crossfade thật
+### [Thấp] Transition giữa hai file nguyên thành cắt thẳng, có thể nghe tiếng tách
 
-Trong cửa sổ transition, mỗi clip được kéo dài qua đầu hoặc đuôi của chính nó, nhưng khi nguồn không còn tiếng ngoài điểm in/out thì phần đầu và đuôi nằm ngoài nguồn là im lặng, trong khi hình giữ khung đầu hoặc khung cuối. Trường hợp thường gặp: nối hai file nguyên (`crates/engine/src/audio_schedule.rs:163-164`, `crates/engine/src/audio_mix.rs`). Nên làm vì tiếng tắt dần rồi bật lên thay vì hoà vào nhau. Ghi ngày 2026-11-09.
+Crossfade tiếng giờ chỉ chạy trên phần cửa sổ mà cả hai clip đều có tiếng (`fitted` trong `crates/engine/src/audio_schedule.rs`). Hai file nguyên nối nhau không có phần chung nên thành cắt thẳng ở chỗ file trước hết tiếng, mức tiếng giữ nguyên nhưng chỗ nối có thể tách nếu sóng không về 0. Đây là lựa chọn tạm (chưa được user chốt): giữ sync, không kéo dài hay lặp tiếng. Có thể thêm dốc chống tách vài ms ở hai phía chỗ cắt. Độ dài file lấy từ duration của container (`AudioFileDecoder::length`), nên với AAC có thể lệch vài chục ms so với mẫu cuối thật. Ghi ngày 2026-11-17.
 
 ### [Thấp] Hai ghi chú về chất lượng tiếng
 

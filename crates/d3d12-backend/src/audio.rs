@@ -110,6 +110,9 @@ pub struct AudioFileDecoder {
     origin: i64,
     /// Media-timeline sample of the first audio sample.
     first_sample: i64,
+    /// Source samples the file holds, from the container's duration; `Some(0)` without an audio
+    /// stream, `None` when the container does not say.
+    length: Option<i64>,
     /// Decoded interleaved samples not consumed yet.
     pending: Vec<f32>,
     /// Media-timeline sample of `pending[0]`.
@@ -152,6 +155,7 @@ impl AudioFileDecoder {
             time_base: ffi::AVRational { num: 1, den: 1 },
             origin: 0,
             first_sample: 0,
+            length: Some(0),
             pending: Vec::new(),
             pending_start: 0,
             positioned: false,
@@ -207,6 +211,13 @@ impl AudioFileDecoder {
         self.time_base = (*stream).time_base;
         self.first_sample = if (*stream).start_time == ffi::NO_PTS { 0 } else { to_mix_samples((*stream).start_time, self.time_base) };
         self.origin = self.video_origin().unwrap_or(self.first_sample);
+        self.length = if (*stream).duration != ffi::NO_PTS && (*stream).duration > 0 {
+            Some(self.first_sample + to_mix_samples((*stream).duration, self.time_base) - self.origin)
+        } else if (*self.format_context).duration > 0 {
+            Some(self.first_sample + to_mix_samples((*self.format_context).duration, ffi::AVRational { num: 1, den: 1_000_000 }) - self.origin)
+        } else {
+            None
+        };
         self.discard_other_streams(index);
 
         self.codec_context = ffi::avcodec_alloc_context3(codec);
@@ -280,6 +291,12 @@ impl AudioFileDecoder {
             }
         }
         Ok(self.deliver(target, frames, out))
+    }
+
+    /// Source samples the file holds, positions `0..n`, from the container's duration. `None` when
+    /// the container does not say.
+    pub fn length(&self) -> Option<i64> {
+        self.length.map(|length| length.max(0))
     }
 
     /// Like [`AudioFileDecoder::read`], always from a seek: the samples depend on `position` only,
@@ -572,6 +589,11 @@ impl AudioSource for AudioFiles {
     fn read_counted(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<usize, RenderError> {
         let decoder = self.decoder(key, source)?;
         decoder.read_counted(position, out).map_err(|e| RenderError(format!("{}: {e}", decoder.path)))
+    }
+
+    fn source_len(&mut self, key: ClipKey, source: &str) -> Option<i64> {
+        // A file that does not open has no audio; the read that follows reports the error.
+        self.decoder(key, source).map_or(Some(0), |decoder| decoder.length())
     }
 
     fn read_fresh(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
