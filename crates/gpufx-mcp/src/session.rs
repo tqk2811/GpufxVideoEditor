@@ -125,7 +125,7 @@ impl AgentHost for FileHost {
         let paths = AgentHost::paths(self);
         let project = self.state.project().clone();
         let total = frame_count(&project);
-        let job = ExportJob { project, project_file: file, paths, out, encoder, hashes: None };
+        let job = ExportJob { project, project_file: file, paths, out, encoder, hashes: None, keyframe_interval: None };
         check_export(&job)?;
         // The child needs the GPU memory and decoders the captures hold.
         self.rig = None;

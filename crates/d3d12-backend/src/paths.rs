@@ -1,7 +1,9 @@
 //! Where the project's source files and effect packages live on disk.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use engine::Resolver;
 
@@ -169,6 +171,9 @@ pub struct ProjectPaths {
     package_roots: Vec<PathBuf>,
     /// Whether a package may be found by the project's folder or an absolute path outside the roots.
     project_packages: bool,
+    /// Smaller copies of video sources the preview decodes instead, by the absolute path of the
+    /// original (see [`Self::video_decode_path`]). Empty for an export, which reads the originals.
+    proxies: Arc<HashMap<PathBuf, PathBuf>>,
 }
 
 fn is_package(path: &Path) -> bool {
@@ -184,7 +189,32 @@ impl ProjectPaths {
     /// `project_file` is the path of the project JSON; `package_roots` are searched in order.
     pub fn new(project_file: &Path, package_roots: Vec<PathBuf>) -> Self {
         let base = project_file.parent().filter(|p| !p.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        Self { base, package_roots, project_packages: true }
+        Self { base, package_roots, project_packages: true, proxies: Arc::default() }
+    }
+
+    /// The same paths with `proxies`: the files the preview decodes in place of the originals, by
+    /// the absolute path of the original.
+    pub fn with_proxies(self, proxies: Arc<HashMap<PathBuf, PathBuf>>) -> Self {
+        Self { proxies, ..self }
+    }
+
+    /// The same paths without proxies, so every source is read from its original file.
+    pub fn without_proxies(&self) -> Self {
+        Self { base: self.base.clone(), package_roots: self.package_roots.clone(), project_packages: self.project_packages, proxies: Arc::default() }
+    }
+
+    pub fn has_proxies(&self) -> bool {
+        !self.proxies.is_empty()
+    }
+
+    /// The file a video decoder opens for `source`: its proxy when it has one, else the original.
+    pub fn video_decode_path(&self, source: &str) -> PathBuf {
+        let original = self.source_path(source);
+        if self.proxies.is_empty() {
+            return original;
+        }
+        let key = std::path::absolute(&original).unwrap_or_else(|_| original.clone());
+        self.proxies.get(&key).cloned().unwrap_or(original)
     }
 
     /// Like [`Self::new`], but packages come only from the package roots. A package is shader code
@@ -493,4 +523,21 @@ mod tests {
         let paths = ProjectPaths::new(Path::new(r"D:\work\project.json"), Vec::new());
         assert_eq!(paths.source_path("a.mp4"), PathBuf::from(r"D:\work\a.mp4"));
     }
+
+    #[test]
+    fn a_video_decodes_from_its_proxy_and_an_export_copy_reads_the_original() {
+        let original = PathBuf::from(r"D:\work\a.mp4");
+        let proxy = PathBuf::from(r"C:\cache\a-proxy.mp4");
+        let map = HashMap::from([(original.clone(), proxy.clone())]);
+        let paths = ProjectPaths::new(Path::new(r"D:\work\p.json"), Vec::new()).with_proxies(Arc::new(map));
+        assert!(paths.has_proxies());
+        assert_eq!(paths.video_decode_path("a.mp4"), proxy, "relative to the project");
+        assert_eq!(paths.video_decode_path(r"D:\work\a.mp4"), proxy, "absolute");
+        assert_eq!(paths.video_decode_path("b.mp4"), PathBuf::from(r"D:\work\b.mp4"), "no proxy");
+        assert_eq!(paths.source_path("a.mp4"), original, "the source path stays the original");
+        let export = paths.without_proxies();
+        assert!(!export.has_proxies());
+        assert_eq!(export.video_decode_path("a.mp4"), original);
+    }
+
 }

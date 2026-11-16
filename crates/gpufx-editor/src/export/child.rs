@@ -196,6 +196,9 @@ fn render_arguments(project_file: &Path, job: &ExportJob, package_roots: &[PathB
     if let Some(hashes) = &job.hashes {
         arguments.extend(["--hashes".into(), hashes.clone().into()]);
     }
+    if let Some(frames) = job.keyframe_interval {
+        arguments.extend(["--keyint".into(), frames.to_string().into()]);
+    }
     for root in package_roots {
         arguments.extend(["--packages".into(), root.clone().into()]);
     }
@@ -290,7 +293,7 @@ mod tests {
 
     fn job(dir: &Path, mode: &str) -> ExportJob {
         // The track is hidden, so its missing source and package pass validation.
-        ExportJob { project: project("clip.mp4", "fx"), project_file: Some(dir.join("project.json")), paths: Arc::new(ProjectPaths::new(&dir.join("project.json"), Vec::new())), out: dir.join(format!("{mode}.mp4")), encoder: EncoderChoice::Named("libx264".into()), hashes: None }
+        ExportJob { project: project("clip.mp4", "fx"), project_file: Some(dir.join("project.json")), paths: Arc::new(ProjectPaths::new(&dir.join("project.json"), Vec::new())), out: dir.join(format!("{mode}.mp4")), encoder: EncoderChoice::Named("libx264".into()), hashes: None, keyframe_interval: None }
     }
 
     fn run(job: &ExportJob, cancel: bool, grace: Duration) -> ExportOutcome {

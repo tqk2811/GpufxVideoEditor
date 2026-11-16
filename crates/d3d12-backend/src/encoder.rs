@@ -324,6 +324,11 @@ impl Mp4Encoder {
     /// has are opened in order until one opens, without a separate probe; that happens before the
     /// first frame, so a file is always written by one encoder.
     pub fn create(path: &Path, output: &Output, choice: &EncoderChoice) -> Result<Self, String> {
+        Self::create_with_keyframes(path, output, choice, None)
+    }
+
+    /// [`Self::create`] with a keyframe every `keyframe_interval` frames instead of every two seconds.
+    pub fn create_with_keyframes(path: &Path, output: &Output, choice: &EncoderChoice, keyframe_interval: Option<u32>) -> Result<Self, String> {
         if output.width % 2 != 0 || output.height % 2 != 0 {
             return Err(format!("output size {}x{} must be even for 4:2:0 video", output.width, output.height));
         }
@@ -338,7 +343,7 @@ impl Mp4Encoder {
                 problems.push(format!("{name}: it needs a width and height that are multiples of 8, not {}x{}", output.width, output.height));
                 continue;
             }
-            match Self::open_encoder(path, output, name) {
+            match Self::open_encoder(path, output, name, keyframe_interval) {
                 Ok(encoder) => return Ok(encoder),
                 Err(reason) => problems.push(format!("{name}: {reason}")),
             }
@@ -352,7 +357,7 @@ impl Mp4Encoder {
         Err(format!("no {codec} encoder could be opened ({})", problems.join("; ")))
     }
 
-    fn open_encoder(path: &Path, output: &Output, name: &str) -> Result<Self, String> {
+    fn open_encoder(path: &Path, output: &Output, name: &str, keyframe_interval: Option<u32>) -> Result<Self, String> {
         let path_text = path.to_str().ok_or("the output path is not valid UTF-8")?;
         let c_path = CString::new(path_text).map_err(|_| "the output path contains NUL")?;
         let c_name = CString::new(name).map_err(|_| "the encoder name contains NUL")?;
@@ -370,11 +375,11 @@ impl Mp4Encoder {
             audio: None,
         };
         // SAFETY: on error, Drop releases what was created so far.
-        unsafe { encoder.initialize(&c_path, &c_name, output)? };
+        unsafe { encoder.initialize(&c_path, &c_name, output, keyframe_interval)? };
         Ok(encoder)
     }
 
-    unsafe fn initialize(&mut self, path: &CStr, name: &CStr, output: &Output) -> Result<(), String> {
+    unsafe fn initialize(&mut self, path: &CStr, name: &CStr, output: &Output, keyframe_interval: Option<u32>) -> Result<(), String> {
         let codec = ffi::avcodec_find_encoder_by_name(name.as_ptr());
         if codec.is_null() {
             return Err(missing_encoder_reason(&name.to_string_lossy(), cfg!(feature = "ffmpeg-gpl")));
@@ -389,7 +394,7 @@ impl Mp4Encoder {
         let divisor = gcd(duration, TICKS_PER_SECOND);
         let time_base = ffi::AVRational { num: (duration / divisor) as i32, den: (TICKS_PER_SECOND / divisor) as i32 };
         let global_header = (*(*self.format_context).oformat).flags & ffi::AVFMT_GLOBALHEADER != 0;
-        let gop = (TICKS_PER_SECOND / duration.max(1) * 2).clamp(1, 600) as i32;
+        let gop = keyframe_interval.map_or_else(|| TICKS_PER_SECOND / duration.max(1) * 2, i64::from).clamp(1, 600) as i32;
         configure_video(&mut *self.codec_context, &self.encoder_name, output.width as i32, output.height as i32, self.pixel_format, time_base, Self::target_bit_rate(output), gop, global_header);
         check(ffi::avcodec_open2(self.codec_context, codec, ptr::null_mut()), "avcodec_open2")?;
 

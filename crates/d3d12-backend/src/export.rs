@@ -51,6 +51,9 @@ pub struct ExportJob {
     pub encoder: EncoderChoice,
     /// Where to write `frame sha256-of-RGBA` lines.
     pub hashes: Option<PathBuf>,
+    /// Frames between keyframes; `None` for the encoder's usual two seconds. A preview proxy asks
+    /// for a short interval so a seek decodes few frames.
+    pub keyframe_interval: Option<u32>,
 }
 
 /// What an export reports while it runs and how it is stopped.
@@ -274,7 +277,9 @@ impl ExportJob {
             }
         };
         let (width, height) = (self.project.output.width, self.project.output.height);
-        let mut compositor = match D3d12Compositor::new(gpu.clone(), self.paths.clone(), width, height) {
+        // An export reads the original files, never the preview's proxies.
+        let paths = if self.paths.has_proxies() { Arc::new(self.paths.without_proxies()) } else { self.paths.clone() };
+        let mut compositor = match D3d12Compositor::new(gpu.clone(), paths, width, height) {
             Ok(compositor) => compositor,
             Err(message) => {
                 settle(&Err(message.clone()));
@@ -318,7 +323,7 @@ impl ExportJob {
                 return Err("the output and the hash file name the same file".to_owned().into());
             }
         }
-        let encoder = Mp4Encoder::create(&out_file.temporary, &self.project.output, &self.encoder)?;
+        let encoder = Mp4Encoder::create_with_keyframes(&out_file.temporary, &self.project.output, &self.encoder, self.keyframe_interval)?;
         let encoder_name = encoder.encoder_name().to_owned();
         if let Some(opened) = control.encoder_opened {
             opened(&encoder_name);

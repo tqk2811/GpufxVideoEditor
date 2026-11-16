@@ -567,7 +567,7 @@ impl Session {
         self.playback = None;
         self.audio_preview.stop();
         let preview_released = self.preview.suspend();
-        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: choice, hashes: None };
+        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: choice, hashes: None, keyframe_interval: None };
         let window = self.window.clone();
         match ExportWorker::start(job, self.package_roots.clone(), sibling_render_exe(), preview_released, move || window.request_redraw()) {
             Ok(worker) => {
@@ -1123,7 +1123,7 @@ impl AgentHost for Session {
     }
 
     fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError> {
-        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: encoder.clone(), hashes: None };
+        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: encoder.clone(), hashes: None, keyframe_interval: None };
         check_export(&job)?;
         Session::start_export(self, out, Some(encoder));
         if self.state.is_exporting() {

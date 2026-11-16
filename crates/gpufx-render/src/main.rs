@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu, ProgressEvent, ProjectPaths, CANCEL_LINE, PROGRESS_PROTOCOL};
 use engine::{frame_count, Project};
 
-const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--codec <h264|hevc>] [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]... [--progress <text|json>] [--cancel-on-stdin-eof]\n\
+const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--codec <h264|hevc>] [--encoder <name|auto>] [--hashes <file>] [--keyint <frames>] [--packages <dir>]... [--progress <text|json>] [--cancel-on-stdin-eof]\n\
     \n\
     --codec     video codec: h264 (default) or hevc; with --encoder auto, picks which encoders Auto tries\n\
     --encoder   auto (default): the first encoder that opens on this machine, hardware first\n\
@@ -21,7 +21,8 @@ const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--code
     \x20           for hevc: hevc_nvenc, hevc_qsv, hevc_amf, hevc_mf, libx265, libkvazaar), or one of those names,\n\
     \x20           or any encoder name FFmpeg accepts. A named encoder that fails stops the render.\n\
     --hashes    write 'frame sha256-of-RGBA' lines to a file\n\
-    --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>\n\
+    --keyint    frames between keyframes (1 to 600); default two seconds. The editor's preview proxies use a short one
+\n    --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>\n\
     --progress  text (default), or json: one JSON event per stdout line, and a 'cancel' line on stdin stops the render\n\
     \x20           (see docs/plans/spec-mcp-server-vi.md)\n\
     --cancel-on-stdin-eof  with --progress json: the end of stdin stops the render, so a parent that dies stops it too\n\
@@ -45,6 +46,7 @@ struct Arguments {
     out: PathBuf,
     encoder: EncoderChoice,
     hashes: Option<PathBuf>,
+    keyframe_interval: Option<u32>,
     package_roots: Vec<PathBuf>,
     progress: ProgressMode,
     cancel_on_stdin_eof: bool,
@@ -56,6 +58,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut codec = None;
     let mut encoder = None;
     let mut hashes = None;
+    let mut keyframe_interval = None;
     let mut package_roots = Vec::new();
     let mut progress = ProgressMode::Text;
     let mut cancel_on_stdin_eof = false;
@@ -69,6 +72,7 @@ fn parse_arguments() -> Result<Arguments, String> {
             "--codec" => codec = Some(value("--codec")?.to_string_lossy().into_owned()),
             "--encoder" => encoder = Some(value("--encoder")?.to_string_lossy().into_owned()),
             "--hashes" => hashes = Some(PathBuf::from(value("--hashes")?)),
+            "--keyint" => keyframe_interval = Some(parse_keyint(&value("--keyint")?.to_string_lossy())?),
             "--packages" => package_roots.push(PathBuf::from(value("--packages")?)),
             "--progress" => {
                 progress = match value("--progress")?.to_string_lossy().as_ref() {
@@ -91,7 +95,12 @@ fn parse_arguments() -> Result<Arguments, String> {
         return Err("--cancel-on-stdin-eof needs --progress json".to_owned());
     }
     let encoder = EncoderChoice::parse(codec.as_deref(), encoder.as_deref())?;
-    Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, package_roots, progress, cancel_on_stdin_eof })
+    Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, keyframe_interval, package_roots, progress, cancel_on_stdin_eof })
+}
+
+/// The `--keyint` value: a whole number of frames from 1 to 600.
+fn parse_keyint(text: &str) -> Result<u32, String> {
+    text.parse::<u32>().ok().filter(|frames| (1..=600).contains(frames)).ok_or_else(|| format!("--keyint must be a number of frames from 1 to 600, not {text}"))
 }
 
 /// Why a run wrote no file.
@@ -159,7 +168,7 @@ fn run() -> Result<(), Failure> {
     let paths = Arc::new(ProjectPaths::new(&arguments.project, arguments.package_roots.clone()));
     let has_audio = project.output.audio.is_some();
     let total = frame_count(&project);
-    let job = ExportJob { project, project_file: Some(arguments.project.clone()), paths, out: arguments.out.clone(), encoder: arguments.encoder, hashes: arguments.hashes };
+    let job = ExportJob { project, project_file: Some(arguments.project.clone()), paths, out: arguments.out.clone(), encoder: arguments.encoder, hashes: arguments.hashes, keyframe_interval: arguments.keyframe_interval };
     job.check_named("--out", "--hashes")?;
 
     let gpu = Arc::new(Gpu::create()?);
@@ -248,5 +257,14 @@ mod tests {
         stop_after_eof(&cancel, Duration::from_millis(1), || gave_up.set(true));
         assert!(cancel.load(Ordering::SeqCst), "the render is asked to stop first");
         assert!(gave_up.get(), "a render that did not stop is ended");
+    }
+
+    #[test]
+    fn the_keyframe_interval_is_a_frame_count_from_one_to_600() {
+        assert_eq!(parse_keyint("10"), Ok(10));
+        assert_eq!(parse_keyint("600"), Ok(600));
+        assert!(parse_keyint("0").is_err());
+        assert!(parse_keyint("601").is_err());
+        assert!(parse_keyint("ten").is_err());
     }
 }

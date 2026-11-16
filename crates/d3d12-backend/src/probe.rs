@@ -119,6 +119,44 @@ pub fn probe_media(path: &Path) -> Result<MediaProbe, String> {
     }
 }
 
+/// The picture of a video file as the editor shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoFormat {
+    /// Width in pixels once the sample aspect ratio and the turn of the stream are applied.
+    pub width: u32,
+    /// Height in pixels once the turn of the stream is applied.
+    pub height: u32,
+    /// How long one frame lasts at the stream's average frame rate, when it states one.
+    pub frame_duration: Option<Time>,
+}
+
+/// Reads the size and frame rate of the best video stream of `path`.
+pub fn probe_video_format(path: &Path) -> Result<VideoFormat, String> {
+    let shown = path.display();
+    let text = path.to_str().ok_or_else(|| format!("{shown}: the path is not valid UTF-8"))?;
+    let c_path = CString::new(text).map_err(|_| format!("{shown}: the path contains NUL"))?;
+    let mut input = Input(ptr::null_mut());
+    // SAFETY: Drop releases the context either way; it is valid once open_input succeeds, and the
+    // stream index comes from av_find_best_stream.
+    unsafe {
+        check(ffi::avformat_open_input(&mut input.0, c_path.as_ptr(), ptr::null(), ptr::null_mut()), "avformat_open_input").map_err(|e| format!("{shown}: {e}"))?;
+        check(ffi::avformat_find_stream_info(input.0, ptr::null_mut()), "avformat_find_stream_info").map_err(|e| format!("{shown}: {e}"))?;
+        let index = check(ffi::av_find_best_stream(input.0, ffi::AVMEDIA_TYPE_VIDEO, -1, -1, ptr::null_mut(), 0), "av_find_best_stream").map_err(|e| format!("{shown}: {e}"))?;
+        let stream = *(*input.0).streams.add(index as usize);
+        let parameters = (*stream).codecpar;
+        let (stored_width, stored_height) = ((*parameters).width, (*parameters).height);
+        if stored_width <= 0 || stored_height <= 0 {
+            return Err(format!("{shown}: the video stream states no size"));
+        }
+        let aspect = ffi::display_aspect(stored_width, stored_height, (*parameters).sample_aspect_ratio);
+        let width = (aspect * f64::from(stored_height)).round().max(1.0) as u32;
+        let (width, height) = crate::orientation::turned_size(width, stored_height as u32, crate::orientation::stream_turns(stream));
+        let rate = (*stream).avg_frame_rate;
+        let frame_duration = (rate.num > 0 && rate.den > 0).then(|| (i64::from(rate.den) * TICKS_PER_SECOND + i64::from(rate.num) / 2) / i64::from(rate.num)).filter(|ticks| *ticks > 0).map(Time::from_ticks);
+        Ok(VideoFormat { width, height, frame_duration })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +208,16 @@ mod tests {
     fn a_length_in_range_converts_and_rounds_to_the_nearest_tick() {
         assert_eq!(rational_to_ticks(3, base(1, 1)), Some(Time::from_ticks(3 * TICKS_PER_SECOND)));
         assert_eq!(rational_to_ticks(1_500_000, base(1, 1_000_000)), Some(Time::from_ticks(TICKS_PER_SECOND * 3 / 2)));
+    }
+
+    #[test]
+    fn the_video_format_applies_the_sample_aspect_ratio_and_reads_the_frame_rate() {
+        let path = clip("format.mp4", &["-f", "lavfi", "-i", "color=c=gray:s=64x48:r=25:d=1", "-vf", "setsar=2", "-c:v", "mpeg4"]);
+        let format = probe_video_format(&path).expect("probe");
+        assert_eq!((format.width, format.height), (128, 48), "square pixels");
+        assert_eq!(format.frame_duration, Some(Time::from_ticks(TICKS_PER_SECOND / 25)));
+        let sound = clip("format-sound.m4a", &["-f", "lavfi", "-i", "sine=f=440:d=1", "-c:a", "aac"]);
+        assert!(probe_video_format(&sound).is_err(), "no video stream");
     }
 
     #[test]
