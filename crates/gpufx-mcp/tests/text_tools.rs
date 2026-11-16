@@ -345,6 +345,23 @@ fn clip_animation_set_animates_a_video_clip_and_a_text_and_refuses_an_audio_clip
 }
 
 #[test]
+fn clip_animation_set_takes_a_negative_in_as_a_hold_and_refuses_a_negative_loop() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let (video, _) = clip_paths();
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": video, "start": 0, "duration": SECOND}));
+    let added = call_ok(&mut session, "clip_add", json!({"expected_revision": 2, "track": 0, "source": video, "start": SECOND, "duration": SECOND}));
+    let set = call_ok(&mut session, "clip_animation_set", json!({"expected_revision": revision(&added), "clip": {"track": 0, "clip": 0}, "in": {"preset": "fade", "duration": -SECOND / 2}}));
+    let project = project_of(&mut session);
+    let clips = &project.tracks[0].clips;
+    assert_eq!((clips[0].duration, clips[0].hold_start()), (engine::Time::from_ticks(SECOND + SECOND / 2), engine::Time::from_ticks(SECOND / 2)));
+    assert_eq!(clips[1].start, engine::Time::from_ticks(SECOND + SECOND / 2), "the next clip moved by the hold");
+    let refused = call_err(&mut session, "clip_animation_set", json!({"expected_revision": revision(&set), "clip": {"track": 0, "clip": 0}, "loop": {"preset": "bounce", "duration": -SECOND}}));
+    assert_eq!(refused.code, "invalid_params");
+    assert!(refused.message.contains("negative"), "{}", refused.message);
+}
+
+#[test]
 fn clip_animation_set_refuses_a_pack_preset_that_is_not_for_the_kind_of_clip() {
     let root = scratch("animation-applies-to");
     let folder = root.join("packages/clip-animation/kinds");

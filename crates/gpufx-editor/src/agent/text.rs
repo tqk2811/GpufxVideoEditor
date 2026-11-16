@@ -225,8 +225,9 @@ fn check_animation(library: &ClipAnimationLibrary, kind: AnimatedClipKind, group
             return Err(invalid(format!("'{}' is not a preset of the '{name}' group; clip_animation_list names them: {known}", value.preset)));
         }
     }
-    if value.duration <= engine::Time::ZERO {
-        return Err(invalid(format!("the '{name}' animation must last more than 0 ticks")));
+    // A negative in or out is a hold (see engine::AnimationRef::duration); a loop cannot be one.
+    if value.duration == engine::Time::ZERO || (group == AnimationGroup::Repeat && value.duration < engine::Time::ZERO) {
+        return Err(invalid(format!("the '{name}' animation must last more than 0 ticks (only in and out may be negative, as a hold)")));
     }
     Ok(())
 }
