@@ -131,6 +131,44 @@ fn silence_before_and_after_has_no_beats() {
 }
 
 #[test]
+fn a_clip_of_a_few_seconds_gets_its_tempo() {
+    for (bpm, seconds) in [(120.0, 3.0), (100.0, 4.0), (90.0, 5.0)] {
+        let (samples, clicks) = click_track(bpm, seconds, 0.2, ANALYSIS_RATE, 0.02);
+        let analysis = detect_beats(&samples, ANALYSIS_RATE, &mut |_| true).unwrap();
+        assert!((analysis.tempo - bpm).abs() < 1.5, "{bpm} BPM over {seconds} s: tempo {}", analysis.tempo);
+        let (recall, _) = hit_rates(&analysis, &clicks, 0.020);
+        assert!(recall >= 0.8, "{bpm} BPM over {seconds} s: recall {recall}");
+    }
+}
+
+#[test]
+fn a_sound_shorter_than_the_minimum_has_no_tempo() {
+    let (samples, _) = click_track(120.0, engine::beats::MIN_TEMPO_SECONDS * 0.9, 0.1, ANALYSIS_RATE, 0.0);
+    assert_eq!(detect_beats(&samples, ANALYSIS_RATE, &mut |_| true).unwrap().tempo, 0.0);
+}
+
+#[test]
+fn samples_that_are_not_numbers_count_as_silence() {
+    let (mut samples, clicks) = click_track(120.0, 12.0, 0.25, ANALYSIS_RATE, 0.0);
+    // A broken decoder output: a burst of NaN and infinities between two clicks.
+    let at = (3.0 * f64::from(ANALYSIS_RATE)) as usize + 1500;
+    for (index, sample) in samples[at..at + 600].iter_mut().enumerate() {
+        *sample = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY][index % 3];
+    }
+    let mut stereo = Vec::new();
+    for sample in &samples {
+        stereo.extend(std::iter::repeat_n(*sample, 8));
+    }
+    let mut mono = Vec::new();
+    downmix_quarter(&stereo, &mut mono);
+    assert!(mono.iter().all(|sample| sample.is_finite()), "the downmix lets non-finite samples through");
+    let analysis = detect_beats(&mono, ANALYSIS_RATE, &mut |_| true).unwrap();
+    assert!((analysis.tempo - 120.0).abs() < 1.0, "tempo {}", analysis.tempo);
+    let (recall, _) = hit_rates(&analysis, &clicks, 0.020);
+    assert!(recall >= 0.9, "recall {recall}");
+}
+
+#[test]
 fn silence_and_short_sounds_give_no_beats() {
     let silent = vec![0.0_f32; ANALYSIS_RATE as usize * 10];
     let analysis = detect_beats(&silent, ANALYSIS_RATE, &mut |_| true).unwrap();

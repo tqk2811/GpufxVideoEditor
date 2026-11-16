@@ -398,7 +398,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldPitch => "Pitch (semitones)".to_owned(),
         Message::FieldBeats => "Beats".to_owned(),
         Message::DetectBeats => "Detect beats".to_owned(),
-        Message::DetectBeatsHint => "Find the beats of the sound, to snap clips and the playhead to them".to_owned(),
+        Message::DetectBeatsHint => "Find the beats of the whole source file, to snap clips and the playhead to them. A sound needs at least 2 seconds for a tempo".to_owned(),
         Message::ClearBeats => "Clear beats".to_owned(),
         Message::CancelBeats => "Cancel".to_owned(),
         Message::BeatsDetecting(percent) => format!("Detecting beats... {percent}%"),

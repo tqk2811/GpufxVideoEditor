@@ -380,7 +380,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldPitch => "Cao độ (nửa cung)".to_owned(),
         Message::FieldBeats => "Nhịp".to_owned(),
         Message::DetectBeats => "Dò nhịp".to_owned(),
-        Message::DetectBeatsHint => "Tìm nhịp của âm thanh để hút clip và đầu phát vào nhịp".to_owned(),
+        Message::DetectBeatsHint => "Tìm nhịp của cả file nguồn để hút clip và đầu phát vào nhịp. Âm thanh cần dài ít nhất 2 giây mới tìm được tempo".to_owned(),
         Message::ClearBeats => "Xoá nhịp".to_owned(),
         Message::CancelBeats => "Huỷ".to_owned(),
         Message::BeatsDetecting(percent) => format!("Đang dò nhịp... {percent}%"),

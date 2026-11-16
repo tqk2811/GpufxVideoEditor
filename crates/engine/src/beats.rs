@@ -35,6 +35,10 @@ pub const BEATS_PER_BAR: usize = 4;
 /// The slowest and fastest tempo looked for, in beats per minute.
 pub const MIN_TEMPO: f64 = 40.0;
 pub const MAX_TEMPO_SEARCHED: f64 = 240.0;
+/// The shortest sound that gets a tempo, in seconds. A tempo needs two of its periods in the
+/// sound, so below `2 * 60 / MIN_TEMPO` seconds (3 s) the slowest tempo looked for rises to two
+/// periods in the length: 60 BPM for 2 s.
+pub const MIN_TEMPO_SECONDS: f64 = 2.0;
 /// The tempo the search leans to, and how far it leans: the spread of the log-normal weight, in
 /// octaves. Between a tempo and its double the one nearer this wins when both fit equally.
 const TEMPO_CENTER: f64 = 120.0;
@@ -55,7 +59,7 @@ const TEMPO_MULTIPLES: usize = 4;
 /// What [`detect_beats`] found.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BeatAnalysis {
-    /// Beats per minute; 0 when no tempo was found (silence, or less than a few seconds).
+    /// Beats per minute; 0 when no tempo was found (silence, or less than [`MIN_TEMPO_SECONDS`]).
     pub tempo: f64,
     /// Beat times in seconds from the first sample, increasing.
     pub beats: Vec<f64>,
@@ -148,6 +152,8 @@ fn spectral_flux(samples: &[f32], window: usize, hop: usize, progress: &mut dyn 
         }
         let start = frame * hop;
         for (slot, (sample, weight)) in buffer.iter_mut().zip(samples[start..start + window].iter().zip(&hann)) {
+            // A sample that is not a number is silence, so one bad value cannot spoil the whole sound.
+            let sample = if sample.is_finite() { *sample } else { 0.0 };
             *slot = Complex32::new(sample * weight, 0.0);
         }
         fft.process_with_scratch(&mut buffer, &mut scratch);
@@ -224,12 +230,15 @@ fn pick_onsets(envelope: &[f64], frames_per_second: f64) -> Vec<usize> {
 /// The beat period in frames (fractional), or `None` when the envelope is too short or flat.
 fn tempo_period(envelope: &[f64], frames_per_second: f64) -> Option<f64> {
     let shortest = (60.0 * frames_per_second / MAX_TEMPO_SEARCHED).floor().max(1.0) as usize;
-    let longest = (60.0 * frames_per_second / MIN_TEMPO).ceil() as usize;
-    let reach = longest * TEMPO_MULTIPLES + 2;
-    // Four periods of the slowest tempo at least, or there is nothing to correlate.
-    if envelope.len() < longest * 4 {
+    if (envelope.len() as f64) < MIN_TEMPO_SECONDS * frames_per_second {
         return None;
     }
+    // Two periods of the slowest tempo looked for fit in the sound.
+    let longest = ((60.0 * frames_per_second / MIN_TEMPO).ceil() as usize).min(envelope.len() / 2);
+    if longest <= shortest {
+        return None;
+    }
+    let reach = longest * TEMPO_MULTIPLES + 2;
     let mean = envelope.iter().sum::<f64>() / envelope.len() as f64;
     let centred: Vec<f64> = envelope.iter().map(|value| value - mean).collect();
     let reach = reach.min(centred.len() - 1);
@@ -247,8 +256,14 @@ fn tempo_period(envelope: &[f64], frames_per_second: f64) -> Option<f64> {
     let score = |period: f64| -> f64 {
         let bpm = 60.0 * frames_per_second / period;
         let weight = (-0.5 * ((bpm / TEMPO_CENTER).log2() / TEMPO_SPREAD_OCTAVES).powi(2)).exp();
-        let summed: f64 = (1..=TEMPO_MULTIPLES).map(|multiple| at(period * multiple as f64)).sum();
-        weight * summed
+        // A short sound holds fewer multiples of a long period: the mean of those it holds, so a
+        // slow tempo is not scored down for them.
+        let held: Vec<f64> = (1..=TEMPO_MULTIPLES).map(|multiple| period * multiple as f64).filter(|lag| (lag.floor() as usize) + 1 < correlation.len()).collect();
+        if held.is_empty() {
+            return 0.0;
+        }
+        let summed: f64 = held.iter().map(|lag| at(*lag)).sum();
+        weight * summed * TEMPO_MULTIPLES as f64 / held.len() as f64
     };
     let best = (shortest..=longest).max_by(|a, b| score(*a as f64).total_cmp(&score(*b as f64)))?;
     if score(best as f64) <= 0.0 {
@@ -350,10 +365,11 @@ fn downbeat_flags(strengths: &[f64]) -> Vec<bool> {
 }
 
 /// Mono at [`ANALYSIS_RATE`] from interleaved stereo at four times that rate: the average of the
-/// two channels over four frames. Appends to `out`.
+/// two channels over four frames, a sample that is not a finite number counting as silence.
+/// Appends to `out`.
 pub fn downmix_quarter(stereo: &[f32], out: &mut Vec<f32>) {
     for group in stereo.chunks_exact(8) {
-        out.push(group.iter().sum::<f32>() / 8.0);
+        out.push(group.iter().map(|sample| if sample.is_finite() { *sample } else { 0.0 }).sum::<f32>() / 8.0);
     }
 }
 
