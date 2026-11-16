@@ -76,6 +76,16 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         let next = engine::set_fades(&expected, key(0, 1), t(0.1), Time::ZERO).unwrap();
         step(&mut session, "clip_set_fades", json!({"clip": {"track": 0, "clip": 1}, "fade_in": 9000, "fade_out": 0}), next)
     };
+    expected = {
+        let denoise = engine::ClipDenoise { mode: engine::DenoiseMode::Voice, strength: 0.5 };
+        let next = engine::set_denoise(&expected, key(0, 0), denoise).unwrap();
+        step(&mut session, "clip_set_denoise", json!({"clip": clip0, "mode": "voice", "strength": 0.5}), next)
+    };
+    expected = {
+        let voice = engine::ClipVoice { semitones: -6.0, effect: engine::VoiceEffect::Robot };
+        let next = engine::set_voice(&expected, key(0, 1), voice).unwrap();
+        step(&mut session, "clip_set_voice", json!({"clip": {"track": 0, "clip": 1}, "preset": "deep", "effect": "robot"}), next)
+    };
     let opacity = engine::KeyframeTarget::Property(engine::ClipProperty::Opacity);
     expected = {
         let next = engine::set_keyframe(&expected, key(0, 0), &opacity, Time::from_ticks(9000), 0.25, Some(engine::Easing::EaseOut)).unwrap();
@@ -150,6 +160,24 @@ fn undo_and_redo_refuse_a_stale_revision() {
     assert_eq!(call_err(&mut session, "undo", json!({"expected_revision": current - 1})).code, "stale_revision");
     let undone = revision(&call_ok(&mut session, "undo", json!({"expected_revision": current})));
     assert_eq!(call_err(&mut session, "redo", json!({"expected_revision": undone - 1})).code, "stale_revision");
+}
+
+#[test]
+fn denoise_and_voice_tools_check_their_ranges_and_default_what_is_absent() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let mut now = two_clips(&mut session);
+    let clip0 = json!({"track": 0, "clip": 0});
+    assert_eq!(call_err(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "general", "strength": 1.5})).code, "out_of_range");
+    assert_eq!(call_err(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "semitones": -12.5})).code, "out_of_range");
+    assert_eq!(call_err(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "loud"})).code, "invalid_params");
+    now = revision(&call_ok(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "general"})));
+    call_ok(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "preset": "chipmunk"}));
+    let value = call_ok(&mut session, "project_get", json!({}));
+    let clip = &value["project"]["tracks"][0]["clips"][0];
+    // The project description shows the settings as the file stores them, defaults left out.
+    assert_eq!(clip["denoise"], json!({"mode": "general"}));
+    assert_eq!(clip["voice"], json!({"semitones": 9.0}));
+    assert!(value["project"]["tracks"][0]["clips"][1].get("voice").is_none());
 }
 
 #[test]

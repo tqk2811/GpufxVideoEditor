@@ -62,6 +62,7 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `clip_animation_set` | Đặt animation `in`, `out`, `loop` cho một clip có hình (video, ảnh, sticker, chữ) |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
 | `clip_set_speed` | Tốc độ phát một clip, xem mục dưới |
+| `clip_set_denoise`, `clip_set_voice` | Khử nhiễu và đổi giọng của clip, xem mục dưới |
 | `clip_set_transform` | Vị trí, độ mờ, xoay tĩnh của clip |
 | `keyframe_set`, `keyframe_remove` | Keyframe cho x, y, width, opacity, rotation và tham số float của effect, thời điểm tính bằng tick từ đầu clip |
 | `undo`, `redo` | Hoàn tác, mỗi tool sửa là một bước; `track_set_locked` không phải một bước, giống nút khoá |
@@ -81,6 +82,14 @@ Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế đ�
 `clip_set_speed` nhận `clip`, `speed` (từ 0,1 đến 10, ví dụ 2 là nhanh gấp đôi) và `expected_revision`. Nó giữ nguyên đoạn nguồn đang phát nên thời lượng trên timeline thành `đoạn nguồn / speed`, tính từ điểm đầu cũ. Lỗi: `speed_overlap` khi clip sẽ chồng lên clip kế tiếp (không tự đẩy clip khác), `transition_on_edge` khi đuôi clip đang có transition, `out_of_range` khi tốc độ ngoài khoảng, `invalid_project` khi fade hoặc transition đầu clip không còn vừa, `track_locked` trên track khoá. `clip_add` nhận thêm `speed` tuỳ chọn; thời lượng mặc định là phần nguồn còn lại chia cho `speed`. `duration` truyền tay cùng `speed` bị từ chối bằng `out_of_range` khi `source_in + duration * speed` vượt quá độ dài của stream đã biết (áp dụng cả khi `speed` là 1). `project_get` trả `speed` khi khác 1.
 
 `keyframe_set` và `keyframe_remove` nhận `clip`, `at`, `expected_revision`, và hoặc `property` (`x`, `y`, `width`, `opacity`, `rotation`) hoặc `effect` (chỉ số) cùng `param` (tham số float của effect đó). `at` là số tick từ `clip.start`, KHÁC với `clip_time` mà gói effect đọc, vốn đếm từ đầu cửa sổ transition đi vào. Phạm vi hợp lệ khi đặt là [0, `duration`): đúng `duration` bị từ chối vì không có khung hình nào ở đó. `keyframe_set` thay keyframe cùng tick, `easing` vắng thì giữ easing cũ; giá trị ngoài giới hạn của thuộc tính hoặc ngoài `min`/`max` của tham số bị từ chối. Mã lỗi: `keyframe_outside_clip` khi `at` ngoài [0, `duration`) lúc đặt, `keyframe_not_found` khi `keyframe_remove` không có keyframe đúng tick `at`. `keyframe_remove` xoá được cả keyframe nằm ngoài clip (do cắt đầu hoặc đuôi clip để lại); khi xoá xong mà thuộc tính không còn keyframe nào trong [0, `duration`), các keyframe còn lại của nó bị xoá theo và thuộc tính về giá trị tĩnh. `project_get` trả `motion` của mỗi clip (`opacity`, `rotation` tĩnh và `keyframes` theo thuộc tính) cùng `keyframes` của từng effect; clip không dùng thì hai trường này vắng.
+
+### `clip_set_denoise` và `clip_set_voice`
+
+`clip_set_denoise` nhận `clip`, `mode` (`off`, `voice` hoặc `general`), `strength` tuỳ chọn (0 đến 1, mặc định 1) và `expected_revision`. `voice` dùng RNNoise (crate `nnnoiseless`, BSD-3), mạng huấn luyện cho tiếng nói: giữ giọng, bỏ phần còn lại; `general` là spectral gating tự viết, bỏ nhiễu nền băng rộng đều (xì, quạt) trên mọi loại âm thanh nhưng giữ âm có cao độ rõ. `strength` trộn kết quả với âm gốc (`voice`) hoặc đặt độ sâu cắt tối đa 30 dB và mức trừ nhiễu (`general`). Khử nhiễu chạy trên âm nguồn, trước tốc độ, cao độ, gain và fade. Lỗi: `out_of_range` khi `strength` ngoài 0 đến 1, `invalid_params` khi `mode` lạ, `track_locked` trên track khoá.
+
+`clip_set_voice` thay toàn bộ phần đổi giọng của clip: `semitones` (-12 đến 12, tốc độ giữ nguyên) và `effect` (`none` hoặc `robot`, ring modulation 50 Hz). `preset` (`normal` 0, `chipmunk` +9, `deep` -6, `robot` 0 kèm hiệu ứng robot) đặt cả hai; `semitones` hoặc `effect` truyền kèm thì ghi đè giá trị của preset; trường không ai đặt thành 0 hoặc `none`. Lỗi: `out_of_range` khi `semitones` vượt 12 về một phía. `project_get` trả `denoise` (khi `mode` khác `off`; `strength` vắng nghĩa là 1) và `voice` (khi có dịch cao độ hoặc hiệu ứng; trường mặc định vắng) trong từng clip.
+
+Preview và xuất file cho cùng mẫu tại cùng thời điểm timeline dù phát hay tua từ đâu: khử nhiễu chia âm nguồn thành khối 1 giây theo vị trí tuyệt đối, mỗi khối chạy bộ lọc mới từ 0,5 giây trước nó và nối với khối trước bằng crossfade 10 ms; đổi cao độ đi chung một lượt WSOLA với tốc độ rồi lấy mẫu lại. Cái giá là khối đầu sau mỗi lần tua phải tính hai lượt chạy (khoảng 60 ms với khử nhiễu ở bản release).
 
 ### Chữ
 

@@ -561,6 +561,74 @@ fn clip_animation_set(p: ClipAnimationSetParams) -> Result<AgentRequest, AgentEr
     edit(p.expected_revision, AgentEdit::ClipSetAnimation { clip: p.clip.into(), animation })
 }
 
+/// The method of clip_set_denoise.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum DenoiseModeParam {
+    /// No noise reduction.
+    Off,
+    /// RNNoise, a network trained on speech: keeps voices, removes the rest.
+    Voice,
+    /// Spectral gating of steady broadband noise (hiss, fans), for any material.
+    General,
+}
+
+/// The effect of clip_set_voice.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceEffectParam {
+    None,
+    /// Ring modulation at 50 Hz.
+    Robot,
+}
+
+/// A ready-made voice of clip_set_voice.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum VoicePresetParam {
+    /// 0 semitones, no effect.
+    Normal,
+    /// +9 semitones.
+    Chipmunk,
+    /// -6 semitones.
+    Deep,
+    /// 0 semitones, robot effect.
+    Robot,
+}
+
+params!(DenoiseParams { expected_revision: u64, clip: ClipParam, mode: DenoiseModeParam, strength: Option<f64> });
+params!(VoiceParams { expected_revision: u64, clip: ClipParam, preset: Option<VoicePresetParam>, semitones: Option<f64>, effect: Option<VoiceEffectParam> });
+
+fn clip_set_denoise(p: DenoiseParams) -> Result<AgentRequest, AgentError> {
+    let mode = match p.mode {
+        DenoiseModeParam::Off => engine::DenoiseMode::Off,
+        DenoiseModeParam::Voice => engine::DenoiseMode::Voice,
+        DenoiseModeParam::General => engine::DenoiseMode::General,
+    };
+    let denoise = engine::ClipDenoise { mode, strength: p.strength.unwrap_or(1.0) };
+    edit(p.expected_revision, AgentEdit::ClipSetDenoise { clip: p.clip.into(), denoise })
+}
+
+fn clip_set_voice(p: VoiceParams) -> Result<AgentRequest, AgentError> {
+    let preset = match p.preset {
+        None | Some(VoicePresetParam::Normal) => engine::VoicePreset::Normal,
+        Some(VoicePresetParam::Chipmunk) => engine::VoicePreset::Chipmunk,
+        Some(VoicePresetParam::Deep) => engine::VoicePreset::Deep,
+        Some(VoicePresetParam::Robot) => engine::VoicePreset::Robot,
+    };
+    let mut voice = preset.voice();
+    if let Some(semitones) = p.semitones {
+        voice.semitones = semitones;
+    }
+    if let Some(effect) = p.effect {
+        voice.effect = match effect {
+            VoiceEffectParam::None => engine::VoiceEffect::None,
+            VoiceEffectParam::Robot => engine::VoiceEffect::Robot,
+        };
+    }
+    edit(p.expected_revision, AgentEdit::ClipSetVoice { clip: p.clip.into(), voice })
+}
+
 params!(MutedParams { expected_revision: u64, clip: ClipParam, muted: bool });
 params!(FadesParams { expected_revision: u64, clip: ClipParam, fade_in: i64, fade_out: i64 });
 params!(TransformParams { expected_revision: u64, clip: ClipParam, placement: Option<PlacementParam>, opacity: Option<f64>, rotation: Option<f64> });
@@ -683,6 +751,8 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("clip_set_gain", "Sets the gain of a clip in decibels.", GainParams, |p| edit(p.expected_revision, AgentEdit::ClipSetGain { clip: p.clip.into(), gain_db: p.gain_db })),
         tool!("clip_set_muted", "Mutes or unmutes a clip.", MutedParams, |p| edit(p.expected_revision, AgentEdit::ClipSetMuted { clip: p.clip.into(), muted: p.muted })),
         tool!("clip_set_fades", "Sets the audio fades of a clip, in ticks.", FadesParams, |p| edit(p.expected_revision, AgentEdit::ClipSetFades { clip: p.clip.into(), fade_in: ticks(p.fade_in), fade_out: ticks(p.fade_out) })),
+        tool!("clip_set_denoise", "Sets the noise reduction of a clip's sound: mode off, voice (RNNoise, keeps speech and removes everything else) or general (removes steady broadband noise such as hiss or fans from any material), and strength from 0 to 1 (default 1). It works on the source audio before speed, pitch, gain and fades. Refused with out_of_range for a strength outside 0 to 1.", DenoiseParams, clip_set_denoise),
+        tool!("clip_set_voice", "Replaces the voice change of a clip: a pitch shift in semitones (-12 to 12, the speed stays) and an effect (none or robot). preset (normal: 0, chipmunk: +9, deep: -6, robot: 0 with the robot effect) gives both; semitones or effect, when given, override it, and what neither gives is 0 or none. Refused with out_of_range for semitones beyond 12 either way.", VoiceParams, clip_set_voice),
         tool!("clip_set_transform", "Sets the static place (x, y, width, all in parts of the frame), opacity (0 to 1) and rotation (clockwise degrees) of a clip. What is absent stays. A number with keyframes ignores its static value.", TransformParams, |p| edit(p.expected_revision, AgentEdit::ClipSetTransform { clip: p.clip.into(), placement: p.placement.map(Into::into), opacity: p.opacity, rotation: p.rotation })),
         tool!("keyframe_set", "Sets a keyframe at `at`, ticks from the start of the clip (clip.start, not the clip_time of an effect), from 0 up to but not including the duration. Give property (x, y, width, opacity, rotation), or effect (its index) and param (a float parameter of that effect). Replaces one at the same tick; easing (linear, ease_in, ease_out, ease_in_out) is how the value moves to the next keyframe, and absent keeps the one replaced. Refused with keyframe_outside_clip.", KeyframeSetParams, |p| { let target = keyframe_target(p.property, p.effect, p.param)?; edit(p.expected_revision, AgentEdit::KeyframeSet { clip: p.clip.into(), target, at: ticks(p.at), value: p.value, easing: p.easing.map(Into::into) }) }),
         tool!("keyframe_remove", "Removes the keyframe at `at` of a property, or of a parameter of an effect, as in keyframe_set, also one that lies outside the clip. After the last one inside the clip the static value applies again. Refused with keyframe_not_found.", KeyframeRemoveParams, |p| { let target = keyframe_target(p.property, p.effect, p.param)?; edit(p.expected_revision, AgentEdit::KeyframeRemove { clip: p.clip.into(), target, at: ticks(p.at) }) }),

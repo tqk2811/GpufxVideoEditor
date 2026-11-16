@@ -566,3 +566,7 @@ Editor chỉ đọc lại các gói clip-animation (và tìm lại gói effect g
 ### [Thấp] Preset `type` của AVS chưa có con trỏ nhấp nháy
 
 Preset dựng sẵn `typewriter` (`crates/engine/src/clip_animation.rs`, `typewriter_in`) chỉ hiện từng ký tự; bản `type` của AI video studio còn vẽ con trỏ sau ký tự cuối. Cần một lớp vẽ thêm (một vạch theo vị trí ký tự cuối đã hiện) trong `draw_units`. Ghi ngày 2026-11-14.
+
+### [Thấp] Đổi cao độ lên không lọc chống aliasing, và khử nhiễu trễ khoảng 60 ms sau mỗi lần tua
+
+`crates/engine/src/stretch.rs` (`ClipStretch::render`, nhánh `pitch_cents != 0`) lấy mẫu lại tín hiệu WSOLA bằng cubic Catmull-Rom, không lọc thông thấp trước khi bỏ mẫu, nên dịch lên `r` lần thì phần trên `24 kHz / r` gập xuống (giọng nói gần như không có năng lượng ở đó, nhạc thì có). Nên thay bằng nội suy sinc có cửa sổ khi dịch lên. `crates/engine/src/denoise.rs` tính hai lượt chạy (mỗi lượt 1,5 giây âm thanh) trước mẫu đầu tiên sau mỗi lần tua hoặc đổi thông số, khoảng 60 ms ở bản release với một clip; vài clip cùng khử nhiễu thì cộng dồn và preview có thể hụt tiếng một chút ngay sau khi tua. Nếu thành vấn đề thì tính trước các khối quanh đầu phát trên luồng chuẩn bị. Ghi ngày 2026-11-16.
