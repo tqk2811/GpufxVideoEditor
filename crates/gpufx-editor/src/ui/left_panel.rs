@@ -9,6 +9,7 @@ use crate::effect_previews::{AnimationState, LoopFrames, PreviewManager, TileSta
 use crate::i18n::{Language, Message};
 use crate::layout::grid_columns;
 use crate::media::{MediaItem, MediaKind};
+use crate::proxy::ProxyStatus;
 use crate::sticker_library::LibrarySticker;
 use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStylePack};
 use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageEntry, PackageKind};
@@ -545,11 +546,36 @@ fn media_cell(ui: &mut egui::Ui, state: &EditorState, item: &MediaItem, size: Ve
     icons::paint(&painter, plus.shrink(4.0), Icon::Plus, theme::on_accent());
     let caption = rect.with_min_y(rect.bottom() - CELL_CAPTION).shrink2(Vec2::new(8.0, 0.0));
     painter.with_clip_rect(caption).text(caption.left_center(), Align2::LEFT_CENTER, &item.name, FontId::proportional(12.0), theme::text());
-    let response = response.on_hover_text(&item.source);
+    let proxy_hint = state.ui.proxy_badges.get(&item.source).and_then(|status| proxy_badge(&painter, thumb, status, state.language()));
+    let response = response.on_hover_text(match proxy_hint {
+        Some(hint) => format!("{}\n{hint}", item.source),
+        None => item.source.clone(),
+    });
     // A single click on the tile is too easy to make by accident, so the tile needs a double click;
     // its + still adds on a single click.
     let on_plus = response.clicked() && response.interact_pointer_pos().is_some_and(|pos| plus.contains(pos));
     on_plus || response.double_clicked()
+}
+
+/// Paints the proxy label at the bottom right of `thumb` and returns the line the hover text adds.
+/// A video that needs no proxy gets neither.
+fn proxy_badge(painter: &egui::Painter, thumb: Rect, status: &ProxyStatus, language: Language) -> Option<String> {
+    let (label, color, hint) = match status {
+        ProxyStatus::Ready(_) => (language.t(Message::ProxyBadge), theme::accent(), Message::ProxyReady),
+        ProxyStatus::Queued => (format!("{} \u{2026}", language.t(Message::ProxyBadge)), Color32::from_black_alpha(180), Message::ProxyQueued),
+        ProxyStatus::Running(progress) => {
+            let percent = (progress * 100.0).round() as u32;
+            (format!("{} {percent}%", language.t(Message::ProxyBadge)), Color32::from_black_alpha(180), Message::ProxyRunning(percent))
+        }
+        ProxyStatus::Failed(detail) => (format!("{} !", language.t(Message::ProxyBadge)), theme::refused(), Message::ProxyFailed(detail.clone())),
+        ProxyStatus::Cancelled => return Some(language.t(Message::ProxyCancelled)),
+        ProxyStatus::NotNeeded => return None,
+    };
+    let galley = painter.layout_no_wrap(label, FontId::proportional(10.0), theme::on_clip());
+    let badge = Rect::from_min_size(egui::pos2(thumb.right() - galley.size().x - 8.0, thumb.bottom() - galley.size().y - 5.0), galley.size() + Vec2::new(5.0, 2.0));
+    painter.rect_filled(badge, CornerRadius::same(3), color);
+    painter.galley(badge.min + Vec2::new(2.5, 1.0), galley, theme::on_clip());
+    Some(language.t(hint))
 }
 
 /// The largest size of shape `aspect` inside `room`.

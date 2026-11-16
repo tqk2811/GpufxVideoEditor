@@ -219,6 +219,26 @@ pub enum Message {
     /// Writing the autosave copy failed.
     AutosaveFailed(String),
 
+    // Preview proxies.
+    MenuProxy,
+    ProxyOff,
+    /// Proxies for videos taller than 1080 pixels.
+    ProxyAuto,
+    ProxyOn,
+    /// Stops the proxies queued or being made.
+    ProxyCancel,
+    /// Proxies left to make, and the progress of the running one in percent.
+    ProxyMaking { left: usize, percent: u32 },
+    /// The short label on a video that has a proxy, or is getting one.
+    ProxyBadge,
+    ProxyQueued,
+    /// Making the proxy, this many percent done.
+    ProxyRunning(u32),
+    ProxyReady,
+    ProxyFailed(String),
+    ProxyCancelled,
+    ProxySettingFailed(String),
+
     // Recovery of autosaves after an unclean exit.
     RecoveryTitle,
     RecoveryIntro,
@@ -668,6 +688,19 @@ mod tests {
             Message::AutosaveEvery(300),
             Message::AutosaveSettingFailed(name()),
             Message::AutosaveFailed(name()),
+            Message::MenuProxy,
+            Message::ProxyOff,
+            Message::ProxyAuto,
+            Message::ProxyOn,
+            Message::ProxyCancel,
+            Message::ProxyMaking { left: 2, percent: 40 },
+            Message::ProxyBadge,
+            Message::ProxyQueued,
+            Message::ProxyRunning(40),
+            Message::ProxyReady,
+            Message::ProxyFailed(name()),
+            Message::ProxyCancelled,
+            Message::ProxySettingFailed(name()),
             Message::RecoveryTitle,
             Message::RecoveryIntro,
             Message::RecoveryRestore,

@@ -35,6 +35,7 @@ use crate::preview::plan::{frame_index, is_current, PlaybackFrames, PlaybackRun,
 use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::package_import::{install_zip, ImportProblem};
 use crate::project_file::{load_project_file, package_roots, parse_project, project_paths, save_project_file, user_package_root};
+use crate::proxy::{proxy_folder, ChildProxyMaker, ProxyManager, ProxyMode};
 use crate::recovery::{current_process, ClaimError, unix_now, Autosave, RecoveryStore, SystemProbe};
 use crate::project_lock::held_elsewhere;
 use crate::tasks::{run_guarded, Action, Arrival, FileDialog, Prompt, Request, TaskId, Tasks};
@@ -162,6 +163,10 @@ struct Session {
     exit_accepted: bool,
     /// Copies of the unsaved project for recovery after a crash.
     autosave: Autosave,
+    /// Smaller copies of large videos that the preview decodes instead of the originals.
+    proxies: ProxyManager,
+    /// The revision of the proxies the paths were built with.
+    proxy_revision: u64,
     #[cfg(debug_assertions)]
     smoke: Smoke,
 }
@@ -199,6 +204,14 @@ impl Session {
             smoke
         };
         let package_roots = package_roots();
+        // A smoke check makes no proxies.
+        #[cfg(debug_assertions)]
+        let proxy_mode = if smoke.enabled { ProxyMode::Off } else { crate::settings::startup_proxy_mode() };
+        #[cfg(not(debug_assertions))]
+        let proxy_mode = crate::settings::startup_proxy_mode();
+        state.ui.proxy_mode = proxy_mode;
+        let proxies_window = session_window.clone();
+        let proxies = ProxyManager::start(ChildProxyMaker { tool: sibling_render_exe(), package_roots: package_roots.clone() }, proxy_folder(), proxy_mode, Some(Arc::new(move || proxies_window.request_redraw())));
         let paths = Arc::new(project_paths(None, &package_roots));
         state.visuals.get_mut().set_paths(paths.clone());
         let visuals_window = session_window.clone();
@@ -256,6 +269,8 @@ impl Session {
             arrival_sender,
             exit_accepted: false,
             autosave,
+            proxies,
+            proxy_revision: 0,
             #[cfg(debug_assertions)]
             smoke,
         };
@@ -695,6 +710,7 @@ impl Session {
         self.start_library_add();
         self.sync_audio_preview();
         self.sync_project_paths();
+        self.sync_proxies();
         self.sync_title();
         self.tick_autosave();
         self.sync_audio_project();
@@ -743,7 +759,7 @@ impl Session {
             None => self.state.release_project_lock(),
         }
         self.paths_file = self.state.project_file().map(Path::to_path_buf);
-        self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.paths = self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         // The audio played on since this frame polled it, so catch up first.
         self.poll_playback();
@@ -978,6 +994,28 @@ impl Session {
         }
     }
 
+    /// The paths of the open project, with the proxies ready now.
+    fn build_paths(&self) -> Arc<ProjectPaths> {
+        Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots).with_proxies(Arc::new(self.proxies.proxies())))
+    }
+
+    /// Asks for the proxies of the project's videos, shows where they stand, and once the set of
+    /// ready proxies changes, gives the preview new paths: new paths make its worker drop the
+    /// decoders that read the old files. Playback that is running keeps its files until it stops.
+    fn sync_proxies(&mut self) {
+        let wanted = proxy_sources(self.state.project(), &self.paths);
+        self.proxies.request(wanted.iter().map(|(_, path)| path.as_path()));
+        self.state.ui.proxy_badges = wanted.into_iter().filter_map(|(source, path)| self.proxies.status(&path).map(|status| (source, status))).collect();
+        self.state.ui.proxy_pending = self.proxies.pending();
+        let revision = self.proxies.revision();
+        if revision != self.proxy_revision {
+            self.proxy_revision = revision;
+            self.paths = self.build_paths();
+            self.tracker = RequestTracker::default();
+            self.shown = None;
+        }
+    }
+
     /// Reads the package list again and lets go of everything built from the old files. New paths
     /// make the preview worker drop its compositor, whose graphs are cached by package name.
     fn package_installed(&mut self, package: &str) {
@@ -985,7 +1023,7 @@ impl Session {
         // The effects of clip animation items are found among the gpufx packages.
         self.clip_animation_library = Some(spawn_clip_animation_scan(self.package_roots.clone(), self.window.clone()));
         self.state.previews.get_mut().forget(package);
-        self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.paths = self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         self.tracker = RequestTracker::default();
         self.shown = None;
@@ -994,7 +1032,7 @@ impl Session {
     /// Reads the installed packs again and drops what still points at files of the old one.
     fn audio_pack_installed(&mut self) {
         self.audio_library = Some(spawn_audio_scan(self.package_roots.clone(), self.window.clone()));
-        self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.paths = self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         self.tracker = RequestTracker::default();
         self.shown = None;
@@ -1003,7 +1041,7 @@ impl Session {
     /// Reads the installed sticker packs again, for the new pack and any replaced files.
     fn sticker_pack_installed(&mut self) {
         self.sticker_library = Some(spawn_sticker_scan(self.package_roots.clone(), self.window.clone()));
-        self.paths = Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots));
+        self.paths = self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         self.tracker = RequestTracker::default();
         self.shown = None;
@@ -1082,6 +1120,14 @@ impl Session {
                     self.state.report_error(Message::PanelSizesSaveFailed(message));
                 }
             }
+            UiRequest::SetProxyMode(mode) => {
+                self.state.ui.proxy_mode = mode;
+                self.proxies.set_mode(mode);
+                if let Err(message) = crate::settings::save_proxy_mode(mode) {
+                    self.state.report_error(Message::ProxySettingFailed(message));
+                }
+            }
+            UiRequest::CancelProxies => self.proxies.cancel_all(),
             UiRequest::SetAutosave(seconds) => {
                 self.state.ui.autosave_seconds = seconds;
                 self.autosave.set_interval(seconds);
@@ -1387,6 +1433,22 @@ pub fn run() -> Result<(), String> {
     app.error.map_or(Ok(()), Err)
 }
 
+/// The video files of `project` that may get a proxy, as (clip source, absolute path): not text,
+/// pictures or pack files, and each file once.
+fn proxy_sources(project: &Project, paths: &ProjectPaths) -> Vec<(String, PathBuf)> {
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    for track in project.tracks.iter().filter(|track| !track.is_audio()) {
+        for clip in &track.clips {
+            if clip.is_text() || clip.is_image() || d3d12_backend::is_asset_source(&clip.source) || found.iter().any(|(source, _)| *source == clip.source) {
+                continue;
+            }
+            let path = paths.source_path(&clip.source);
+            found.push((clip.source.clone(), std::path::absolute(&path).unwrap_or(path)));
+        }
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1400,5 +1462,28 @@ mod tests {
     fn other_events_ask_only_when_egui_wants_a_repaint() {
         assert!(should_request_redraw(&WindowEvent::Focused(true), true));
         assert!(!should_request_redraw(&WindowEvent::Focused(true), false));
+    }
+
+    #[test]
+    fn proxies_are_asked_for_the_video_files_only_once_each() {
+        use crate::editor::new_clip;
+        use engine::{Output, Track, SUPPORTED_VERSION};
+        let second = Time::from_ticks(engine::TICKS_PER_SECOND);
+        let clip = |source: &str| new_clip(source, Time::ZERO, second);
+        let track = |kind, clips| Track { kind, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None };
+        let project = Project {
+            version: SUPPORTED_VERSION,
+            output: Output { width: 1920, height: 1080, frame_duration: Time::from_ticks(3000), audio: None },
+            tracks: vec![
+                track(TrackKind::Video, vec![clip("a.mp4"), clip("b.png"), clip("a.mp4"), clip("asset:sticker/p/x.png")]),
+                track(TrackKind::Audio, vec![clip("music.mp4")]),
+                track(TrackKind::Video, vec![clip(r"E:\b.mov")]),
+            ],
+            markers: Vec::new(),
+            beats: Default::default(),
+        };
+        let paths = ProjectPaths::new(std::path::Path::new(r"D:\work\p.json"), Vec::new());
+        let found = proxy_sources(&project, &paths);
+        assert_eq!(found, vec![("a.mp4".to_owned(), PathBuf::from(r"D:\work\a.mp4")), (r"E:\b.mov".to_owned(), PathBuf::from(r"E:\b.mov"))]);
     }
 }

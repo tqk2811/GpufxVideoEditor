@@ -327,6 +327,12 @@ pub struct UiState {
     pub autosave_seconds: u64,
     /// Autosaves of editors that did not close cleanly, offered for recovery at start.
     pub recovery_offers: Vec<RecoveryOffer>,
+    /// Which videos the preview decodes from a smaller proxy file.
+    pub proxy_mode: crate::proxy::ProxyMode,
+    /// Where the proxy of each video source of the project stands, by clip source.
+    pub proxy_badges: std::collections::HashMap<String, crate::proxy::ProxyStatus>,
+    /// Proxies queued or being made, and the progress of the running one.
+    pub proxy_pending: (usize, Option<f32>),
 }
 
 /// An autosave left behind by an editor that did not close cleanly.

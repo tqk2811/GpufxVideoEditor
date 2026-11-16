@@ -4,6 +4,7 @@ use super::icons::{self, Icon};
 use super::{theme, UiRequest};
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
+use crate::proxy::ProxyMode;
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{Align, Align2, CornerRadius, FontId, Layout, Pos2, Rect, Vec2};
 
@@ -18,8 +19,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
         ui.add_space(10.0);
         let (language, agent_access) = (state.language(), state.agent_access);
         file_menu(ui, language, state.ui.theme, agent_access, state.ui.autosave_seconds, state.is_exporting(), requests);
+        proxy_menu(ui, language, state.ui.proxy_mode, state.ui.proxy_pending, requests);
         if state.agent_connected {
             ui.colored_label(theme::accent(), language.t(Message::AgentConnected));
+        }
+        if let (left @ 1.., progress) = state.ui.proxy_pending {
+            let percent = (progress.unwrap_or(0.0) * 100.0).round() as u32;
+            ui.colored_label(theme::text_dim(), language.t(Message::ProxyMaking { left, percent }));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(10.0);
@@ -109,6 +115,28 @@ fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeCh
                 }
             });
         });
+    });
+}
+
+/// Which videos the preview plays from a proxy, and stopping the proxies being made.
+fn proxy_menu(ui: &mut egui::Ui, language: Language, mode: ProxyMode, pending: (usize, Option<f32>), requests: &mut Vec<UiRequest>) {
+    ui.menu_button(language.t(Message::MenuProxy), |ui| {
+        for choice in ProxyMode::ALL {
+            let label = language.t(match choice {
+                ProxyMode::Off => Message::ProxyOff,
+                ProxyMode::Auto => Message::ProxyAuto,
+                ProxyMode::On => Message::ProxyOn,
+            });
+            if ui.radio(choice == mode, label).clicked() {
+                requests.push(UiRequest::SetProxyMode(choice));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.add_enabled(pending.0 > 0, egui::Button::new(language.t(Message::ProxyCancel))).clicked() {
+            requests.push(UiRequest::CancelProxies);
+            ui.close();
+        }
     });
 }
 

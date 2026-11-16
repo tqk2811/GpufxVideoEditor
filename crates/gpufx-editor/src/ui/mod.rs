@@ -41,6 +41,8 @@ pub enum UiRequest {
     SetAgentAccess(bool),
     /// How often to autosave, in seconds; zero is off.
     SetAutosave(u64),
+    SetProxyMode(crate::proxy::ProxyMode),
+    CancelProxies,
     /// The choice for autosave `index` of the recovery dialog.
     Recovery { index: usize, choice: crate::editor::RecoveryChoice },
 }
