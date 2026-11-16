@@ -633,3 +633,15 @@ RNNoise trong `crates/engine/src/denoise.rs` (`DenoiseCache::run`) khởi độn
 ### [Thấp] Project.beats khoá theo chuỗi source: nhịp cũ khi file đổi nội dung, trùng mục, mục mồ côi không gỡ được
 
 `Project.beats` (`crates/engine/src/project.rs`) khoá bằng chuỗi `source`: ghi đè file cùng tên vẫn giữ nhịp cũ; cùng file ghi bằng hai chuỗi (tương đối/tuyệt đối, khác hoa thường) thành hai mục; mục của nguồn hết clip không có đường gỡ (`clip_beats_clear` cần một clip). Nên lưu stamp/hash file trong `ClipBeats` và cân nhắc bỏ giữ mục mồ côi (snapshot undo đã giữ `Arc`). Ngoài ra `clear_beats` huỷ lần dò trước khi biết lệnh gỡ có bị từ chối vì khoá track. Ghi ngày 2026-11-16.
+
+### [Thấp] Cache RAM của decoder phát ngược bỏ khung nằm trên ring khi tua lùi vào cache
+
+`crates/d3d12-backend/src/decoder/reverse.rs` (`take_from_below`, `self.below.drain(first..)`) xoá khỏi `below` mọi khung từ `first` trở lên, kể cả các khung nằm trên khung đích mà ring mới không chứa hết. Tua ngược rồi tua xuôi lại vào đoạn đó thì không còn khung trong cache và phải refill (giải mã lại từ keyframe). Nên chỉ rút phần đưa vào ring, giữ các khung phía trên nếu còn ngân sách. Ghi ngày 2026-11-17.
+
+### [Thấp] Ước lượng byte mỗi khung của decoder phát ngược giả định 4:2:0
+
+`frame_bytes` (`crates/d3d12-backend/src/decoder/reverse.rs`) tính `rộng * cao * 3 / 2`, đúng cho NV12/P010. Nguồn 4:2:2 hoặc 4:4:4 (nếu decoder xuất định dạng đó) tốn gấp 1,33 đến 2 lần, nên ngân sách `RING_BUDGET` và `CACHE_BUDGET` bị ước lượng thấp hơn thực tế cùng mức. Nên lấy hệ số theo định dạng pixel thật của pool. Ghi ngày 2026-11-17.
+
+### [Thấp] Âm thanh clip phát ngược preroll 200 ms cho mọi nguồn
+
+`read_fresh` (`crates/d3d12-backend/src/audio.rs`, quanh dòng 287) seek và preroll 200 ms cho mọi chunk lùi của mọi nguồn, khoảng 1,6 lần giải mã. Preroll chỉ cần để bộ lấy mẫu lại ổn định, nên có thể giới hạn cho nguồn không phải 48 kHz (nguồn 48 kHz không qua resampler). Liên quan mục "Âm thanh clip phát ngược seek một lần mỗi chunk" ở trên. Ghi ngày 2026-11-17.
