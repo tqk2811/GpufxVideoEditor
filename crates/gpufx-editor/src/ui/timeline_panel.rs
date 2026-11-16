@@ -318,6 +318,18 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
         }
     }
 
+    // A double click on a clip selects it and brings the playhead to its start.
+    if response.double_clicked() {
+        if let Some(pointer) = response.interact_pointer_pos() {
+            let (x, y) = local(pointer);
+            let track = state.view.track_at_y(y, track_count, height);
+            let on_transition = track.and_then(|track| transition_hit_test(state.project(), &state.view, track, x)).is_some();
+            if let Some(hit) = track.and_then(|track| hit_test(state.project(), &state.view, track, x)).filter(|_| !on_transition) {
+                state.select_and_seek(hit.key);
+            }
+        }
+    }
+
     // A right click selects the clip under it and opens its menu; elsewhere it opens nothing.
     if response.secondary_clicked() {
         state.ui.clip_menu = response.interact_pointer_pos().and_then(|pointer| {

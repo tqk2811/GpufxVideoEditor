@@ -702,6 +702,13 @@ impl EditorState {
         self.transition_selection = None;
     }
 
+    /// Selects clip `key` and brings the playhead to its start, as a double click on it does.
+    pub fn select_and_seek(&mut self, key: ClipKey) {
+        let Some(start) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map(|clip| clip.start) else { return };
+        self.select(Some(key));
+        self.set_playhead(start);
+    }
+
     /// Selects the transition `key`, dropping the clip selection.
     pub fn select_transition(&mut self, key: Option<TransitionKey>) {
         self.selection = None;
@@ -3353,6 +3360,20 @@ mod tests {
         assert_eq!(track.transitions[0].duration, DEFAULT_TRANSITION_DURATION);
         state.undo();
         assert!(state.project().tracks[0].transitions.is_empty());
+    }
+
+    #[test]
+    fn select_and_seek_moves_the_playhead_to_the_clip_start() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        state.select_transition(Some(TransitionKey { track: 0, after_clip: 0 }));
+        let start = state.project().tracks[0].clips[1].start;
+        state.select_and_seek(key(1));
+        assert_eq!(state.selection(), Some(key(1)));
+        assert_eq!(state.selected_transition(), None);
+        assert_eq!(state.playhead(), start);
+        state.select_and_seek(key(5));
+        assert_eq!(state.selection(), Some(key(1)), "a missing clip changes nothing");
     }
 
     #[test]
