@@ -310,7 +310,17 @@ pub enum Message {
     TransformUppercase,
     TransformLowercase,
     FieldLetterSpacing,
+    /// The tab of the clip card with everything but the animations.
+    ClipTabProperties,
     TabAnimation,
+    /// A hold was set on a cut that had a transition, so the transition went.
+    HoldRemovedTransition,
+    /// A transition was added on a cut that had holds, so they became plain animations.
+    TransitionReleasedHold,
+    /// Under a negative animation duration: the still lasts that many seconds.
+    AnimationHoldNote(String),
+    /// Hover text of the animation duration.
+    AnimationDurationHint,
     AnimationEnter,
     AnimationExit,
     AnimationRepeat,
@@ -554,6 +564,11 @@ mod tests {
             Message::TransformLowercase,
             Message::FieldLetterSpacing,
             Message::TabAnimation,
+            Message::ClipTabProperties,
+            Message::HoldRemovedTransition,
+            Message::TransitionReleasedHold,
+            Message::AnimationHoldNote("0.5".to_owned()),
+            Message::AnimationDurationHint,
             Message::AnimationEnter,
             Message::AnimationExit,
             Message::AnimationRepeat,

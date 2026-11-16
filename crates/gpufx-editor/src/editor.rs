@@ -28,7 +28,7 @@ use crate::text_shapes::TextShapes;
 use crate::text_clip::{default_text, natural_placement, rescaled_placement};
 use engine::{
     keyframe_neighbors, keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, Keyframe, remove_keyframe, set_effect_params_at, set_keyframe, set_motion_value, set_placement_at, ClipPlacement, ClipProperty, Easing, KeyframeTarget, PlacedRect,
-    add_clip, add_effect, add_track, remove_track, add_transition, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
+    add_clip, add_effect, add_track, remove_track, add_transition_report, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
     add_text_clip, set_text, TextContent, set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
@@ -57,6 +57,9 @@ pub enum Status {
     #[default]
     Idle,
     Info(Message),
+    /// The edit was made, but it also undid something the user had set; shown in a colour that
+    /// stands out.
+    Warning(Message),
     Refused(Message),
     Error(Message),
 }
@@ -242,6 +245,8 @@ pub struct UiState {
     pub clip_menu: Option<ClipKey>,
     /// The clip the inspector showed last, to notice when that changes.
     pub inspector_clip: Option<(ClipKey, String, i64)>,
+    /// The tab of the clip card; it stays when another clip is selected.
+    pub clip_tab: ClipTab,
     pub panel_sizes: PanelSizes,
     pub theme: crate::ui::theme::ThemeChoice,
     /// The splitter in the user's hand. Not a hold: edits go on while it moves.
@@ -278,6 +283,16 @@ impl UiState {
             self.panel_sizes = drag.before;
         }
     }
+}
+
+/// The tabs of the clip card of the inspector, for a clip with a picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipTab {
+    /// Times, sound, text, place, motion and effects.
+    #[default]
+    Properties,
+    /// The in, out and loop presets.
+    Animation,
 }
 
 /// What may be chosen in the inspector's time fields. Waits for the release of a drag, as a clip
@@ -1187,7 +1202,11 @@ impl EditorState {
                 return;
             }
             ClipField::Start(seconds) => EditCommand::Move { key, track: key.track, desired_start: crate::timecode::from_seconds(seconds) },
-            ClipField::Duration(seconds) => EditCommand::TrimEnd { key, new_end: clip.start.saturating_add(clip.timeline_ticks(crate::timecode::from_seconds(seconds))) },
+            // The field gives the source the moving part plays; the holds keep their length.
+            ClipField::Duration(seconds) => {
+                let holds = clip.duration.saturating_sub(clip.media_duration());
+                EditCommand::TrimEnd { key, new_end: clip.start.saturating_add(holds).saturating_add(clip.timeline_ticks(crate::timecode::from_seconds(seconds))) }
+            }
         };
         let command = clamp_trim(self.project(), command);
         self.finish_drag(command);
@@ -1637,7 +1656,18 @@ impl EditorState {
             return;
         }
         let shown = self.project().clone();
-        self.live_edit(|_| engine::set_animation(&shown, key, animation));
+        let mut removed = false;
+        self.live_edit(|_| {
+            engine::set_animation_report(&shown, key, animation).map(|(next, transitions)| {
+                removed = !transitions.is_empty();
+                next
+            })
+        });
+        // A hold on a cut with a transition takes the transition away; say so, since it may be
+        // off screen. The live edit is one undo step, so an undo brings it back.
+        if removed && self.live.is_some() {
+            self.status = Status::Warning(Message::HoldRemovedTransition);
+        }
     }
 
     /// Gives text clip `key` the font `font` as one undo step, keeping a fixed place scaled like
@@ -2089,7 +2119,17 @@ impl EditorState {
             return;
         };
         let transition = Transition { after_clip, package: package.to_owned(), duration: DEFAULT_TRANSITION_DURATION, params: Map::new() };
-        self.run(|project| add_transition(project, key.track, transition));
+        let mut released = false;
+        let added = self.run(|project| {
+            add_transition_report(project, key.track, transition).map(|(next, holds)| {
+                released = !holds.is_empty();
+                next
+            })
+        });
+        // The holds on the cut became plain animations in the same undo step; say so.
+        if added && released {
+            self.status = Status::Warning(Message::TransitionReleasedHold);
+        }
     }
 
     pub fn remove_transition_after(&mut self, track: usize, after_clip: usize) {
@@ -3362,6 +3402,55 @@ mod tests {
         assert_eq!(track.transitions[0].duration, DEFAULT_TRANSITION_DURATION);
         state.undo();
         assert!(state.project().tracks[0].transitions.is_empty());
+    }
+
+    fn hold(seconds: f64) -> Option<engine::AnimationRef> {
+        Some(engine::AnimationRef { preset: "fade".to_owned(), duration: Time::from_ticks((seconds * TICKS_PER_SECOND as f64) as i64) })
+    }
+
+    #[test]
+    fn a_hold_on_a_cut_with_a_transition_removes_it_in_one_step_and_warns() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        let before = state.project().clone();
+        state.select(Some(key(0)));
+        state.live_animation(engine::ClipAnimation { exit: hold(-0.5), ..Default::default() });
+        state.commit_live();
+        assert_eq!(state.status(), &Status::Warning(Message::HoldRemovedTransition));
+        let track = &state.project().tracks[0];
+        assert!(track.transitions.is_empty());
+        assert_eq!(track.clips[1].start, before.tracks[0].clips[1].start.saturating_add(Time::from_ticks(TICKS_PER_SECOND / 2)), "the next clip moves by the hold");
+        state.undo();
+        assert_eq!(state.project(), &before, "one undo brings the transition back");
+    }
+
+    #[test]
+    fn a_transition_on_a_held_cut_releases_the_holds_in_one_step_and_warns() {
+        let mut state = two_touching_clips();
+        let before = state.project().clone();
+        state.live_animation(engine::ClipAnimation { exit: hold(-0.5), ..Default::default() });
+        state.commit_live();
+        let held = state.project().clone();
+        assert_eq!(state.status(), &Status::Idle, "no transition was there to remove");
+        state.add_transition_package("mix");
+        assert_eq!(state.status(), &Status::Warning(Message::TransitionReleasedHold));
+        let track = &state.project().tracks[0];
+        assert_eq!(track.transitions.len(), 1);
+        assert_eq!(track.clips[1].start, before.tracks[0].clips[1].start);
+        assert_eq!(track.clips[0].animation.exit, hold(0.5));
+        state.undo();
+        assert_eq!(state.project(), &held);
+    }
+
+    #[test]
+    fn the_video_duration_field_keeps_the_holds() {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        state.live_animation(engine::ClipAnimation { enter: hold(-1.0), ..Default::default() });
+        state.commit_live();
+        state.apply_clip_field(ClipField::Duration(2.0));
+        let clip = &state.project().tracks[0].clips[0];
+        assert_eq!((clip.duration, clip.media_duration()), (seconds(3), seconds(2)));
     }
 
     #[test]

@@ -16,6 +16,8 @@ use engine::{AnimationGroup, AnimationRef, Clip, ClipAnimation, Time, TrackKind}
 use std::ops::RangeInclusive;
 
 const ANIMATION_SECONDS: RangeInclusive<f64> = 0.05..=10.0;
+/// In and out may also be negative, as a hold (see [`engine::AnimationRef::duration`]).
+const HOLD_SECONDS: RangeInclusive<f64> = -10.0..=10.0;
 const GROUPS: [AnimationGroup; 3] = [AnimationGroup::Enter, AnimationGroup::Exit, AnimationGroup::Repeat];
 
 /// Whether a clip on a track of `kind` has a picture to animate: video, image, sticker and text
@@ -28,7 +30,6 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, id: egui::Id, cli
     let language = state.language();
     let animation = &clip.animation;
     let kind = AnimatedClipKind::of(clip);
-    ui.label(egui::RichText::new(language.t(Message::TabAnimation)).strong());
     let mut next = animation.clone();
     for group in GROUPS {
         animation_row(ui, id, &mut next, group, language, &state.clip_animation_library, kind);
@@ -101,16 +102,42 @@ fn animation_row(ui: &mut egui::Ui, id: egui::Id, animation: &mut ClipAnimation,
     let Some(current) = current else { return };
     ui.indent(("animation-duration", group as u8), |ui| {
         ui.horizontal(|ui| {
-            ui.colored_label(theme::text_dim(), language.t(Message::FieldAnimationDuration));
+            ui.colored_label(theme::text_dim(), language.t(Message::FieldAnimationDuration)).on_hover_text(language.t(Message::AnimationDurationHint));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let mut seconds = to_seconds(current.duration);
-                if drag_field(ui, &mut seconds, ANIMATION_SECONDS, 0.01, 2, " s", None).1 {
-                    let duration = from_seconds(seconds).max(Time::from_ticks(1));
+                let before = to_seconds(current.duration);
+                let mut seconds = before;
+                let range = if group == AnimationGroup::Repeat { ANIMATION_SECONDS } else { HOLD_SECONDS };
+                if drag_field(ui, &mut seconds, range, 0.01, 2, " s", None).1 {
+                    let duration = duration_from_seconds(seconds, before);
                     *animation = with_animation(animation, group, Some(AnimationRef { duration, ..current.clone() }));
                 }
             });
         });
+        if current.is_hold() {
+            ui.colored_label(theme::text_dim(), language.t(Message::AnimationHoldNote(format!("{:.2}", to_seconds(current.length())))));
+        }
     });
+}
+
+/// The duration typed or dragged as `seconds`, from `before`: never 0 nor shorter than the
+/// shortest run either way, so a drag crosses 0 from the shortest run on one side to the shortest
+/// on the other.
+fn duration_from_seconds(seconds: f64, before: f64) -> Time {
+    let shortest = *ANIMATION_SECONDS.start();
+    let seconds = if seconds.abs() >= shortest {
+        seconds
+    } else if seconds < before {
+        -shortest
+    } else {
+        shortest
+    };
+    signed_seconds(seconds)
+}
+
+/// Seconds as ticks, keeping the sign.
+fn signed_seconds(seconds: f64) -> Time {
+    let magnitude = from_seconds(seconds.abs()).max(Time::from_ticks(1));
+    if seconds < 0.0 { Time::from_ticks(-magnitude.ticks()) } else { magnitude }
 }
 
 /// The text naming preset `id` of `group`: a built-in name, `pack: name` for an installed pack, or
@@ -137,6 +164,15 @@ fn preset_name(id: &str) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_duration_skips_zero_and_keeps_its_sign() {
+        assert_eq!(duration_from_seconds(-0.5, 0.5), signed_seconds(-0.5));
+        assert_eq!(duration_from_seconds(-0.5, 0.5).ticks(), -45_000);
+        assert_eq!(duration_from_seconds(0.01, 0.05), signed_seconds(-0.05), "dragged down past 0");
+        assert_eq!(duration_from_seconds(-0.01, -0.05), from_seconds(0.05), "dragged up past 0");
+        assert_eq!(duration_from_seconds(1.25, 1.0), from_seconds(1.25));
+    }
 
     #[test]
     fn only_clips_with_a_picture_show_the_section() {

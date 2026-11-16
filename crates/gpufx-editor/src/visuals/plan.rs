@@ -49,7 +49,8 @@ pub fn tile_ticks(clip: &Clip, tile_width: f64, pixels_per_second: f64) -> i64 {
 pub fn tile_source_ticks(clip: &Clip, tile_width: f64, pixels_per_second: f64, index: usize) -> i64 {
     let middle = (index as f64 + 0.5) * tile_width;
     let into_clip = width_ticks(middle, pixels_per_second).clamp(0, clip.duration.ticks().saturating_sub(1).max(0));
-    clip.source_in.saturating_add(clip.source_offset(Time::from_ticks(into_clip))).ticks()
+    // Inside a hold the tile shows the still frame (see engine::Clip::source_time_at).
+    clip.source_time_at(Time::from_ticks(into_clip)).ticks()
 }
 
 /// The cells of width `cell` from `origin` that overlap `visible`, within `extent` of cells.
@@ -68,7 +69,7 @@ pub fn bar_span(clip: &Clip, pixels_per_second: f64, index: usize) -> Range<i64>
     let pitch = BAR_WIDTH + BAR_GAP;
     let begin = width_ticks(index as f64 * pitch, pixels_per_second);
     let end = width_ticks((index + 1) as f64 * pitch, pixels_per_second).min(clip.duration.ticks());
-    let at = |ticks: i64| clip.source_in.saturating_add(clip.source_offset(Time::from_ticks(ticks))).ticks();
+    let at = |ticks: i64| clip.source_time_at(Time::from_ticks(ticks)).ticks();
     at(begin)..at(end.max(begin + 1)).max(at(begin) + 1)
 }
 

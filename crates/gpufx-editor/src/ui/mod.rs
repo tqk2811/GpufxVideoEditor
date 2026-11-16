@@ -254,7 +254,7 @@ fn status_summary(state: &EditorState) -> String {
     lines.extend(state.loading().map(|name| language.t(Message::Loading(name.to_owned()))));
     match state.status() {
         Status::Idle => {}
-        Status::Info(message) | Status::Error(message) => lines.push(language.text(message)),
+        Status::Info(message) | Status::Warning(message) | Status::Error(message) => lines.push(language.text(message)),
         Status::Refused(message) => lines.push(language.t(Message::RefusedLine(language.text(message)))),
     }
     lines.extend(state.preview_error().map(|message| language.t(Message::PreviewLine(message.to_owned()))));
@@ -289,6 +289,9 @@ fn status_line(ui: &mut egui::Ui, state: &EditorState) {
             }
             Status::Info(message) => {
                 ui.colored_label(theme::text_dim(), language.text(message));
+            }
+            Status::Warning(message) => {
+                ui.label(egui::RichText::new(language.text(message)).color(theme::accent_text()).strong());
             }
             Status::Refused(message) => {
                 ui.colored_label(theme::refused(), language.t(Message::RefusedLine(language.text(message))));
