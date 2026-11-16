@@ -11,7 +11,7 @@ fn clip(source: &str, start: i64, duration: i64) -> Clip {
 }
 
 fn project(kind: TrackKind, clips: Vec<Clip>) -> Project {
-    Project { version: SUPPORTED_VERSION, output: Output { width: 320, height: 180, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }], markers: Vec::new(), beats: Default::default() }
+    Project { version: SUPPORTED_VERSION, output: Output { width: 320, height: 180, frame_rate: engine::FrameRate::whole(30), audio: None }, tracks: vec![Track { kind, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }], markers: Vec::new(), beats: Default::default() }
 }
 
 const KEY: ClipKey = ClipKey { track: 0, clip: 0 };
@@ -77,7 +77,7 @@ fn the_speed_of_an_image_cannot_be_changed() {
 
 #[test]
 fn a_file_with_an_image_loads_and_saves_without_new_fields() {
-    let json = r#"{"version":1,"output":{"width":320,"height":180,"frame_duration":3000},"tracks":[{"clips":[{"source":"a.mp4","start":0,"source_in":0,"duration":90000},{"source":"logo.png","start":90000,"source_in":0,"duration":90000}]}]}"#;
+    let json = r#"{"version":1,"output":{"width":320,"height":180,"frame_rate":{"num":30,"den":1}},"tracks":[{"clips":[{"source":"a.mp4","start":0,"source_in":0,"duration":90000},{"source":"logo.png","start":90000,"source_in":0,"duration":90000}]}]}"#;
     let loaded = Project::from_json(json).expect("the file loads");
     assert!(validate(&loaded, &AcceptAll).is_empty());
     assert!(!loaded.tracks[0].clips[0].is_image());

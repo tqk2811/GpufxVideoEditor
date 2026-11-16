@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use d3d12_backend::{is_asset_source, reserve_temporary, ProjectPaths};
-use engine::{validate, Project, Resolver, ValidationError, MIN_FRAME_DURATION};
+use engine::{validate, FrameRate, Project, Resolver, ValidationError};
 
 /// Names a directory holding `packages/gpufx`, for an install that keeps them elsewhere.
 pub const PACKAGE_ROOT_VARIABLE: &str = "GPUFX_PACKAGE_ROOT";
@@ -165,9 +165,9 @@ pub fn write_file_atomically(file: &Path, bytes: &[u8]) -> Result<(), String> {
 /// Times are in ticks, so no clip moves; the file itself changes only if the user saves.
 fn limit_frame_rate(project: &mut Project, file: &Path) {
     let output = &mut project.output;
-    if output.frame_duration > engine::Time::ZERO && output.frame_duration < MIN_FRAME_DURATION {
-        eprintln!("{}: frame_duration {} is more than 60 fps, using {MIN_FRAME_DURATION}", file.display(), output.frame_duration);
-        output.frame_duration = MIN_FRAME_DURATION;
+    if output.frame_rate.is_valid() && output.frame_rate.is_faster_than(FrameRate::MAX) {
+        eprintln!("{}: frame_rate {} is more than {} fps, using {}", file.display(), output.frame_rate, FrameRate::MAX, FrameRate::MAX);
+        output.frame_rate = FrameRate::MAX;
     }
 }
 
@@ -219,7 +219,7 @@ mod tests {
 
     fn project(sources: Vec<String>) -> Project {
         let clips = sources.into_iter().enumerate().map(|(i, source)| clip(source, i as i64 * 900)).collect();
-        Project { version: SUPPORTED_VERSION, output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }], markers: Vec::new(), beats: Default::default() }
+        Project { version: SUPPORTED_VERSION, output: Output { width: 16, height: 16, frame_rate: engine::FrameRate::whole(30), audio: None }, tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }], markers: Vec::new(), beats: Default::default() }
     }
 
     #[test]
@@ -381,39 +381,40 @@ mod tests {
 
     #[test]
     fn only_the_current_version_opens() {
-        let text = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[{"clips":[]}]}"#;
+        let text = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":30,"den":1}},"tracks":[{"clips":[]}]}"#;
         let opened = parse_project(text, Path::new(r"D:\p.json"), &AcceptAll).unwrap();
         assert_eq!(opened.version, SUPPORTED_VERSION);
         assert!(parse_project(&text.replace(r#""version":1"#, r#""version":2"#), Path::new(r"D:\p.json"), &AcceptAll).is_err());
     }
 
-    fn project_at(frame_duration: i64) -> String {
-        format!(r#"{{"version":1,"output":{{"width":16,"height":16,"frame_duration":{frame_duration}}},"tracks":[]}}"#)
+    fn project_at(num: u32, den: u32) -> String {
+        format!(r#"{{"version":1,"output":{{"width":16,"height":16,"frame_rate":{{"num":{num},"den":{den}}}}},"tracks":[]}}"#)
     }
 
     #[test]
     fn a_file_above_60_fps_still_opens_at_60() {
         let file = Path::new(r"D:\p.json");
-        let opened = parse_project(&project_at(1_000), file, &AcceptAll).expect("it opens");
-        assert_eq!(opened.output.frame_duration, MIN_FRAME_DURATION);
+        let opened = parse_project(&project_at(90, 1), file, &AcceptAll).expect("it opens");
+        assert_eq!(opened.output.frame_rate, FrameRate::MAX);
     }
 
     #[test]
     fn a_file_at_or_below_60_fps_keeps_its_rate_and_a_broken_one_is_still_refused() {
         let file = Path::new(r"D:\p.json");
-        for ticks in [1_500, 3_003] {
-            assert_eq!(parse_project(&project_at(ticks), file, &AcceptAll).unwrap().output.frame_duration.ticks(), ticks);
+        for rate in [FrameRate::MAX, FrameRate::NTSC, FrameRate::NTSC_FILM, FrameRate::NTSC_DOUBLE] {
+            assert_eq!(parse_project(&project_at(rate.num, rate.den), file, &AcceptAll).unwrap().output.frame_rate, rate);
         }
-        assert!(parse_project(&project_at(0), file, &AcceptAll).is_err(), "not a rate at all");
+        assert!(parse_project(&project_at(0, 1), file, &AcceptAll).is_err(), "not a rate at all");
+        assert!(parse_project(&project_at(30, 0), file, &AcceptAll).is_err(), "no denominator");
     }
 
     #[test]
     fn broken_or_invalid_projects_are_reported() {
         let file = Path::new(r"D:\p.json");
         assert!(parse_project("not json", file, &AcceptAll).unwrap_err().contains("p.json"));
-        let zero_size = r#"{"version":1,"output":{"width":0,"height":16,"frame_duration":3000},"tracks":[]}"#;
+        let zero_size = r#"{"version":1,"output":{"width":0,"height":16,"frame_rate":{"num":30,"den":1}},"tracks":[]}"#;
         assert!(parse_project(zero_size, file, &AcceptAll).is_err());
-        assert!(parse_project(r#"{"version":9,"output":{"width":16,"height":16,"frame_duration":3000},"tracks":[]}"#, file, &AcceptAll).unwrap_err().contains("unsupported"));
+        assert!(parse_project(r#"{"version":9,"output":{"width":16,"height":16,"frame_rate":{"num":30,"den":1}},"tracks":[]}"#, file, &AcceptAll).unwrap_err().contains("unsupported"));
     }
 
     #[test]

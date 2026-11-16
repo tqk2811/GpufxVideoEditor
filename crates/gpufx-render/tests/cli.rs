@@ -31,7 +31,7 @@ fn write_project(dir: &PathBuf, json: &str) -> PathBuf {
 fn two_clip_project() -> String {
     let (a, b) = test_clips();
     format!(
-        r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_rate":{{"num":90000,"den":{FRAME}}}}},"tracks":[{{"clips":[
            {{"source":"{}","start":0,"source_in":0,"duration":{CLIP_DURATION}}},
            {{"source":"{}","start":{CLIP_DURATION},"source_in":0,"duration":{CLIP_DURATION}}}],
            "transitions":[{{"after_clip":0,"package":"fade-grays","duration":{transition}}}]}}]}}"#,
@@ -139,7 +139,7 @@ const AUDIO_OUTPUT: &str = r#","audio":{"sample_rate":48000,"channels":2,"bitrat
 /// One clip of `seconds`, starting `source_in` seconds into `source`.
 fn audio_project(source: &std::path::Path, source_in: i64, seconds: i64, audio_output: &str) -> String {
     format!(
-        r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_duration":{FRAME}{audio_output}}},"tracks":[{{"clips":[
+        r#"{{"version":1,"output":{{"width":{CLIP_WIDTH},"height":{CLIP_HEIGHT},"frame_rate":{{"num":90000,"den":{FRAME}}}{audio_output}}},"tracks":[{{"clips":[
            {{"source":"{}","start":0,"source_in":{},"duration":{}}}]}}]}}"#,
         json_path(source),
         source_in * 90_000,
@@ -183,6 +183,38 @@ fn exports_aac_stereo_at_48k_as_long_as_the_video() {
 
     let decode = Command::new(ffmpeg_tool()).args(["-hide_banner", "-v", "error", "-i"]).arg(&out).args(["-f", "null", "-"]).output().expect("run ffmpeg");
     assert!(decode.status.success() && decode.stderr.is_empty(), "decoding failed: {}", String::from_utf8_lossy(&decode.stderr));
+}
+
+/// An NTSC rate is written as its exact fraction: ffprobe reads `r_frame_rate` 24000/1001, not a
+/// rounded 3753-tick frame, and the audio is as long as the fraction says to the sample.
+#[test]
+fn ntsc_rates_export_with_their_exact_frame_rate() {
+    let _lock = gpu_lock();
+    let clip = tone_clip_with_video();
+    if !hardware_available() {
+        return;
+    }
+    // (num, den, frames in 3 s, samples at 48000 Hz after those frames)
+    for (num, den, frames, samples) in [(24000, 1001, 72, 144_144), (30000, 1001, 90, 144_144), (60000, 1001, 180, 144_144)] {
+        let dir = scratch_dir(&format!("cli-ntsc-{num}"));
+        let json = audio_project(&clip, 1, 3, AUDIO_OUTPUT).replace(&format!(r#""frame_rate":{{"num":90000,"den":{FRAME}}}"#), &format!(r#""frame_rate":{{"num":{num},"den":{den}}}"#));
+        assert!(json.contains(&format!(r#""num":{num}"#)), "the rate was not replaced: {json}");
+        let project = write_project(&dir, &json);
+        let out = dir.join("out.mp4");
+        let result = render(&project, &out, &dir.join("hashes.txt"));
+        assert!(result.status.success(), "{num}/{den}: render failed: {}", String::from_utf8_lossy(&result.stderr));
+        let printed = String::from_utf8_lossy(&result.stdout);
+        assert!(printed.lines().any(|l| l == format!("audio: {samples} samples, 0 clamped")), "{num}/{den}: the audio report is wrong: {printed}");
+        assert!(printed.lines().any(|l| l.starts_with(&format!("wrote {frames} frames"))), "{num}/{den}: {printed}");
+        assert_eq!(stream_field(&out, "v:0", "r_frame_rate"), format!("{num}/{den}"));
+        assert_eq!(stream_field(&out, "v:0", "avg_frame_rate"), format!("{num}/{den}"));
+        assert_eq!(probe(&["-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"], &out), frames.to_string());
+        let (audio, video) = (seconds_of(&out, "a:0", "duration"), seconds_of(&out, "v:0", "duration"));
+        let exact = f64::from(frames) * f64::from(den) / f64::from(num);
+        assert!((video - exact).abs() < 1e-3, "{num}/{den}: video lasts {video} s, not {exact} s");
+        let limit = (1024.0 + 1024.0) / 48_000.0;
+        assert!((audio - video).abs() < limit, "{num}/{den}: audio {audio} s, video {video} s, limit {limit} s");
+    }
 }
 
 /// Decodes a stream of `file` to raw bytes.
@@ -266,7 +298,7 @@ fn a_failed_render_with_audio_leaves_existing_outputs_untouched() {
 }
 
 fn invalid_project(tracks: &str) -> String {
-    format!(r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000}},"tracks":[{tracks}]}}"#)
+    format!(r#"{{"version":1,"output":{{"width":64,"height":64,"frame_rate":{{"num":30,"den":1}}}},"tracks":[{tracks}]}}"#)
 }
 
 fn expect_rejected(test: &str, tracks: &str, message: &str) {
@@ -282,7 +314,7 @@ fn expect_rejected(test: &str, tracks: &str, message: &str) {
 #[test]
 fn more_than_60_fps_is_rejected() {
     let dir = scratch_dir("reject-fps");
-    let project = write_project(&dir, r#"{"version":1,"output":{"width":64,"height":64,"frame_duration":1000},"tracks":[]}"#);
+    let project = write_project(&dir, r#"{"version":1,"output":{"width":64,"height":64,"frame_rate":{"num":90,"den":1}},"tracks":[]}"#);
     let output = render(&project, &dir.join("out.mp4"), &dir.join("hashes.txt"));
     assert!(!output.status.success(), "the project must be rejected");
     let stderr = String::from_utf8_lossy(&output.stderr);

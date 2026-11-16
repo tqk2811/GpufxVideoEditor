@@ -24,7 +24,7 @@ fn clip(name: &str, duration: Time) -> Clip {
 fn project(clips: Vec<Clip>) -> Arc<Project> {
     Arc::new(Project {
         version: SUPPORTED_VERSION,
-        output: Output { width: 320, height: 180, frame_duration: Time::from_ticks(3000), audio: None },
+        output: Output { width: 320, height: 180, frame_rate: engine::FrameRate::whole(30), audio: None },
         tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
         markers: Vec::new(), beats: Default::default(),
     })

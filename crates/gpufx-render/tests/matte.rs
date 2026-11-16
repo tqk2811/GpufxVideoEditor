@@ -53,7 +53,7 @@ impl FrameSink for All {
 fn project(top: &Path, bottom: &Path, matte: &str) -> (Project, Arc<ProjectPaths>) {
     let clip = |source: &Path, extra: &str| format!(r#"{{"source":"{}","start":0,"source_in":{},"duration":{}{extra}}}"#, json_path(source), 10 * FRAME, FRAMES * FRAME);
     let json = format!(
-        r#"{{"version":1,"output":{{"width":{W},"height":{H},"frame_duration":{FRAME}}},"tracks":[{{"clips":[{}]}},{{"clips":[{}]}}]}}"#,
+        r#"{{"version":1,"output":{{"width":{W},"height":{H},"frame_rate":{{"num":90000,"den":{FRAME}}}}},"tracks":[{{"clips":[{}]}},{{"clips":[{}]}}]}}"#,
         clip(bottom, ""),
         clip(top, &format!(r#","matte":{matte}"#))
     );

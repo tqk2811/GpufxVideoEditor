@@ -1,5 +1,6 @@
 //! Project model: the project JSON, in its one current format version.
 
+use crate::frame_rate::FrameRate;
 use crate::keyframe::{ClipMotion, Keyframe};
 use crate::time::Time;
 use serde::{Deserialize, Serialize};
@@ -100,8 +101,8 @@ pub struct Output {
     pub width: u32,
     /// Frame height in pixels.
     pub height: u32,
-    /// Duration of one output frame in ticks (3003 for 30000/1001 fps).
-    pub frame_duration: Time,
+    /// Output frames per second as an exact fraction (`{"num":30000,"den":1001}` for 29.97 fps).
+    pub frame_rate: FrameRate,
     /// Audio stream settings. Without them the output has no audio stream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioOutput>,
@@ -657,8 +658,6 @@ impl PlacedRect {
 pub const MIN_SPEED: f64 = 0.1;
 /// The fastest playback speed of a clip.
 pub const MAX_SPEED: f64 = 10.0;
-/// The shortest output frame in ticks: 60 fps is the highest output rate.
-pub const MIN_FRAME_DURATION: Time = Time::from_ticks(1500);
 /// A speed is used as a whole number of these parts: the mapping is exact in integers and never
 /// accumulates rounding, however long the clip. See [`Clip::source_offset`].
 pub const SPEED_SCALE: i64 = 1000;

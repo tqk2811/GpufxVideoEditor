@@ -253,7 +253,7 @@ fn a_mix_of_cuts_reads_the_right_seconds_of_the_source() {
         let source = path.file_name().and_then(|n| n.to_str()).expect("name").to_owned();
         // Two cuts of one file, the second earlier in the source than the first ended.
         let json = format!(
-            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_rate":{{"num":30,"den":1}},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
                 {{"kind":"audio","clips":[
                   {{"source":"{source}","start":0,"source_in":315000,"duration":45000}},
                   {{"source":"{source}","start":45000,"source_in":157500,"duration":45000}}]}}]}}"#
@@ -367,7 +367,7 @@ fn a_reversed_chunk_reads_the_same_samples_whatever_was_read_before() {
         let source = path.file_name().and_then(|n| n.to_str()).expect("name").to_owned();
         // From source 1 s for 3 s: timeline sample v plays file frame 191999 - v.
         let json = format!(
-            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_rate":{{"num":30,"den":1}},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
                 {{"kind":"audio","clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":270000,"reverse":true}}]}}]}}"#
         );
         let project = Project::from_json(&json).expect("project parses");

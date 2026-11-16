@@ -268,29 +268,29 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         }
         AgentEdit::TrackSetLocked { track, locked } => state.set_track_locked(track, locked).map_err(refused)?,
         AgentEdit::TrackSetHidden { track, hidden } => state.apply_agent_command(|project| engine::set_track_hidden(project, track, hidden)).map_err(refused)?,
-        AgentEdit::ProjectSetOutput { width, height, frame_duration } => {
-            if width.is_none() && height.is_none() && frame_duration.is_none() {
-                return Err(AgentError::new("invalid_params", "give at least one of width, height and frame_duration"));
+        AgentEdit::ProjectSetOutput { width, height, frame_rate } => {
+            if width.is_none() && height.is_none() && frame_rate.is_none() {
+                return Err(AgentError::new("invalid_params", "give at least one of width, height and frame_rate"));
             }
             for side in [width, height].into_iter().flatten() {
                 if !(2..=MAX_OUTPUT_SIDE).contains(&side) {
                     return Err(AgentError::new("out_of_range", format!("side {side} is outside 2 to {MAX_OUTPUT_SIDE}")));
                 }
             }
-            if let Some(frame_duration) = frame_duration {
-                if frame_duration < engine::MIN_FRAME_DURATION {
-                    return Err(AgentError::new("out_of_range", format!("frame_duration {frame_duration} is under {} ticks (60 fps)", engine::MIN_FRAME_DURATION)));
+            if let Some(frame_rate) = frame_rate {
+                if !frame_rate.is_output_rate() {
+                    return Err(AgentError::new("out_of_range", format!("frame_rate {frame_rate} is outside {} to {} fps or has a zero part", engine::FrameRate::MIN, engine::FrameRate::MAX)));
                 }
             }
             state
                 .apply_agent_command(|project| {
                     let output = &project.output;
                     let sized = engine::set_output_size(project, even_side(width.unwrap_or(output.width)), even_side(height.unwrap_or(output.height)))?;
-                    engine::set_frame_duration(&sized, frame_duration.unwrap_or(output.frame_duration))
+                    engine::set_frame_rate(&sized, frame_rate.map_or(output.frame_rate, |rate| engine::FrameRate::new(rate.num, rate.den)))
                 })
                 .map_err(refused)?;
             let output = &state.project().output;
-            result.insert("output".to_owned(), json!({"width": output.width, "height": output.height, "frame_duration": output.frame_duration}));
+            result.insert("output".to_owned(), json!({"width": output.width, "height": output.height, "frame_rate": output.frame_rate}));
         }
         AgentEdit::ClipAdd { track, source, start, source_in, duration, speed } => {
             let clip = added_clip(state, track, &source, start, source_in, duration, speed, probe)?;
@@ -1265,11 +1265,11 @@ mod tests {
         let mut host = FakeHost::new("live");
         let before = host.state.project().output.clone();
         let revision = host.state.revision();
-        let edit = AgentEdit::ProjectSetOutput { width: Some(1081), height: Some(1920), frame_duration: Some(Time::from_ticks(3750)) };
+        let edit = AgentEdit::ProjectSetOutput { width: Some(1081), height: Some(1920), frame_rate: Some(engine::FrameRate { num: 48000, den: 2002 }) };
         let result = host.run(AgentRequest::Edit { expected_revision: revision, edit }).expect("set output");
-        assert_eq!(result["output"], json!({"width": 1080, "height": 1920, "frame_duration": 3750}));
+        assert_eq!(result["output"], json!({"width": 1080, "height": 1920, "frame_rate": {"num": 24000, "den": 1001}}));
         let output = &host.state.project().output;
-        assert_eq!((output.width, output.height, output.frame_duration), (1080, 1920, Time::from_ticks(3750)));
+        assert_eq!((output.width, output.height, output.frame_rate), (1080, 1920, engine::FrameRate::NTSC_FILM));
         let revision = host.state.revision();
         host.run(AgentRequest::Undo { expected_revision: revision }).expect("undo");
         assert_eq!(host.state.project().output, before);
@@ -1279,18 +1279,20 @@ mod tests {
     fn project_set_output_keeps_what_is_not_given_and_refuses_bad_values() {
         let mut host = FakeHost::new("live");
         let before = host.state.project().output.clone();
-        let mut set = |width, height, frame_duration: Option<i64>| {
+        let mut set = |width, height, frame_rate: Option<(u32, u32)>| {
             let revision = host.state.revision();
-            let edit = AgentEdit::ProjectSetOutput { width, height, frame_duration: frame_duration.map(Time::from_ticks) };
+            let edit = AgentEdit::ProjectSetOutput { width, height, frame_rate: frame_rate.map(|(num, den)| engine::FrameRate { num, den }) };
             host.run(AgentRequest::Edit { expected_revision: revision, edit })
         };
         assert_eq!(code(set(None, None, None)), "invalid_params");
         assert_eq!(code(set(Some(0), None, None)), "out_of_range");
         assert_eq!(code(set(None, Some(MAX_OUTPUT_SIDE + 2), None)), "out_of_range");
-        assert_eq!(code(set(None, None, Some(1000))), "out_of_range");
+        assert_eq!(code(set(None, None, Some((90, 1)))), "out_of_range");
+        assert_eq!(code(set(None, None, Some((30, 0)))), "out_of_range");
+        assert_eq!(code(set(None, None, Some((1, 2)))), "out_of_range");
         set(None, Some(720), None).expect("height alone");
         let output = &host.state.project().output;
-        assert_eq!((output.width, output.height, output.frame_duration), (before.width, 720, before.frame_duration));
+        assert_eq!((output.width, output.height, output.frame_rate), (before.width, 720, before.frame_rate));
     }
 
     #[test]

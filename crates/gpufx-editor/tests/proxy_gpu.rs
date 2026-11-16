@@ -49,7 +49,7 @@ fn one_clip_project(source: &Path, seconds: i64) -> Arc<Project> {
     let clip = new_clip(&source.to_string_lossy(), Time::ZERO, Time::from_seconds(seconds).unwrap());
     Arc::new(Project {
         version: SUPPORTED_VERSION,
-        output: Output { width: 320, height: 180, frame_duration: Time::from_ticks(3000), audio: None },
+        output: Output { width: 320, height: 180, frame_rate: engine::FrameRate::whole(30), audio: None },
         tracks: vec![Track { kind: TrackKind::Video, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
         markers: Vec::new(),
         beats: Default::default(),
@@ -169,7 +169,7 @@ fn a_proxy_of_an_odd_rate_source_with_a_start_offset_shows_the_frame_the_origina
 
     let mut producer = D3d12Producer::new(gpu);
     let mut project = (*one_clip_project(&original, 10)).clone();
-    project.output.frame_duration = Time::from_ticks(1500);
+    project.output.frame_rate = engine::FrameRate::MAX;
     // Trimmed by 1000 ticks, so output frame i reads the source at i * 1500 + 1000: late in the
     // clip that lands just after the start of a source frame, where a drifting proxy is behind.
     project.tracks[0].clips[0].source_in = Time::from_ticks(1000);

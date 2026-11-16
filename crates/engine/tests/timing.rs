@@ -351,3 +351,29 @@ fn clip_clock_of_a_clip_between_two_transitions_spans_both_windows() {
     let (last_from, _) = transition_clocks(&p, 20, 0);
     assert_eq!(last_from, (36_000, 39_000), "the last frame of the second window");
 }
+
+/// One hour of a single clip at each NTSC rate: the frame count, the start of the last frame and
+/// the audio length come from the exact fraction, not from a rounded frame length times a count.
+#[test]
+fn ntsc_rates_do_not_drift_over_an_hour() {
+    const HOUR: i64 = 3600 * 90_000;
+    let hour_long = |rate| project_at(rate, vec![track(vec![clip("a.mp4", 0, 0, HOUR)], vec![])]);
+    // (rate, frames, start of the last frame, samples at 48000 Hz)
+    let cases = [
+        (engine::FrameRate::NTSC_FILM, 86_314, 323_997_423, 172_800_628),
+        (engine::FrameRate::NTSC, 107_893, 323_999_676, 172_801_428),
+        (engine::FrameRate::NTSC_DOUBLE, 215_785, 323_999_676, 172_800_628),
+    ];
+    for (rate, frames, last_start, samples) in cases {
+        let p = hour_long(rate);
+        assert_eq!(frame_count(&p), frames, "{rate}");
+        assert_eq!(frame_time(&p, frames - 1), Some(t(last_start)), "{rate}");
+        assert!(frame_time(&p, frames).unwrap() >= t(HOUR), "{rate}: the count covers the hour");
+        assert_eq!(engine::audio_sample_count(&p), samples, "{rate}");
+        // The same layer is found on the last frame as on the first: the clip covers the hour.
+        assert_eq!(layers_at_frame(&p, frames - 1).len(), 1, "{rate}");
+    }
+    // Stepping a rounded 3753-tick frame would fall about 17 frames short of the hour after the
+    // same count of frames, so it would need more frames and drift from the audio.
+    assert!(HOUR - engine::FrameRate::NTSC_FILM.frame_duration().ticks() * 86_314 > 16 * 3753);
+}

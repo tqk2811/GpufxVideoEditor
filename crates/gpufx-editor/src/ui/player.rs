@@ -2,11 +2,12 @@
 
 use super::icons::{self, Icon};
 use super::{placement, theme, UiRequest};
-use crate::editor::{EditorState, Status, OUTPUT_FRAME_DURATIONS, OUTPUT_PRESETS};
+use crate::editor::{EditorState, Status, OUTPUT_FRAME_RATES, OUTPUT_PRESETS};
 use crate::i18n::Message;
 use crate::presenter::PreviewTexture;
 use crate::preview::plan::fit_size;
-use crate::timecode::{aspect_label, format_fps, format_timecode, fps_from_frame_duration, frame_duration_from_fps};
+use crate::timecode::{aspect_label, format_fps, format_timecode};
+use engine::FrameRate;
 use crate::timeline::view::content_end;
 use crate::media::MediaItem;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Pos2, Rect, Sense, Stroke, UiBuilder, Vec2};
@@ -154,10 +155,10 @@ fn transport_fit(beside_play: f32, current: f32, total: f32, aspect: f32, gap: f
 
 fn transport(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, controls: Rect) {
     let output = &state.project().output;
-    let frame_duration = output.frame_duration;
-    let size = format!("{}  {}", size_label(output.width, output.height), format_fps(frame_duration));
-    let current = format_timecode(state.playhead(), frame_duration);
-    let total = format_timecode(content_end(state.project()), frame_duration);
+    let frame_rate = output.frame_rate;
+    let size = format!("{}  {}", size_label(output.width, output.height), format_fps(frame_rate));
+    let current = format_timecode(state.playhead(), frame_rate);
+    let total = format_timecode(content_end(state.project()), frame_rate);
     let total = format!("/ {total}");
     let width_of = |text: &str, style: egui::TextStyle| ui.painter().layout_no_wrap(text.to_owned(), style.resolve(ui.style()), theme::text()).size().x;
     let beside_play = controls.width() / 2.0 - PLAY_HALF_WIDTH - ui.spacing().item_spacing.x;
@@ -198,7 +199,7 @@ fn size_label(width: u32, height: u32) -> String {
 /// The size and frame rate of the output: lists of usual values and a width and height to type.
 fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
     let output = &state.project().output;
-    let (width, height, frame_duration) = (output.width, output.height, output.frame_duration);
+    let (width, height, frame_rate) = (output.width, output.height, output.frame_rate);
     let language = state.language();
     let draft_id = ui.scope_id().with("output-size-draft");
     let fps_draft_id = ui.scope_id().with("output-fps-draft");
@@ -227,24 +228,25 @@ fn output_size_menu(ui: &mut egui::Ui, state: &mut EditorState, label: String) {
             }
             ui.separator();
             ui.colored_label(theme::text_dim(), language.t(Message::FieldFrameRate));
-            for preset in OUTPUT_FRAME_DURATIONS {
-                if ui.selectable_label(preset == frame_duration, format_fps(preset)).clicked() {
-                    state.set_frame_duration(preset);
+            for preset in OUTPUT_FRAME_RATES {
+                if ui.selectable_label(preset == frame_rate, format_fps(preset)).clicked() {
+                    state.set_frame_rate(preset);
                     ui.close();
                 }
             }
             ui.separator();
             ui.colored_label(theme::text_dim(), language.t(Message::FrameRateCustom));
-            let mut draft_fps = ui.data(|data| data.get_temp::<f64>(fps_draft_id)).unwrap_or_else(|| fps_from_frame_duration(frame_duration));
+            let mut draft_fps = ui.data(|data| data.get_temp::<f64>(fps_draft_id)).unwrap_or_else(|| frame_rate.fps());
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut draft_fps).speed(0.1).max_decimals(3).suffix(" fps"));
             });
             ui.data_mut(|data| data.insert_temp(fps_draft_id, draft_fps));
             // Only 1 to 60 fps is taken; anything else leaves Apply off instead of being clamped.
-            let custom = frame_duration_from_fps(draft_fps);
+            // 23.976, 29.97 and 59.94 become their exact NTSC fractions.
+            let custom = FrameRate::from_fps(draft_fps);
             if ui.add_enabled(custom.is_some(), egui::Button::new(language.t(Message::Apply))).clicked() {
                 if let Some(custom) = custom {
-                    state.set_frame_duration(custom);
+                    state.set_frame_rate(custom);
                     ui.close();
                 }
             }

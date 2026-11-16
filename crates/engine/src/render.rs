@@ -10,7 +10,7 @@
 
 use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
 use crate::stretch::StretchStates;
-use crate::audio_schedule::{sample_position, MIX_CHANNELS};
+use crate::audio_schedule::{MIX_CHANNELS, MIX_SAMPLE_RATE};
 use crate::clip_animation::animation_effects;
 use crate::keyframe::effects_at;
 use crate::keyframe::ClipTransform;
@@ -425,7 +425,7 @@ impl<C: Compositor> FrameRenderer<C> {
         for layer in &layers {
             used.extend(layer_clips(&layer.content, layer.track));
             let failed = |e: RenderError| RenderError(format!("frame {index}, track {}: {e}", layer.track));
-            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project.output.frame_duration) {
+            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project.output.frame_rate.frame_duration()) {
                 Ok(image) => image,
                 Err(e) => {
                     if let Some(base) = canvas {
@@ -496,8 +496,7 @@ pub fn render_with_audio<C: Compositor, S: FrameSink>(
         sink.write_frame(index, &rgba)
             .map_err(|e| RenderError(format!("frame {index}: {e}")))?;
         if let Some(source) = &mut audio {
-            let end = frame_time(project, index + 1)
-                .map(sample_position)
+            let end = project.output.frame_rate.frame_sample(index + 1, MIX_SAMPLE_RATE)
                 .ok_or_else(|| RenderError(format!("frame {index}: time overflows")))?;
             samples.resize((end - mixed) as usize * MIX_CHANNELS, 0.0);
             let MixReport { clamped_samples: clamped } =
@@ -684,15 +683,15 @@ mod tests {
         )
     }
 
-    const TWO_TRACKS: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const TWO_TRACKS: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":200}]},
         {"clips":[{"source":"b","start":100,"source_in":500,"duration":100}]}]}"#;
 
-    const TRANSITION: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const TRANSITION: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":300},{"source":"b","start":300,"source_in":0,"duration":300}],
          "transitions":[{"after_clip":0,"package":"mix","duration":200}]}]}"#;
 
-    const GAP: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const GAP: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":100},{"source":"b","start":200,"source_in":0,"duration":100}]}]}"#;
 
     #[test]
@@ -823,7 +822,7 @@ mod tests {
         }
     }
 
-    const WITH_AUDIO: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
+    const WITH_AUDIO: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1},"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":300}]}]}"#;
 
     fn run_audio(json: &str, source: &mut dyn AudioSource) -> Result<(AudioSink, RenderSummary), RenderError> {
@@ -912,7 +911,7 @@ mod tests {
         assert_eq!(opened, ["open a", "open c"]);
     }
 
-    const TEXT: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const TEXT: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
         {"clips":[{"source":"text:","start":0,"source_in":0,"duration":300,"text":{"content":"Hi","size":0.1}}]}]}"#;
 
     #[test]
@@ -1097,7 +1096,7 @@ mod tests {
     #[test]
     fn empty_project_renders_nothing() {
         let (journal, summary) = run(
-            r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[]}"#,
+            r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[]}"#,
         );
         assert_eq!(summary.frames, 0);
         assert!(journal.events.is_empty());
