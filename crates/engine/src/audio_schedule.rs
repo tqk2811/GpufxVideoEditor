@@ -28,9 +28,13 @@
 //!   sample has gain 0. A fade on the side of a transition is rejected by [`crate::validate`]
 //!   (`FadeBesideTransition`), because it would silence part of the window; the scheduler assumes
 //!   it does not occur.
+//! * **Voice.** Per clip, in this order: noise reduction of the source audio ([`crate::denoise`]),
+//!   the stretch with the pitch shift ([`crate::stretch`]), the voice effect ([`VoiceFx`]), and
+//!   last the gain and fades.
 //! * **Total length.** Audio stops with the last video frame, see [`audio_sample_count`].
 
-use crate::project::{Clip, Project, Track, Transition};
+use crate::denoise::DenoiseSpec;
+use crate::project::{Clip, Project, Track, Transition, VoiceEffect, ROBOT_HZ};
 use crate::render::ClipKey;
 use crate::schedule::{frame_count, frame_time, transition_window};
 use crate::stretch::Stretch;
@@ -134,6 +138,35 @@ pub struct AudioSegment<'a> {
     /// Set for a clip at another speed: its samples come from the time stretcher, not from
     /// consecutive source samples starting at `source_start`.
     pub stretch: Option<Stretch>,
+    /// Set for a clip with noise reduction, which applies to its source audio before the stretch.
+    pub denoise: Option<DenoiseSpec>,
+    /// Set for a clip with a voice effect, which applies after the stretch and before the gain.
+    pub voice_effect: Option<VoiceFx>,
+}
+
+/// A voice effect over the timeline samples of one clip. Each value depends only on the sample.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VoiceFx {
+    /// Which effect; never [`VoiceEffect::None`].
+    pub effect: VoiceEffect,
+    /// Timeline sample of the first sample of the clip, where the effect starts its phase.
+    pub clip_start: i64,
+}
+
+impl VoiceFx {
+    /// The factor the effect multiplies timeline sample `sample` by.
+    pub fn factor_at(&self, sample: i64) -> f32 {
+        match self.effect {
+            VoiceEffect::None => 1.0,
+            // Ring modulation; the phase is taken modulo a whole period so that it stays exact far
+            // into a long clip.
+            VoiceEffect::Robot => {
+                let period = (f64::from(MIX_SAMPLE_RATE) / ROBOT_HZ).round() as i64;
+                let phase = sample.saturating_sub(self.clip_start).rem_euclid(period) as f64 / period as f64;
+                (phase * std::f64::consts::TAU).sin() as f32
+            }
+        }
+    }
 }
 
 /// The segments sounding in the `len` samples from `start`, in track then clip order. Muted clips,
@@ -168,10 +201,11 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
                 continue;
             }
             let source_base = sample_position(clip.source_in);
-            let stretch = clip.has_speed().then_some(Stretch {
+            let stretch = (clip.has_speed() || clip.voice.pitch_cents() != 0).then_some(Stretch {
                 clip_start,
                 source_base,
                 speed_milli: clip.speed_milli(),
+                pitch_cents: clip.voice.pitch_cents(),
             });
             segments.push(AudioSegment {
                 key: ClipKey { track: t, clip: c },
@@ -184,6 +218,8 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
                 ),
                 gain: envelope(clip, clip_start, clip_end, crossfade_in, crossfade_out),
                 stretch,
+                denoise: DenoiseSpec::of(&clip.denoise),
+                voice_effect: (clip.voice.effect != VoiceEffect::None).then_some(VoiceFx { effect: clip.voice.effect, clip_start }),
             });
         }
     }

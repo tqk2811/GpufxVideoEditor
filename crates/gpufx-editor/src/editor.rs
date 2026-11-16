@@ -386,6 +386,8 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         motion: Default::default(),
         text: None,
         animation: Default::default(),
+        denoise: Default::default(),
+        voice: Default::default(),
     }
 }
 

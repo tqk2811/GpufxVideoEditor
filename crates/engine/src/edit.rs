@@ -45,7 +45,7 @@
 use crate::audio_schedule::sample_position;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
-use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, Effect, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipDenoise, ClipVoice, Effect, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -431,6 +431,8 @@ pub fn text_clip(start: Time, duration: Time, text: TextContent) -> Clip {
         motion: ClipMotion::default(),
         text: Some(text),
         animation: ClipAnimation::default(),
+        denoise: Default::default(),
+        voice: Default::default(),
     }
 }
 
@@ -871,6 +873,23 @@ pub fn set_gain(project: &Project, key: ClipKey, gain_db: f64) -> Result<Project
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.gain_db = gain_db;
+    finish(next)
+}
+
+/// Sets the noise reduction of a clip. A strength outside 0 to 1 is refused as invalid.
+pub fn set_denoise(project: &Project, key: ClipKey, denoise: ClipDenoise) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.denoise = denoise;
+    finish(next)
+}
+
+/// Sets the pitch shift and voice effect of a clip. A shift beyond an octave is refused as
+/// invalid.
+pub fn set_voice(project: &Project, key: ClipKey, voice: ClipVoice) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.voice = voice;
     finish(next)
 }
 

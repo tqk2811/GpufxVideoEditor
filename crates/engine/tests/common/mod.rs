@@ -23,6 +23,8 @@ pub fn clip(source: &str, start: i64, source_in: i64, duration: i64) -> Clip {
         motion: Default::default(),
         text: None,
         animation: Default::default(),
+        denoise: Default::default(),
+        voice: Default::default(),
     }
 }
 
