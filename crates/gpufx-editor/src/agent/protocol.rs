@@ -165,6 +165,13 @@ pub enum AgentEdit {
     /// Gives subtitle track `track` the subtitle style `style_id`. A cue with a style of its own
     /// keeps it unless `all`.
     SubtitleSetStyle { track: usize, style_id: String, all: bool },
+    /// Adds a marker to the ruler at `at` (timeline ticks); answers the index it got.
+    MarkerAdd { at: Time, label: Option<String>, color: Option<Rgba> },
+    MarkerRemove { marker: usize },
+    /// Moves a marker; answers the index it now has.
+    MarkerMove { marker: usize, at: Time },
+    /// Takes the beats off a clip.
+    ClipBeatsClear { clip: ClipRef },
 }
 
 /// Which output frame to capture.
@@ -197,6 +204,18 @@ pub enum AgentRequest {
     AssetList { kind: Option<String>, filter: Option<String> },
     /// The text clips of subtitle track `track` as an SRT file, also written to `path` when given.
     SubtitleExport { track: usize, path: Option<PathBuf>, overwrite: bool },
+    /// The markers of the ruler and the beats every clip plays, in timeline time.
+    MarkersList,
+    /// Detects the beats of the sound of the source of `clip` and writes them to that source as one
+    /// undo step. A session without a window waits for the result; an open window detects in the
+    /// background and answers `running` with the progress until a later call finds the result
+    /// ready. A failed detection is reported, not run again, unless `retry` is set.
+    BeatsDetect {
+        expected_revision: u64,
+        clip: ClipRef,
+        #[serde(default)]
+        retry: bool,
+    },
     Edit { expected_revision: u64, edit: AgentEdit },
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },
@@ -257,6 +276,7 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::KeyframeNotFound { .. } => "keyframe_not_found",
         EditError::NoPlacement { .. } => "no_placement",
         EditError::NotText { .. } => "not_text",
+        EditError::MarkerNotFound { .. } => "marker_not_found",
         EditError::Invalid(_) => "invalid_project",
     }
 }

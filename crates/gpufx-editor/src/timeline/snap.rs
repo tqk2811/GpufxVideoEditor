@@ -1,5 +1,10 @@
-//! Magnetic snapping of clip drags to the edges of other clips, the playhead and the start of the
-//! timeline. Nothing here knows about egui.
+//! Magnetic snapping of clip drags and of the playhead to the edges of other clips, the markers,
+//! the beats of clips, the playhead and the start of the timeline. Nothing here knows about egui.
+//!
+//! The beats of a clip that is being moved are no points: they move with it, so its own edge would
+//! only ever meet them where they already are. A clip being trimmed keeps its beats in place on the
+//! timeline (a trim leaves the source under every other tick where it was), so they are points,
+//! all of them, also those the trim is about to reveal.
 
 use super::drag::{clamp_trim, EditCommand};
 use engine::{nearest_free_start, ClipKey, Project, Time, TICKS_PER_SECOND};
@@ -16,11 +21,11 @@ pub fn snap_tolerance(pixels_per_second: f64) -> Time {
     Time::from_ticks((SNAP_DISTANCE / pixels_per_second * TICKS_PER_SECOND as f64).round() as i64)
 }
 
-/// The times an edge may snap to: the start of the timeline, the playhead, and the start and end of
-/// every clip except `ignore`. Locked and hidden tracks count, their clips are on screen. Sorted
-/// and without repeats.
-pub fn snap_points(project: &Project, ignore: Option<ClipKey>, playhead: Time) -> Vec<Time> {
-    let mut points = vec![Time::ZERO, playhead];
+/// The times that do not depend on the playhead: the start of the timeline, every marker except
+/// `skip_marker`, and the start, end and played beats of every clip except `ignore`.
+fn fixed_points(project: &Project, ignore: Option<ClipKey>, skip_marker: Option<usize>) -> Vec<Time> {
+    let mut points = vec![Time::ZERO];
+    points.extend(project.markers.iter().enumerate().filter(|(index, _)| Some(*index) != skip_marker).map(|(_, marker)| marker.at));
     for (track_index, track) in project.tracks.iter().enumerate() {
         for (clip_index, clip) in track.clips.iter().enumerate() {
             if ignore == Some(ClipKey { track: track_index, clip: clip_index }) {
@@ -30,11 +35,53 @@ pub fn snap_points(project: &Project, ignore: Option<ClipKey>, playhead: Time) -
             if let Some(end) = clip.end() {
                 points.push(end);
             }
+            points.extend(project.clip_beat_times(clip).map(|(at, _)| at));
         }
     }
+    points
+}
+
+fn sorted(mut points: Vec<Time>) -> Vec<Time> {
     points.sort();
     points.dedup();
     points
+}
+
+/// The times an edge may snap to: the start of the timeline, the playhead, the markers, and the
+/// start, end and played beats of every clip except `ignore`. Locked and hidden tracks count,
+/// their clips are on screen. Sorted and without repeats.
+pub fn snap_points(project: &Project, ignore: Option<ClipKey>, playhead: Time) -> Vec<Time> {
+    let mut points = fixed_points(project, ignore, None);
+    points.push(playhead);
+    sorted(points)
+}
+
+/// The points of a trim of clip `key`: those of [`snap_points`] without its own edges, and every
+/// beat of the clip where the speed of the clip puts it, whether or not the clip plays it yet.
+pub fn trim_snap_points(project: &Project, key: ClipKey, playhead: Time) -> Vec<Time> {
+    let mut points = snap_points(project, Some(key), playhead);
+    if let Some(clip) = project.tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) {
+        let beats = project.clip_beats(clip).map_or(&[][..], |beats| &beats.beats[..]);
+        points.extend(beats.iter().map(|beat| clip.timeline_time_of(beat.at)).filter(|at| *at >= Time::ZERO));
+    }
+    sorted(points)
+}
+
+/// The points the playhead snaps to when the ruler is pressed: those of [`snap_points`] of every
+/// clip, without the playhead itself.
+pub fn scrub_points(project: &Project) -> Vec<Time> {
+    sorted(fixed_points(project, None, None))
+}
+
+/// The points a drag of marker `marker` snaps to: those of [`scrub_points`] without that marker.
+pub fn marker_drag_points(project: &Project, marker: usize) -> Vec<Time> {
+    sorted(fixed_points(project, None, Some(marker)))
+}
+
+/// The point of `points` nearest `time` within `tolerance`, the earlier one on a tie.
+pub fn snap_time(points: &[Time], time: Time, tolerance: Time) -> Option<Time> {
+    let limit = tolerance.ticks().max(0) as u64;
+    points.iter().copied().filter(|point| point.ticks().abs_diff(time.ticks()) <= limit).min_by_key(|point| point.ticks().abs_diff(time.ticks()))
 }
 
 /// A command after snapping, and the time to draw a guide line at when it snapped.
@@ -177,6 +224,7 @@ mod tests {
             version: engine::SUPPORTED_VERSION,
             output: Output { width: 1920, height: 1080, frame_duration: Time::from_ticks(3000), audio: None },
             tracks: Vec::new(),
+            markers: Vec::new(), beats: Default::default(),
         };
         let video = add_track(&empty, TrackKind::Video).unwrap();
         let other = add_track(&video, TrackKind::Video).unwrap();
@@ -288,6 +336,47 @@ mod tests {
         assert!(points.contains(&Time::ZERO) && points.contains(&seconds(7)));
         assert!(points.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(snap_points(&project, None, Time::ZERO).iter().filter(|point| **point == Time::ZERO).count(), 1);
+    }
+
+    /// A beat at every whole second of the source of clip b (10 to 12 s, source from 0).
+    fn with_beats_on_b() -> Project {
+        let mut project = project();
+        project.beats.insert("b.mp4".into(), std::sync::Arc::new(engine::ClipBeats { tempo: 60.0, beats: (0..6).map(|second| engine::Beat { at: seconds(second), downbeat: false }).collect() }));
+        project
+    }
+
+    #[test]
+    fn markers_and_played_beats_are_points() {
+        let mut project = with_beats_on_b();
+        project.markers.push(engine::Marker::at(seconds(7)));
+        let points = snap_points(&project, None, Time::ZERO);
+        assert!(points.contains(&seconds(7)), "the marker");
+        // Clip b plays source 0 to 2 s from 10 s: beats at 10 and 11 s.
+        assert!(points.contains(&seconds(11)));
+        assert!(!points.contains(&seconds(13)), "a beat the clip does not play");
+        let snapped = snap_command(&project, move_to(0, 1, 7 * SECOND + 900), &points, tolerance());
+        assert_eq!(snapped.guide, Some(seconds(7)));
+    }
+
+    #[test]
+    fn the_beats_of_a_moved_clip_are_not_points_but_those_of_a_trimmed_one_are() {
+        let project = with_beats_on_b();
+        assert!(!snap_points(&project, Some(key(1)), Time::ZERO).contains(&seconds(11)), "they move with it");
+        let trim = trim_snap_points(&project, key(1), Time::ZERO);
+        assert!(trim.contains(&seconds(11)), "a trim leaves them in place");
+        assert!(trim.contains(&seconds(14)), "and those a longer clip would play count too");
+        let command = EditCommand::TrimEnd { key: key(1), new_end: Time::from_ticks(14 * SECOND + 1800) };
+        assert_eq!(snap_command(&project, command, &trim, tolerance()).guide, Some(seconds(14)));
+    }
+
+    #[test]
+    fn the_playhead_snaps_to_the_nearest_point_within_the_tolerance() {
+        let mut project = with_beats_on_b();
+        project.markers.push(engine::Marker::at(seconds(7)));
+        let points = scrub_points(&project);
+        assert_eq!(snap_time(&points, Time::from_ticks(11 * SECOND - 900), tolerance()), Some(seconds(11)));
+        assert_eq!(snap_time(&points, Time::from_ticks(7 * SECOND + 900), tolerance()), Some(seconds(7)));
+        assert_eq!(snap_time(&points, Time::from_ticks(8 * SECOND + SECOND / 2), tolerance()), None);
     }
 
     #[test]

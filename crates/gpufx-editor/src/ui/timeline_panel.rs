@@ -2,12 +2,12 @@
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
-use crate::editor::{clip_name, format_speed, DropBatch, EditorState};
+use crate::editor::{clip_name, format_speed, DropBatch, EditorState, MarkerDrag};
 use crate::i18n::{Language, Message};
 use crate::media::MediaItem;
 use crate::timeline::drag::DragKind;
 use crate::timeline::hit::{hit_test, transition_hit_test, transition_span, ClipZone, TransitionKey, MIN_CLIP_WIDTH};
-use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
+use crate::timeline::ruler::{format_time, major_step, marker_at, ruler_ticks};
 use crate::timeline::view::{content_end, ViewArea, Wheel};
 use crate::visuals::levels::{bar_fraction, peak_bucket};
 use crate::visuals::plan::{bar_span, bucket_step, bucket_time, split_body, tile_source_ticks, tile_ticks, visible_cells, BAR_GAP, BAR_WIDTH};
@@ -34,6 +34,19 @@ const KEYFRAME_MARK_MARGIN: f32 = 5.0;
 const CLIP_RADIUS: u8 = 4;
 const ZOOM_SLIDER_WIDTH: f32 = 130.0;
 const PLAYHEAD_MARKER: f32 = 6.0;
+/// The flag of a marker on the ruler: how wide and how tall.
+const MARKER_FLAG_WIDTH: f32 = 9.0;
+const MARKER_FLAG_HEIGHT: f32 = 9.0;
+/// How far the pointer must go from the press before a held marker moves.
+const MARKER_MOVE_POINTS: f32 = 3.0;
+/// The colours a marker can be given in its menu, after the default one.
+const MARKER_COLORS: [engine::Rgba; 6] = [[235, 70, 70, 255], [255, 150, 40, 255], [240, 210, 50, 255], [80, 200, 100, 255], [70, 150, 255, 255], [170, 100, 240, 255]];
+/// How tall the tick of a beat is on a clip, and of a downbeat.
+const BEAT_TICK: f32 = 5.0;
+const DOWNBEAT_TICK: f32 = 9.0;
+/// Beats closer than this on screen are not drawn one by one: only the downbeats are, and when
+/// those are closer too, none.
+const MIN_BEAT_SPACING: f32 = 4.0;
 /// The picture shape used until a source says its own.
 const DEFAULT_ASPECT: f32 = 16.0 / 9.0;
 const DRAGGED_OPACITY: f32 = 0.5;
@@ -83,6 +96,9 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
             }
         });
         ui.separator();
+        if icons::button(ui, Icon::Marker, &language.t(Message::MarkerAddShortcut), false).clicked() {
+            state.add_marker_at_playhead();
+        }
         if icons::button(ui, Icon::Magnet, &language.t(Message::SnapToggle), !state.ui.snap_off).clicked() {
             state.ui.snap_off = !state.ui.snap_off;
         }
@@ -121,13 +137,7 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     handle_wheel(ui, state, rect, tracks_rect, &area);
 
     let ruler_response = ui.interact(ruler_rect, ui.scope_id().with("ruler"), Sense::click_and_drag());
-    if ruler_response.is_pointer_button_down_on() {
-        if let Some(pointer) = ruler_response.interact_pointer_pos() {
-            state.scrub_to(state.view.x_to_time(f64::from(pointer.x - tracks_left)));
-        }
-    } else {
-        state.end_scrub();
-    }
+    handle_ruler(ui, state, &ruler_response, tracks_left);
 
     let tracks_response = ui.interact(tracks_rect, ui.scope_id().with("tracks"), Sense::click_and_drag());
     handle_tracks(ui, state, &tracks_response, tracks_rect);
@@ -143,6 +153,7 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     add_track_menu(ui, state, Rect::from_min_max(rect.min, Pos2::new(tracks_left, ruler_rect.bottom())));
     headers(ui, state, header_rect, requests);
     painter.vline(tracks_left, rect.y_range(), Stroke::new(1.0, theme::border()));
+    draw_marker_lines(&painter, state, ruler_rect, tracks_rect);
     draw_playhead(&painter, state, ruler_rect, tracks_rect);
     let moving_out = state.drag.filter(|drag| matches!(drag.kind, DragKind::Move)).and_then(|drag| {
         let pointer = ui.ctx().pointer_latest_pos().filter(|pointer| outside_the_rows(state, tracks_rect, *pointer))?;
@@ -153,6 +164,112 @@ fn timeline(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     if let Some(preview) = media_preview.or(moving_out) {
         draw_drop_preview(ui, state, tracks_rect, preview);
     }
+}
+
+/// A press on the ruler: on a marker it holds the marker, which a drag moves and a click goes to;
+/// anywhere else it moves the playhead, pulled onto a clip edge, marker or beat unless Shift is
+/// held. A right click on a marker opens its menu.
+fn handle_ruler(ui: &egui::Ui, state: &mut EditorState, response: &egui::Response, tracks_left: f32) {
+    let x_of = |pointer: Pos2| f64::from(pointer.x - tracks_left);
+    let (primary, free) = ui.input(|input| (input.pointer.primary_down(), input.modifiers.shift));
+    if response.is_pointer_button_down_on() && primary {
+        if state.ui.marker_drag.is_none() && response.drag_started_by(egui::PointerButton::Primary) || state.ui.marker_drag.is_none() && ui.input(|input| input.pointer.primary_pressed()) {
+            let press = ui.input(|input| input.pointer.press_origin());
+            state.ui.marker_drag = press.and_then(|press| marker_at(&state.view, &state.project().markers, x_of(press)).map(|marker| MarkerDrag { marker, press_x: press.x, moved: false, revision: state.revision() }));
+        }
+        match (state.ui.marker_drag, response.interact_pointer_pos()) {
+            (Some(mut drag), Some(pointer)) => {
+                if drag.moved || (pointer.x - drag.press_x).abs() >= MARKER_MOVE_POINTS {
+                    drag.moved = true;
+                    state.ui.marker_drag = Some(drag);
+                    let time = state.snapped_marker_time(drag, state.view.x_to_time(x_of(pointer)).max(Time::ZERO), free);
+                    state.live_marker(drag.marker, time);
+                }
+            }
+            (None, Some(pointer)) => {
+                let time = state.snapped_scrub_time(state.view.x_to_time(x_of(pointer)).max(Time::ZERO), free);
+                state.scrub_to(time);
+            }
+            _ => {}
+        }
+    } else {
+        if let Some(drag) = state.ui.marker_drag.take() {
+            if !drag.moved {
+                if let Some(at) = state.project().markers.get(drag.marker).map(|marker| marker.at) {
+                    state.scrub_to(at);
+                }
+            }
+        }
+        state.end_scrub();
+    }
+
+    let hovered = response.hover_pos().and_then(|pointer| marker_at(&state.view, &state.project().markers, x_of(pointer)));
+    if hovered.is_some() || state.ui.marker_drag.is_some_and(|drag| drag.moved) {
+        ui.ctx().set_cursor_icon(if state.ui.marker_drag.is_some() { CursorIcon::Grabbing } else { CursorIcon::Grab });
+    }
+    if hovered.is_some() && state.ui.marker_drag.is_none() {
+        let hint = state.language().t(Message::MarkerHint);
+        let label = hovered.and_then(|marker| state.project().markers.get(marker)).map(|marker| marker.label.clone()).filter(|label| !label.is_empty());
+        response.clone().on_hover_text(label.map_or(hint.clone(), |label| format!("{label}\n{hint}")));
+    }
+    if response.secondary_clicked() {
+        state.ui.marker_menu = response.interact_pointer_pos().and_then(|pointer| marker_at(&state.view, &state.project().markers, x_of(pointer))).and_then(|marker| state.project().markers.get(marker).map(|found| (marker, found.label.clone())));
+    }
+    marker_menu(state, response);
+}
+
+/// The menu of the marker last right-clicked: its label, its colour and a button to remove it.
+/// The label is written when the field loses focus or Enter is pressed, as one undo step.
+fn marker_menu(state: &mut EditorState, response: &egui::Response) {
+    let Some((marker, mut label)) = state.ui.marker_menu.clone() else { return };
+    let Some(current) = state.project().markers.get(marker).cloned() else {
+        state.ui.marker_menu = None;
+        return;
+    };
+    let language = state.language();
+    let mut remove = false;
+    let mut color = None;
+    let mut commit_label = false;
+    let shown = response.context_menu(|ui| {
+        ui.horizontal(|ui| {
+            ui.label(language.t(Message::MarkerLabel));
+            let field = ui.add(egui::TextEdit::singleline(&mut label).char_limit(engine::MAX_MARKER_LABEL).desired_width(160.0));
+            commit_label = field.lost_focus();
+        });
+        ui.horizontal(|ui| {
+            ui.label(language.t(Message::MarkerColor));
+            if ui.selectable_label(current.color.is_none(), language.t(Message::MarkerDefaultColor)).clicked() {
+                color = Some(None);
+            }
+            for choice in MARKER_COLORS {
+                let (rect, swatch) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::click());
+                ui.painter().rect_filled(rect, CornerRadius::same(3), Color32::from_rgba_unmultiplied(choice[0], choice[1], choice[2], choice[3]));
+                if current.color == Some(choice) {
+                    ui.painter().rect_stroke(rect, CornerRadius::same(3), Stroke::new(2.0, theme::selected()), StrokeKind::Outside);
+                }
+                if swatch.clicked() {
+                    color = Some(Some(choice));
+                }
+            }
+        });
+        ui.separator();
+        if ui.button(language.t(Message::MarkerRemove)).clicked() {
+            remove = true;
+            ui.close();
+        }
+    });
+    if remove {
+        state.ui.marker_menu = None;
+        state.remove_marker(marker);
+        return;
+    }
+    if let Some(color) = color {
+        state.set_marker(marker, label.trim().to_owned(), color);
+    } else if commit_label && label.trim() != current.label {
+        state.set_marker(marker, label.trim().to_owned(), current.color);
+    }
+    // A menu that closed takes its draft with it.
+    state.ui.marker_menu = if shown.is_some() { Some((marker, label)) } else { None };
 }
 
 /// Where a clip held over the timeline would land: on track `track`, or on the new track a drop
@@ -345,19 +462,38 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     if let Some(key) = state.ui.clip_menu {
         let language = state.language();
         let locked = state.is_track_locked(key.track);
+        let (has_sound, has_beats) = state.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map_or((false, false), |clip| (!clip.is_still(), state.project().clip_beats(clip).is_some()));
         let mut delete = false;
+        let mut detect = false;
+        let mut clear = false;
         response.context_menu(|ui| {
-            let button = ui.add_enabled(!locked, egui::Button::new(language.t(Message::DeleteShortcut)));
-            let button = if locked { button.on_disabled_hover_text(language.t(Message::TrackLockedNote)) } else { button };
-            if button.clicked() {
-                delete = true;
-                ui.close();
+            let enabled = |ui: &mut egui::Ui, message: Message, flag: &mut bool| {
+                let button = ui.add_enabled(!locked, egui::Button::new(language.t(message)));
+                let button = if locked { button.on_disabled_hover_text(language.t(Message::TrackLockedNote)) } else { button };
+                if button.clicked() {
+                    *flag = true;
+                    ui.close();
+                }
+            };
+            enabled(ui, Message::DeleteShortcut, &mut delete);
+            if has_sound {
+                ui.separator();
+                enabled(ui, Message::DetectBeats, &mut detect);
+                if has_beats {
+                    enabled(ui, Message::ClearBeats, &mut clear);
+                }
             }
         });
-        if delete {
+        if delete || detect || clear {
             state.ui.clip_menu = None;
             state.select(Some(key));
+        }
+        if delete {
             state.delete_selected();
+        } else if detect {
+            state.detect_beats(key);
+        } else if clear {
+            state.clear_beats(key);
         }
     }
 
@@ -436,7 +572,7 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
             let rect = span_rect(state, tracks_rect, row, clip.start, clip.start.saturating_add(clip.duration));
             if rect.intersects(tracks_rect) {
                 let dragged = state.drag.is_some_and(|drag| drag.key == key);
-                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, hidden: track.hidden, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second() });
+                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, hidden: track.hidden, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second(), beats: state.project().clip_beats(clip) });
             }
         }
         draw_transitions(&painter, state, tracks_rect, row, t, track);
@@ -458,6 +594,8 @@ pub struct ClipPaint<'a> {
     /// The thumbnails and levels to draw, when there are any to draw from.
     pub visuals: Option<&'a RefCell<ClipVisuals>>,
     pub pixels_per_second: f64,
+    /// The beats of the clip's source, when some were found.
+    pub beats: Option<&'a engine::ClipBeats>,
 }
 
 impl ClipPaint<'_> {
@@ -509,6 +647,7 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
         draw_holds(&text, paint, paint.rect.with_min_y(strip.bottom()));
         draw_keyframe_marks(&text, paint);
     }
+    draw_beat_ticks(&text, paint, strip.bottom());
     if paint.selected {
         painter.rect_stroke(paint.rect, radius, Stroke::new(2.0, theme::selected()), StrokeKind::Inside);
     }
@@ -538,6 +677,40 @@ fn draw_holds(painter: &egui::Painter, paint: &ClipPaint<'_>, body: Rect) {
         }
         let edge = if rect.left() <= body.left() { rect.right() } else { rect.left() };
         painter.vline(edge, rect.y_range(), Stroke::new(1.0, theme::on_clip().gamma_multiply(0.6 * opacity)));
+    }
+}
+
+/// A tick hanging from the name strip at each beat the clip plays, a longer one at a downbeat.
+/// Beats too close together on screen are thinned to the downbeats, then left out.
+fn draw_beat_ticks(painter: &egui::Painter, paint: &ClipPaint<'_>, top: f32) {
+    let Some(beats) = paint.beats else { return };
+    // On screen a beat lasts 60 / tempo seconds of the source, sped up by the clip.
+    let seconds_per_beat = if beats.tempo > 0.0 { 60.0 / beats.tempo / paint.clip.speed.max(f64::MIN_POSITIVE) } else { 0.0 };
+    let spacing = (seconds_per_beat * paint.pixels_per_second) as f32;
+    let downbeats_only = spacing > 0.0 && spacing < MIN_BEAT_SPACING;
+    if downbeats_only && spacing * (engine::beats::BEATS_PER_BAR as f32) < MIN_BEAT_SPACING {
+        return;
+    }
+    let duration = paint.clip.duration.ticks().max(1) as f32;
+    let visible = painter.clip_rect().x_range();
+    let color = theme::on_clip().gamma_multiply(0.75 * paint.opacity());
+    let strong = theme::on_clip_accent().gamma_multiply(paint.opacity());
+    // Only the beats inside the visible part of the clip, found by binary search.
+    let time_at = |x: f32| {
+        let part = f64::from((x - paint.rect.left()) / paint.rect.width().max(f32::MIN_POSITIVE));
+        paint.clip.start.saturating_add(Time::from_ticks((part * f64::from(duration)).floor() as i64))
+    };
+    let (from, to) = (time_at(visible.min).saturating_sub(Time::from_ticks(1)), time_at(visible.max).saturating_add(Time::from_ticks(1)));
+    for (at, beat) in paint.clip.beat_times_between(&beats.beats, from, to) {
+        if downbeats_only && !beat.downbeat {
+            continue;
+        }
+        let x = paint.rect.left() + paint.rect.width() * ((at.ticks() - paint.clip.start.ticks()) as f32 / duration);
+        if !visible.contains(x) {
+            continue;
+        }
+        let (height, stroke) = if beat.downbeat { (DOWNBEAT_TICK, Stroke::new(1.5, strong)) } else { (BEAT_TICK, Stroke::new(1.0, color)) };
+        painter.line_segment([Pos2::new(x, top), Pos2::new(x, (top + height).min(paint.rect.bottom()))], stroke);
     }
 }
 
@@ -691,6 +864,34 @@ fn draw_ruler(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect) {
         }
     }
     ruler.hline(ruler_rect.x_range(), ruler_rect.bottom(), Stroke::new(1.0, theme::border()));
+    for marker in &state.project().markers {
+        let x = ruler_rect.left() + state.view.time_to_x(marker.at) as f32;
+        if x < ruler_rect.left() - MARKER_FLAG_WIDTH || x > ruler_rect.right() {
+            continue;
+        }
+        let color = marker_color(marker);
+        let top = ruler_rect.top() + 2.0;
+        ruler.line_segment([Pos2::new(x, top), Pos2::new(x, ruler_rect.bottom())], Stroke::new(1.5, color));
+        let flag = vec![Pos2::new(x, top), Pos2::new(x + MARKER_FLAG_WIDTH, top + MARKER_FLAG_HEIGHT / 2.0), Pos2::new(x, top + MARKER_FLAG_HEIGHT)];
+        ruler.add(Shape::convex_polygon(flag, color, Stroke::NONE));
+        if !marker.label.is_empty() {
+            ruler.text(Pos2::new(x + MARKER_FLAG_WIDTH + 2.0, top + MARKER_FLAG_HEIGHT / 2.0), Align2::LEFT_CENTER, &marker.label, FontId::proportional(11.0), color);
+        }
+    }
+}
+
+fn marker_color(marker: &engine::Marker) -> Color32 {
+    marker.color.map_or_else(theme::marker, |[r, g, b, a]| Color32::from_rgba_unmultiplied(r, g, b, a))
+}
+
+/// A faint line down the tracks under each marker, so clips can be lined up with it by eye.
+fn draw_marker_lines(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect, tracks_rect: Rect) {
+    for marker in &state.project().markers {
+        let x = ruler_rect.left() + state.view.time_to_x(marker.at) as f32;
+        if x >= tracks_rect.left() && x <= tracks_rect.right() {
+            painter.vline(x, tracks_rect.y_range(), Stroke::new(1.0, marker_color(marker).gamma_multiply(0.45)));
+        }
+    }
 }
 
 fn draw_playhead(painter: &egui::Painter, state: &EditorState, ruler_rect: Rect, tracks_rect: Rect) {

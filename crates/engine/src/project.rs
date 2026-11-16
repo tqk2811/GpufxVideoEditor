@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// The project format version: the only one this engine reads and writes.
 pub const SUPPORTED_VERSION: u32 = 1;
@@ -19,6 +20,77 @@ pub struct Project {
     pub output: Output,
     /// Tracks in compositing order, index 0 at the bottom.
     pub tracks: Vec<Track>,
+    /// Markers on the ruler, in timeline time, sorted by time. Left out of the file when there
+    /// are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+    /// The beats of the sound of each source file, keyed by the `source` of the clips that show it,
+    /// in the time of that source. Every clip of the source (after a split, or the file placed
+    /// again) shares the one list and plays the part of it inside what it shows, see
+    /// [`Project::clip_beat_times`]. Behind an [`Arc`] so the snapshots of the undo history share
+    /// it. Left out of the file when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub beats: BTreeMap<String, Arc<ClipBeats>>,
+}
+
+/// The longest label of a [`Marker`], in characters.
+pub const MAX_MARKER_LABEL: usize = 200;
+
+/// A point of the timeline the user marked, shown on the ruler. It belongs to the timeline, not
+/// to a clip: moving clips leaves it where it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marker {
+    /// Timeline position; never negative.
+    pub at: Time,
+    /// What the marker is for; at most [`MAX_MARKER_LABEL`] characters. Left out when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    /// Its colour on the ruler; the editor's own marker colour when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<Rgba>,
+}
+
+impl Marker {
+    /// A marker at `at` with no label and the default colour.
+    pub fn at(at: Time) -> Marker {
+        Marker { at, label: String::new(), color: None }
+    }
+}
+
+/// The most beats a clip may keep: a beat every 50 ms for well over an hour.
+pub const MAX_BEATS: usize = 100_000;
+/// The fastest tempo a clip's beats may state, in beats per minute.
+pub const MAX_TEMPO: f64 = 1000.0;
+
+/// One beat of the sound of a clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Beat {
+    /// Position in the source media of the clip, not on the timeline: the beat stays on its sound
+    /// whatever is done to the clip.
+    pub at: Time,
+    /// The first beat of a bar, drawn stronger.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub downbeat: bool,
+}
+
+/// The beats found in the sound of a source file, in the time of that source; the project keeps
+/// them per source in [`Project::beats`]. Every clip of the source plays them over moves, trims,
+/// splits and speed changes; only those inside the part of the source a clip plays are shown and
+/// snapped to, see [`Project::clip_beat_times`].
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ClipBeats {
+    /// The tempo the beats were found at, in beats per minute of the source; 0 when unknown.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tempo: f64,
+    /// The beats, in increasing source time.
+    pub beats: Vec<Beat>,
+}
+
+impl ClipBeats {
+    /// Whether there are no beats, so the file leaves them out.
+    pub fn is_empty(&self) -> bool {
+        self.beats.is_empty()
+    }
 }
 
 /// Output settings.
@@ -835,6 +907,25 @@ impl Project {
         }
         serde_json::from_str(text).map_err(LoadError::Json)
     }
+
+    /// The beats kept for the source of `clip`, unless it is a still or none were found.
+    pub fn clip_beats(&self, clip: &Clip) -> Option<&ClipBeats> {
+        if clip.is_still() {
+            return None;
+        }
+        self.beats.get(&clip.source).map(|beats| &**beats).filter(|beats| !beats.is_empty())
+    }
+
+    /// The beats `clip` plays, each with its timeline time, in order: the list of its source seen
+    /// through the clip's trim and speed, see [`Clip::beat_times`].
+    pub fn clip_beat_times<'a>(&'a self, clip: &'a Clip) -> impl Iterator<Item = (Time, Beat)> + 'a {
+        clip.beat_times(self.clip_beats(clip).map_or(&[][..], |beats| &beats.beats[..]))
+    }
+
+    /// Whether some clip of the project shows `source` with its sound (not as a still).
+    pub fn plays_source_sound(&self, source: &str) -> bool {
+        self.tracks.iter().flat_map(|track| &track.clips).any(|clip| clip.source == source && !clip.is_still())
+    }
 }
 
 /// The extensions of the still images a clip may show, lower-cased.
@@ -959,6 +1050,34 @@ impl Clip {
     /// and at most [`SPEED_SCALE`] ticks (11 ms) otherwise.
     pub fn speed_grid(&self) -> i64 {
         SPEED_SCALE / gcd(self.speed_milli(), SPEED_SCALE)
+    }
+
+    /// The timeline time at which the moving part of the clip plays source position `source`, by
+    /// the clip's speed: the inverse of [`Clip::source_time_at`] outside the holds, rounded down.
+    /// It does not check that the clip plays that position; see [`Clip::plays_source`].
+    pub fn timeline_time_of(&self, source: Time) -> Time {
+        self.start.saturating_add(self.hold_start()).saturating_add(self.timeline_ticks(source.saturating_sub(self.source_in)))
+    }
+
+    /// Whether the moving part of the clip plays source position `source`.
+    pub fn plays_source(&self, source: Time) -> bool {
+        source >= self.source_in && source < self.source_end()
+    }
+
+    /// The beats of `beats` (the list of the clip's source) that the clip plays, each with its
+    /// timeline time, in order. A beat outside the part of the source the clip plays (trimmed away,
+    /// or in the other half of a split) is left out. Finds the first one by binary search.
+    pub fn beat_times<'a>(&'a self, beats: &'a [Beat]) -> impl Iterator<Item = (Time, Beat)> + 'a {
+        let first = beats.partition_point(|beat| beat.at < self.source_in);
+        beats[first..].iter().take_while(|beat| self.plays_source(beat.at)).map(|beat| (self.timeline_time_of(beat.at), *beat))
+    }
+
+    /// [`Clip::beat_times`] from timeline time `from` to `to`, both included, found by binary
+    /// search: the timeline time of a beat grows with its source time, so a clip on screen costs
+    /// the beats it shows, not all those of its source.
+    pub fn beat_times_between<'a>(&'a self, beats: &'a [Beat], from: Time, to: Time) -> impl Iterator<Item = (Time, Beat)> + 'a {
+        let first = beats.partition_point(|beat| beat.at < self.source_in || self.timeline_time_of(beat.at) < from);
+        beats[first..].iter().take_while(move |beat| self.plays_source(beat.at) && self.timeline_time_of(beat.at) <= to).map(|beat| (self.timeline_time_of(beat.at), *beat))
     }
 }
 

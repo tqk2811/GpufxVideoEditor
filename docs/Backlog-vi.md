@@ -598,3 +598,15 @@ RNNoise trong `crates/engine/src/denoise.rs` (`DenoiseCache::run`) khởi độn
 ### [Thấp] Khử nhiễu "chung" coi một lần đọc ngắn là hết file
 
 `crates/engine/src/denoise.rs` (`source_end`, gán khi `read_counted` trả ít mẫu hơn yêu cầu) dùng mốc này để cắt thống kê và hồ sơ nhiễu. Nếu nguồn trả đọc ngắn khi chưa hết file (decoder trục trặc giữa chừng) thì các khối sau bị coi là ngoài file, và preview có thể khác export. Nên xác nhận `read_counted` của `crates/d3d12-backend/src/audio.rs` chỉ trả ngắn ở cuối file, hoặc lấy độ dài từ probe. Ghi ngày 2026-11-16.
+
+### [Thấp] Dò nhịp nhập nhằng quãng tám khi nửa nhịp to ngang nhịp chính
+
+`crates/engine/src/beats.rs` (`tempo_period`) chọn chu kỳ có tự tương quan cao nhất, nghiêng về 120 BPM. Click track 100 BPM kèm tiếng ở nửa nhịp to ngang nhịp chính cho ra 200 BPM (mọi nhịp đúng vẫn có, nhưng thêm một nhịp xen giữa); tiếng nửa nhịp bằng nửa độ to thì đúng. Có thể so điểm của T và T/2 theo độ mạnh onset ở pha lẻ, hoặc cho người dùng chọn "nửa tempo / gấp đôi" sau khi dò. Chưa thử trên nhạc thật có sẵn. Ghi ngày 2026-11-16.
+
+### [Vừa] Nhịp theo nguồn: ghi đi vòng qua khoá track, và MCP live xoá stack redo
+
+`set_beats` (`crates/engine/src/edit.rs`) chỉ kiểm khoá track của clip được chọn, còn `poll_beats` (`crates/gpufx-editor/src/editor.rs`) gọi thẳng `set_source_beats` không kiểm khoá: clip cùng file trên track khoá vẫn nhận nhịp, khoá track trong lúc dò cũng không chặn. Cần chốt: nhịp cấp project không chịu khoá (bỏ check ở `set_beats`, MCP, spec) hay từ chối khi có clip của nguồn trên track khoá. Thêm nữa nhánh `Ready` của `beats_detect` live (`crates/gpufx-editor/src/agent/run.rs`) ghi luôn dù đang có redo, khác UI (giữ lại, báo `BeatsKeptForRedo`). Ghi ngày 2026-11-16.
+
+### [Thấp] Project.beats khoá theo chuỗi source: nhịp cũ khi file đổi nội dung, trùng mục, mục mồ côi không gỡ được
+
+`Project.beats` (`crates/engine/src/project.rs`) khoá bằng chuỗi `source`: ghi đè file cùng tên vẫn giữ nhịp cũ; cùng file ghi bằng hai chuỗi (tương đối/tuyệt đối, khác hoa thường) thành hai mục; mục của nguồn hết clip không có đường gỡ (`clip_beats_clear` cần một clip). Nên lưu stamp/hash file trong `ClipBeats` và cân nhắc bỏ giữ mục mồ côi (snapshot undo đã giữ `Arc`). Ngoài ra `clear_beats` huỷ lần dò trước khi biết lệnh gỡ có bị từ chối vì khoá track. Ghi ngày 2026-11-16.

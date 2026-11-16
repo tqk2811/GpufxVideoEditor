@@ -4,7 +4,7 @@ use super::icons::{self, Icon};
 use super::numeric::{drag_field, speed_field};
 use super::param_widgets;
 use super::theme;
-use crate::editor::{clip_name, speed_limits, transition_duration_limits, ClipField, ClipTab, EditorState};
+use crate::editor::{clip_name, speed_limits, tempo_text, transition_duration_limits, ClipField, ClipTab, EditorState};
 use crate::i18n::{Language, Message};
 use crate::packages::short_name;
 use crate::timecode::{aspect_label, format_fps, format_timecode, from_seconds, to_seconds};
@@ -162,6 +162,8 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         denoise_rows(ui, state, &clip.denoise);
         ui.separator();
         voice_rows(ui, state, &clip.voice);
+        ui.separator();
+        beats_rows(ui, state, key, &clip);
     });
 
     if let Some(text) = &clip.text {
@@ -250,6 +252,37 @@ fn voice_rows(ui: &mut egui::Ui, state: &mut EditorState, voice: &engine::ClipVo
     if ui.checkbox(&mut robot, language.t(Message::VoiceRobot)).changed() {
         state.set_voice_effect(if robot { engine::VoiceEffect::Robot } else { engine::VoiceEffect::None });
     }
+}
+
+/// The beats of the clip: how many it plays and their tempo, a button to detect them (a progress
+/// bar and Cancel while that runs) and one to clear them.
+fn beats_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: &engine::Clip) {
+    let language = state.language();
+    ui.colored_label(theme::text_dim(), language.t(Message::FieldBeats));
+    if let Some(progress) = state.beat_progress(key) {
+        ui.horizontal(|ui| {
+            let text = language.t(Message::BeatsDetecting((progress * 100.0).round() as u32));
+            ui.add(egui::ProgressBar::new(progress).desired_width((ui.available_width() - 70.0).max(40.0)).text(text));
+            if ui.button(language.t(Message::CancelBeats)).clicked() {
+                state.cancel_beats(key);
+            }
+        });
+        return;
+    }
+    let found = state.project().clip_beats(clip).map(|beats| (clip.beat_times(&beats.beats).count(), beats.tempo));
+    let summary = match found {
+        None => Message::BeatsNone,
+        Some((count, tempo)) => Message::BeatsSummary { count, tempo: tempo_text(tempo) },
+    };
+    ui.label(language.t(summary));
+    ui.horizontal(|ui| {
+        if ui.button(language.t(Message::DetectBeats)).on_hover_text(language.t(Message::DetectBeatsHint)).clicked() {
+            state.detect_beats(key);
+        }
+        if found.is_some() && ui.button(language.t(Message::ClearBeats)).clicked() {
+            state.clear_beats(key);
+        }
+    });
 }
 
 fn transitions_beside(state: &EditorState, key: ClipKey) -> (bool, bool) {

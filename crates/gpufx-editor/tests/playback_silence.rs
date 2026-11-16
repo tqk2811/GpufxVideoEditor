@@ -23,6 +23,7 @@ fn project(audio: &str, seconds: i64) -> Project {
         version: SUPPORTED_VERSION,
         output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
         tracks: vec![track(TrackKind::Video, audio, seconds), track(TrackKind::Audio, audio, seconds)],
+        markers: Vec::new(), beats: Default::default(),
     }
 }
 

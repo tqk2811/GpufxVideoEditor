@@ -50,6 +50,10 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     state.visuals.borrow_mut().begin_frame(root.ctx());
     state.previews.borrow_mut().begin_frame(root.ctx());
     state.visuals.borrow_mut().sync_project(state.revision(), state.project());
+    // Finished detections write their beats; running ones need the progress drawn.
+    if state.poll_beats() {
+        root.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
     track_fullscreen_activity(root.ctx(), state);
     handle_shortcuts(root.ctx(), state, requests);
     if state.ui.fullscreen {
@@ -251,6 +255,9 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
         }
         if consume_exact(input, Modifiers::NONE, Key::Delete) {
             state.delete_selected();
+        }
+        if consume_exact(input, Modifiers::NONE, Key::M) {
+            state.add_marker_at_playhead();
         }
     });
 }
@@ -855,6 +862,18 @@ mod tests {
     }
 
     #[test]
+    fn m_adds_a_marker_at_the_playhead_as_one_undo_step() {
+        let mut state = state();
+        state.set_playhead(Time::from_ticks(45_000));
+        press(&mut state, Key::M, Modifiers::NONE);
+        assert_eq!(state.project().markers, vec![engine::Marker::at(Time::from_ticks(45_000))]);
+        press(&mut state, Key::M, Modifiers::SHIFT);
+        assert_eq!(state.project().markers.len(), 1, "Shift+M is not M");
+        press(&mut state, Key::Z, Modifiers::COMMAND);
+        assert!(state.project().markers.is_empty());
+    }
+
+    #[test]
     fn file_shortcuts_become_requests_and_do_not_split() {
         let mut state = state();
         assert_eq!(press(&mut state, Key::S, Modifiers::COMMAND), vec![UiRequest::SaveProject]);
@@ -1105,6 +1124,33 @@ mod tests {
     fn on_track(state: &EditorState, time: Time) -> egui::Pos2 {
         let origin = timeline_panel::tracks_origin(panels(egui::vec2(1280.0, 720.0)).timeline);
         origin + egui::vec2(state.view.time_to_x(time) as f32, state.view.track_top(0, &[engine::TrackKind::Video]) as f32 + 30.0)
+    }
+
+    /// The screen position of `time` on the ruler.
+    fn on_ruler(state: &EditorState, time: Time) -> egui::Pos2 {
+        egui::pos2(on_track(state, time).x, timeline_panel::tracks_origin(timeline_panel_rect()).y - 8.0)
+    }
+
+    #[test]
+    fn a_marker_on_the_ruler_moves_by_drag_in_one_step_and_a_click_goes_to_it() {
+        let mut state = state();
+        let ctx = egui::Context::default();
+        input_frame(&ctx, &mut state, vec![]);
+        state.set_playhead(seconds(1));
+        state.add_marker_at_playhead();
+        state.set_playhead(Time::ZERO);
+        let (from, to) = (on_ruler(&state, seconds(1)), on_ruler(&state, seconds(3)));
+        for events in [vec![Event::PointerMoved(from)], pointer_press(from), vec![Event::PointerMoved(from + egui::vec2(20.0, 0.0))], vec![Event::PointerMoved(to)], vec![Event::PointerMoved(to)], pointer_release(to), vec![]] {
+            input_frame(&ctx, &mut state, events);
+        }
+        let moved = state.project().markers[0].at;
+        assert!(moved.ticks().abs_diff(seconds(3).ticks()) < 9000, "{moved}");
+        assert_eq!(state.playhead(), Time::ZERO, "a held marker does not move the playhead");
+        state.undo();
+        assert_eq!(state.project().markers[0].at, seconds(1), "one step");
+        let marker = on_ruler(&state, seconds(1));
+        click(&ctx, &mut state, marker);
+        assert_eq!(state.playhead(), seconds(1), "a click goes to the marker");
     }
 
     /// Presses on the clip at 2 s and moves away, leaving a timeline drag in progress.

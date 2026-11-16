@@ -55,6 +55,7 @@ pub fn project(frame_duration: i64, tracks: Vec<Track>) -> Project {
             audio: None,
         },
         tracks,
+        markers: Vec::new(), beats: Default::default(),
     }
 }
 

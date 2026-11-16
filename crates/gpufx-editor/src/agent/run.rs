@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
 use super::text::{animation_list, apply_animation_patch, apply_patch, font_list, patched_animation, styled_base, subtitle_style};
+use crate::beats::BeatStatus;
 use crate::editor::read_subtitle_file;
 use crate::subtitle_track::track_srt;
 use crate::clip_animation_library::AnimatedClipKind;
@@ -520,8 +521,111 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         AgentEdit::KeyframeRemove { clip, target, at } => {
             state.apply_agent_command(|project| engine::remove_keyframe(project, clip.into(), &target, at)).map_err(refused)?
         }
+        AgentEdit::MarkerAdd { at, label, color } => {
+            let label = label.unwrap_or_default();
+            check_marker(at, &label)?;
+            let mut index = 0;
+            state
+                .apply_agent_command(|project| {
+                    engine::add_marker_report(project, engine::Marker { at, label, color }).map(|(next, at_index)| {
+                        index = at_index;
+                        next
+                    })
+                })
+                .map_err(refused)?;
+            result.insert("marker".to_owned(), json!(index));
+        }
+        AgentEdit::MarkerRemove { marker } => state.apply_agent_command(|project| engine::remove_marker(project, marker)).map_err(refused)?,
+        AgentEdit::MarkerMove { marker, at } => {
+            check_marker(at, "")?;
+            let mut index = marker;
+            state
+                .apply_agent_command(|project| {
+                    engine::move_marker_report(project, marker, at).map(|(next, at_index)| {
+                        index = at_index;
+                        next
+                    })
+                })
+                .map_err(refused)?;
+            result.insert("marker".to_owned(), json!(index));
+        }
+        AgentEdit::ClipBeatsClear { clip } => state.apply_agent_command(|project| engine::set_beats(project, clip.into(), engine::ClipBeats::default())).map_err(refused)?,
     }
     Ok(Value::Object(result))
+}
+
+/// Refuses a marker time before zero and a label longer than the engine keeps.
+fn check_marker(at: Time, label: &str) -> Result<(), AgentError> {
+    if at < Time::ZERO {
+        return Err(AgentError::new("out_of_range", format!("marker time {at} is negative")));
+    }
+    let length = label.chars().count();
+    if length > engine::MAX_MARKER_LABEL {
+        return Err(AgentError::new("out_of_range", format!("the label has {length} characters, more than {}", engine::MAX_MARKER_LABEL)));
+    }
+    Ok(())
+}
+
+/// The beats a clip plays (from the list of its source), in timeline time, as the tools give them.
+fn beats_json(project: &Project, clip: &Clip) -> Value {
+    Value::Array(project.clip_beat_times(clip).map(|(at, beat)| json!({"at": at, "downbeat": beat.downbeat})).collect())
+}
+
+fn markers_list(project: &Project) -> Value {
+    let markers: Vec<Value> = project.markers.iter().enumerate().map(|(index, marker)| json!({"marker": index, "at": marker.at, "label": marker.label, "color": marker.color})).collect();
+    let mut beats = Vec::new();
+    for (track_index, track) in project.tracks.iter().enumerate() {
+        for (clip_index, clip) in track.clips.iter().enumerate() {
+            if let Some(found) = project.clip_beats(clip) {
+                beats.push(json!({"clip": {"track": track_index, "clip": clip_index}, "source": clip.source, "tempo": found.tempo, "beats": beats_json(project, clip)}));
+            }
+        }
+    }
+    json!({"markers": markers, "beats": beats})
+}
+
+/// Polls first and starts a detection only when nothing is known for the file (or a failure is to
+/// be retried), so a live agent that calls again and again neither restarts a failed detection nor
+/// decodes the file anew; a failure is reported as `detect_failed` on every call until `retry`.
+fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef, retry: bool) -> Result<Value, AgentError> {
+    writable(host, expected)?;
+    let paths = host.paths();
+    let wait = host.mode() == "file";
+    let state = host.state();
+    let found = current_clip(state.project(), clip).map_err(|error| AgentError::from_edit(&error))?;
+    if found.is_still() {
+        return Err(AgentError::new("invalid_params", format!("track {}, clip {} is a still or text, which has no sound", clip.track, clip.clip)));
+    }
+    if state.is_track_locked(clip.track) {
+        return Err(AgentError::from_edit(&engine::EditError::TrackLocked { track: clip.track }));
+    }
+    let source = found.source.clone();
+    let path = paths.source_path(&source);
+    let begin = match state.beats.status(&path) {
+        BeatStatus::Idle => true,
+        BeatStatus::Failed(_) => retry,
+        BeatStatus::Running(_) => wait,
+        BeatStatus::Ready(_) => false,
+    };
+    let status = match (begin, wait) {
+        (true, true) => state.beats.wait(&path),
+        (true, false) => state.beats.start(&path),
+        (false, _) => state.beats.status(&path),
+    };
+    match status {
+        BeatStatus::Idle => Ok(json!({"state": "running", "progress": 0.0, "clip": clip})),
+        BeatStatus::Running(progress) => Ok(json!({"state": "running", "progress": progress, "clip": clip})),
+        BeatStatus::Failed(message) => Err(AgentError::new("detect_failed", message)),
+        BeatStatus::Ready(analysis) => {
+            let beats = analysis.clip_beats();
+            let tempo = beats.tempo;
+            state.apply_agent_command(|project| engine::set_source_beats(project, &source, beats)).map_err(|error| AgentError::from_edit(&error))?;
+            let placed = current_clip(state.project(), clip).map_err(|error| AgentError::from_edit(&error))?;
+            let shown = beats_json(state.project(), placed);
+            let count = shown.as_array().map_or(0, Vec::len);
+            Ok(json!({"state": "done", "clip": clip, "tempo": tempo, "count": count, "beats": shown}))
+        }
+    }
 }
 
 fn replaceable<H: AgentHost>(host: &mut H, discard_changes: bool) -> Result<(), AgentError> {
@@ -768,6 +872,8 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::TextStyleList { kind } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref()),
         AgentRequest::AssetList { kind, filter } => asset_list(host.state(), kind.as_deref(), filter.as_deref().unwrap_or("")),
         AgentRequest::SubtitleExport { track, path, overwrite } => subtitle_export(host, track, path.as_deref(), overwrite),
+        AgentRequest::MarkersList => Ok(markers_list(host.state().project())),
+        AgentRequest::BeatsDetect { expected_revision, clip, retry } => beats_detect(host, expected_revision, clip, retry),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
             None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe)),
@@ -866,6 +972,172 @@ mod tests {
 
     fn code(result: AgentResult) -> String {
         result.expect_err("must be refused").code
+    }
+
+    #[test]
+    fn markers_are_added_moved_listed_and_removed_as_undo_steps() {
+        let mut host = FakeHost::new("file");
+        let revision = |host: &mut FakeHost| host.state.revision();
+        let add = |at: i64, label: Option<&str>| AgentEdit::MarkerAdd { at: Time::from_ticks(at), label: label.map(str::to_owned), color: None };
+        let now = revision(&mut host);
+        let first = host.run(AgentRequest::Edit { expected_revision: now, edit: add(90_000, Some("Drop")) }).expect("add");
+        assert_eq!(first["marker"], 0);
+        let now = revision(&mut host);
+        let second = host.run(AgentRequest::Edit { expected_revision: now, edit: add(45_000, None) }).expect("add");
+        assert_eq!(second["marker"], 0, "sorted by time");
+        let now = revision(&mut host);
+        let moved = host.run(AgentRequest::Edit { expected_revision: now, edit: AgentEdit::MarkerMove { marker: 0, at: Time::from_ticks(180_000) } }).expect("move");
+        assert_eq!(moved["marker"], 1);
+        let listed = host.run(AgentRequest::MarkersList).expect("list");
+        assert_eq!(listed["markers"][0]["label"], "Drop");
+        assert_eq!(listed["markers"][1]["at"], 180_000);
+        assert_eq!(listed["beats"], json!([]));
+        let now = revision(&mut host);
+        assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: now, edit: add(-1, None) })), "out_of_range");
+        assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: now, edit: AgentEdit::MarkerRemove { marker: 5 } })), "marker_not_found");
+        host.run(AgentRequest::Edit { expected_revision: now, edit: AgentEdit::MarkerRemove { marker: 0 } }).expect("remove");
+        assert_eq!(host.state.project().markers.len(), 1);
+        let now = revision(&mut host);
+        host.run(AgentRequest::Undo { expected_revision: now }).expect("undo");
+        assert_eq!(host.state.project().markers.len(), 2);
+    }
+
+    /// Writes eight seconds of stereo 16-bit clicks at 120 BPM as a WAV file.
+    fn click_wav(path: &Path) {
+        let rate = 48_000_u32;
+        let frames = rate as usize * 8;
+        let mut samples = vec![0_i16; frames];
+        for click in 0..15 {
+            let first = click * rate as usize / 2 + rate as usize / 10;
+            for n in 0..720 {
+                let time = n as f64 / f64::from(rate);
+                samples[first + n] = (20_000.0 * (-time / 0.004).exp() * (std::f64::consts::TAU * 1500.0 * time).sin()) as i16;
+            }
+        }
+        let data = (frames * 4) as u32;
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(36 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 0, 2, 0]);
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 4).to_le_bytes());
+        bytes.extend_from_slice(&[4, 0, 16, 0]);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn in_live_mode_beats_detect_runs_in_the_background_until_a_call_finds_it_done() {
+        let folder = std::env::temp_dir().join(format!("gpufx-live-beats-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("clicks.wav");
+        click_wav(&path);
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Audio);
+        let project = engine::add_clip(host.state.project(), 0, new_clip(&path.to_string_lossy(), Time::ZERO, Time::from_ticks(8 * 90_000))).unwrap();
+        host.state.replace_project(project, None);
+        let clip = ClipRef { track: 0, clip: 0 };
+        let first = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect("started");
+        assert_eq!(first["state"], "running", "{first}");
+        assert!(host.state.project().beats.is_empty(), "no edit while it runs");
+        let started = std::time::Instant::now();
+        let done = loop {
+            let answer = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect("polled");
+            if answer["state"] == "done" {
+                break answer;
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "detection hangs");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert!((done["tempo"].as_f64().unwrap() - 120.0).abs() < 1.0, "{done}");
+        assert!(host.state.project().clip_beats(&host.state.project().tracks[0].clips[0]).is_some());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn in_live_mode_a_failed_detection_is_reported_and_not_run_again() {
+        let folder = std::env::temp_dir().join(format!("gpufx-live-beats-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        // Not a sound file: probing it fails.
+        let path = folder.join("broken.wav");
+        std::fs::write(&path, b"not a wave file").unwrap();
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Audio);
+        let project = engine::add_clip(host.state.project(), 0, new_clip(&path.to_string_lossy(), Time::ZERO, Time::from_ticks(90_000))).unwrap();
+        host.state.replace_project(project, None);
+        let clip = ClipRef { track: 0, clip: 0 };
+        let started = std::time::Instant::now();
+        let failed = loop {
+            match host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }) {
+                Ok(answer) => assert_eq!(answer["state"], "running", "{answer}"),
+                Err(error) => break error,
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(30), "the failure is never reported");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(failed.code, "detect_failed", "{failed:?}");
+        // A later call reports the same failure without decoding the file again.
+        let again = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect_err("still failed");
+        assert_eq!(again.code, "detect_failed");
+        assert!(!host.state.beats.running(), "no new detection was started");
+        assert!(host.state.project().beats.is_empty() && !host.state.can_undo());
+        // An explicit retry runs it again.
+        let retried = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: true });
+        assert!(retried.as_ref().is_ok_and(|answer| answer["state"] == "running") || retried.as_ref().is_err_and(|error| error.code == "detect_failed"), "{retried:?}");
+        assert!(host.state.beats.running() || retried.is_err(), "the retry started a detection");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn in_live_mode_polling_after_done_adds_no_undo_step() {
+        let folder = std::env::temp_dir().join(format!("gpufx-live-beats-again-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("clicks.wav");
+        click_wav(&path);
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Audio);
+        let project = engine::add_clip(host.state.project(), 0, new_clip(&path.to_string_lossy(), Time::ZERO, Time::from_ticks(8 * 90_000))).unwrap();
+        host.state.replace_project(project, None);
+        let clip = ClipRef { track: 0, clip: 0 };
+        let started = std::time::Instant::now();
+        while host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect("polled")["state"] != "done" {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "detection hangs");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let revision = host.state.revision();
+        for _ in 0..3 {
+            let answer = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect("again");
+            assert_eq!(answer["state"], "done");
+        }
+        assert_eq!(host.state.revision(), revision, "a repeated call changes nothing");
+        host.state.undo();
+        assert!(!host.state.can_undo(), "one undo step for the beats");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn beats_are_listed_in_timeline_time_and_cleared() {
+        let mut host = FakeHost::new("file");
+        host.state.add_track(TrackKind::Audio);
+        let mut clip = new_clip("C:/media/song.mp3", Time::from_ticks(450_000), Time::from_ticks(180_000));
+        clip.source_in = Time::from_ticks(90_000);
+        let mut project = engine::add_clip(host.state.project(), 0, clip).unwrap();
+        project.beats.insert("C:/media/song.mp3".into(), std::sync::Arc::new(engine::ClipBeats { tempo: 60.0, beats: (0..5).map(|second| engine::Beat { at: Time::from_ticks(second * 90_000), downbeat: second == 2 }).collect() }));
+        host.state.replace_project(project, None);
+        let listed = host.run(AgentRequest::MarkersList).expect("list");
+        // The clip plays source 1 to 3 s from 5 s: the beats at source 1 and 2 s.
+        assert_eq!(listed["beats"][0]["beats"], json!([{"at": 450_000, "downbeat": false}, {"at": 540_000, "downbeat": true}]));
+        let clip = ClipRef { track: 0, clip: 0 };
+        let now = host.state.revision();
+        host.run(AgentRequest::Edit { expected_revision: now, edit: AgentEdit::ClipBeatsClear { clip } }).expect("clear");
+        assert!(host.state.project().beats.is_empty());
+        assert_eq!(host.run(AgentRequest::MarkersList).expect("list")["beats"], json!([]));
     }
 
     fn probed(length: Time) -> MediaProbe {
