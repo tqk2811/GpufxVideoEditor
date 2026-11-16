@@ -9,12 +9,12 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use d3d12_backend::{probe_media, probe_video_format, Gpu, ProjectPaths};
+use d3d12_backend::{probe_media, probe_video_format, Gpu, ProjectPaths, ProxyFile};
 use engine::{Output, Project, Time, Track, TrackKind, SUPPORTED_VERSION};
 use gpufx_editor::editor::new_clip;
 use gpufx_editor::preview::backend::D3d12Producer;
 use gpufx_editor::project_file::package_roots;
-use gpufx_editor::proxy::{proxy_file, ChildProxyMaker, MakeOutcome, ProxyMaker, KEYFRAME_INTERVAL};
+use gpufx_editor::proxy::{preview_file, proxy_file, ChildProxyMaker, MakeOutcome, ProxyMaker, KEYFRAME_INTERVAL};
 use gpufx_editor::visuals::worker::FileStamp;
 
 fn skip(reason: &str) {
@@ -102,16 +102,115 @@ fn a_proxy_is_540p_short_gop_silent_and_the_preview_decodes_it_in_place_of_the_o
     let mut producer = D3d12Producer::new(gpu);
     let project = one_clip_project(&original, 20);
     let plain = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()));
-    let with_proxy = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()).with_proxies(Arc::new(HashMap::from([(original.clone(), out.clone())]))));
+    let with_proxy = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()).with_proxies(Arc::new(HashMap::from([(original.clone(), preview_file(out.clone(), &format))]))));
     let frame = 45;
     let from_original = producer.capture(&project, &plain, frame).expect("capture the original");
     let from_proxy = producer.capture(&project, &with_proxy, frame).expect("capture the proxy");
     let close = mean_difference(&from_original, &from_proxy);
     assert!(close < 6.0, "the proxy looks like the original: mean difference {close}");
     // Mapped to another file, the preview shows that file: the map is what it decodes.
-    let elsewhere = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()).with_proxies(Arc::new(HashMap::from([(original.clone(), test_clip("clip-b.mp4"))]))));
+    let elsewhere = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()).with_proxies(Arc::new(HashMap::from([(original.clone(), ProxyFile::plain(test_clip("clip-b.mp4")))]))));
     let from_other = producer.capture(&project, &elsewhere, frame).expect("capture the other file");
     let far = mean_difference(&from_original, &from_other);
     assert!(far > close * 2.0 && far > 6.0, "another file looks different: {far} against {close}");
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+fn ffmpeg_exe() -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/ffmpeg/bin/ffmpeg.exe"))
+}
+
+/// Writes `name` in `folder` with ffmpeg and returns its absolute path.
+fn synthesize(folder: &Path, name: &str, arguments: &[&str]) -> PathBuf {
+    let path = folder.join(name);
+    let status = Command::new(ffmpeg_exe()).args(["-hide_banner", "-y", "-v", "error"]).args(arguments).arg(&path).status().expect("ffmpeg runs");
+    assert!(status.success(), "making {name} failed");
+    std::path::absolute(path).unwrap()
+}
+
+/// Makes the proxy of `original` in `folder` with the real tool, and the paths that read it.
+fn make_proxy(tool: &Path, folder: &Path, original: &Path) -> (Arc<ProjectPaths>, d3d12_backend::VideoFormat, PathBuf) {
+    let maker = ChildProxyMaker { tool: tool.to_path_buf(), package_roots: package_roots() };
+    let out = proxy_file(folder, original, maker.stamp(original).expect("stamp"));
+    let (format, duration) = maker.inspect(original).expect("inspect");
+    let outcome = maker.make(original, &format, duration, &out, &Arc::new(AtomicBool::new(false)), &|_| {});
+    assert_eq!(outcome, MakeOutcome::Done, "the proxy of {}", original.display());
+    let paths = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()).with_proxies(Arc::new(HashMap::from([(original.to_path_buf(), preview_file(out.clone(), &format))]))));
+    (paths, format, out)
+}
+
+/// The GPU, the tool and a scratch folder, or why the test skips.
+fn rig(name: &str) -> Option<(Arc<Gpu>, PathBuf, PathBuf)> {
+    let Some(gpu) = Gpu::create_hardware().expect("device") else {
+        skip("no hardware adapter");
+        return None;
+    };
+    let Some(tool) = render_exe() else {
+        skip("gpufx-render.exe is not built; run cargo build -p gpufx-render");
+        return None;
+    };
+    let folder = std::env::temp_dir().join(format!("gpufx-proxy-gpu-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).unwrap();
+    Some((Arc::new(gpu), tool, folder))
+}
+
+#[test]
+fn a_proxy_of_an_odd_rate_source_with_a_start_offset_shows_the_frame_the_original_shows() {
+    let Some((gpu, tool, folder)) = rig("timing") else { return };
+    // 59.94 fps (1501.5 ticks a frame, so a rounded step drifts half a tick a frame), a grey level
+    // of its own on every frame, and a stream that starts at 1.5 s.
+    let original = synthesize(&folder, "film.mp4", &["-f", "lavfi", "-i", "color=c=black:s=640x360:r=60000/1001:d=10,geq=lum=mod(N*37\\,200)+20:cb=128:cr=128", "-c:v", "libopenh264", "-pix_fmt", "yuv420p", "-b:v", "8M", "-g", "12", "-output_ts_offset", "1.5"]);
+    let (with_proxy, format, out) = make_proxy(&tool, &folder, &original);
+    assert_eq!(format.rate, Some((60000, 1001)));
+    let (_, proxy_frames) = keyframes(&out);
+    let (_, original_frames) = keyframes(&original);
+    assert!(proxy_frames >= original_frames, "every frame of the source is in the proxy: {proxy_frames} against {original_frames}");
+
+    let mut producer = D3d12Producer::new(gpu);
+    let mut project = (*one_clip_project(&original, 10)).clone();
+    project.output.frame_duration = Time::from_ticks(1500);
+    // Trimmed by 1000 ticks, so output frame i reads the source at i * 1500 + 1000: late in the
+    // clip that lands just after the start of a source frame, where a drifting proxy is behind.
+    project.tracks[0].clips[0].source_in = Time::from_ticks(1000);
+    project.tracks[0].clips[0].duration = Time::from_ticks(9 * engine::TICKS_PER_SECOND);
+    let plain = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()));
+    let mut worst = (0.0, 0);
+    // 60 fps output frames over a 59.94 fps source, at the start and late, where drift adds up.
+    for frame in (0..30).chain(450..535) {
+        let from_original = producer.capture(&project, &plain, frame).expect("capture the original");
+        let from_proxy = producer.capture(&project, &with_proxy, frame).expect("capture the proxy");
+        let difference = mean_difference(&from_original, &from_proxy);
+        if difference > worst.0 {
+            worst = (difference, frame);
+        }
+    }
+    // One frame off is a grey step of 37 (or more), about 30 in RGB.
+    assert!(worst.0 < 4.0, "output frame {} shows another source frame through the proxy: mean difference {}", worst.1, worst.0);
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+#[test]
+fn a_turned_source_has_an_upright_proxy_that_is_not_turned_again_and_keeps_the_original_shape() {
+    let Some((gpu, tool, folder)) = rig("turned") else { return };
+    // Stored 1280x720, shown turned a quarter: an upright 720x1280 picture.
+    let stored = synthesize(&folder, "stored.mp4", &["-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=1", "-c:v", "libopenh264", "-pix_fmt", "yuv420p", "-b:v", "8M"]);
+    let original = synthesize(&folder, "turned.mp4", &["-display_rotation", "90", "-i", &stored.to_string_lossy(), "-c", "copy"]);
+    let (with_proxy, format, out) = make_proxy(&tool, &folder, &original);
+    assert_eq!((format.width, format.height), (720, 1280));
+    let proxy_format = probe_video_format(&out).expect("probe the proxy");
+    assert_eq!((proxy_format.width, proxy_format.height), (304, 540), "upright, with no turn of its own");
+    assert!((proxy_format.aspect - format.aspect).abs() > 1e-4, "the even sides round the shape: {} against {}", proxy_format.aspect, format.aspect);
+    assert_eq!(with_proxy.video_decode_source(&original.to_string_lossy()).and_then(|file| file.display_aspect), Some(format.aspect), "the layout uses the original's shape");
+
+    let mut producer = D3d12Producer::new(gpu);
+    let project = one_clip_project(&original, 1);
+    let plain = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()));
+    for frame in [0, 15] {
+        let from_original = producer.capture(&project, &plain, frame).expect("capture the original");
+        let from_proxy = producer.capture(&project, &with_proxy, frame).expect("capture the proxy");
+        let difference = mean_difference(&from_original, &from_proxy);
+        assert!(difference < 8.0, "frame {frame}: the proxy is drawn where and as the original is: mean difference {difference}");
+    }
     let _ = std::fs::remove_dir_all(&folder);
 }

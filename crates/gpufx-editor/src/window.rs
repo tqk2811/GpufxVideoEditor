@@ -1443,14 +1443,14 @@ pub fn run() -> Result<(), String> {
 /// The paths of a session from `originals`: (shared, preview). Only the preview worker gets the
 /// proxies; capture, agent, thumbnails, probes and export read the shared paths, which never hold
 /// any, so none of them has to remember [`ProjectPaths::without_proxies`].
-fn session_paths(originals: ProjectPaths, proxies: HashMap<PathBuf, PathBuf>) -> (Arc<ProjectPaths>, Arc<ProjectPaths>) {
+fn session_paths(originals: ProjectPaths, proxies: HashMap<PathBuf, d3d12_backend::ProxyFile>) -> (Arc<ProjectPaths>, Arc<ProjectPaths>) {
     let shared = Arc::new(originals);
     let preview = preview_paths(&shared, proxies);
     (shared, preview)
 }
 
 /// `shared` plus `proxies`, for the preview worker: `shared` itself when there is none.
-fn preview_paths(shared: &Arc<ProjectPaths>, proxies: HashMap<PathBuf, PathBuf>) -> Arc<ProjectPaths> {
+fn preview_paths(shared: &Arc<ProjectPaths>, proxies: HashMap<PathBuf, d3d12_backend::ProxyFile>) -> Arc<ProjectPaths> {
     if proxies.is_empty() {
         shared.clone()
     } else {
@@ -1493,7 +1493,7 @@ mod tests {
     fn only_the_preview_paths_hold_the_proxies() {
         let original = PathBuf::from(r"D:\work\a.mp4");
         let proxy = PathBuf::from(r"C:\cache\a-proxy.mp4");
-        let (shared, preview) = session_paths(ProjectPaths::new(std::path::Path::new(r"D:\work\p.json"), Vec::new()), HashMap::from([(original.clone(), proxy.clone())]));
+        let (shared, preview) = session_paths(ProjectPaths::new(std::path::Path::new(r"D:\work\p.json"), Vec::new()), HashMap::from([(original.clone(), d3d12_backend::ProxyFile::plain(proxy.clone()))]));
         assert!(!shared.has_proxies(), "capture, agent paths, thumbnails and export read the originals");
         assert_eq!(shared.video_decode_path("a.mp4"), original);
         assert_eq!(preview.video_decode_path("a.mp4"), proxy, "the preview decodes the proxy");

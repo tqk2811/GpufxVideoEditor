@@ -1381,7 +1381,11 @@ impl Compositor for D3d12Compositor {
             let path = self.paths.source_path(source);
             return self.load_still(&path).map(SourceDecoder::Still).map_err(RenderError);
         }
-        let mut decoder = SequentialDecoder::open(&self.paths.video_decode_path(source), self.gpu.raw_device())?;
+        let proxy = self.paths.video_decode_source(source);
+        let mut decoder = SequentialDecoder::open(&proxy.as_ref().map_or_else(|| self.paths.source_path(source), |proxy| proxy.path.clone()), self.gpu.raw_device())?;
+        if let Some(proxy) = proxy {
+            decoder.set_proxy(proxy);
+        }
         if let Some((flag, grace)) = &self.abort {
             decoder.set_abort(flag.clone(), *grace);
             decoder.set_abort_policy(self.closing.clone(), Some(self.publish_clock.clone()));

@@ -26,7 +26,7 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 
 ### [Thấp] Proxy chế độ Tự động chỉ xét chiều cao, proxy tối đa 60 fps
 
-`crates/gpufx-editor/src/proxy.rs:75` (`ProxyMode::wants`) chỉ xét cao hơn 1080; chưa xét fps cao hay codec nặng (HEVC 10-bit, AV1). `proxy.rs:186` kẹp tốc độ khung về 60 fps vì project không cho nhanh hơn, nên nguồn 120 fps có proxy 60 fps. Ghi ngày 2026-11-17.
+`crates/gpufx-editor/src/proxy.rs:75` (`ProxyMode::wants`) chỉ xét cao hơn 1080; chưa xét fps cao hay codec nặng (HEVC 10-bit, AV1). `proxy_frame_duration` (`proxy.rs`) kẹp tốc độ khung về 60 fps vì project không cho nhanh hơn, nên nguồn 120 fps có proxy 60 fps và preview đọc proxy theo thời gian của gốc (`preview_file` bỏ `ProxyTiming`), lệch dưới một khung proxy. Nguồn VFR (avg khác `r_frame_rate`) cũng không giữ PTS gốc: proxy lấy mẫu theo `r_frame_rate` làm tròn xuống và đọc theo thời gian của gốc, nên khung hiện ra có thể là khung gốc trước đó tối đa một bước proxy; muốn khớp tuyệt đối phải mã proxy giữ PTS gốc. Ghi ngày 2026-11-17.
 
 ### [Thấp] Agent không xem được trạng thái proxy
 

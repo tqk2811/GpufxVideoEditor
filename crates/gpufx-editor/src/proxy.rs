@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
-use d3d12_backend::{probe_media, probe_video_format, EncoderChoice, ExportJob, ProjectPaths, VideoCodec, VideoFormat};
+use d3d12_backend::{probe_media, probe_video_format, EncoderChoice, ExportJob, ProjectPaths, ProxyFile, ProxyTiming, VideoCodec, VideoFormat};
 use engine::{ClipPlacement, Output, Project, Time, Track, TrackKind, MIN_FRAME_DURATION, SUPPORTED_VERSION};
 
 use crate::visuals::worker::FileStamp;
@@ -180,10 +180,29 @@ fn covering_placement(format: &VideoFormat, width: u32, height: u32) -> ClipPlac
     ClipPlacement { x: (1.0 - width_part) / 2.0, y: (1.0 - height_part) / 2.0, width: width_part }
 }
 
+/// The frame step of the proxy of a video of `format`: one frame of the source rounded down to
+/// whole ticks (see [`VideoFormat::frame_duration`]), so the proxy samples every frame of a
+/// constant-rate source. A source above 60 fps gets 60, the fastest a project may run, and one
+/// that states no rate at all 30.
+pub fn proxy_frame_duration(format: &VideoFormat) -> Time {
+    format.frame_duration.map_or(Time::from_ticks(3000), |ticks| ticks.max(MIN_FRAME_DURATION))
+}
+
+/// What the preview needs to read the proxy at `path` of a video of `format` in its place: the
+/// original's shape, since the proxy's even sides round it, and, for a constant-rate source the
+/// proxy samples at every frame, how the original's times map to proxy frames. Without that map
+/// (a variable-rate source, or one above 60 fps) the proxy is read at the original's time and
+/// shows the source as sampled at most one proxy frame earlier.
+pub fn preview_file(path: PathBuf, format: &VideoFormat) -> ProxyFile {
+    let frame_duration = proxy_frame_duration(format);
+    let timing = format.rate.filter(|_| format.constant_rate && format.frame_duration == Some(frame_duration)).map(|rate| ProxyTiming { rate, time_base: format.time_base, frame_duration });
+    ProxyFile { path, display_aspect: Some(format.aspect), timing }
+}
+
 /// The one-clip project whose export is the proxy of `original`, which runs `duration`.
 pub fn proxy_project(original: &Path, format: &VideoFormat, duration: Time) -> Project {
     let (width, height) = proxy_size(format);
-    let frame_duration = format.frame_duration.map_or(Time::from_ticks(3000), |ticks| ticks.max(MIN_FRAME_DURATION));
+    let frame_duration = proxy_frame_duration(format);
     let mut clip = crate::editor::new_clip(&original.to_string_lossy(), Time::ZERO, duration);
     clip.placement = Some(covering_placement(format, width, height));
     clip.muted = true;
@@ -294,6 +313,8 @@ pub fn file_stamp(path: &Path) -> Option<FileStamp> {
 struct State {
     mode: ProxyMode,
     entries: HashMap<PathBuf, ProxyStatus>,
+    /// How the preview reads each ready proxy.
+    files: HashMap<PathBuf, ProxyFile>,
     queue: VecDeque<PathBuf>,
     /// The source being made and how to stop it.
     running: Option<(PathBuf, Arc<AtomicBool>)>,
@@ -421,13 +442,13 @@ impl ProxyManager {
     }
 
     /// The ready proxies to decode in place of their originals; empty while the mode is Off.
-    pub fn proxies(&self) -> HashMap<PathBuf, PathBuf> {
+    pub fn proxies(&self) -> HashMap<PathBuf, ProxyFile> {
         let state = self.shared.lock();
         if state.mode == ProxyMode::Off {
             return HashMap::new();
         }
         state.entries.iter().filter_map(|(source, status)| match status {
-            ProxyStatus::Ready(proxy) => Some((source.clone(), proxy.clone())),
+            ProxyStatus::Ready(_) => state.files.get(source).map(|file| (source.clone(), file.clone())),
             _ => None,
         }).collect()
     }
@@ -447,7 +468,7 @@ impl Drop for ProxyManager {
 }
 
 /// Sets the status of `source`, if the mode it was made for still holds.
-fn settle(shared: &Shared, source: &Path, generation: u64, status: ProxyStatus) {
+fn settle(shared: &Shared, source: &Path, generation: u64, (status, file): (ProxyStatus, Option<ProxyFile>)) {
     let mut state = shared.lock();
     if state.generation != generation {
         return;
@@ -457,6 +478,10 @@ fn settle(shared: &Shared, source: &Path, generation: u64, status: ProxyStatus) 
     }
     let ready = matches!(status, ProxyStatus::Ready(_));
     state.entries.insert(source.to_path_buf(), status);
+    match file {
+        Some(file) => state.files.insert(source.to_path_buf(), file),
+        None => state.files.remove(source),
+    };
     if state.running.as_ref().is_some_and(|(running, _)| running == source) {
         state.running = None;
     }
@@ -487,19 +512,21 @@ fn work<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path) {
     }
 }
 
-fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &Path, generation: u64, mode: ProxyMode, cancel: &Arc<AtomicBool>) -> ProxyStatus {
-    let Some(stamp) = maker.stamp(source) else { return ProxyStatus::Failed(format!("{} cannot be read", source.display())) };
+fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &Path, generation: u64, mode: ProxyMode, cancel: &Arc<AtomicBool>) -> (ProxyStatus, Option<ProxyFile>) {
+    let failed = |message: String| (ProxyStatus::Failed(message), None);
+    let Some(stamp) = maker.stamp(source) else { return failed(format!("{} cannot be read", source.display())) };
+    // The source's shape and frame rate are needed to read even a proxy made earlier.
+    let (format, duration) = match maker.inspect(source) {
+        Ok(found) => found,
+        Err(message) => return failed(message),
+    };
+    if !mode.wants(&format) {
+        return (ProxyStatus::NotNeeded, None);
+    }
     let target = proxy_file(folder, source, stamp);
     if target.is_file() {
         touch(&target);
-        return ProxyStatus::Ready(target);
-    }
-    let (format, duration) = match maker.inspect(source) {
-        Ok(found) => found,
-        Err(message) => return ProxyStatus::Failed(message),
-    };
-    if !mode.wants(&format) {
-        return ProxyStatus::NotNeeded;
+        return (ProxyStatus::Ready(target.clone()), Some(preview_file(target, &format)));
     }
     let progress = |fraction: f32| {
         let mut state = shared.lock();
@@ -513,11 +540,11 @@ fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &P
     match maker.make(source, &format, duration, &target, cancel, &progress) {
         MakeOutcome::Done if target.is_file() => {
             remove_other_versions(folder, &target);
-            ProxyStatus::Ready(target)
+            (ProxyStatus::Ready(target.clone()), Some(preview_file(target, &format)))
         }
-        MakeOutcome::Done => ProxyStatus::Failed(format!("{} was not written", target.display())),
-        MakeOutcome::Cancelled => ProxyStatus::Cancelled,
-        MakeOutcome::Failed(message) => ProxyStatus::Failed(message),
+        MakeOutcome::Done => failed(format!("{} was not written", target.display())),
+        MakeOutcome::Cancelled => (ProxyStatus::Cancelled, None),
+        MakeOutcome::Failed(message) => failed(message),
     }
 }
 
@@ -535,7 +562,7 @@ mod tests {
     }
 
     fn format(width: u32, height: u32) -> VideoFormat {
-        VideoFormat { width, height, frame_duration: Some(Time::from_ticks(3000)) }
+        VideoFormat { width, height, aspect: f64::from(width) / f64::from(height), rate: Some((30, 1)), constant_rate: true, time_base: (1, 15360), frame_duration: Some(Time::from_ticks(3000)) }
     }
 
     fn stamp(size: u64, seconds: u64) -> FileStamp {
@@ -629,8 +656,26 @@ mod tests {
         assert_eq!((project.output.width, project.output.height), (960, 540));
         assert!(project.output.audio.is_none(), "a proxy has no sound");
         assert_eq!(project.tracks[0].clips[0].duration, Time::from_ticks(90_000));
-        let fast = proxy_project(Path::new(r"D:\a.mp4"), &VideoFormat { width: 3840, height: 2160, frame_duration: Some(Time::from_ticks(750)) }, Time::from_ticks(90_000));
+        let fast_format = VideoFormat { rate: Some((120, 1)), frame_duration: Some(Time::from_ticks(750)), ..format(3840, 2160) };
+        let fast = proxy_project(Path::new(r"D:\a.mp4"), &fast_format, Time::from_ticks(90_000));
         assert_eq!(fast.output.frame_duration, MIN_FRAME_DURATION, "120 fps becomes the 60 fps a project may have");
+        assert_eq!(preview_file(PathBuf::from("p.mp4"), &fast_format).timing, None, "a capped proxy is read at the original's time");
+    }
+
+    #[test]
+    fn the_preview_reads_a_proxy_with_the_shape_and_frame_times_of_its_original() {
+        // 2160x3840 has a proxy of 304x540, a little wider than the source.
+        let upright = format(2160, 3840);
+        let file = preview_file(PathBuf::from("p.mp4"), &upright);
+        assert_eq!(file.display_aspect, Some(2160.0 / 3840.0), "the original's shape, not 304/540");
+        let film = VideoFormat { rate: Some((24000, 1001)), frame_duration: d3d12_backend::frame_ticks_floor(24000, 1001), ..format(3840, 2160) };
+        let project = proxy_project(Path::new(r"D:\a.mp4"), &film, Time::from_ticks(90_000));
+        assert_eq!(project.output.frame_duration, Time::from_ticks(3753), "one 23.976 frame, rounded down");
+        assert_eq!(preview_file(PathBuf::from("p.mp4"), &film).timing, Some(ProxyTiming { rate: (24000, 1001), time_base: (1, 15360), frame_duration: Time::from_ticks(3753) }));
+        let variable = VideoFormat { constant_rate: false, ..film };
+        assert_eq!(preview_file(PathBuf::from("p.mp4"), &variable).timing, None, "a variable rate is read at the original's time");
+        let unstated = VideoFormat { rate: None, frame_duration: None, constant_rate: false, ..film };
+        assert_eq!(proxy_frame_duration(&unstated), Time::from_ticks(3000));
     }
 
     /// A maker driven by the test: each `make` waits for an outcome sent on the channel.
@@ -705,7 +750,7 @@ mod tests {
         outcomes.send(MakeOutcome::Failed("encoder broke".into())).unwrap();
         assert_eq!(wait_for(&manager, other, |s| matches!(s, ProxyStatus::Failed(_))), ProxyStatus::Failed("encoder broke".into()));
         assert_ne!(manager.revision(), revision);
-        assert_eq!(manager.proxies(), HashMap::from([(big.to_path_buf(), proxy_file(&folder, big, stamp(1, 1)))]));
+        assert_eq!(manager.proxies(), HashMap::from([(big.to_path_buf(), preview_file(proxy_file(&folder, big, stamp(1, 1)), &format(3840, 2160)))]));
         manager.request([big, small, other]);
         assert!(made.recv_timeout(Duration::from_millis(50)).is_err(), "known sources are not queued again");
 

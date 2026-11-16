@@ -92,7 +92,7 @@ fn seek_target_after_attempt(held_is_none: bool, seek_target: Option<i64>) -> Op
 /// The stream timestamp of `ticks` of source time, rounded to the nearest unit of the time base
 /// `num / den` (flooring would pick the frame before when the stream rounds its timestamps up, as
 /// MKV's 1/1000 does), added to `start_pts`.
-fn stream_pts(ticks: i64, num: i32, den: i32, start_pts: i64) -> i64 {
+pub(crate) fn stream_pts(ticks: i64, num: i32, den: i32, start_pts: i64) -> i64 {
     let k = TICKS_PER_SECOND * i128::from(num);
     let offset = (2 * i128::from(ticks) * i128::from(den) + k).div_euclid(2 * k);
     start_pts.saturating_add(offset as i64)
@@ -169,6 +169,8 @@ pub struct DecodedFrame {
     format: PixelFormat,
     /// Clockwise quarter turns that show the picture upright (see [`crate::orientation`]).
     turns: u8,
+    /// The shape to show instead of the frame's own: a proxy's original (see [`crate::ProxyFile`]).
+    aspect: Option<f64>,
 }
 
 impl DecodedFrame {
@@ -185,7 +187,7 @@ impl DecodedFrame {
         if frame.is_null() {
             return Err("av_frame_clone failed".to_owned());
         }
-        Ok(Self { frame, pts: self.pts, format: self.format, turns: self.turns })
+        Ok(Self { frame, pts: self.pts, format: self.format, turns: self.turns, aspect: self.aspect })
     }
 
     /// `ID3D12Resource *` of the frame, borrowed.
@@ -231,6 +233,9 @@ impl DecodedFrame {
     /// Width over height of the picture as it is shown: the sample aspect ratio of the frame
     /// applied and the turn of the stream, the same rule as the thumbnails.
     pub fn display_aspect(&self) -> f64 {
+        if let Some(aspect) = self.aspect {
+            return aspect;
+        }
         // SAFETY: self.frame is valid for the lifetime of self.
         let sample_aspect = unsafe { (*self.frame).sample_aspect_ratio };
         let stored = ffi::display_aspect(self.width() as i32, self.height() as i32, sample_aspect);
@@ -377,6 +382,8 @@ pub struct SequentialDecoder {
     turns: u8,
     /// Whether the stream goes to FFmpeg's native AV1 decoder, which decodes through D3D12VA only.
     native_av1: bool,
+    /// Set when this file is the preview proxy of another: the original's shape and frame times.
+    proxy: Option<crate::ProxyFile>,
 }
 
 impl SequentialDecoder {
@@ -407,6 +414,7 @@ impl SequentialDecoder {
             path: path_text.to_owned(),
             turns: 0,
             native_av1: false,
+            proxy: None,
         };
         // SAFETY: on error, Drop releases whatever has been created so far.
         unsafe { decoder.initialize(&c_path, device) }.map_err(|e| format!("{path_text}: {e}"))?;
@@ -535,7 +543,7 @@ impl SequentialDecoder {
                         ffi::av_frame_free(&mut frame);
                         return Err("the decoded frame has neither a best-effort timestamp nor a pts; frames cannot be placed on the timeline".to_owned());
                     }
-                    Ok(Some(DecodedFrame { frame, pts, format, turns: self.turns }))
+                    Ok(Some(DecodedFrame { frame, pts, format, turns: self.turns, aspect: self.proxy.as_ref().and_then(|proxy| proxy.display_aspect) }))
                 }
                 Ok(false) => {
                     ffi::av_frame_free(&mut frame);
@@ -684,8 +692,15 @@ impl SequentialDecoder {
         }
     }
 
+    /// Marks this file as the proxy `proxy` of another source: frames take the original's shape and
+    /// times are those of the original. Call before the first frame.
+    pub fn set_proxy(&mut self, proxy: crate::ProxyFile) {
+        self.proxy = Some(proxy);
+    }
+
     fn frame_at_inner(&mut self, time: Time) -> Result<DecodedFrame, String> {
         self.request_started = Instant::now();
+        let time = self.proxy.as_ref().and_then(|proxy| proxy.timing).map_or(time, |timing| timing.proxy_time(time));
         let target = self.target_pts(time);
         let cannot_continue = match (&self.held, self.seek_target) {
             (_, None) => true,

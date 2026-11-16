@@ -5,7 +5,77 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use engine::Resolver;
+use engine::{Resolver, Time, TICKS_PER_SECOND};
+
+/// A smaller copy of a video source that the preview decodes in its place, and what it needs to
+/// show it as the original would be shown.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProxyFile {
+    pub path: PathBuf,
+    /// Width over height of the ORIGINAL as shown. The proxy's own sides are rounded to even
+    /// numbers, so its shape is a little off; the layout uses this one.
+    pub display_aspect: Option<f64>,
+    /// How times of the original map to frames of the proxy; `None` reads the proxy at the same
+    /// time as the original.
+    pub timing: Option<ProxyTiming>,
+}
+
+impl ProxyFile {
+    /// A proxy read at the original's times with its own shape.
+    pub fn plain(path: PathBuf) -> Self {
+        Self { path, display_aspect: None, timing: None }
+    }
+}
+
+/// The frames of a constant-rate original and of its proxy. Both count time from their own first
+/// frame (the decoder subtracts the stream's start time), so only the frame step differs: the
+/// proxy samples the original every `frame_duration` ticks, a whole number of ticks at or below
+/// one frame of the original, so every frame of the original is in some proxy frame. Proxy frame
+/// `k` holds the frame the original's decoder showed at `k * frame_duration`, found the way that
+/// decoder finds it (the time rounded to the stream's time base, then the last frame not after it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProxyTiming {
+    /// Frames per second of the original, as `num / den`.
+    pub rate: (i32, i32),
+    /// The time base of the original's video stream, as `num / den` seconds.
+    pub time_base: (i32, i32),
+    /// One frame of the proxy.
+    pub frame_duration: Time,
+}
+
+impl ProxyTiming {
+    /// The frame of the original, counted from its first, that its decoder shows at `ticks`.
+    fn original_frame(&self, ticks: i64) -> i128 {
+        let (tb_num, tb_den) = self.time_base;
+        let pts = i128::from(crate::decoder::stream_pts(ticks, tb_num, tb_den, 0));
+        // Frame j has pts round(j * a / b), a muxer's rounding of its exact start: the last frame
+        // not after `pts` is the largest j with j * a / b < pts + 1/2, ceil((2 pts + 1) b / 2a) - 1.
+        let a = i128::from(tb_den) * i128::from(self.rate.1);
+        let b = i128::from(tb_num) * i128::from(self.rate.0);
+        ((2 * pts + 1) * b + 2 * a - 1).div_euclid(2 * a) - 1
+    }
+
+    /// The time to ask the proxy for so it shows the frame the original shows at `time`.
+    pub fn proxy_time(&self, time: Time) -> Time {
+        let (num, den) = (i128::from(self.rate.0), i128::from(self.rate.1));
+        let step = i128::from(self.frame_duration.ticks());
+        if num <= 0 || den <= 0 || step <= 0 || self.time_base.0 <= 0 || self.time_base.1 <= 0 || time.ticks() < 0 {
+            return time;
+        }
+        let frame = self.original_frame(time.ticks());
+        // Start just before the sample at frame * den * ticks / (num * step) and walk to the
+        // first sample that holds the frame; the rounding to the time base moves it by one at most.
+        let mut sample = (frame * den * i128::from(TICKS_PER_SECOND) / (num * step) - 2).max(0);
+        for _ in 0..8 {
+            let Ok(ticks) = i64::try_from(sample * step) else { return time };
+            if self.original_frame(ticks) >= frame {
+                return Time::from_ticks(ticks);
+            }
+            sample += 1;
+        }
+        time
+    }
+}
 
 /// What starts a clip source naming a file of an installed asset pack: `asset:<type>/<id>/<file>`.
 pub const ASSET_PREFIX: &str = "asset:";
@@ -173,7 +243,7 @@ pub struct ProjectPaths {
     project_packages: bool,
     /// Smaller copies of video sources the preview decodes instead, by the absolute path of the
     /// original (see [`Self::video_decode_path`]). Empty for an export, which reads the originals.
-    proxies: Arc<HashMap<PathBuf, PathBuf>>,
+    proxies: Arc<HashMap<PathBuf, ProxyFile>>,
 }
 
 fn is_package(path: &Path) -> bool {
@@ -194,7 +264,7 @@ impl ProjectPaths {
 
     /// The same paths with `proxies`: the files the preview decodes in place of the originals, by
     /// the absolute path of the original.
-    pub fn with_proxies(self, proxies: Arc<HashMap<PathBuf, PathBuf>>) -> Self {
+    pub fn with_proxies(self, proxies: Arc<HashMap<PathBuf, ProxyFile>>) -> Self {
         Self { proxies, ..self }
     }
 
@@ -209,12 +279,17 @@ impl ProjectPaths {
 
     /// The file a video decoder opens for `source`: its proxy when it has one, else the original.
     pub fn video_decode_path(&self, source: &str) -> PathBuf {
-        let original = self.source_path(source);
+        self.video_decode_source(source).map_or_else(|| self.source_path(source), |proxy| proxy.path)
+    }
+
+    /// The proxy of `source`, when the preview has one.
+    pub fn video_decode_source(&self, source: &str) -> Option<ProxyFile> {
         if self.proxies.is_empty() {
-            return original;
+            return None;
         }
-        let key = std::path::absolute(&original).unwrap_or_else(|_| original.clone());
-        self.proxies.get(&key).cloned().unwrap_or(original)
+        let original = self.source_path(source);
+        let key = std::path::absolute(&original).unwrap_or(original);
+        self.proxies.get(&key).cloned()
     }
 
     /// Like [`Self::new`], but packages come only from the package roots. A package is shader code
@@ -528,7 +603,7 @@ mod tests {
     fn a_video_decodes_from_its_proxy_and_an_export_copy_reads_the_original() {
         let original = PathBuf::from(r"D:\work\a.mp4");
         let proxy = PathBuf::from(r"C:\cache\a-proxy.mp4");
-        let map = HashMap::from([(original.clone(), proxy.clone())]);
+        let map = HashMap::from([(original.clone(), ProxyFile::plain(proxy.clone()))]);
         let paths = ProjectPaths::new(Path::new(r"D:\work\p.json"), Vec::new()).with_proxies(Arc::new(map));
         assert!(paths.has_proxies());
         assert_eq!(paths.video_decode_path("a.mp4"), proxy, "relative to the project");
@@ -538,6 +613,35 @@ mod tests {
         let export = paths.without_proxies();
         assert!(!export.has_proxies());
         assert_eq!(export.video_decode_path("a.mp4"), original);
+    }
+
+    #[test]
+    fn a_proxy_time_lands_on_the_proxy_frame_that_holds_the_original_frame() {
+        // 23.976 fps: one frame is 3753.75 ticks; the proxy steps 3753. Time bases of 1/24000 (the
+        // usual one), 1/90000 and 1/1000 (coarse, so the rounding moves frames).
+        for time_base in [(1, 24000), (1, 90000), (1, 1000)] {
+            let timing = ProxyTiming { rate: (24000, 1001), time_base, frame_duration: Time::from_ticks(3753) };
+            for frame in [0_i64, 1, 2, 3, 100, 14_385, 100_000] {
+                let start = (frame as f64 * 3753.75) as i64;
+                for offset in [-2, -1, 0, 1, 2, 1800, 3750, 3752] {
+                    let time = Time::from_ticks((start + offset).max(0));
+                    let asked = timing.proxy_time(time).ticks();
+                    assert_eq!(asked % 3753, 0, "a proxy frame start");
+                    // Proxy frame `asked / 3753` holds what the original's decoder showed at `asked`.
+                    assert_eq!(timing.original_frame(asked), timing.original_frame(time.ticks()), "{time_base:?}: time {} ticks asked {asked}", time.ticks());
+                    assert!(asked <= time.ticks() + 3753, "{time_base:?}: never more than a proxy frame on");
+                }
+            }
+        }
+        // The case the GPU test found: at 7506 ticks the original shows its frame 2 (pts 2001.6
+        // rounds to 2002), so the proxy frame there holds frame 2, not 1.
+        let film = ProxyTiming { rate: (24000, 1001), time_base: (1, 24000), frame_duration: Time::from_ticks(3753) };
+        assert_eq!(film.proxy_time(Time::from_ticks(6000)), Time::from_ticks(3753));
+        assert_eq!(film.proxy_time(Time::from_ticks(7506)), Time::from_ticks(7506));
+        // Same steps: the time is kept to the frame start.
+        let even = ProxyTiming { rate: (30, 1), time_base: (1, 15360), frame_duration: Time::from_ticks(3000) };
+        assert_eq!(even.proxy_time(Time::from_ticks(4500)), Time::from_ticks(3000));
+        assert_eq!(even.proxy_time(Time::from_ticks(3000)), Time::from_ticks(3000));
     }
 
 }

@@ -120,14 +120,35 @@ pub fn probe_media(path: &Path) -> Result<MediaProbe, String> {
 }
 
 /// The picture of a video file as the editor shows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VideoFormat {
     /// Width in pixels once the sample aspect ratio and the turn of the stream are applied.
     pub width: u32,
     /// Height in pixels once the turn of the stream is applied.
     pub height: u32,
-    /// How long one frame lasts at the stream's average frame rate, when it states one.
+    /// Width over height as shown, unrounded: the sample aspect ratio and the turn applied, the
+    /// rule of [`crate::DecodedFrame::display_aspect`].
+    pub aspect: f64,
+    /// The frame rate as frames per second `(num, den)`: the average rate, or the stream's base
+    /// rate (`r_frame_rate`) when the average is not stated (`0/0`). `None` when neither is.
+    pub rate: Option<(i32, i32)>,
+    /// Whether the average and base rates agree, so the frames are evenly spaced at `rate`. A
+    /// variable-rate file has a base rate above its average.
+    pub constant_rate: bool,
+    /// The time base of the video stream, as `num / den` seconds.
+    pub time_base: (i32, i32),
+    /// One frame of `rate`, rounded down to whole ticks, so frames sampled at this step never skip
+    /// a frame of the source.
     pub frame_duration: Option<Time>,
+}
+
+fn valid_rate(rate: ffi::AVRational) -> Option<(i32, i32)> {
+    (rate.num > 0 && rate.den > 0).then_some((rate.num, rate.den))
+}
+
+/// One frame at `num/den` frames per second in whole ticks, rounded down; `None` below one tick.
+pub fn frame_ticks_floor(num: i32, den: i32) -> Option<Time> {
+    (num > 0 && den > 0).then(|| i64::from(den) * TICKS_PER_SECOND / i64::from(num)).filter(|ticks| *ticks > 0).map(Time::from_ticks)
 }
 
 /// Reads the size and frame rate of the best video stream of `path`.
@@ -148,12 +169,18 @@ pub fn probe_video_format(path: &Path) -> Result<VideoFormat, String> {
         if stored_width <= 0 || stored_height <= 0 {
             return Err(format!("{shown}: the video stream states no size"));
         }
-        let aspect = ffi::display_aspect(stored_width, stored_height, (*parameters).sample_aspect_ratio);
-        let width = (aspect * f64::from(stored_height)).round().max(1.0) as u32;
-        let (width, height) = crate::orientation::turned_size(width, stored_height as u32, crate::orientation::stream_turns(stream));
-        let rate = (*stream).avg_frame_rate;
-        let frame_duration = (rate.num > 0 && rate.den > 0).then(|| (i64::from(rate.den) * TICKS_PER_SECOND + i64::from(rate.num) / 2) / i64::from(rate.num)).filter(|ticks| *ticks > 0).map(Time::from_ticks);
-        Ok(VideoFormat { width, height, frame_duration })
+        let stored_aspect = ffi::display_aspect(stored_width, stored_height, (*parameters).sample_aspect_ratio);
+        let width = (stored_aspect * f64::from(stored_height)).round().max(1.0) as u32;
+        let turns = crate::orientation::stream_turns(stream);
+        let (width, height) = crate::orientation::turned_size(width, stored_height as u32, turns);
+        let aspect = if turns % 2 == 1 { 1.0 / stored_aspect } else { stored_aspect };
+        let (average, base) = (valid_rate((*stream).avg_frame_rate), valid_rate((*stream).r_frame_rate));
+        let rate = average.or(base);
+        // Rates compare as fractions: 30000/1001 and 60000/2002 are one rate.
+        let constant_rate = matches!((average, base), (Some((an, ad)), Some((bn, bd))) if i64::from(an) * i64::from(bd) == i64::from(bn) * i64::from(ad));
+        let frame_duration = rate.and_then(|(num, den)| frame_ticks_floor(num, den));
+        let time_base = ((*stream).time_base.num, (*stream).time_base.den);
+        Ok(VideoFormat { width, height, aspect, rate, constant_rate, time_base, frame_duration })
     }
 }
 
@@ -215,9 +242,26 @@ mod tests {
         let path = clip("format.mp4", &["-f", "lavfi", "-i", "color=c=gray:s=64x48:r=25:d=1", "-vf", "setsar=2", "-c:v", "mpeg4"]);
         let format = probe_video_format(&path).expect("probe");
         assert_eq!((format.width, format.height), (128, 48), "square pixels");
+        assert!((format.aspect - 128.0 / 48.0).abs() < 1e-9);
         assert_eq!(format.frame_duration, Some(Time::from_ticks(TICKS_PER_SECOND / 25)));
+        assert_eq!(format.rate, Some((25, 1)));
+        assert!(format.constant_rate);
         let sound = clip("format-sound.m4a", &["-f", "lavfi", "-i", "sine=f=440:d=1", "-c:a", "aac"]);
         assert!(probe_video_format(&sound).is_err(), "no video stream");
+    }
+
+    #[test]
+    fn an_odd_frame_rate_rounds_its_frame_down_and_a_turned_video_swaps_its_shape() {
+        assert_eq!(frame_ticks_floor(24000, 1001), Some(Time::from_ticks(3753)), "3753.75 ticks, down");
+        assert_eq!(frame_ticks_floor(30000, 1001), Some(Time::from_ticks(3003)));
+        assert_eq!(frame_ticks_floor(0, 0), None);
+        let stored = clip("format-stored.mp4", &["-f", "lavfi", "-i", "color=c=gray:s=64x48:r=24000/1001:d=1", "-c:v", "mpeg4"]);
+        let path = clip("format-turned.mp4", &["-display_rotation", "90", "-i", &stored.to_string_lossy(), "-c", "copy"]);
+        let format = probe_video_format(&path).expect("probe");
+        assert_eq!((format.width, format.height), (48, 64), "upright");
+        assert!((format.aspect - 48.0 / 64.0).abs() < 1e-9, "{}", format.aspect);
+        assert_eq!(format.rate, Some((24000, 1001)));
+        assert_eq!(format.frame_duration, Some(Time::from_ticks(3753)));
     }
 
     #[test]
