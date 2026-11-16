@@ -30,10 +30,6 @@ use engine::render::{Decoder, RenderError};
 use engine::Time;
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
-use windows::core::Interface;
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
-
 use super::{forward_seek_pays, stream_pts, DecodedFrame, PixelFormat, PublishClock, SequentialDecoder, FORWARD_SEEK_SECONDS};
 use crate::ffi::{self, check};
 
@@ -105,12 +101,19 @@ struct CpuFrame {
     frame: *mut ffi::AVFrame,
     pts: i64,
     format: PixelFormat,
+    /// A reference to the pool of the frame it came from, which it goes back into: the decoder's
+    /// pool changes with the size of the pictures, and a converted frame has another pool.
+    pool: *mut ffi::AVBufferRef,
 }
 
 impl Drop for CpuFrame {
     fn drop(&mut self) {
-        // SAFETY: self.frame came from av_frame_alloc and is not used afterwards.
-        unsafe { ffi::av_frame_free(&mut self.frame) };
+        // SAFETY: self.frame came from av_frame_alloc, self.pool from av_buffer_ref or is null,
+        // and neither is used afterwards.
+        unsafe {
+            ffi::av_frame_free(&mut self.frame);
+            ffi::av_buffer_unref(&mut self.pool);
+        }
     }
 }
 
@@ -417,9 +420,9 @@ impl ReverseDecoder {
 fn download(frame: &DecodedFrame) -> Result<CpuFrame, String> {
     // SAFETY: frame.frame is a valid D3D12 frame; the copy is freed by CpuFrame on every path.
     unsafe {
-        let copy = CpuFrame { frame: ffi::av_frame_alloc(), pts: frame.pts, format: frame.format };
-        if copy.frame.is_null() {
-            return Err("av_frame_alloc failed".to_owned());
+        let copy = CpuFrame { frame: ffi::av_frame_alloc(), pts: frame.pts, format: frame.format, pool: ffi::av_buffer_ref((*frame.frame).hw_frames_ctx) };
+        if copy.frame.is_null() || copy.pool.is_null() {
+            return Err("av_frame_alloc or av_buffer_ref failed".to_owned());
         }
         // FFmpeg waits for the frame's fence before copying it.
         check(ffi::av_hwframe_transfer_data(copy.frame, frame.frame, 0), "av_hwframe_transfer_data (download)")?;
@@ -430,27 +433,17 @@ fn download(frame: &DecodedFrame) -> Result<CpuFrame, String> {
     }
 }
 
-/// `copy` uploaded into a free frame of the pool of `decoder`.
+/// `copy` uploaded into a free frame of the pool it was downloaded from.
 fn upload(decoder: &SequentialDecoder, copy: &CpuFrame) -> Result<DecodedFrame, String> {
-    // SAFETY: the codec context has a frames context once it has decoded a frame, which it did
-    // for `copy`; the new frame is freed by DecodedFrame on every path.
+    // SAFETY: copy.pool is a valid frames context; the new frame is freed by DecodedFrame on
+    // every path.
     unsafe {
-        let frames = (*decoder.codec_context).hw_frames_ctx;
-        if frames.is_null() {
-            return Err("the decoder has no frame pool to upload into".to_owned());
-        }
         let frame = DecodedFrame { frame: ffi::av_frame_alloc(), pts: copy.pts, format: copy.format, turns: decoder.turns, aspect: None, origin: None };
         if frame.frame.is_null() {
             return Err("av_frame_alloc failed".to_owned());
         }
-        check(ffi::av_hwframe_get_buffer(frames, frame.frame, 0), "av_hwframe_get_buffer")?;
-        // The surface may still be read by work on its last picture, which FFmpeg's upload does
-        // not wait for.
-        let sync = &frame.descriptor().sync_ctx;
-        let raw = sync.fence.cast::<std::ffi::c_void>();
-        if let Some(fence) = ID3D12Fence::from_raw_borrowed(&raw) {
-            fence.SetEventOnCompletion(sync.fence_value, HANDLE::default()).map_err(|e| format!("waiting for a pool surface failed: {e}"))?;
-        }
+        check(ffi::av_hwframe_get_buffer(copy.pool, frame.frame, 0), "av_hwframe_get_buffer")?;
+        super::wait_for_surface(frame.frame)?;
         check(ffi::av_hwframe_transfer_data(frame.frame, copy.frame, 0), "av_hwframe_transfer_data (upload)")?;
         check(ffi::av_frame_copy_props(frame.frame, copy.frame), "av_frame_copy_props")?;
         (*frame.frame).width = (*copy.frame).width;

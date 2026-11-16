@@ -139,9 +139,25 @@ Blend của `crates/poc/src/mix_bench.rs` chỉ kiểm ở 3 vị trí tua, ma t
 
 `crates/d3d12-backend/src/encoder.rs` đã dùng các encoder phần cứng nhận khung NV12 từ CPU (`*_nvenc`, `*_qsv`, `*_amf`, `*_mf`) cho cả H.264 và HEVC, nhưng `h264_d3d12va`/`hevc_d3d12va` vẫn chưa dùng được: chúng đòi `AV_PIX_FMT_D3D12` (hw frames context). Muốn dùng cần đưa khung đã ghép trên GPU thẳng vào hw frames context của FFmpeg (zero-copy), bỏ bước đọc RGBA về CPU và đổi sang NV12 trên CPU. Ghi ngày 2026-11-09, thu hẹp ngày 2026-11-16.
 
-### [Vừa] Bộ giải mã chưa xử lý nguồn đổi kích thước giữa chừng và nguồn 4:2:2 / 4:4:4
+### [Thấp] Đường giải mã phần mềm hạ chroma 4:2:2 / 4:4:4 xuống 4:2:0
 
-`crates/d3d12-backend/src/decoder.rs` (`next_frame`) nhận NV12 (8-bit) và P010 (10-bit 4:2:0), từ chối mọi định dạng khác, kể cả 10-bit 4:2:2 của một số máy quay. Kích thước khung coi như không đổi suốt một clip; nguồn đổi độ phân giải giữa file chưa có bài test và chưa xử lý. Ghi ngày 2026-11-09, cập nhật 2026-11-16 sau khi thêm P010.
+`crates/d3d12-backend/src/decoder/software.rs` đổi mọi khung D3D12VA không nhận (H.264 4:2:2, ProRes, FFV1, HEVC 4:4:4...) sang NV12/P010 bằng libswscale vì đầu vào D3D12 của gpufx-core chỉ đọc NV12/P010/RGBA. Màu đúng (test `crates/gpufx-render/tests/source_formats.rs` so với ffmpeg), nhưng mất nửa độ phân giải chroma, lộ ở viền chữ màu hoặc khi keying. Giữ đủ chroma cần đường planar (hoặc RGBA64) cho đầu vào D3D12 trong gpufx-core. Ghi ngày 2026-11-17 (tạm chọn khi làm đường dự phòng phần mềm).
+
+### [Thấp] Đường giải mã phần mềm upload đồng bộ từng khung
+
+Mỗi khung của `FrameConverter::convert` chờ `av_hwframe_transfer_data` upload xong (FFmpeg chờ queue rỗng) và chuyển đổi trên CPU, nên nguồn 4K 4:2:2 phát chậm. Nên upload bất đồng bộ hoặc chuyển màu bằng shader; tạm thời proxy là cách xem mượt. Ghi ngày 2026-11-17.
+
+### [Thấp] Clip đảo ngược lệch một khung với time base 1/1000 (MKV)
+
+`ReverseDecoder` làm tròn xuống (`floor_pts`) còn khung MKV lưu timestamp đã làm tròn lên (khung 61 ở 2033 ms thay vì 2033,33), nên tại ranh giới khung clip đảo ngược hiện khung sau đó một khung. Thấy khi viết `source_formats.rs` với clip MKV (đã đổi sang MP4 để tránh); chưa sửa. Ghi ngày 2026-11-17.
+
+### [Thấp] Seek đầu tiên trong MPEG-TS ghép có thể rơi vào GOP sau
+
+Clip `.ts` ghép bằng concat demuxer (start_time 1,47 s) cho khung đầu tiên là khung 30 thay vì 0: seek ban đầu của `SequentialDecoder` không thử lùi lại như `skip_ahead`. Chưa kiểm với file TS thường. Ghi ngày 2026-11-17.
+
+### [Thấp] Proxy của nguồn đổi kích thước giữa chừng giữ khung hình phần đầu
+
+Proxy dựng theo kích thước và tỉ lệ đầu file (`ProxyFile::display_aspect`), nên phần sau có tỉ lệ khác bị letterbox bên trong khung đó rồi mới đặt vào project; export từ bản gốc đặt trực tiếp. Kết quả gần giống nhưng có thể chênh viền. Ghi ngày 2026-11-17.
 
 ### [Thấp] Đưa clip về kích thước project đang kéo giãn, downscale chỉ bilinear
 

@@ -181,6 +181,8 @@ unsafe extern "C" {
     pub fn av_frame_get_buffer(frame: *mut AVFrame, align: core::ffi::c_int) -> core::ffi::c_int;
     pub fn av_pix_fmt_desc_get(format: AVPixelFormat) -> *const AVPixFmtDescriptor;
     pub fn av_hwframe_get_buffer(frames: *mut AVBufferRef, frame: *mut AVFrame, flags: core::ffi::c_int) -> core::ffi::c_int;
+    pub fn av_hwframe_ctx_alloc(device: *mut AVBufferRef) -> *mut AVBufferRef;
+    pub fn av_hwframe_ctx_init(frames: *mut AVBufferRef) -> core::ffi::c_int;
     pub fn av_frame_copy_props(destination: *mut AVFrame, source: *const AVFrame) -> core::ffi::c_int;
     pub fn av_frame_make_writable(frame: *mut AVFrame) -> core::ffi::c_int;
     pub fn av_packet_rescale_ts(packet: *mut AVPacket, source: AVRational, destination: AVRational);
@@ -189,6 +191,11 @@ unsafe extern "C" {
     /// when the codec accepts any format.
     pub fn avcodec_get_supported_config(context: *const AVCodecContext, codec: *const AVCodec, config: core::ffi::c_int, flags: core::ffi::c_uint, out_configs: *mut *const core::ffi::c_void, out_count: *mut core::ffi::c_int) -> core::ffi::c_int;
 }
+
+/// `AV_PIX_FMT_FLAG_HWACCEL`: the format is a hardware surface, not samples in memory.
+pub const AV_PIX_FMT_FLAG_HWACCEL: u64 = 1 << 3;
+/// `AV_PIX_FMT_FLAG_RGB`
+pub const AV_PIX_FMT_FLAG_RGB: u64 = 1 << 5;
 
 /// `AV_CODEC_CONFIG_PIX_FORMAT`
 pub const AV_CODEC_CONFIG_PIX_FORMAT: core::ffi::c_int = 0;
