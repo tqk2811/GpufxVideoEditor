@@ -16,17 +16,28 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 
 `D3d12Decoder::wait_until_idle` ở `crates/poc/src/decoder.rs` và `SequentialDecoder::wait_idle` ở `crates/d3d12-backend/src/decoder.rs:389-401` chờ CPU trước mỗi `mix` để khung không còn bị decode khác tham chiếu. Phát p99 có lần lên 31,4 ms, sát ngưỡng 33 ms, chưa rõ nguyên nhân. Bản editor cần đồng bộ trên GPU hoặc tách luồng. Ghi ngày 2026-11-09.
 
-### [Vừa] Âm thanh clip phát ngược seek một lần mỗi chunk
+### [Thấp] Âm thanh clip phát ngược seek một lần mỗi chunk
 
-`crates/engine/src/stretch.rs` (`ReverseReader`, `REVERSE_CHUNK` 16384 khung) đọc file theo chiều lùi nên mỗi chunk là một lần seek của decoder audio. Với nguồn 48 kHz kết quả vẫn trùng bit giữa preview và export; với nguồn tần số khác, decoder khởi động lại resampler sau seek (xem đầu `stretch.rs`) nên mẫu ở biên chunk có thể lệch nhẹ so với lần đọc tuần tự, và chi phí seek tăng theo độ dài clip. Nên cân nhắc chunk lớn hơn, hoặc giải mã cả đoạn nguồn của clip ngược một lần vào bộ nhớ khi nó ngắn. Ghi ngày 2026-11-17.
+`crates/engine/src/stretch.rs` (`ReverseReader`, `REVERSE_CHUNK` 16384 khung) đọc file theo chiều lùi, và mỗi chunk đọc bằng `AudioSource::read_fresh` (seek mới, preroll 200 ms ở `crates/d3d12-backend/src/audio.rs`) để mẫu chỉ phụ thuộc vị trí, preview trùng bit với export. Giá phải trả: mỗi chunk khoảng 1/3 giây lại giải mã thêm 200 ms preroll, và chi phí seek tăng theo độ dài clip. Nên cân nhắc chunk lớn hơn, hoặc giải mã cả đoạn nguồn của clip ngược một lần vào bộ nhớ khi nó ngắn. Ghi ngày 2026-11-17.
 
-### [Thấp] Decoder phát ngược: VRAM của ring và biên khung khi pts làm tròn lên
+### [Thấp] Decoder phát ngược: báo GOP dài lên giao diện, trần bộ nhớ chung, biên khung khi pts làm tròn lên
 
-`crates/d3d12-backend/src/decoder/reverse.rs`: mỗi clip phát ngược mở decoder với thêm `RING + 1` = 33 surface trong pool (4K P010 khoảng 800 MB), chưa co giãn theo độ phân giải. GOP dài hơn ring thì mỗi 32 khung giải mã lại từ keyframe (chi phí khoảng GOP/32 lần mỗi khung). `floor_pts` lấy pts sàn để khung "1 tick trước biên" không bị làm tròn sang khung sau; với stream ghi pts trễ lên một đơn vị, khung cuối/đoạn giữ cuối của clip ngược có thể rơi xuống khung ngay dưới `source_in`. Chưa có test với nguồn HDR/P010 phát ngược và chưa đo tua clip ngược trong editor. Ghi ngày 2026-11-17.
+`crates/d3d12-backend/src/decoder/reverse.rs`:
 
-### [Thấp] Kéo đầu clip phát ngược không bị chặn ở cuối nguồn
+- `ReverseDecoder::slow_gop` báo khi GOP dài hơn nhiều lần ring + cache (lúc đó mỗi khung bị giải mã lại nhiều lần), nhưng chưa có đường đưa lên thanh trạng thái: decoder nằm trong `FrameRenderer` của engine, compositor và editor chưa đọc được. Nên nối lên và gợi ý bật proxy (tính năng proxy ở nhánh `feat/proxy`).
+- Trần VRAM của ring (`RING_BUDGET` 256 MB) và RAM của cache (`CACHE_BUDGET` 768 MB) tính riêng từng clip phát ngược, chưa có trần chung khi nhiều clip ngược cùng mở.
+- `floor_pts` lấy pts sàn để khung "1 tick trước biên" không bị làm tròn sang khung sau; với stream ghi pts trễ lên một đơn vị, khung cuối/đoạn giữ cuối của clip ngược có thể rơi xuống khung ngay dưới `source_in`.
+- Chưa có test với nguồn HDR/P010 phát ngược (đường tải khung từ cache RAM lên pool) và chưa đo tua clip ngược trong editor.
 
-`crates/gpufx-editor/src/timeline/drag.rs` (`clamp_trim`, nhánh `TrimStart`) và `crates/engine/src/edit.rs` (`trim_start`): clip phát ngược kéo đầu ra trước là đọc lên phía cuối nguồn, nhưng project không biết độ dài nguồn nên không chặn (giống `trim_end` của clip xuôi). Có thể dùng `EditorState::source_remaining` để chặn ở cuối nguồn như ô thời lượng. Ghi ngày 2026-11-17.
+Ghi ngày 2026-11-17.
+
+### [Thấp] Clip phát ngược đọc quá cuối nguồn khi kéo đầu hoặc có transition vào
+
+`crates/gpufx-editor/src/timeline/drag.rs:88` (`clamp_trim`, nhánh `TrimStart`) và `crates/engine/src/edit.rs` (`trim_start`): clip phát ngược kéo đầu ra trước là đọc lên phía cuối nguồn, nhưng project không biết độ dài nguồn nên không chặn (giống `trim_end` của clip xuôi). Transition vào clip phát ngược cũng đọc phía trên `source_end`, có thể vượt cuối file. Cần độ dài nguồn đã probe; có thể dùng `EditorState::source_remaining` để chặn như ô thời lượng. Ghi ngày 2026-11-17.
+
+### [Thấp] Ý tưởng: clip phát ngược ưu tiên proxy toàn khung I
+
+Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đọc từ proxy toàn khung I (hoặc GOP rất ngắn): mỗi khung giải mã đúng một lần, không cần ring lớn hay cache RAM của `crates/d3d12-backend/src/decoder/reverse.rs`. Ghi ngày 2026-11-17.
 
 ### [Thấp] `still_dimensions` bỏ qua hướng EXIF
 
