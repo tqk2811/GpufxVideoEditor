@@ -586,3 +586,15 @@ Editor gọi `encoder_available` (`crates/d3d12-backend/src/encoder.rs`) trong t
 ### [Thấp] Khôi phục ghi lại ngay bản vừa đọc lên chỗ bản tự lưu gốc
 
 `Autosave::adopt` (`crates/gpufx-editor/src/recovery.rs`) ghi project vừa parse đè lên `project.json` của bản vừa giành. Nếu parse rồi serialize lại làm rơi dữ liệu (trường lạ, phiên bản khác) thì mất bản gốc. Nên giữ bản gốc tới lần tự lưu kế tiếp hoặc chép sang `.orig`. Ghi ngày 2026-11-16.
+
+### [Thấp] Đổi cao độ lên không lọc chống aliasing, và khử nhiễu trễ khoảng 60 ms sau mỗi lần tua
+
+`crates/engine/src/stretch.rs` (`ClipStretch::render`, nhánh `pitch_cents != 0`) lấy mẫu lại tín hiệu WSOLA bằng cubic Catmull-Rom, không lọc thông thấp trước khi bỏ mẫu, nên dịch lên `r` lần thì phần trên `24 kHz / r` gập xuống (giọng nói gần như không có năng lượng ở đó, nhạc thì có). Nên thay bằng nội suy sinc có cửa sổ khi dịch lên. `crates/engine/src/denoise.rs` sau mỗi lần tua hoặc đổi chế độ phải tính trước mẫu đầu tiên: chế độ "giọng nói" hai lượt RNNoise (mỗi lượt 1,5 giây âm thanh), chế độ "chung" đọc khoảng 7 giây nguồn quanh chunk để lấy hồ sơ nhiễu (`PROFILE_SPAN`); khoảng 45-60 ms ở bản release với một clip, phần lớn là giải mã nguồn (`cost_per_second_of_audio` trong `crates/engine/tests/voice_fx.rs`; đổi độ mạnh không tính lại); vài clip cùng khử nhiễu thì cộng dồn và preview có thể hụt tiếng một chút ngay sau khi tua. Nếu thành vấn đề thì tính trước các khối quanh đầu phát trên luồng chuẩn bị. Ghi ngày 2026-11-16.
+
+### [Thấp] Khử nhiễu "giọng nói" còn làm tiếng ồn còn lại "thở" khoảng 1,5 dB mỗi giây
+
+RNNoise trong `crates/engine/src/denoise.rs` (`DenoiseCache::run`) khởi động lại mỗi chunk 1 giây sau 0,5 giây preroll, nên trên nhiễu trắng đều tiếng ồn còn lại cao hơn ở đầu chunk khoảng 1,5 dB (`steady_noise_stays_level_after_general_denoise` in ra số này, chỉ chặn chế độ "chung"). Preroll 1 giây còn 1,23 dB, 2 giây còn 1,13 dB, tốn gấp đôi trở lên nên chưa đổi. Chế độ "chung" đã hết nhờ hồ sơ nhiễu cố định theo vị trí nguồn. Ghi ngày 2026-11-16.
+
+### [Thấp] Khử nhiễu "chung" coi một lần đọc ngắn là hết file
+
+`crates/engine/src/denoise.rs` (`source_end`, gán khi `read_counted` trả ít mẫu hơn yêu cầu) dùng mốc này để cắt thống kê và hồ sơ nhiễu. Nếu nguồn trả đọc ngắn khi chưa hết file (decoder trục trặc giữa chừng) thì các khối sau bị coi là ngoài file, và preview có thể khác export. Nên xác nhận `read_counted` của `crates/d3d12-backend/src/audio.rs` chỉ trả ngắn ở cuối file, hoặc lấy độ dài từ probe. Ghi ngày 2026-11-16.

@@ -70,23 +70,17 @@ pub fn mix_audio_with<S: AudioSource + ?Sized>(
     let frames = out.len() / MIX_CHANNELS;
     let mut scratch: Vec<f32> = Vec::new();
     let segments = audio_segments(project, start, frames as i64);
-    stretch.retain(&segments.iter().filter(|segment| segment.stretch.is_some()).map(|segment| segment.key).collect::<Vec<_>>());
+    stretch.retain(&segments);
     for segment in segments {
         let len = segment.len as usize;
         scratch.clear();
         scratch.resize(len * MIX_CHANNELS, 0.0);
-        if let Some(spec) = segment.stretch {
-            stretch.render(source, &segment, spec, &mut scratch)?;
-        } else {
-            // Samples before the beginning of the source stay silent.
-            let skip = segment.source_start.saturating_neg().clamp(0, segment.len) as usize;
-            if skip < len {
-                source.read(
-                    segment.key,
-                    segment.source,
-                    segment.source_start.max(0),
-                    &mut scratch[skip * MIX_CHANNELS..],
-                )?;
+        stretch.read(source, &segment, &mut scratch)?;
+        if let Some(effect) = segment.voice_effect {
+            for (i, frame) in scratch.chunks_exact_mut(MIX_CHANNELS).enumerate() {
+                let factor = effect.factor_at(segment.start + i as i64);
+                frame[0] *= factor;
+                frame[1] *= factor;
             }
         }
         let offset = (segment.start - start) as usize * MIX_CHANNELS;

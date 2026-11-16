@@ -1,7 +1,7 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
-use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED};
+use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MAX_PITCH_SEMITONES};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -186,6 +186,10 @@ pub enum ValidationError {
     },
     /// A clip `gain_db` is above 60.
     GainTooLarge { track: usize, clip: usize, gain_db: f64 },
+    /// A clip `denoise.strength` is not a number from 0 to 1.
+    InvalidDenoiseStrength { track: usize, clip: usize, strength: f64 },
+    /// A clip `voice.semitones` is not a number from -12 to 12.
+    InvalidPitch { track: usize, clip: usize, semitones: f64 },
     /// `output.audio.bitrate` is zero.
     InvalidAudioBitrate,
     /// `fade_in + fade_out` is longer than the clip.
@@ -358,6 +362,12 @@ impl fmt::Display for ValidationError {
             ),
             GainTooLarge { track, clip, gain_db } => {
                 write!(f, "track {track}, clip {clip}: gain_db {gain_db} must not be above 60")
+            }
+            InvalidDenoiseStrength { track, clip, strength } => {
+                write!(f, "track {track}, clip {clip}: denoise strength {strength} must be from 0 to 1")
+            }
+            InvalidPitch { track, clip, semitones } => {
+                write!(f, "track {track}, clip {clip}: voice semitones {semitones} must be from -{MAX_PITCH_SEMITONES} to {MAX_PITCH_SEMITONES}")
             }
             InvalidAudioBitrate => write!(f, "output: audio bitrate must be positive"),
             FadesExceedClip { track, clip, fade_in, fade_out, duration } => write!(
@@ -621,6 +631,12 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                     clip: c,
                     gain_db: clip.gain_db,
                 });
+            }
+            if !(0.0..=1.0).contains(&clip.denoise.strength) {
+                errors.push(InvalidDenoiseStrength { track: t, clip: c, strength: clip.denoise.strength });
+            }
+            if !(-MAX_PITCH_SEMITONES..=MAX_PITCH_SEMITONES).contains(&clip.voice.semitones) {
+                errors.push(InvalidPitch { track: t, clip: c, semitones: clip.voice.semitones });
             }
             let mut fades_ok = true;
             for (field, value) in [("fade_in", clip.fade_in), ("fade_out", clip.fade_out)] {

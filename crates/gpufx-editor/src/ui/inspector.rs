@@ -158,6 +158,10 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         // The sound, and so its fades, is only the moving part between the holds.
         fade_row(ui, state, &language.t(Message::FadeIn), clip.fade_in, clip.media_duration().saturating_sub(clip.fade_out), !has_before, |state, value| state.live_fades(value, clip.fade_out));
         fade_row(ui, state, &language.t(Message::FadeOut), clip.fade_out, clip.media_duration().saturating_sub(clip.fade_in), !has_after, |state, value| state.live_fades(clip.fade_in, value));
+        ui.separator();
+        denoise_rows(ui, state, &clip.denoise);
+        ui.separator();
+        voice_rows(ui, state, &clip.voice);
     });
 
     if let Some(text) = &clip.text {
@@ -174,6 +178,77 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         });
         ui.separator();
         effects(ui, state, key, editable);
+    }
+}
+
+/// The noise reduction of the clip: a method and, when one is chosen, its strength in percent.
+fn denoise_rows(ui: &mut egui::Ui, state: &mut EditorState, denoise: &engine::ClipDenoise) {
+    let language = state.language();
+    ui.colored_label(theme::text_dim(), language.t(Message::FieldDenoise));
+    ui.horizontal(|ui| {
+        for (mode, label, hint) in [
+            (engine::DenoiseMode::Off, Message::DenoiseOff, None),
+            (engine::DenoiseMode::Voice, Message::DenoiseVoice, Some(Message::DenoiseVoiceHint)),
+            (engine::DenoiseMode::General, Message::DenoiseGeneral, Some(Message::DenoiseGeneralHint)),
+        ] {
+            let mut response = ui.selectable_label(denoise.mode == mode, language.t(label));
+            if let Some(hint) = hint {
+                response = response.on_hover_text(language.t(hint));
+            }
+            if response.clicked() && denoise.mode != mode {
+                state.set_denoise_mode(mode);
+            }
+        }
+    });
+    if denoise.mode == engine::DenoiseMode::Off {
+        return;
+    }
+    let mut percent = denoise.strength * 100.0;
+    let changed = ui.horizontal(|ui| {
+        ui.colored_label(theme::text_dim(), language.t(Message::DenoiseStrength));
+        ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+        let mut changed = ui.add(slider(&mut percent, 0.0..=100.0)).changed();
+        changed |= drag_field(ui, &mut percent, 0.0..=100.0, 1.0, 0, " %", None).1;
+        changed
+    });
+    if changed.inner {
+        state.live_denoise_strength((percent / 100.0).clamp(0.0, 1.0));
+    }
+}
+
+/// The voice change of the clip: presets, the pitch in semitones and the robot effect.
+fn voice_rows(ui: &mut egui::Ui, state: &mut EditorState, voice: &engine::ClipVoice) {
+    let language = state.language();
+    ui.colored_label(theme::text_dim(), language.t(Message::FieldVoiceChange));
+    let current = engine::VoicePreset::of(voice);
+    ui.horizontal_wrapped(|ui| {
+        for preset in engine::VoicePreset::ALL {
+            let label = match preset {
+                engine::VoicePreset::Normal => Message::VoiceNormal,
+                engine::VoicePreset::Chipmunk => Message::VoiceChipmunk,
+                engine::VoicePreset::Deep => Message::VoiceDeep,
+                engine::VoicePreset::Robot => Message::VoiceRobot,
+            };
+            if ui.selectable_label(current == Some(preset), language.t(label)).clicked() && current != Some(preset) {
+                state.apply_voice_preset(preset);
+            }
+        }
+    });
+    let range = -engine::MAX_PITCH_SEMITONES..=engine::MAX_PITCH_SEMITONES;
+    let mut semitones = voice.semitones;
+    ui.colored_label(theme::text_dim(), language.t(Message::FieldPitch));
+    let changed = ui.horizontal(|ui| {
+        ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+        let mut changed = ui.add(slider(&mut semitones, range.clone()).step_by(0.1)).changed();
+        changed |= drag_field(ui, &mut semitones, range, 0.05, 1, "", None).1;
+        changed
+    });
+    if changed.inner {
+        state.live_pitch(semitones);
+    }
+    let mut robot = voice.effect == engine::VoiceEffect::Robot;
+    if ui.checkbox(&mut robot, language.t(Message::VoiceRobot)).changed() {
+        state.set_voice_effect(if robot { engine::VoiceEffect::Robot } else { engine::VoiceEffect::None });
     }
 }
 

@@ -28,7 +28,7 @@ pub fn preview_length(manifest: Option<Time>, probed: Option<Time>) -> Time {
 /// track: the timeline is only as long as its video tracks, so on an audio track the preview would
 /// last no time at all. A video clip is heard all the same.
 pub fn preview_project(source: &str, duration: Option<Time>) -> Project {
-    let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration: duration.filter(|length| *length > Time::ZERO).unwrap_or(FALLBACK_LENGTH), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default() };
+    let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration: duration.filter(|length| *length > Time::ZERO).unwrap_or(FALLBACK_LENGTH), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default() };
     Project {
         version: SUPPORTED_VERSION,
         output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 128_000 }) },

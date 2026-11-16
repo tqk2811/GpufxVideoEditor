@@ -180,6 +180,12 @@ pub struct Clip {
     /// the file when there are none; ignored on an audio track.
     #[serde(default, skip_serializing_if = "ClipAnimation::is_empty")]
     pub animation: ClipAnimation,
+    /// Noise reduction of the sound. Left out of the file when off.
+    #[serde(default, skip_serializing_if = "ClipDenoise::is_off")]
+    pub denoise: ClipDenoise,
+    /// Pitch shift and voice effect of the sound. Left out of the file when neutral.
+    #[serde(default, skip_serializing_if = "ClipVoice::is_neutral")]
+    pub voice: ClipVoice,
 }
 
 /// The `source` of every text clip. It names no file and has no extension, so
@@ -598,6 +604,133 @@ pub fn speed_milli(speed: f64) -> i64 {
     }
 }
 
+/// How noise is removed from the sound of a clip. See [`crate::denoise`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DenoiseMode {
+    /// The sound is left as it is.
+    #[default]
+    Off,
+    /// A neural network trained on speech (RNNoise): keeps voices, removes the rest.
+    Voice,
+    /// Spectral gating against a tracked noise floor, for steady broadband noise such as hiss,
+    /// hum or fans, on any material.
+    General,
+}
+
+/// Noise reduction of a clip, applied to its source audio before anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ClipDenoise {
+    /// Which method, or none.
+    #[serde(default)]
+    pub mode: DenoiseMode,
+    /// How much of it, from 0 (no change) to 1 (all of it). 1 when absent.
+    #[serde(default = "unit_f64", skip_serializing_if = "is_unit_f64")]
+    pub strength: f64,
+}
+
+impl Default for ClipDenoise {
+    fn default() -> Self {
+        Self { mode: DenoiseMode::Off, strength: 1.0 }
+    }
+}
+
+impl ClipDenoise {
+    /// Whether it leaves the sound as it is, so the file leaves it out.
+    pub fn is_off(&self) -> bool {
+        self.mode == DenoiseMode::Off
+    }
+}
+
+/// An effect laid over the voice of a clip after its pitch shift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceEffect {
+    /// No effect.
+    #[default]
+    None,
+    /// Ring modulation at [`ROBOT_HZ`]: the metallic voice of an old film robot.
+    Robot,
+}
+
+/// The frequency of the ring modulation of [`VoiceEffect::Robot`].
+pub const ROBOT_HZ: f64 = 50.0;
+/// The largest pitch shift either way, in semitones: one octave.
+pub const MAX_PITCH_SEMITONES: f64 = 12.0;
+
+/// Voice change of a clip: a pitch shift that keeps the speed, then an effect.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct ClipVoice {
+    /// Pitch shift in semitones, from -12 to 12; 0 keeps the pitch.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub semitones: f64,
+    /// Effect after the shift.
+    #[serde(default, skip_serializing_if = "is_no_voice_effect")]
+    pub effect: VoiceEffect,
+}
+
+impl ClipVoice {
+    /// Whether it leaves the sound as it is, so the file leaves it out.
+    pub fn is_neutral(&self) -> bool {
+        self.semitones == 0.0 && self.effect == VoiceEffect::None
+    }
+
+    /// The pitch shift in whole cents, the unit the mixer works in.
+    pub fn pitch_cents(&self) -> i32 {
+        if self.semitones.is_finite() {
+            (self.semitones.clamp(-MAX_PITCH_SEMITONES, MAX_PITCH_SEMITONES) * 100.0).round() as i32
+        } else {
+            0
+        }
+    }
+}
+
+/// Ready-made voice changes, for the editor's buttons and the agent tools. They are not stored:
+/// choosing one sets [`ClipVoice`] to its values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoicePreset {
+    /// Back to the clip's own voice.
+    Normal,
+    /// Nine semitones up: small and quick.
+    Chipmunk,
+    /// Six semitones down: large and slow.
+    Deep,
+    /// The clip's pitch with [`VoiceEffect::Robot`].
+    Robot,
+}
+
+impl VoicePreset {
+    /// Every preset, in the order the editor shows them.
+    pub const ALL: [VoicePreset; 4] = [VoicePreset::Normal, VoicePreset::Chipmunk, VoicePreset::Deep, VoicePreset::Robot];
+
+    /// What the preset sets.
+    pub fn voice(self) -> ClipVoice {
+        match self {
+            VoicePreset::Normal => ClipVoice::default(),
+            VoicePreset::Chipmunk => ClipVoice { semitones: 9.0, effect: VoiceEffect::None },
+            VoicePreset::Deep => ClipVoice { semitones: -6.0, effect: VoiceEffect::None },
+            VoicePreset::Robot => ClipVoice { semitones: 0.0, effect: VoiceEffect::Robot },
+        }
+    }
+
+    /// The preset whose values `voice` has, if any.
+    pub fn of(voice: &ClipVoice) -> Option<VoicePreset> {
+        Self::ALL.into_iter().find(|preset| preset.voice() == *voice)
+    }
+}
+
+fn is_no_voice_effect(effect: &VoiceEffect) -> bool {
+    *effect == VoiceEffect::None
+}
+
+fn unit_f64() -> f64 {
+    1.0
+}
+
+fn is_unit_f64(value: &f64) -> bool {
+    *value == 1.0
+}
+
 /// Greatest common divisor of two positive numbers.
 fn gcd(a: i64, b: i64) -> i64 {
     if b == 0 {
@@ -835,7 +968,7 @@ pub(crate) mod tests_support {
 
     /// A plain clip of one second at the start of the timeline.
     pub(crate) fn clip() -> Clip {
-        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default() }
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default() }
     }
 }
 

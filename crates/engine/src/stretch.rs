@@ -28,11 +28,21 @@
 //! numbers. A clip cut in two starts a new grid at each half. A key grain is not in phase with
 //! the grain before it, and where the two overlap the level is held by dividing out what their
 //! correlation says they cancel, so the join is a phase jump and no dip.
+//!
+//! # Pitch shift
+//!
+//! A clip with a voice pitch shift of ratio `r` goes through the same stretcher once: the grains
+//! build a signal `r` times longer than the clip, at the clip speed divided by `r`, and timeline
+//! sample `k` reads that signal at `k * r` with a cubic. Speed and pitch therefore cost one pass,
+//! and the result is still a function of the source and the clip alone. The cubic does not filter
+//! before it drops samples, so a shift upward folds content above `24 kHz / r` back down; for
+//! voices, whose energy lies far lower, that is not audible.
 
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::PI;
 
 use crate::audio_mix::AudioSource;
+use crate::denoise::DenoiseCache;
 use crate::audio_schedule::{AudioSegment, MIX_CHANNELS};
 use crate::project::SPEED_SCALE;
 use crate::render::{ClipKey, RenderError};
@@ -67,6 +77,8 @@ pub struct Stretch {
     pub source_base: i64,
     /// The speed, in [`SPEED_SCALE`] parts.
     pub speed_milli: i64,
+    /// Pitch shift in cents; 0 keeps the pitch.
+    pub pitch_cents: i32,
 }
 
 impl Stretch {
@@ -74,6 +86,23 @@ impl Stretch {
     pub fn nominal(&self, k: i64) -> i64 {
         let product = i128::from(k) * i128::from(self.speed_milli);
         self.source_base.saturating_add(product.div_euclid(i128::from(SPEED_SCALE)) as i64)
+    }
+
+    /// How many times higher the clip sounds: `2^(cents / 1200)`.
+    pub fn pitch_ratio(&self) -> f64 {
+        (f64::from(self.pitch_cents) / 1200.0).exp2()
+    }
+
+    /// The nominal source sample of sample `v` of the stretched signal. Without a pitch shift that
+    /// signal is the clip itself. With one it runs `pitch_ratio` times longer than the clip, at the
+    /// speed divided by the ratio, and is resampled back to the clip's length, which raises the
+    /// pitch by the ratio: timeline sample `k` still reads around source sample `nominal(k)`.
+    fn grain_source(&self, v: i64) -> i64 {
+        if self.pitch_cents == 0 {
+            return self.nominal(v);
+        }
+        let speed = self.speed_milli as f64 / SPEED_SCALE as f64;
+        self.source_base.saturating_add((v as f64 * speed / self.pitch_ratio()).floor() as i64)
     }
 }
 
@@ -94,41 +123,126 @@ struct ClipStretch {
     weights: Vec<f32>,
     /// The key grains of this block with what came before them: `(grain, correlation)`.
     joins: Vec<(i64, f32)>,
+    /// The stretched signal of a block with a pitch shift, before it is resampled.
+    stretched: Vec<f32>,
 }
 
-/// The stretchers of the clips being mixed. Keep one for a whole render or playback.
+/// The per-clip work of the mixer kept between blocks: the stretchers and the noise reduction of
+/// the clips being mixed. Keep one for a whole render or playback. It is only memoisation: the
+/// mixed samples do not depend on it.
 #[derive(Default)]
 pub struct StretchStates {
     clips: HashMap<ClipKey, ClipStretch>,
+    denoise: HashMap<ClipKey, DenoiseCache>,
 }
 
 impl StretchStates {
-    /// Forgets the clips that are not in `keep`, which have stopped sounding.
-    pub(crate) fn retain(&mut self, keep: &[ClipKey]) {
-        self.clips.retain(|key, _| keep.contains(key));
+    /// Forgets the clips that are not sounding in `segments`.
+    pub(crate) fn retain(&mut self, segments: &[AudioSegment<'_>]) {
+        self.clips.retain(|key, _| segments.iter().any(|segment| segment.key == *key && segment.stretch.is_some()));
+        self.denoise.retain(|key, _| segments.iter().any(|segment| segment.key == *key && segment.denoise.is_some()));
     }
 
-    /// Writes the `segment.len` stretched frames of `segment` to `out`, interleaved and zeroed.
-    pub(crate) fn render<S: AudioSource + ?Sized>(&mut self, source: &mut S, segment: &AudioSegment<'_>, spec: Stretch, out: &mut [f32]) -> Result<(), RenderError> {
-        let state = self.clips.entry(segment.key).or_insert_with(|| ClipStretch::new(spec, segment.source));
+    /// Writes the `segment.len` frames of `segment` to `out`, interleaved and zeroed: its source
+    /// audio, denoised and then stretched when the segment asks for it.
+    pub(crate) fn read<S: AudioSource + ?Sized>(&mut self, source: &mut S, segment: &AudioSegment<'_>, out: &mut [f32]) -> Result<(), RenderError> {
+        match segment.denoise {
+            Some(spec) => {
+                let cache = self.denoise.entry(segment.key).or_insert_with(|| DenoiseCache::new(spec, segment.source));
+                if !cache.matches(spec, segment.source) {
+                    *cache = DenoiseCache::new(spec, segment.source);
+                }
+                // Only the mode and the file are in the runs; a new strength keeps them.
+                cache.set_strength(spec.strength);
+                read_plain_or_stretched(&mut self.clips, &mut Denoised { inner: source, cache }, segment, out)
+            }
+            None => read_plain_or_stretched(&mut self.clips, source, segment, out),
+        }
+    }
+}
+
+fn read_plain_or_stretched<S: AudioSource + ?Sized>(clips: &mut HashMap<ClipKey, ClipStretch>, source: &mut S, segment: &AudioSegment<'_>, out: &mut [f32]) -> Result<(), RenderError> {
+    let len = segment.len;
+    if let Some(spec) = segment.stretch {
+        let state = clips.entry(segment.key).or_insert_with(|| ClipStretch::new(spec, segment.source));
         if state.spec != spec || state.source != segment.source {
             *state = ClipStretch::new(spec, segment.source);
         }
-        state.render(source, segment.key, segment.start, segment.len, out)
+        return state.render(source, segment.key, segment.start, len, out);
     }
+    // Samples before the beginning of the source stay silent.
+    let skip = segment.source_start.saturating_neg().clamp(0, len) as usize;
+    if skip < len as usize {
+        source.read(segment.key, segment.source, segment.source_start.max(0), &mut out[skip * MIX_CHANNELS..])?;
+    }
+    Ok(())
+}
+
+/// A source whose audio passes through the noise reduction of one clip first.
+struct Denoised<'a, S: AudioSource + ?Sized> {
+    inner: &'a mut S,
+    cache: &'a mut DenoiseCache,
+}
+
+impl<S: AudioSource + ?Sized> AudioSource for Denoised<'_, S> {
+    fn read(&mut self, key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        self.cache.read(self.inner, key, position, out).map(|_| ())
+    }
+
+    fn read_counted(&mut self, key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<usize, RenderError> {
+        self.cache.read(self.inner, key, position, out)
+    }
+}
+
+/// The Catmull-Rom cubic through `b` at `t = 0` and `c` at `t = 1`.
+fn catmull_rom(a: f32, b: f32, c: f32, d: f32, t: f32) -> f32 {
+    let (t2, t3) = (t * t, t * t * t);
+    0.5 * (2.0 * b + (c - a) * t + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2 + (3.0 * b - a - 3.0 * c + d) * t3)
 }
 
 impl ClipStretch {
     fn new(spec: Stretch, source: &str) -> Self {
-        Self { spec, source: source.to_owned(), window: Vec::new(), window_start: 0, positions: VecDeque::new(), source_end: None, reference: Vec::new(), candidates: Vec::new(), weights: Vec::new(), joins: Vec::new() }
+        Self { spec, source: source.to_owned(), window: Vec::new(), window_start: 0, positions: VecDeque::new(), source_end: None, reference: Vec::new(), candidates: Vec::new(), weights: Vec::new(), joins: Vec::new(), stretched: Vec::new() }
     }
 
     fn nominal(&self, grain: i64) -> i64 {
-        self.spec.nominal(grain.saturating_mul(HOP))
+        self.spec.grain_source(grain.saturating_mul(HOP))
     }
 
     fn render<S: AudioSource + ?Sized>(&mut self, source: &mut S, key: ClipKey, timeline_start: i64, frames: i64, out: &mut [f32]) -> Result<(), RenderError> {
         let begin = timeline_start.saturating_sub(self.spec.clip_start);
+        if self.spec.pitch_cents == 0 {
+            return self.render_range(source, key, begin, frames, out);
+        }
+        // Clip sample `k` lies at `k * ratio` of the stretched signal, read with a cubic through
+        // the samples around it. Each output sample depends only on its own position, so the
+        // result does not depend on how a render is split.
+        let ratio = self.spec.pitch_ratio();
+        let position = |k: i64| k as f64 * ratio;
+        let from = position(begin).floor() as i64 - 1;
+        let to = position(begin + frames - 1).floor() as i64 + 3;
+        let mut stretched = std::mem::take(&mut self.stretched);
+        stretched.clear();
+        stretched.resize((to - from) as usize * MIX_CHANNELS, 0.0);
+        let result = self.render_range(source, key, from, to - from, &mut stretched);
+        if result.is_ok() {
+            for (n, frame) in out.chunks_exact_mut(MIX_CHANNELS).enumerate() {
+                let at = position(begin + n as i64);
+                let whole = at.floor();
+                let t = (at - whole) as f32;
+                let index = (whole as i64 - from) as usize;
+                for (c, sample) in frame.iter_mut().enumerate() {
+                    let tap = |i: usize| stretched[i * MIX_CHANNELS + c];
+                    *sample = catmull_rom(tap(index - 1), tap(index), tap(index + 1), tap(index + 2), t);
+                }
+            }
+        }
+        self.stretched = stretched;
+        result
+    }
+
+    /// Renders `frames` samples of the stretched signal from its sample `begin` into `out`.
+    fn render_range<S: AudioSource + ?Sized>(&mut self, source: &mut S, key: ClipKey, begin: i64, frames: i64, out: &mut [f32]) -> Result<(), RenderError> {
         let end = begin.saturating_add(frames);
         // The first grain reaching past `begin`, and the last one starting before `end`.
         let first = (begin - GRAIN / 2).div_euclid(HOP) + 1;
