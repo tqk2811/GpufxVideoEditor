@@ -131,7 +131,8 @@ pub struct EditorState {
     language: Language,
     /// Beat detection of source files, in the background.
     pub beats: BeatDetector,
-    /// Detections the user started from a clip, whose beats go to that clip when they are ready.
+    /// Detections the user started from a clip, whose beats go to the clip's source when they are
+    /// ready; at most one per source.
     beat_requests: Vec<BeatRequest>,
 }
 
@@ -144,10 +145,9 @@ pub struct MarkerDrag {
     pub moved: bool,
 }
 
-/// A detection started for clip `key`, which showed `source` (resolved to `path`) at the time.
+/// A detection started for the beats of `source`, resolved to `path`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BeatRequest {
-    key: ClipKey,
     source: String,
     path: PathBuf,
 }
@@ -422,7 +422,6 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         animation: Default::default(),
         denoise: Default::default(),
         voice: Default::default(),
-        beats: Default::default(),
     }
 }
 
@@ -441,7 +440,7 @@ fn default_project() -> Project {
             audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }),
         },
         tracks: Vec::new(),
-        markers: Vec::new(),
+        markers: Vec::new(), beats: Default::default(),
     }
 }
 
@@ -1563,9 +1562,9 @@ impl EditorState {
         self.visuals.borrow().source_path(source)
     }
 
-    /// Starts detecting the beats of clip `key`; they are written to it, as one undo step, when
-    /// ready. A file already analysed gives them at once. Refused on a locked track, and on a still
-    /// or text, which have no sound.
+    /// Starts detecting the beats of the source of clip `key`; they are written to the source, so
+    /// to every clip of it, as one undo step, when ready. A file already analysed gives them at once.
+    /// Refused on a locked track, and on a still or text, which have no sound.
     pub fn detect_beats(&mut self, key: ClipKey) {
         let Ok(clip) = clip_in(self.project(), key) else { return };
         if clip.is_still() {
@@ -1577,34 +1576,41 @@ impl EditorState {
         }
         let source = clip.source.clone();
         let path = self.source_file(&source);
-        self.beat_requests.retain(|request| request.key != key);
         self.beats.start(&path);
-        self.beat_requests.push(BeatRequest { key, source, path });
+        if !self.beat_requests.iter().any(|request| request.source == source) {
+            self.beat_requests.push(BeatRequest { source, path });
+        }
         self.poll_beats();
     }
 
-    /// Stops the detection started for clip `key`.
+    /// The request of the source of clip `key`, if one waits.
+    fn beat_request_of(&self, key: ClipKey) -> Option<usize> {
+        let source = &clip_in(self.project(), key).ok()?.source;
+        self.beat_requests.iter().position(|request| request.source == *source)
+    }
+
+    /// Stops the detection started for the source of clip `key`.
     pub fn cancel_beats(&mut self, key: ClipKey) {
-        let Some(index) = self.beat_requests.iter().position(|request| request.key == key) else { return };
+        let Some(index) = self.beat_request_of(key) else { return };
         let request = self.beat_requests.remove(index);
         if !self.beat_requests.iter().any(|other| other.path == request.path) {
             self.beats.cancel(&request.path);
         }
     }
 
-    /// How far the detection started for clip `key` is, from 0 to 1, while it runs.
+    /// How far the detection started for the source of clip `key` is, from 0 to 1, while it runs.
     pub fn beat_progress(&mut self, key: ClipKey) -> Option<f32> {
-        let path = self.beat_requests.iter().find(|request| request.key == key)?.path.clone();
+        let path = self.beat_requests[self.beat_request_of(key)?].path.clone();
         match self.beats.status(&path) {
             BeatStatus::Running(progress) => Some(progress),
             _ => None,
         }
     }
 
-    /// Writes the beats of finished detections to the clips they were started for, and says
-    /// whether any still runs. A clip that no longer shows the same source at its place gets
-    /// nothing; the result stays cached, so starting again on it is instant. While edits wait (a
-    /// drag or an export) finished results wait too.
+    /// Writes the beats of finished detections to the sources they were started for, and says
+    /// whether any still runs. A source no clip plays any more gets nothing; the result stays
+    /// cached, so starting again on it is instant. While edits wait (a drag or an export) finished
+    /// results wait too.
     pub fn poll_beats(&mut self) -> bool {
         let blocked = self.export.is_some() || self.is_holding();
         let mut index = 0;
@@ -1616,12 +1622,12 @@ impl EditorState {
                 continue;
             }
             self.beat_requests.remove(index);
-            let current = clip_in(self.project(), request.key).ok().filter(|clip| clip.source == request.source).is_some();
+            let current = self.project().plays_source_sound(&request.source);
             match status {
                 BeatStatus::Ready(analysis) if current => {
                     let beats = analysis.clip_beats();
                     let (count, tempo) = (beats.beats.len(), beats.tempo);
-                    if self.run(|project| engine::set_beats(project, request.key, beats)) {
+                    if self.run(|project| engine::set_source_beats(project, &request.source, beats)) {
                         self.status = Status::Info(if count == 0 { Message::BeatsNotFound } else { Message::BeatsFound { count, tempo: tempo_text(tempo) } });
                     }
                 }
@@ -1632,7 +1638,7 @@ impl EditorState {
         self.beats.running()
     }
 
-    /// Takes the beats off clip `key`: one undo step.
+    /// Takes the beats off the source of clip `key`, so off every clip of it: one undo step.
     pub fn clear_beats(&mut self, key: ClipKey) {
         self.cancel_beats(key);
         self.run(|project| engine::set_beats(project, key, engine::ClipBeats::default()));

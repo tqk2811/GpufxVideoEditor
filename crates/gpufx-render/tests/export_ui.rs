@@ -38,7 +38,7 @@ fn hardware_gpu() -> Option<Arc<Gpu>> {
 }
 
 fn clip(path: &Path, start: i64, duration: i64) -> Clip {
-    Clip { source: path.to_string_lossy().into_owned(), start: Time::from_ticks(start), source_in: Time::ZERO, duration: Time::from_ticks(duration), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), beats: Default::default() }
+    Clip { source: path.to_string_lossy().into_owned(), start: Time::from_ticks(start), source_in: Time::ZERO, duration: Time::from_ticks(duration), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default() }
 }
 
 fn project_with_transition_and_sound() -> Project {
@@ -49,7 +49,7 @@ fn project_with_transition_and_sound() -> Project {
         version: SUPPORTED_VERSION,
         output: Output { width: CLIP_WIDTH, height: CLIP_HEIGHT, frame_duration: Time::from_ticks(FRAME), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
         tracks: vec![Track { kind: TrackKind::Video, clips, transitions, locked: false, hidden: false, subtitle: None }],
-        markers: Vec::new(),
+        markers: Vec::new(), beats: Default::default(),
     }
 }
 

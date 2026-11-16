@@ -111,7 +111,7 @@ mod tests {
             version: SUPPORTED_VERSION,
             output: Output { width: 16, height: 9, frame_duration: Time::from_ticks(frame_duration), audio: None },
             tracks: Vec::new(),
-            markers: Vec::new(),
+            markers: Vec::new(), beats: Default::default(),
         }
     }
 

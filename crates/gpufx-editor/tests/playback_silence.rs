@@ -14,7 +14,7 @@ use gpufx_editor::playback::thread::{fill_device_buffer, PreparingThread};
 
 fn track(kind: TrackKind, source: &str, seconds: i64) -> Track {
     let duration = Time::from_seconds(seconds).expect("a valid length");
-    let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), beats: Default::default() };
+    let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default() };
     Track { kind, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }
 }
 
@@ -23,7 +23,7 @@ fn project(audio: &str, seconds: i64) -> Project {
         version: SUPPORTED_VERSION,
         output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
         tracks: vec![track(TrackKind::Video, audio, seconds), track(TrackKind::Audio, audio, seconds)],
-        markers: Vec::new(),
+        markers: Vec::new(), beats: Default::default(),
     }
 }
 

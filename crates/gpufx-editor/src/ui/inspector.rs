@@ -269,13 +269,17 @@ fn beats_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: &e
         });
         return;
     }
-    let summary = if clip.beats.is_empty() { Message::BeatsNone } else { Message::BeatsSummary { count: clip.beat_times().count(), tempo: tempo_text(clip.beats.tempo) } };
+    let found = state.project().clip_beats(clip).map(|beats| (clip.beat_times(&beats.beats).count(), beats.tempo));
+    let summary = match found {
+        None => Message::BeatsNone,
+        Some((count, tempo)) => Message::BeatsSummary { count, tempo: tempo_text(tempo) },
+    };
     ui.label(language.t(summary));
     ui.horizontal(|ui| {
         if ui.button(language.t(Message::DetectBeats)).on_hover_text(language.t(Message::DetectBeatsHint)).clicked() {
             state.detect_beats(key);
         }
-        if !clip.beats.is_empty() && ui.button(language.t(Message::ClearBeats)).clicked() {
+        if found.is_some() && ui.button(language.t(Message::ClearBeats)).clicked() {
             state.clear_beats(key);
         }
     });

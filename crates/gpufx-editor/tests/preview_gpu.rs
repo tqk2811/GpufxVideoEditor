@@ -18,7 +18,7 @@ use gpufx_editor::project_file::{package_roots, project_paths};
 fn clip(name: &str, duration: Time) -> Clip {
     let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-clips")).join(name);
     let source = std::path::absolute(source).expect("absolute path").to_string_lossy().into_owned();
-    Clip { source, start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), beats: Default::default() }
+    Clip { source, start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default() }
 }
 
 fn project(clips: Vec<Clip>) -> Arc<Project> {
@@ -26,7 +26,7 @@ fn project(clips: Vec<Clip>) -> Arc<Project> {
         version: SUPPORTED_VERSION,
         output: Output { width: 320, height: 180, frame_duration: Time::from_ticks(3000), audio: None },
         tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
-        markers: Vec::new(),
+        markers: Vec::new(), beats: Default::default(),
     })
 }
 

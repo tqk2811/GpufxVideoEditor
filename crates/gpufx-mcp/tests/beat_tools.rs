@@ -63,7 +63,7 @@ fn times(beats: &Value) -> Vec<i64> {
 }
 
 #[test]
-fn beats_detect_stores_the_beats_on_the_clip_and_they_follow_it() {
+fn beats_detect_stores_the_beats_of_the_source_and_they_follow_the_clip() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
     let now = music(&mut session, "beats-follow");
     let clip = json!({"track": 0, "clip": 0});
@@ -77,9 +77,9 @@ fn beats_detect_stores_the_beats_on_the_clip_and_they_follow_it() {
     assert!((shown[0] - (2 * SECOND + SECOND / 4)).abs() <= SECOND / 50, "{}", shown[0]);
     assert!(detected["beats"].as_array().unwrap().iter().any(|beat| beat["downbeat"] == true));
 
-    // The project keeps them in source time.
+    // The project keeps them per source, in source time.
     let project = project_of(&mut session);
-    let beats = &project.tracks[0].clips[0].beats;
+    let beats = project.clip_beats(&project.tracks[0].clips[0]).expect("stored for the source");
     assert_eq!(beats.beats.len(), shown.len());
     assert!((beats.beats[0].at.ticks() - SECOND / 4).abs() <= SECOND / 50);
 
@@ -89,13 +89,16 @@ fn beats_detect_stores_the_beats_on_the_clip_and_they_follow_it() {
     let after = times(&listed["beats"][0]["beats"]);
     assert_eq!(after, shown.iter().map(|at| at + 3 * SECOND).collect::<Vec<_>>());
 
-    // Detecting again is one more undo step, from the cache; clearing is one too.
+    // Detecting again comes from the cache and changes nothing, so it is no undo step; clearing
+    // is one.
     let again = call_ok(&mut session, "beats_detect", json!({"expected_revision": revision(&moved), "clip": clip}));
     assert_eq!(again["state"], "done");
+    assert_eq!(revision(&again), revision(&moved), "{again}");
     let cleared = call_ok(&mut session, "clip_beats_clear", json!({"expected_revision": revision(&again), "clip": clip}));
-    assert!(project_of(&mut session).tracks[0].clips[0].beats.is_empty());
+    assert!(project_of(&mut session).beats.is_empty());
     call_ok(&mut session, "undo", json!({"expected_revision": revision(&cleared)}));
-    assert_eq!(project_of(&mut session).tracks[0].clips[0].beats.beats.len(), shown.len());
+    let restored = project_of(&mut session);
+    assert_eq!(restored.clip_beats(&restored.tracks[0].clips[0]).unwrap().beats.len(), shown.len());
 }
 
 #[test]

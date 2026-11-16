@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// The project format version: the only one this engine reads and writes.
 pub const SUPPORTED_VERSION: u32 = 1;
@@ -23,6 +24,13 @@ pub struct Project {
     /// are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// The beats of the sound of each source file, keyed by the `source` of the clips that show it,
+    /// in the time of that source. Every clip of the source (after a split, or the file placed
+    /// again) shares the one list and plays the part of it inside what it shows, see
+    /// [`Project::clip_beat_times`]. Behind an [`Arc`] so the snapshots of the undo history share
+    /// it. Left out of the file when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub beats: BTreeMap<String, Arc<ClipBeats>>,
 }
 
 /// The longest label of a [`Marker`], in characters.
@@ -65,9 +73,10 @@ pub struct Beat {
     pub downbeat: bool,
 }
 
-/// The beats found in the sound of a clip, in the time of its source media. The clip keeps them
-/// over moves, trims, splits (each half keeps the whole list) and speed changes; only those inside
-/// the part of the source it plays are shown and snapped to, see [`Clip::beat_times`].
+/// The beats found in the sound of a source file, in the time of that source; the project keeps
+/// them per source in [`Project::beats`]. Every clip of the source plays them over moves, trims,
+/// splits and speed changes; only those inside the part of the source a clip plays are shown and
+/// snapped to, see [`Project::clip_beat_times`].
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ClipBeats {
     /// The tempo the beats were found at, in beats per minute of the source; 0 when unknown.
@@ -249,10 +258,6 @@ pub struct Clip {
     /// Pitch shift and voice effect of the sound. Left out of the file when neutral.
     #[serde(default, skip_serializing_if = "ClipVoice::is_neutral")]
     pub voice: ClipVoice,
-    /// The beats of the sound, in source time. Left out of the file when there are none; only a
-    /// clip with sound (not a still) may have them.
-    #[serde(default, skip_serializing_if = "ClipBeats::is_empty")]
-    pub beats: ClipBeats,
 }
 
 /// The `source` of every text clip. It names no file and has no extension, so
@@ -902,6 +907,25 @@ impl Project {
         }
         serde_json::from_str(text).map_err(LoadError::Json)
     }
+
+    /// The beats kept for the source of `clip`, unless it is a still or none were found.
+    pub fn clip_beats(&self, clip: &Clip) -> Option<&ClipBeats> {
+        if clip.is_still() {
+            return None;
+        }
+        self.beats.get(&clip.source).map(|beats| &**beats).filter(|beats| !beats.is_empty())
+    }
+
+    /// The beats `clip` plays, each with its timeline time, in order: the list of its source seen
+    /// through the clip's trim and speed, see [`Clip::beat_times`].
+    pub fn clip_beat_times<'a>(&'a self, clip: &'a Clip) -> impl Iterator<Item = (Time, Beat)> + 'a {
+        clip.beat_times(self.clip_beats(clip).map_or(&[][..], |beats| &beats.beats[..]))
+    }
+
+    /// Whether some clip of the project shows `source` with its sound (not as a still).
+    pub fn plays_source_sound(&self, source: &str) -> bool {
+        self.tracks.iter().flat_map(|track| &track.clips).any(|clip| clip.source == source && !clip.is_still())
+    }
 }
 
 /// The extensions of the still images a clip may show, lower-cased.
@@ -1040,10 +1064,12 @@ impl Clip {
         source >= self.source_in && source < self.source_end()
     }
 
-    /// The beats the clip plays, each with its timeline time, in order. A beat outside the part of
-    /// the source the clip plays (trimmed away, or in the other half of a split) is left out.
-    pub fn beat_times(&self) -> impl Iterator<Item = (Time, Beat)> + '_ {
-        self.beats.beats.iter().filter(|beat| self.plays_source(beat.at)).map(|beat| (self.timeline_time_of(beat.at), *beat))
+    /// The beats of `beats` (the list of the clip's source) that the clip plays, each with its
+    /// timeline time, in order. A beat outside the part of the source the clip plays (trimmed away,
+    /// or in the other half of a split) is left out. Finds the first one by binary search.
+    pub fn beat_times<'a>(&'a self, beats: &'a [Beat]) -> impl Iterator<Item = (Time, Beat)> + 'a {
+        let first = beats.partition_point(|beat| beat.at < self.source_in);
+        beats[first..].iter().take_while(|beat| self.plays_source(beat.at)).map(|beat| (self.timeline_time_of(beat.at), *beat))
     }
 }
 
@@ -1053,7 +1079,7 @@ pub(crate) mod tests_support {
 
     /// A plain clip of one second at the start of the timeline.
     pub(crate) fn clip() -> Clip {
-        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default(), beats: Default::default() }
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default() }
     }
 }
 

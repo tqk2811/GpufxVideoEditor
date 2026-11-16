@@ -176,7 +176,7 @@ mod tests {
     }
 
     fn project(tracks: Vec<Track>) -> Project {
-        Project { version: SUPPORTED_VERSION, output: Output { width: 1920, height: 1080, frame_duration: Time::from_ticks(3000), audio: None }, tracks, markers: Vec::new() }
+        Project { version: SUPPORTED_VERSION, output: Output { width: 1920, height: 1080, frame_duration: Time::from_ticks(3000), audio: None }, tracks, markers: Vec::new(), beats: Default::default() }
     }
 
     fn probe(video: Option<i64>, audio: Option<i64>) -> MediaProbe {

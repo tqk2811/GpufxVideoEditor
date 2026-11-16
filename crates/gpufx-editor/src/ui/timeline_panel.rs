@@ -462,7 +462,7 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     if let Some(key) = state.ui.clip_menu {
         let language = state.language();
         let locked = state.is_track_locked(key.track);
-        let (has_sound, has_beats) = state.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map_or((false, false), |clip| (!clip.is_still(), !clip.beats.is_empty()));
+        let (has_sound, has_beats) = state.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map_or((false, false), |clip| (!clip.is_still(), state.project().clip_beats(clip).is_some()));
         let mut delete = false;
         let mut detect = false;
         let mut clear = false;
@@ -572,7 +572,7 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
             let rect = span_rect(state, tracks_rect, row, clip.start, clip.start.saturating_add(clip.duration));
             if rect.intersects(tracks_rect) {
                 let dragged = state.drag.is_some_and(|drag| drag.key == key);
-                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, hidden: track.hidden, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second() });
+                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, hidden: track.hidden, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second(), beats: state.project().clip_beats(clip) });
             }
         }
         draw_transitions(&painter, state, tracks_rect, row, t, track);
@@ -594,6 +594,8 @@ pub struct ClipPaint<'a> {
     /// The thumbnails and levels to draw, when there are any to draw from.
     pub visuals: Option<&'a RefCell<ClipVisuals>>,
     pub pixels_per_second: f64,
+    /// The beats of the clip's source, when some were found.
+    pub beats: Option<&'a engine::ClipBeats>,
 }
 
 impl ClipPaint<'_> {
@@ -681,10 +683,7 @@ fn draw_holds(painter: &egui::Painter, paint: &ClipPaint<'_>, body: Rect) {
 /// A tick hanging from the name strip at each beat the clip plays, a longer one at a downbeat.
 /// Beats too close together on screen are thinned to the downbeats, then left out.
 fn draw_beat_ticks(painter: &egui::Painter, paint: &ClipPaint<'_>, top: f32) {
-    let beats = &paint.clip.beats;
-    if beats.is_empty() {
-        return;
-    }
+    let Some(beats) = paint.beats else { return };
     // On screen a beat lasts 60 / tempo seconds of the source, sped up by the clip.
     let seconds_per_beat = if beats.tempo > 0.0 { 60.0 / beats.tempo / paint.clip.speed.max(f64::MIN_POSITIVE) } else { 0.0 };
     let spacing = (seconds_per_beat * paint.pixels_per_second) as f32;
@@ -696,7 +695,7 @@ fn draw_beat_ticks(painter: &egui::Painter, paint: &ClipPaint<'_>, top: f32) {
     let visible = painter.clip_rect().x_range();
     let color = theme::on_clip().gamma_multiply(0.75 * paint.opacity());
     let strong = theme::on_clip_accent().gamma_multiply(paint.opacity());
-    for (at, beat) in paint.clip.beat_times() {
+    for (at, beat) in paint.clip.beat_times(&beats.beats) {
         if downbeats_only && !beat.downbeat {
             continue;
         }

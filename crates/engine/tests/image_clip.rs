@@ -7,11 +7,11 @@ fn seconds(value: i64) -> Time {
 }
 
 fn clip(source: &str, start: i64, duration: i64) -> Clip {
-    Clip { source: source.to_owned(), start: seconds(start), source_in: Time::ZERO, duration: seconds(duration), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), beats: Default::default() }
+    Clip { source: source.to_owned(), start: seconds(start), source_in: Time::ZERO, duration: seconds(duration), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default() }
 }
 
 fn project(kind: TrackKind, clips: Vec<Clip>) -> Project {
-    Project { version: SUPPORTED_VERSION, output: Output { width: 320, height: 180, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }], markers: Vec::new() }
+    Project { version: SUPPORTED_VERSION, output: Output { width: 320, height: 180, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }], markers: Vec::new(), beats: Default::default() }
 }
 
 const KEY: ClipKey = ClipKey { track: 0, clip: 0 };

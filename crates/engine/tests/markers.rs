@@ -1,10 +1,11 @@
-//! Project markers and clip beats: the file format, the edits, and how beats follow their clip.
+//! Project markers and the beats of sources: the file format, the edits, and how beats follow
+//! the clips of their source.
 
 mod common;
 
 use common::{clip, project, t, track};
 use engine::{
-    add_marker, add_marker_report, move_clip, move_marker, move_marker_report, remove_marker, set_beats, set_marker, set_speed, split_clip, trim_end, trim_start, validate,
+    add_marker, add_marker_report, move_clip, move_marker, move_marker_report, remove_marker, set_beats, set_source_beats, set_marker, set_speed, split_clip, trim_end, trim_start, validate,
     AcceptAll, Beat, ClipBeats, ClipKey, EditError, EditHistory, Marker, Project, Time, ValidationError, MAX_MARKER_LABEL,
 };
 
@@ -21,9 +22,10 @@ fn beats_every_second(count: i64) -> ClipBeats {
 /// One clip of 10 s at 5 s on the timeline, playing its source from 2 s, with a beat at every
 /// whole second of its source from 0 to 19.
 fn with_beats() -> Project {
-    let mut music = clip("song.mp3", 5 * SECOND, 2 * SECOND, 10 * SECOND);
-    music.beats = beats_every_second(20);
-    project(3000, vec![track(vec![music], Vec::new())])
+    let music = clip("song.mp3", 5 * SECOND, 2 * SECOND, 10 * SECOND);
+    let mut project = project(3000, vec![track(vec![music], Vec::new())]);
+    project.beats.insert("song.mp3".into(), std::sync::Arc::new(beats_every_second(20)));
+    project
 }
 
 fn key() -> ClipKey {
@@ -31,7 +33,7 @@ fn key() -> ClipKey {
 }
 
 fn times(project: &Project, clip: usize) -> Vec<Time> {
-    project.tracks[0].clips[clip].beat_times().map(|(at, _)| at).collect()
+    project.clip_beat_times(&project.tracks[0].clips[clip]).map(|(at, _)| at).collect()
 }
 
 #[test]
@@ -62,7 +64,7 @@ fn a_beat_maps_to_the_timeline_through_the_clip() {
     // Source 2 s plays at 5 s; the clip plays source 2 to 12 s, so beats 2..=11 show.
     let shown = times(&project, 0);
     assert_eq!(shown, (5..15).map(s).collect::<Vec<_>>());
-    let downbeats: Vec<bool> = project.tracks[0].clips[0].beat_times().map(|(_, beat)| beat.downbeat).collect();
+    let downbeats: Vec<bool> = project.clip_beat_times(&project.tracks[0].clips[0]).map(|(_, beat)| beat.downbeat).collect();
     assert_eq!(&downbeats[..3], &[false, false, true], "source 4 s is a downbeat");
 }
 
@@ -87,7 +89,24 @@ fn each_half_of_a_split_shows_its_own_beats() {
     let split = split_clip(&with_beats(), key(), s(9)).unwrap();
     assert_eq!(times(&split, 0), (5..9).map(s).collect::<Vec<_>>());
     assert_eq!(times(&split, 1), (9..15).map(s).collect::<Vec<_>>());
-    assert_eq!(split.tracks[0].clips[1].beats, beats_every_second(20), "both halves keep the list");
+    assert_eq!(split.beats.len(), 1, "both halves share the one list of their source");
+}
+
+#[test]
+fn every_clip_of_a_source_shares_its_beats() {
+    let mut project = with_beats();
+    project.tracks[0].clips.push(clip("song.mp3", 30 * SECOND, 0, 3 * SECOND));
+    assert_eq!(times(&project, 1), (30..33).map(s).collect::<Vec<_>>(), "the file placed again plays the same list");
+    let cleared = set_beats(&project, ClipKey { track: 0, clip: 1 }, ClipBeats::default()).unwrap();
+    assert!(cleared.beats.is_empty() && times(&cleared, 0).is_empty(), "clearing through one clip clears the source");
+}
+
+#[test]
+fn setting_the_same_beats_again_is_no_undo_step() {
+    let mut history = EditHistory::new(with_beats(), 10);
+    history.apply(|project| set_source_beats(project, "song.mp3", beats_every_second(20))).unwrap();
+    history.apply(|project| set_beats(project, key(), beats_every_second(20))).unwrap();
+    assert!(!history.can_undo());
 }
 
 #[test]
@@ -147,9 +166,9 @@ fn marker_and_beat_edits_are_undo_steps() {
     history.apply(|project| add_marker(project, Marker::at(s(3)))).unwrap();
     history.apply(|project| move_marker(project, 0, s(8))).unwrap();
     history.apply(|project| set_beats(project, key(), ClipBeats::default())).unwrap();
-    assert!(history.current().tracks[0].clips[0].beats.is_empty());
+    assert!(history.current().beats.is_empty());
     assert!(history.undo());
-    assert_eq!(history.current().tracks[0].clips[0].beats, beats_every_second(20));
+    assert_eq!(*history.current().beats["song.mp3"], beats_every_second(20));
     assert!(history.undo());
     assert_eq!(history.current().markers[0].at, s(3));
     assert!(history.undo());
@@ -168,15 +187,16 @@ fn bad_markers_are_invalid_and_refused() {
 
 #[test]
 fn bad_beats_are_invalid() {
-    let invalid = |beats: ClipBeats| matches!(set_beats(&with_beats(), key(), beats), Err(EditError::Invalid(errors)) if matches!(errors[..], [ValidationError::InvalidBeats { track: 0, clip: 0, .. }]));
+    let invalid = |beats: ClipBeats| matches!(set_beats(&with_beats(), key(), beats), Err(EditError::Invalid(errors)) if matches!(errors[..], [ValidationError::InvalidBeats { .. }]));
     assert!(invalid(ClipBeats { tempo: 60.0, beats: vec![Beat { at: s(2), downbeat: false }, Beat { at: s(1), downbeat: false }] }), "out of order");
     assert!(invalid(ClipBeats { tempo: 60.0, beats: vec![Beat { at: s(1), downbeat: false }, Beat { at: s(1), downbeat: false }] }), "repeated");
     assert!(invalid(ClipBeats { tempo: 60.0, beats: vec![Beat { at: t(-1), downbeat: false }] }), "negative");
     assert!(invalid(ClipBeats { tempo: f64::NAN, beats: vec![Beat { at: s(1), downbeat: false }] }), "tempo");
     // A still has no sound to have beats.
     let mut still = project(3000, vec![track(vec![clip("a.png", 0, 0, SECOND)], Vec::new())]);
-    still.tracks[0].clips[0].beats = beats_every_second(2);
-    assert!(matches!(&validate(&still, &AcceptAll)[..], [ValidationError::InvalidBeats { .. }]));
+    still.beats.insert("a.png".into(), std::sync::Arc::new(beats_every_second(2)));
+    assert!(matches!(&validate(&still, &AcceptAll)[..], [ValidationError::InvalidBeats { source, .. }] if source == "a.png"));
+    assert!(set_source_beats(&with_beats(), engine::TEXT_SOURCE, beats_every_second(2)).is_err(), "text has no sound");
 }
 
 #[test]

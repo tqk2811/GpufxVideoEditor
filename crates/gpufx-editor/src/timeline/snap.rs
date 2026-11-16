@@ -35,7 +35,7 @@ fn fixed_points(project: &Project, ignore: Option<ClipKey>) -> Vec<Time> {
             if let Some(end) = clip.end() {
                 points.push(end);
             }
-            points.extend(clip.beat_times().map(|(at, _)| at));
+            points.extend(project.clip_beat_times(clip).map(|(at, _)| at));
         }
     }
     points
@@ -61,7 +61,8 @@ pub fn snap_points(project: &Project, ignore: Option<ClipKey>, playhead: Time) -
 pub fn trim_snap_points(project: &Project, key: ClipKey, playhead: Time) -> Vec<Time> {
     let mut points = snap_points(project, Some(key), playhead);
     if let Some(clip) = project.tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) {
-        points.extend(clip.beats.beats.iter().map(|beat| clip.timeline_time_of(beat.at)).filter(|at| *at >= Time::ZERO));
+        let beats = project.clip_beats(clip).map_or(&[][..], |beats| &beats.beats[..]);
+        points.extend(beats.iter().map(|beat| clip.timeline_time_of(beat.at)).filter(|at| *at >= Time::ZERO));
     }
     sorted(points)
 }
@@ -218,7 +219,7 @@ mod tests {
             version: engine::SUPPORTED_VERSION,
             output: Output { width: 1920, height: 1080, frame_duration: Time::from_ticks(3000), audio: None },
             tracks: Vec::new(),
-            markers: Vec::new(),
+            markers: Vec::new(), beats: Default::default(),
         };
         let video = add_track(&empty, TrackKind::Video).unwrap();
         let other = add_track(&video, TrackKind::Video).unwrap();
@@ -335,7 +336,7 @@ mod tests {
     /// A beat at every whole second of the source of clip b (10 to 12 s, source from 0).
     fn with_beats_on_b() -> Project {
         let mut project = project();
-        project.tracks[0].clips[1].beats = engine::ClipBeats { tempo: 60.0, beats: (0..6).map(|second| engine::Beat { at: seconds(second), downbeat: false }).collect() };
+        project.beats.insert("b.mp4".into(), std::sync::Arc::new(engine::ClipBeats { tempo: 60.0, beats: (0..6).map(|second| engine::Beat { at: seconds(second), downbeat: false }).collect() }));
         project
     }
 

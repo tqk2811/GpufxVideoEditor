@@ -100,7 +100,7 @@ fn a_file_without_sound_fails() {
 }
 
 #[test]
-fn the_editor_writes_the_beats_to_the_clip_as_one_undo_step() {
+fn the_editor_writes_the_beats_to_the_source_as_one_undo_step() {
     let path = scratch("clicks-140.wav");
     write_click_wav(&path, 140.0, 10.0, 0.1);
     let source = path.to_string_lossy().into_owned();
@@ -117,14 +117,14 @@ fn the_editor_writes_the_beats_to_the_clip_as_one_undo_step() {
         std::thread::sleep(Duration::from_millis(20));
     }
     state.poll_beats();
-    let beats = state.project().tracks[track].clips[0].beats.clone();
+    let beats = state.project().beats[&source].clone();
     assert!((beats.tempo - 140.0).abs() < 1.0 && beats.beats.len() > 15, "{} beats at {}", beats.beats.len(), beats.tempo);
     assert!(state.can_undo());
     state.undo();
-    assert!(state.project().tracks[track].clips[0].beats.is_empty());
+    assert!(state.project().beats.is_empty());
     // A second detection of the same file is instant, from the cache.
     state.detect_beats(key);
-    assert_eq!(state.project().tracks[track].clips[0].beats, beats);
+    assert_eq!(state.project().beats[&source], beats);
     state.clear_beats(key);
-    assert!(state.project().tracks[track].clips[0].beats.is_empty());
+    assert!(state.project().beats.is_empty());
 }

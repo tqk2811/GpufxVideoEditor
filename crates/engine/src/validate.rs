@@ -1,7 +1,7 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
-use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO};
+use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -198,9 +198,10 @@ pub enum ValidationError {
     MarkersOutOfOrder { marker: usize },
     /// A marker label is longer than [`MAX_MARKER_LABEL`] characters.
     MarkerLabelTooLong { marker: usize, length: usize },
-    /// The beats of a clip are on a still, at a negative or repeated time, out of order, too many,
-    /// or with a tempo that is not a number from 0 to [`MAX_TEMPO`]; `problem` says which.
-    InvalidBeats { track: usize, clip: usize, problem: String },
+    /// The beats kept for a source are for a still or text, at a negative or repeated time, out of
+    /// order, too many, or with a tempo that is not a number from 0 to [`MAX_TEMPO`]; `problem` says
+    /// which.
+    InvalidBeats { source: String, problem: String },
     /// `fade_in + fade_out` is longer than the clip.
     FadesExceedClip {
         track: usize,
@@ -382,7 +383,7 @@ impl fmt::Display for ValidationError {
             NegativeMarkerTime { marker, at } => write!(f, "marker {marker}: time {at} is negative"),
             MarkersOutOfOrder { marker } => write!(f, "marker {marker}: comes before the marker ahead of it; markers must be sorted by time"),
             MarkerLabelTooLong { marker, length } => write!(f, "marker {marker}: the label has {length} characters, more than {MAX_MARKER_LABEL}"),
-            InvalidBeats { track, clip, problem } => write!(f, "track {track}, clip {clip}: beats {problem}"),
+            InvalidBeats { source, problem } => write!(f, "beats of {source:?}: {problem}"),
             FadesExceedClip { track, clip, fade_in, fade_out, duration } => write!(
                 f,
                 "track {track}, clip {clip}: fade_in {fade_in} plus fade_out {fade_out} is longer than duration {duration}"
@@ -435,14 +436,14 @@ impl fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// What is wrong with the beats of `clip`, if anything.
-fn beats_problem(clip: &Clip) -> Option<String> {
-    let beats = &clip.beats;
+/// What is wrong with the beats kept for `source`, if anything. An empty list is kept by no edit
+/// but harmless.
+fn beats_problem(source: &str, beats: &ClipBeats) -> Option<String> {
     if beats.is_empty() {
         return None;
     }
-    if clip.is_still() {
-        return Some("are on a still, which has no sound".to_owned());
+    if source == TEXT_SOURCE || is_image_source(source) {
+        return Some("the source is a still or text, which has no sound".to_owned());
     }
     if !beats.tempo.is_finite() || !(0.0..=MAX_TEMPO).contains(&beats.tempo) {
         return Some(format!("tempo {} must be from 0 to {MAX_TEMPO}", beats.tempo));
@@ -532,6 +533,12 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
         let length = marker.label.chars().count();
         if length > MAX_MARKER_LABEL {
             errors.push(MarkerLabelTooLong { marker: m, length });
+        }
+    }
+
+    for (source, beats) in &project.beats {
+        if let Some(problem) = beats_problem(source, beats) {
+            errors.push(InvalidBeats { source: source.clone(), problem });
         }
     }
 
@@ -684,9 +691,6 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             }
             if !(-MAX_PITCH_SEMITONES..=MAX_PITCH_SEMITONES).contains(&clip.voice.semitones) {
                 errors.push(InvalidPitch { track: t, clip: c, semitones: clip.voice.semitones });
-            }
-            if let Some(problem) = beats_problem(clip) {
-                errors.push(InvalidBeats { track: t, clip: c, problem });
             }
             let mut fades_ok = true;
             for (field, value) in [("fade_in", clip.fade_in), ("fade_out", clip.fade_out)] {

@@ -41,11 +41,13 @@
 //!   track is refused with [`EditError::TrackLocked`], so that every caller gets the same rule.
 //!   A move is refused when either its source track or its target track is locked. Locking and
 //!   hiding themselves stay possible, as does adding a track.
-//! * **Markers and beats.** A marker counts in timeline time, so no clip edit moves it. The beats
-//!   of a clip count in its source time, so they follow the sound through every edit without being
-//!   touched: a move, a trim, a split (each half keeps them all) or a speed change only changes which
-//!   of them the clip plays and where, see [`Clip::beat_times`]. Setting beats is refused on a
-//!   locked track; markers belong to no track.
+//! * **Markers and beats.** A marker counts in timeline time, so no clip edit moves it. Beats are
+//!   kept per source file in [`Project::beats`], in the time of that source, so they follow the
+//!   sound through every edit without being touched: a move, a trim, a split (both halves share the
+//!   list) or a speed change only changes which of them a clip plays and where, see
+//!   [`Project::clip_beat_times`]. Setting them through a clip ([`set_beats`]) is refused on a
+//!   locked track and changes the list of every clip of that source; [`set_source_beats`] names
+//!   the source itself. Markers belong to no track.
 
 use crate::audio_schedule::sample_position;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
@@ -441,7 +443,6 @@ pub fn text_clip(start: Time, duration: Time, text: TextContent) -> Clip {
         animation: ClipAnimation::default(),
         denoise: Default::default(),
         voice: Default::default(),
-        beats: Default::default(),
     }
 }
 
@@ -1284,12 +1285,25 @@ pub fn set_marker(project: &Project, marker: usize, label: String, color: Option
     finish(next)
 }
 
-/// Replaces the beats of a clip, which count in its source time; empty beats clear them. Refused
-/// as invalid on a still or with beats out of order.
+/// Replaces the beats of the source of clip `key`, which count in that source's time, so every
+/// clip of the source gets them; empty beats clear them. Refused on a locked track, and as invalid
+/// on a still or text or with beats out of order.
 pub fn set_beats(project: &Project, key: ClipKey, beats: ClipBeats) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
+    let source = clip_of(project, key)?.source.clone();
+    set_source_beats(project, &source, beats)
+}
+
+/// Replaces the beats kept for `source`, in its time; empty beats remove its entry. Refused as
+/// invalid for a still or text source or with beats out of order. Equal beats give an equal
+/// project, so [`EditHistory::apply`] records no step.
+pub fn set_source_beats(project: &Project, source: &str, beats: ClipBeats) -> Result<Project, EditError> {
     let mut next = project.clone();
-    clip_mut(&mut next, key)?.beats = beats;
+    if beats.is_empty() {
+        next.beats.remove(source);
+    } else if next.beats.get(source).is_none_or(|kept| **kept != beats) {
+        next.beats.insert(source.to_owned(), std::sync::Arc::new(beats));
+    }
     finish(next)
 }
 

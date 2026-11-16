@@ -566,17 +566,19 @@ fn check_marker(at: Time, label: &str) -> Result<(), AgentError> {
     Ok(())
 }
 
-/// The beats a clip plays, in timeline time, as the tools give them.
-fn beats_json(clip: &Clip) -> Value {
-    Value::Array(clip.beat_times().map(|(at, beat)| json!({"at": at, "downbeat": beat.downbeat})).collect())
+/// The beats a clip plays (from the list of its source), in timeline time, as the tools give them.
+fn beats_json(project: &Project, clip: &Clip) -> Value {
+    Value::Array(project.clip_beat_times(clip).map(|(at, beat)| json!({"at": at, "downbeat": beat.downbeat})).collect())
 }
 
 fn markers_list(project: &Project) -> Value {
     let markers: Vec<Value> = project.markers.iter().enumerate().map(|(index, marker)| json!({"marker": index, "at": marker.at, "label": marker.label, "color": marker.color})).collect();
     let mut beats = Vec::new();
     for (track_index, track) in project.tracks.iter().enumerate() {
-        for (clip_index, clip) in track.clips.iter().enumerate().filter(|(_, clip)| !clip.beats.is_empty()) {
-            beats.push(json!({"clip": {"track": track_index, "clip": clip_index}, "tempo": clip.beats.tempo, "beats": beats_json(clip)}));
+        for (clip_index, clip) in track.clips.iter().enumerate() {
+            if let Some(found) = project.clip_beats(clip) {
+                beats.push(json!({"clip": {"track": track_index, "clip": clip_index}, "source": clip.source, "tempo": found.tempo, "beats": beats_json(project, clip)}));
+            }
         }
     }
     json!({"markers": markers, "beats": beats})
@@ -594,7 +596,8 @@ fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef) -> Res
     if state.is_track_locked(clip.track) {
         return Err(AgentError::from_edit(&engine::EditError::TrackLocked { track: clip.track }));
     }
-    let path = paths.source_path(&found.source);
+    let source = found.source.clone();
+    let path = paths.source_path(&source);
     let status = if wait { state.beats.wait(&path) } else { state.beats.start(&path) };
     match status {
         BeatStatus::Idle => Ok(json!({"state": "running", "progress": 0.0, "clip": clip})),
@@ -603,9 +606,9 @@ fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef) -> Res
         BeatStatus::Ready(analysis) => {
             let beats = analysis.clip_beats();
             let tempo = beats.tempo;
-            state.apply_agent_command(|project| engine::set_beats(project, clip.into(), beats)).map_err(|error| AgentError::from_edit(&error))?;
+            state.apply_agent_command(|project| engine::set_source_beats(project, &source, beats)).map_err(|error| AgentError::from_edit(&error))?;
             let placed = current_clip(state.project(), clip).map_err(|error| AgentError::from_edit(&error))?;
-            let shown = beats_json(placed);
+            let shown = beats_json(state.project(), placed);
             let count = shown.as_array().map_or(0, Vec::len);
             Ok(json!({"state": "done", "clip": clip, "tempo": tempo, "count": count, "beats": shown}))
         }
@@ -1032,7 +1035,7 @@ mod tests {
         let clip = ClipRef { track: 0, clip: 0 };
         let first = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip }).expect("started");
         assert_eq!(first["state"], "running", "{first}");
-        assert!(host.state.project().tracks[0].clips[0].beats.is_empty(), "no edit while it runs");
+        assert!(host.state.project().beats.is_empty(), "no edit while it runs");
         let started = std::time::Instant::now();
         let done = loop {
             let answer = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip }).expect("polled");
@@ -1043,7 +1046,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         assert!((done["tempo"].as_f64().unwrap() - 120.0).abs() < 1.0, "{done}");
-        assert!(!host.state.project().tracks[0].clips[0].beats.is_empty());
+        assert!(host.state.project().clip_beats(&host.state.project().tracks[0].clips[0]).is_some());
         let _ = std::fs::remove_dir_all(&folder);
     }
 
@@ -1053,8 +1056,8 @@ mod tests {
         host.state.add_track(TrackKind::Audio);
         let mut clip = new_clip("C:/media/song.mp3", Time::from_ticks(450_000), Time::from_ticks(180_000));
         clip.source_in = Time::from_ticks(90_000);
-        clip.beats = engine::ClipBeats { tempo: 60.0, beats: (0..5).map(|second| engine::Beat { at: Time::from_ticks(second * 90_000), downbeat: second == 2 }).collect() };
-        let project = engine::add_clip(host.state.project(), 0, clip).unwrap();
+        let mut project = engine::add_clip(host.state.project(), 0, clip).unwrap();
+        project.beats.insert("C:/media/song.mp3".into(), std::sync::Arc::new(engine::ClipBeats { tempo: 60.0, beats: (0..5).map(|second| engine::Beat { at: Time::from_ticks(second * 90_000), downbeat: second == 2 }).collect() }));
         host.state.replace_project(project, None);
         let listed = host.run(AgentRequest::MarkersList).expect("list");
         // The clip plays source 1 to 3 s from 5 s: the beats at source 1 and 2 s.
@@ -1062,7 +1065,7 @@ mod tests {
         let clip = ClipRef { track: 0, clip: 0 };
         let now = host.state.revision();
         host.run(AgentRequest::Edit { expected_revision: now, edit: AgentEdit::ClipBeatsClear { clip } }).expect("clear");
-        assert!(host.state.project().tracks[0].clips[0].beats.is_empty());
+        assert!(host.state.project().beats.is_empty());
         assert_eq!(host.run(AgentRequest::MarkersList).expect("list")["beats"], json!([]));
     }
 
