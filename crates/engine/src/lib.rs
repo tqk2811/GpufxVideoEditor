@@ -18,6 +18,7 @@
 pub mod audio_clock;
 pub mod audio_mix;
 pub mod audio_schedule;
+pub mod beats;
 pub mod denoise;
 pub mod edit;
 pub mod karaoke;
