@@ -191,6 +191,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::KeyframeOutsideClip { key, .. } => Message::EditKeyframeOutsideClip(label(key.track)),
         EditError::KeyframeNotFound { key, .. } => Message::EditKeyframeNotFound(label(key.track)),
         EditError::NoPlacement { key } => Message::EditNoPlacement(label(key.track)),
+        EditError::MarkerNotFound { marker } => Message::EditMarkerNotFound(marker + 1),
         EditError::NotText { .. } => Message::EditInvalid(error.to_string()),
         EditError::Invalid(errors) => Message::EditInvalid(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
     }
@@ -388,6 +389,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         animation: Default::default(),
         denoise: Default::default(),
         voice: Default::default(),
+        beats: Default::default(),
     }
 }
 
@@ -406,6 +408,7 @@ fn default_project() -> Project {
             audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }),
         },
         tracks: Vec::new(),
+        markers: Vec::new(),
     }
 }
 

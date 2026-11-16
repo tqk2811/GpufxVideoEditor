@@ -1,7 +1,7 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
-use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MAX_PITCH_SEMITONES};
+use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -192,6 +192,15 @@ pub enum ValidationError {
     InvalidPitch { track: usize, clip: usize, semitones: f64 },
     /// `output.audio.bitrate` is zero.
     InvalidAudioBitrate,
+    /// A marker is at a negative time.
+    NegativeMarkerTime { marker: usize, at: Time },
+    /// A marker comes before the one ahead of it in the list: markers must be sorted by time.
+    MarkersOutOfOrder { marker: usize },
+    /// A marker label is longer than [`MAX_MARKER_LABEL`] characters.
+    MarkerLabelTooLong { marker: usize, length: usize },
+    /// The beats of a clip are on a still, at a negative or repeated time, out of order, too many,
+    /// or with a tempo that is not a number from 0 to [`MAX_TEMPO`]; `problem` says which.
+    InvalidBeats { track: usize, clip: usize, problem: String },
     /// `fade_in + fade_out` is longer than the clip.
     FadesExceedClip {
         track: usize,
@@ -370,6 +379,10 @@ impl fmt::Display for ValidationError {
                 write!(f, "track {track}, clip {clip}: voice semitones {semitones} must be from -{MAX_PITCH_SEMITONES} to {MAX_PITCH_SEMITONES}")
             }
             InvalidAudioBitrate => write!(f, "output: audio bitrate must be positive"),
+            NegativeMarkerTime { marker, at } => write!(f, "marker {marker}: time {at} is negative"),
+            MarkersOutOfOrder { marker } => write!(f, "marker {marker}: comes before the marker ahead of it; markers must be sorted by time"),
+            MarkerLabelTooLong { marker, length } => write!(f, "marker {marker}: the label has {length} characters, more than {MAX_MARKER_LABEL}"),
+            InvalidBeats { track, clip, problem } => write!(f, "track {track}, clip {clip}: beats {problem}"),
             FadesExceedClip { track, clip, fade_in, fade_out, duration } => write!(
                 f,
                 "track {track}, clip {clip}: fade_in {fade_in} plus fade_out {fade_out} is longer than duration {duration}"
@@ -421,6 +434,27 @@ impl fmt::Display for ValidationError {
 }
 
 impl std::error::Error for ValidationError {}
+
+/// What is wrong with the beats of `clip`, if anything.
+fn beats_problem(clip: &Clip) -> Option<String> {
+    let beats = &clip.beats;
+    if beats.is_empty() {
+        return None;
+    }
+    if clip.is_still() {
+        return Some("are on a still, which has no sound".to_owned());
+    }
+    if !beats.tempo.is_finite() || !(0.0..=MAX_TEMPO).contains(&beats.tempo) {
+        return Some(format!("tempo {} must be from 0 to {MAX_TEMPO}", beats.tempo));
+    }
+    if beats.beats.len() > MAX_BEATS {
+        return Some(format!("are {}, more than {MAX_BEATS}", beats.beats.len()));
+    }
+    if let Some(first) = beats.beats.first().filter(|beat| beat.at < Time::ZERO) {
+        return Some(format!("start at {}, before the start of the source", first.at));
+    }
+    beats.beats.windows(2).position(|pair| pair[1].at <= pair[0].at).map(|index| format!("{} and {} are not in increasing time", index, index + 1))
+}
 
 /// Adds the problems of the opacity, rotation and keyframes of one clip to `errors`.
 fn motion_errors(clip: &Clip, track: usize, c: usize, on_audio_track: bool, errors: &mut Vec<ValidationError>) {
@@ -485,6 +519,19 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
         }
         if audio.bitrate == 0 {
             errors.push(InvalidAudioBitrate);
+        }
+    }
+
+    for (m, marker) in project.markers.iter().enumerate() {
+        if marker.at < Time::ZERO {
+            errors.push(NegativeMarkerTime { marker: m, at: marker.at });
+        }
+        if m > 0 && marker.at < project.markers[m - 1].at {
+            errors.push(MarkersOutOfOrder { marker: m });
+        }
+        let length = marker.label.chars().count();
+        if length > MAX_MARKER_LABEL {
+            errors.push(MarkerLabelTooLong { marker: m, length });
         }
     }
 
@@ -637,6 +684,9 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             }
             if !(-MAX_PITCH_SEMITONES..=MAX_PITCH_SEMITONES).contains(&clip.voice.semitones) {
                 errors.push(InvalidPitch { track: t, clip: c, semitones: clip.voice.semitones });
+            }
+            if let Some(problem) = beats_problem(clip) {
+                errors.push(InvalidBeats { track: t, clip: c, problem });
             }
             let mut fades_ok = true;
             for (field, value) in [("fade_in", clip.fade_in), ("fade_out", clip.fade_out)] {

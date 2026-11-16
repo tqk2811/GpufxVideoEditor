@@ -217,6 +217,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditKeyframeOutsideClip(track) => format!("{}: thời điểm keyframe nằm ngoài clip", track_label(*track)),
         Message::EditKeyframeNotFound(track) => format!("{}: không có keyframe tại thời điểm đó", track_label(*track)),
         Message::EditNoPlacement(track) => format!("{}: hãy đặt clip vào khung trước", track_label(*track)),
+        Message::EditMarkerNotFound(marker) => format!("Không có điểm đánh dấu {marker}"),
         Message::TabText => "Chữ".to_owned(),
         Message::AddText => "Thêm chữ".to_owned(),
         Message::TextAddHint => "Thêm chữ vào vị trí đầu phát, trên một track video còn trống. Sửa chữ ở bảng bên phải.".to_owned(),

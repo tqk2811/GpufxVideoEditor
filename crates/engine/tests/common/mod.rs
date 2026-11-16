@@ -25,6 +25,7 @@ pub fn clip(source: &str, start: i64, source_in: i64, duration: i64) -> Clip {
         animation: Default::default(),
         denoise: Default::default(),
         voice: Default::default(),
+        beats: Default::default(),
     }
 }
 
@@ -55,6 +56,7 @@ pub fn project(frame_duration: i64, tracks: Vec<Track>) -> Project {
             audio: None,
         },
         tracks,
+        markers: Vec::new(),
     }
 }
 

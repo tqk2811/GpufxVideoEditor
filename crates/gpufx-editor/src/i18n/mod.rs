@@ -229,6 +229,8 @@ pub enum Message {
     EditKeyframeOutsideClip(TrackLabel),
     EditKeyframeNotFound(TrackLabel),
     EditNoPlacement(TrackLabel),
+    /// A marker that is not there, numbered from 1.
+    EditMarkerNotFound(usize),
     /// The Text tab of the left panel, and the Text part of the inspector.
     TabText,
     AddText,
@@ -510,6 +512,7 @@ mod tests {
             Message::EditKeyframeOutsideClip(TrackLabel::Video(1)),
             Message::EditKeyframeNotFound(TrackLabel::Video(1)),
             Message::EditNoPlacement(TrackLabel::Video(1)),
+            Message::EditMarkerNotFound(2),
             Message::TabText,
             Message::AddText,
             Message::TextAddHint,

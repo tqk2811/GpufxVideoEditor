@@ -195,12 +195,12 @@ mod tests {
     }
 
     fn clip(source: String, start: i64) -> Clip {
-        Clip { source, start: Time::from_ticks(start), source_in: Time::ZERO, duration: Time::from_ticks(900), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default() }
+        Clip { source, start: Time::from_ticks(start), source_in: Time::ZERO, duration: Time::from_ticks(900), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), beats: Default::default() }
     }
 
     fn project(sources: Vec<String>) -> Project {
         let clips = sources.into_iter().enumerate().map(|(i, source)| clip(source, i as i64 * 900)).collect();
-        Project { version: SUPPORTED_VERSION, output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }] }
+        Project { version: SUPPORTED_VERSION, output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: None }, tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }], markers: Vec::new() }
     }
 
     #[test]

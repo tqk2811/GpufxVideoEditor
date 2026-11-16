@@ -235,6 +235,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditKeyframeOutsideClip(track) => format!("{}: that keyframe time is outside the clip", track_label(*track)),
         Message::EditKeyframeNotFound(track) => format!("{}: no keyframe at that time", track_label(*track)),
         Message::EditNoPlacement(track) => format!("{}: place the clip in the frame first", track_label(*track)),
+        Message::EditMarkerNotFound(marker) => format!("Marker {marker} does not exist"),
         Message::TabText => "Text".to_owned(),
         Message::AddText => "Add text".to_owned(),
         Message::TextAddHint => "Adds a text at the playhead, on a free video track. Edit it in the panel on the right.".to_owned(),

@@ -41,11 +41,16 @@
 //!   track is refused with [`EditError::TrackLocked`], so that every caller gets the same rule.
 //!   A move is refused when either its source track or its target track is locked. Locking and
 //!   hiding themselves stay possible, as does adding a track.
+//! * **Markers and beats.** A marker counts in timeline time, so no clip edit moves it. The beats
+//!   of a clip count in its source time, so they follow the sound through every edit without being
+//!   touched: a move, a trim, a split (each half keeps them all) or a speed change only changes which
+//!   of them the clip plays and where, see [`Clip::beat_times`]. Setting beats is refused on a
+//!   locked track; markers belong to no track.
 
 use crate::audio_schedule::sample_position;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
-use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipDenoise, ClipVoice, Effect, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -99,6 +104,8 @@ pub enum EditError {
     NoPlacement { key: ClipKey },
     /// The clip is no text clip, so it has no text to change.
     NotText { key: ClipKey },
+    /// The project has no marker at this index.
+    MarkerNotFound { marker: usize },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -158,6 +165,7 @@ impl fmt::Display for EditError {
             KeyframeNotFound { key, at } => write!(f, "track {}, clip {}: no keyframe at {at}", key.track, key.clip),
             NoPlacement { key } => write!(f, "track {}, clip {}: the clip has no placement yet", key.track, key.clip),
             NotText { key } => write!(f, "track {}, clip {}: the clip shows no text", key.track, key.clip),
+            MarkerNotFound { marker } => write!(f, "marker {marker} does not exist"),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
                 for error in errors {
@@ -433,6 +441,7 @@ pub fn text_clip(start: Time, duration: Time, text: TextContent) -> Clip {
         animation: ClipAnimation::default(),
         denoise: Default::default(),
         voice: Default::default(),
+        beats: Default::default(),
     }
 }
 
@@ -1211,6 +1220,76 @@ pub fn set_transition_params(
         .ok_or(EditError::TransitionNotFound { track, after_clip })?;
     transition.params = params;
     transition.duration = duration;
+    finish(next)
+}
+
+/// The index a marker at `at` gets among `markers`: after every marker at or before it.
+fn marker_slot(markers: &[Marker], at: Time) -> usize {
+    markers.partition_point(|marker| marker.at <= at)
+}
+
+/// Adds a marker to the ruler and gives the project with the index it got: markers stay sorted
+/// by time, and a marker at the time of others comes after them. A negative time or a label that
+/// is too long is refused as invalid.
+pub fn add_marker_report(project: &Project, marker: Marker) -> Result<(Project, usize), EditError> {
+    let mut next = project.clone();
+    let index = marker_slot(&next.markers, marker.at);
+    next.markers.insert(index, marker);
+    finish(next).map(|next| (next, index))
+}
+
+/// [`add_marker_report`] without the index.
+pub fn add_marker(project: &Project, marker: Marker) -> Result<Project, EditError> {
+    add_marker_report(project, marker).map(|(next, _)| next)
+}
+
+/// Removes marker `marker`.
+pub fn remove_marker(project: &Project, marker: usize) -> Result<Project, EditError> {
+    if marker >= project.markers.len() {
+        return Err(EditError::MarkerNotFound { marker });
+    }
+    let mut next = project.clone();
+    next.markers.remove(marker);
+    finish(next)
+}
+
+/// Moves marker `marker` to `at` and gives the project with the index it now has, the markers
+/// sorted again as [`add_marker_report`] sorts them.
+pub fn move_marker_report(project: &Project, marker: usize, at: Time) -> Result<(Project, usize), EditError> {
+    if marker >= project.markers.len() {
+        return Err(EditError::MarkerNotFound { marker });
+    }
+    if project.markers[marker].at == at {
+        return finish(project.clone()).map(|next| (next, marker));
+    }
+    let mut next = project.clone();
+    let mut moved = next.markers.remove(marker);
+    moved.at = at;
+    let index = marker_slot(&next.markers, at);
+    next.markers.insert(index, moved);
+    finish(next).map(|next| (next, index))
+}
+
+/// [`move_marker_report`] without the index.
+pub fn move_marker(project: &Project, marker: usize, at: Time) -> Result<Project, EditError> {
+    move_marker_report(project, marker, at).map(|(next, _)| next)
+}
+
+/// Changes the label and colour of marker `marker`; its time stays.
+pub fn set_marker(project: &Project, marker: usize, label: String, color: Option<crate::project::Rgba>) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    let target = next.markers.get_mut(marker).ok_or(EditError::MarkerNotFound { marker })?;
+    target.label = label;
+    target.color = color;
+    finish(next)
+}
+
+/// Replaces the beats of a clip, which count in its source time; empty beats clear them. Refused
+/// as invalid on a still or with beats out of order.
+pub fn set_beats(project: &Project, key: ClipKey, beats: ClipBeats) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.beats = beats;
     finish(next)
 }
 
