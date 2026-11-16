@@ -391,6 +391,11 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
     }
 }
 
+/// Clip `key` of `project`, or the refusal of an edit of a clip that is not there.
+fn clip_in(project: &Project, key: ClipKey) -> Result<&Clip, EditError> {
+    project.tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).ok_or(EditError::ClipNotFound { key })
+}
+
 fn default_project() -> Project {
     Project {
         version: SUPPORTED_VERSION,
@@ -1483,6 +1488,49 @@ impl EditorState {
         let Some(key) = self.selection else { return };
         let speed = speed_limits(self.history.current(), key).map_or(speed, |(lowest, highest)| speed.max(lowest).min(highest));
         self.live_edit(|project| set_speed(project, key, speed));
+    }
+
+    /// Sets the noise reduction method of the selected clip, keeping its strength: one undo step.
+    pub fn set_denoise_mode(&mut self, mode: engine::DenoiseMode) {
+        let Some(key) = self.selection else { return };
+        self.run(|project| {
+            let denoise = engine::ClipDenoise { mode, ..clip_in(project, key)?.denoise };
+            engine::set_denoise(project, key, denoise)
+        });
+    }
+
+    /// Moves the noise reduction strength of the selected clip, merged like the other sliders.
+    pub fn live_denoise_strength(&mut self, strength: f64) {
+        let Some(key) = self.selection else { return };
+        self.live_edit(|project| {
+            let denoise = engine::ClipDenoise { strength, ..clip_in(project, key)?.denoise };
+            engine::set_denoise(project, key, denoise)
+        });
+    }
+
+    /// Gives the selected clip the voice of `preset`: one undo step.
+    pub fn apply_voice_preset(&mut self, preset: engine::VoicePreset) {
+        let Some(key) = self.selection else { return };
+        self.run(|project| engine::set_voice(project, key, preset.voice()));
+    }
+
+    /// Moves the pitch shift of the selected clip, keeping its effect, merged like the other
+    /// sliders.
+    pub fn live_pitch(&mut self, semitones: f64) {
+        let Some(key) = self.selection else { return };
+        self.live_edit(|project| {
+            let voice = engine::ClipVoice { semitones, ..clip_in(project, key)?.voice };
+            engine::set_voice(project, key, voice)
+        });
+    }
+
+    /// Turns the robot effect of the selected clip on or off, keeping its pitch: one undo step.
+    pub fn set_voice_effect(&mut self, effect: engine::VoiceEffect) {
+        let Some(key) = self.selection else { return };
+        self.run(|project| {
+            let voice = engine::ClipVoice { effect, ..clip_in(project, key)?.voice };
+            engine::set_voice(project, key, voice)
+        });
     }
 
     pub fn live_fades(&mut self, fade_in: Time, fade_out: Time) {
@@ -3737,6 +3785,38 @@ mod tests {
         state.commit_live();
         assert!(state.audio_revision() > audio);
         assert_eq!(state.project().tracks[0].clips[0].gain_db, -6.0);
+    }
+
+    #[test]
+    fn denoise_and_voice_edits_are_one_undo_step_each_and_sliders_merge() {
+        let mut state = state_with_clip();
+        let clip = |state: &EditorState| state.project().tracks[0].clips[0].clone();
+        state.set_denoise_mode(engine::DenoiseMode::Voice);
+        state.live_denoise_strength(0.8);
+        state.live_denoise_strength(0.4);
+        state.commit_live();
+        assert_eq!(clip(&state).denoise, engine::ClipDenoise { mode: engine::DenoiseMode::Voice, strength: 0.4 });
+        // A new method keeps the strength.
+        state.set_denoise_mode(engine::DenoiseMode::General);
+        assert_eq!(clip(&state).denoise.strength, 0.4);
+        state.apply_voice_preset(engine::VoicePreset::Chipmunk);
+        state.live_pitch(3.0);
+        state.live_pitch(-4.5);
+        state.commit_live();
+        state.set_voice_effect(engine::VoiceEffect::Robot);
+        assert_eq!(clip(&state).voice, engine::ClipVoice { semitones: -4.5, effect: engine::VoiceEffect::Robot });
+        assert_eq!(engine::VoicePreset::of(&clip(&state).voice), None);
+        state.undo();
+        assert_eq!(clip(&state).voice.semitones, -4.5, "the effect was its own step");
+        state.undo();
+        assert_eq!(clip(&state).voice, engine::VoicePreset::Chipmunk.voice(), "the slider drag was one step");
+        state.undo();
+        state.undo();
+        assert_eq!(clip(&state).denoise.mode, engine::DenoiseMode::Voice);
+        state.undo();
+        assert_eq!(clip(&state).denoise, engine::ClipDenoise { mode: engine::DenoiseMode::Voice, strength: 1.0 }, "the strength drag was one step");
+        state.undo();
+        assert_eq!(clip(&state).denoise, engine::ClipDenoise::default());
     }
 
     #[test]
