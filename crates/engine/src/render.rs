@@ -19,6 +19,7 @@ use crate::project::{text_step_up, Clip, ClipMatte, Effect, Project, TextContent
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, LayerContent, Progress, SourceSample,
 };
+use crate::frame_rate::FrameRate;
 use crate::time::Time;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -297,9 +298,9 @@ fn decode_sample<C: Compositor>(
 /// [`animation_effects`]). When that fails and a preset added an effect, the clip is prepared again
 /// with its own effects only: a preset effect whose package went away since the packs were read
 /// leaves the clip drawn without it, as a missing package does when the packs are read.
-fn prepare_sample<C: Compositor>(compositor: &mut C, key: ClipKey, frame: &mut <C::Decoder as Decoder>::Frame, sample: &SourceSample<'_>, at: FrameContext, frame_duration: Time) -> Result<C::Image, RenderError> {
+fn prepare_sample<C: Compositor>(compositor: &mut C, key: ClipKey, frame: &mut <C::Decoder as Decoder>::Frame, sample: &SourceSample<'_>, at: FrameContext, frame_rate: FrameRate) -> Result<C::Image, RenderError> {
     let own = effects_at(sample.effects, sample.offset);
-    let added = animation_effects(&sample.model.animation, sample.clock, frame_duration);
+    let added = animation_effects(&sample.model.animation, sample.clock, frame_rate);
     let matte = if sample.model.text.is_some() { ClipMatte::default() } else { sample.model.matte };
     with_preset_fallback(&own, added, |effects| compositor.prepare_clip(key, frame, effects, &matte, sample.transform, sample.clock, at))
 }
@@ -323,7 +324,7 @@ fn render_layer<C: Compositor>(
     track: usize,
     content: &LayerContent<'_>,
     at: FrameContext,
-    frame_duration: Time,
+    frame_rate: FrameRate,
 ) -> Result<C::Image, RenderError> {
     let key = |clip| ClipKey { track, clip };
     match content {
@@ -333,7 +334,7 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(sample.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let image = prepare_sample(compositor, key(sample.clip), &mut frame, sample, at, frame_duration)?;
+            let image = prepare_sample(compositor, key(sample.clip), &mut frame, sample, at, frame_rate)?;
             kept.0.push(frame);
             Ok(image)
         }
@@ -354,9 +355,9 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(to.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let from_image = prepare_sample(compositor, key(from.clip), &mut from_frame, from, at, frame_duration)?;
+            let from_image = prepare_sample(compositor, key(from.clip), &mut from_frame, from, at, frame_rate)?;
             let to_image =
-                match prepare_sample(compositor, key(to.clip), &mut to_frame, to, at, frame_duration) {
+                match prepare_sample(compositor, key(to.clip), &mut to_frame, to, at, frame_rate) {
                     Ok(image) => image,
                     Err(e) => {
                         compositor.release(from_image);
@@ -425,7 +426,7 @@ impl<C: Compositor> FrameRenderer<C> {
         for layer in &layers {
             used.extend(layer_clips(&layer.content, layer.track));
             let failed = |e: RenderError| RenderError(format!("frame {index}, track {}: {e}", layer.track));
-            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project.output.frame_rate.frame_duration()) {
+            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project.output.frame_rate) {
                 Ok(image) => image,
                 Err(e) => {
                     if let Some(base) = canvas {

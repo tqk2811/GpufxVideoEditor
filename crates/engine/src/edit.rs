@@ -1242,10 +1242,11 @@ pub fn set_effect_params_at(project: &Project, key: ClipKey, effect: usize, para
     finish(next)
 }
 
-/// Changes the output frame rate. Anything above 60 fps is refused.
+/// Changes the output frame rate, reduced (60/2 is stored as 30/1). Anything outside 1 to 60 fps
+/// is refused.
 pub fn set_frame_rate(project: &Project, frame_rate: FrameRate) -> Result<Project, EditError> {
     let mut next = project.clone();
-    next.output.frame_rate = frame_rate;
+    next.output.frame_rate = FrameRate::new(frame_rate.num, frame_rate.den);
     finish(next)
 }
 

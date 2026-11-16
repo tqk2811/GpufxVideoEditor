@@ -28,6 +28,8 @@ fn the_frame_rate_changes_and_zero_is_refused() {
     let start = project(3_000, vec![]);
     assert_eq!(set_frame_rate(&start, engine::FrameRate::NTSC_FILM).unwrap().output.frame_rate, engine::FrameRate::NTSC_FILM);
     assert_eq!(set_frame_rate(&start, engine::FrameRate::whole(60)).unwrap().output.frame_rate, engine::FrameRate::whole(60));
+    assert_eq!(set_frame_rate(&start, engine::FrameRate { num: 60, den: 2 }).unwrap().output.frame_rate, engine::FrameRate::whole(30), "stored reduced");
+    assert!(matches!(set_frame_rate(&start, engine::FrameRate { num: 1, den: 2 }), Err(EditError::Invalid(_))), "less than 1 fps");
     assert!(matches!(set_frame_rate(&start, engine::FrameRate { num: 0, den: 1 }), Err(EditError::Invalid(_))));
     assert!(matches!(set_frame_rate(&start, engine::FrameRate { num: 30, den: 0 }), Err(EditError::Invalid(_))));
     assert!(matches!(set_frame_rate(&start, engine::FrameRate::new(60_001, 1000)), Err(EditError::Invalid(_))), "more than 60 fps");

@@ -251,6 +251,10 @@ fn more_than_60_fps_is_refused_and_60_is_not() {
     let message = only(&p)[0].to_string();
     assert!(message.contains("60 fps"), "{message}");
     assert_eq!(only(&project(1_500, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])])), vec![]);
+    // 1 fps is the slowest an output may run, as the UI and the agent tools say.
+    let slow = engine::FrameRate { num: 1, den: 2 };
+    assert_eq!(only(&common::project_at(slow, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])])), vec![E::FrameRateTooLow { frame_rate: slow }]);
+    assert_eq!(only(&common::project_at(engine::FrameRate::MIN, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])])), vec![]);
 }
 
 #[test]

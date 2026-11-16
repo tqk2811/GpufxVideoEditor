@@ -76,6 +76,8 @@ pub enum ValidationError {
     InvalidFrameRate { frame_rate: FrameRate },
     /// `output.frame_rate` is faster than [`FrameRate::MAX`], 60 fps.
     FrameRateTooHigh { frame_rate: FrameRate },
+    /// `output.frame_rate` is slower than [`FrameRate::MIN`], 1 fps.
+    FrameRateTooLow { frame_rate: FrameRate },
     /// `output.audio.sample_rate` is not 48000.
     UnsupportedSampleRate { sample_rate: u32 },
     /// `output.audio.channels` is not 2.
@@ -296,6 +298,9 @@ impl fmt::Display for ValidationError {
             FrameRateTooHigh { frame_rate } => {
                 write!(f, "output: frame_rate {frame_rate} is more than {} fps", FrameRate::MAX)
             }
+            FrameRateTooLow { frame_rate } => {
+                write!(f, "output: frame_rate {frame_rate} is less than {} fps", FrameRate::MIN)
+            }
             UnsupportedSampleRate { sample_rate } => {
                 write!(f, "output: audio sample_rate {sample_rate} must be 48000")
             }
@@ -509,6 +514,8 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
         errors.push(InvalidFrameRate { frame_rate });
     } else if frame_rate.is_faster_than(FrameRate::MAX) {
         errors.push(FrameRateTooHigh { frame_rate });
+    } else if FrameRate::MIN.is_faster_than(frame_rate) {
+        errors.push(FrameRateTooLow { frame_rate });
     }
     if let Some(audio) = &project.output.audio {
         if audio.sample_rate != 48_000 {

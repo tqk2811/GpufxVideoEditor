@@ -56,6 +56,10 @@ Hai tiến trình editor dùng chung `%LOCALAPPDATA%\gpufx-editor\proxies`: `swe
 
 Khi có proxy, preview dùng `ProjectPaths` riêng còn capture của agent dùng bản gốc; `D3d12Producer::use_paths` (`crates/gpufx-editor/src/preview/backend.rs:64`) bỏ compositor mỗi khi paths đổi, nên capture xen với preview dựng lại graph mỗi lần đổi. Nên giữ compositor riêng cho capture. Ghi ngày 2026-11-17.
 
+### [Thấp] Proxy dùng nhịp khung tròn tick thay vì phân số chính xác của nguồn
+
+`crates/gpufx-editor/src/proxy.rs` (`proxy_project`) đặt nhịp của project proxy là `FrameRate::from_frame_duration` của khung tròn tick (`proxy_frame_duration`), nên nguồn 23,976 fps cho proxy 90000/3753 = 30000/1251, hiện là "23.981 fps", thay vì 24000/1001. Giữ vậy để khung proxy khớp `ProxyTiming::proxy_time` (bước đều theo tick, `crates/d3d12-backend/src/paths.rs`). Muốn proxy đúng nhịp nguồn thì phải dùng `FrameRate` của nguồn và viết lại `proxy_time` theo mốc khung phân số. Ghi ngày 2026-11-17.
+
 ### [Thấp] Proxy chế độ Tự động chỉ xét chiều cao, proxy tối đa 60 fps
 
 `crates/gpufx-editor/src/proxy.rs:75` (`ProxyMode::wants`) chỉ xét cao hơn 1080; chưa xét fps cao hay codec nặng (HEVC 10-bit, AV1). `proxy_frame_duration` (`proxy.rs`) kẹp tốc độ khung về 60 fps vì project không cho nhanh hơn, nên nguồn 120 fps có proxy 60 fps và preview đọc proxy theo thời gian của gốc (`preview_file` bỏ `ProxyTiming`), lệch dưới một khung proxy. Nguồn VFR (avg khác `r_frame_rate`) cũng không giữ PTS gốc: proxy lấy mẫu theo `r_frame_rate` làm tròn xuống và đọc theo thời gian của gốc, nên khung hiện ra có thể là khung gốc trước đó tối đa một bước proxy; muốn khớp tuyệt đối phải mã proxy giữ PTS gốc. Ghi ngày 2026-11-17.

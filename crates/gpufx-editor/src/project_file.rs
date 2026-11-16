@@ -161,14 +161,24 @@ pub fn write_file_atomically(file: &Path, bytes: &[u8]) -> Result<(), String> {
     })
 }
 
-/// Brings a file written by hand above 60 fps down to 60, so it still opens. The app never wrote one.
-/// Times are in ticks, so no clip moves; the file itself changes only if the user saves.
+/// Reduces the frame rate of the file (60/2 becomes 30/1, so it equals the menu's rates) and brings
+/// a rate written by hand outside 1 to 60 fps to the nearer end, so it still opens. The app never
+/// wrote one. Times are in ticks, so no clip moves; the file itself changes only if the user saves.
 fn limit_frame_rate(project: &mut Project, file: &Path) {
     let output = &mut project.output;
-    if output.frame_rate.is_valid() && output.frame_rate.is_faster_than(FrameRate::MAX) {
-        eprintln!("{}: frame_rate {} is more than {} fps, using {}", file.display(), output.frame_rate, FrameRate::MAX, FrameRate::MAX);
-        output.frame_rate = FrameRate::MAX;
+    if !output.frame_rate.is_valid() {
+        return;
     }
+    output.frame_rate = FrameRate::new(output.frame_rate.num, output.frame_rate.den);
+    let limit = if output.frame_rate.is_faster_than(FrameRate::MAX) {
+        FrameRate::MAX
+    } else if FrameRate::MIN.is_faster_than(output.frame_rate) {
+        FrameRate::MIN
+    } else {
+        return;
+    };
+    eprintln!("{}: frame_rate {} is outside {} to {} fps, using {limit}", file.display(), output.frame_rate, FrameRate::MIN, FrameRate::MAX);
+    output.frame_rate = limit;
 }
 
 /// Parses `text` as the project stored in `file` and validates it, reporting at most a few problems.
@@ -396,6 +406,15 @@ mod tests {
         let file = Path::new(r"D:\p.json");
         let opened = parse_project(&project_at(90, 1), file, &AcceptAll).expect("it opens");
         assert_eq!(opened.output.frame_rate, FrameRate::MAX);
+        let slow = parse_project(&project_at(1, 2), file, &AcceptAll).expect("it opens");
+        assert_eq!(slow.output.frame_rate, FrameRate::MIN, "below 1 fps comes up to 1");
+    }
+
+    #[test]
+    fn an_unreduced_rate_opens_reduced_so_it_equals_the_presets() {
+        let file = Path::new(r"D:\p.json");
+        assert_eq!(parse_project(&project_at(60, 2), file, &AcceptAll).unwrap().output.frame_rate, FrameRate::whole(30));
+        assert_eq!(parse_project(&project_at(48000, 2002), file, &AcceptAll).unwrap().output.frame_rate, FrameRate::NTSC_FILM);
     }
 
     #[test]
