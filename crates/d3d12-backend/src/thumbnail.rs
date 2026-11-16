@@ -345,7 +345,7 @@ impl FrameSampler {
         check(lines, "sws_scale")?;
         let row = width as usize * bytes_per_pixel;
         let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-                for line in buffer.chunks_exact(stride).take(height as usize) {
+        for line in buffer.chunks_exact(stride).take(height as usize) {
             if to_sdr {
                 for pixel in line[..row].chunks_exact(8) {
                     let channel = |i: usize| f64::from(u16::from_le_bytes([pixel[2 * i], pixel[2 * i + 1]])) / 65535.0;
