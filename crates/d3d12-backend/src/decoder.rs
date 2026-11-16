@@ -126,6 +126,18 @@ fn forward_retry_point(landing: Option<i64>, target: i64, point: i64, origin: i6
     Some(target.saturating_sub(retreat).max(origin))
 }
 
+/// `AVERROR(ENOSYS)` with the MSVC C runtime, where ENOSYS is 40.
+const AVERROR_ENOSYS: i32 = -40;
+
+/// The message of a failed decoding call. FFmpeg's native AV1 decoder has no software path and
+/// fails with ENOSYS when the GPU has no D3D12VA AV1 decoder: said plainly.
+fn decode_error(native_av1: bool, what: &str, status: i32) -> String {
+    if native_av1 && status == AVERROR_ENOSYS {
+        return format!("this GPU cannot decode AV1 (it has no D3D12VA AV1 decoder; {what} failed: {})", describe_error(status));
+    }
+    format!("{what} failed: {}", describe_error(status))
+}
+
 unsafe extern "C" fn choose_d3d12_format(_context: *mut ffi::AVCodecContext, formats: *const ffi::AVPixelFormat) -> ffi::AVPixelFormat {
     let mut current = formats;
     while *current != ffi::AV_PIX_FMT_NONE {
@@ -242,32 +254,40 @@ impl DecodedFrame {
     /// The colour description for gpufx, with the same defaults as FFmpeg's vf_gpufx.
     pub fn color_info(&self) -> Result<ColorInfo, String> {
         // SAFETY: self.frame is valid for the lifetime of self.
-        let (colorspace, color_range, chroma_location) = unsafe { ((*self.frame).colorspace, (*self.frame).color_range, (*self.frame).chroma_location) };
-        // SAFETY: as above.
-        let (trc, primaries) = unsafe { ((*self.frame).color_trc, (*self.frame).color_primaries) };
-        // SAFETY: as above.
-        let peak_nits = unsafe { frame_peak_nits(self.frame) };
-        let matrix = match colorspace {
-            ffi::AVCOL_SPC_BT709 => Matrix::Bt709,
-            ffi::AVCOL_SPC_BT2020_NCL => Matrix::Bt2020,
-            // Unknown matrices are BT.601 for swscale too.
-            ffi::AVCOL_SPC_UNSPECIFIED | ffi::AVCOL_SPC_BT470BG | ffi::AVCOL_SPC_SMPTE170M => Matrix::Bt601,
-            other => return Err(format!("colorspace {other} has no matrix in gpufx")),
-        };
-        let range = if color_range == ffi::AVCOL_RANGE_JPEG { Range::Full } else { Range::Limited };
-        let chroma_location = match chroma_location {
-            ffi::AVCHROMA_LOC_CENTER => ChromaLocation::Center,
-            ffi::AVCHROMA_LOC_TOPLEFT => ChromaLocation::TopLeft,
-            ffi::AVCHROMA_LOC_TOP => ChromaLocation::Top,
-            ffi::AVCHROMA_LOC_BOTTOMLEFT => ChromaLocation::BottomLeft,
-            ffi::AVCHROMA_LOC_BOTTOM => ChromaLocation::Bottom,
-            ffi::AVCHROMA_LOC_LEFT => ChromaLocation::Left,
-            // Unspecified: H.264 and MPEG-2 convention for limited range, JPEG convention for full.
-            _ if range == Range::Full => ChromaLocation::Center,
-            _ => ChromaLocation::Left,
-        };
-        Ok(ColorInfo { matrix, range, chroma_location, premultiplied: false, transfer: transfer_of(trc), primaries: primaries_of(primaries), peak_nits })
+        unsafe { frame_color_info(self.frame) }
     }
+}
+
+/// The colour description of a decoded frame for gpufx, with the same defaults as FFmpeg's
+/// vf_gpufx. The preview (`DecodedFrame::color_info`) and the thumbnails both read it here, so
+/// the two agree on the matrix, range and transfer of untagged sources.
+///
+/// # Safety
+/// `frame` must be a valid frame.
+pub(crate) unsafe fn frame_color_info(frame: *const ffi::AVFrame) -> Result<ColorInfo, String> {
+    let (colorspace, color_range, chroma_location) = ((*frame).colorspace, (*frame).color_range, (*frame).chroma_location);
+    let (trc, primaries) = ((*frame).color_trc, (*frame).color_primaries);
+    let peak_nits = frame_peak_nits(frame);
+    let matrix = match colorspace {
+        ffi::AVCOL_SPC_BT709 => Matrix::Bt709,
+        ffi::AVCOL_SPC_BT2020_NCL => Matrix::Bt2020,
+        // Unknown matrices are BT.601 for swscale too.
+        ffi::AVCOL_SPC_UNSPECIFIED | ffi::AVCOL_SPC_BT470BG | ffi::AVCOL_SPC_SMPTE170M => Matrix::Bt601,
+        other => return Err(format!("colorspace {other} has no matrix in gpufx")),
+    };
+    let range = if color_range == ffi::AVCOL_RANGE_JPEG { Range::Full } else { Range::Limited };
+    let chroma_location = match chroma_location {
+        ffi::AVCHROMA_LOC_CENTER => ChromaLocation::Center,
+        ffi::AVCHROMA_LOC_TOPLEFT => ChromaLocation::TopLeft,
+        ffi::AVCHROMA_LOC_TOP => ChromaLocation::Top,
+        ffi::AVCHROMA_LOC_BOTTOMLEFT => ChromaLocation::BottomLeft,
+        ffi::AVCHROMA_LOC_BOTTOM => ChromaLocation::Bottom,
+        ffi::AVCHROMA_LOC_LEFT => ChromaLocation::Left,
+        // Unspecified: H.264 and MPEG-2 convention for limited range, JPEG convention for full.
+        _ if range == Range::Full => ChromaLocation::Center,
+        _ => ChromaLocation::Left,
+    };
+    Ok(ColorInfo { matrix, range, chroma_location, premultiplied: false, transfer: transfer_of(trc), primaries: primaries_of(primaries), peak_nits })
 }
 
 /// The transfer of an FFmpeg `color_trc`: everything that is neither PQ nor HLG is treated as SDR.
@@ -355,6 +375,8 @@ pub struct SequentialDecoder {
     path: String,
     /// Clockwise quarter turns of the stream's display matrix.
     turns: u8,
+    /// Whether the stream goes to FFmpeg's native AV1 decoder, which decodes through D3D12VA only.
+    native_av1: bool,
 }
 
 impl SequentialDecoder {
@@ -384,6 +406,7 @@ impl SequentialDecoder {
             request_started: Instant::now(),
             path: path_text.to_owned(),
             turns: 0,
+            native_av1: false,
         };
         // SAFETY: on error, Drop releases whatever has been created so far.
         unsafe { decoder.initialize(&c_path, device) }.map_err(|e| format!("{path_text}: {e}"))?;
@@ -403,6 +426,7 @@ impl SequentialDecoder {
             let native = ffi::avcodec_find_decoder_by_name(c"av1".as_ptr());
             if !native.is_null() {
                 codec = native;
+                self.native_av1 = true;
             }
         }
         self.time_base = (*stream).time_base;
@@ -525,6 +549,10 @@ impl SequentialDecoder {
         }
     }
 
+    fn decode_error(&self, what: &str, status: i32) -> String {
+        decode_error(self.native_av1, what, status)
+    }
+
     unsafe fn receive_into(&mut self, frame: *mut ffi::AVFrame) -> Result<bool, String> {
         loop {
             let status = ffi::avcodec_receive_frame(self.codec_context, frame);
@@ -535,7 +563,7 @@ impl SequentialDecoder {
                 return Ok(false);
             }
             if status != ffi::AVERROR_EAGAIN {
-                return Err(format!("avcodec_receive_frame failed: {}", describe_error(status)));
+                return Err(self.decode_error("avcodec_receive_frame", status));
             }
             self.feed_decoder()?;
         }
@@ -555,7 +583,9 @@ impl SequentialDecoder {
             let is_video = (*self.packet).stream_index == self.stream_index;
             let sent = if is_video { ffi::avcodec_send_packet(self.codec_context, self.packet) } else { 0 };
             ffi::av_packet_unref(self.packet);
-            check(sent, "avcodec_send_packet")?;
+            if sent < 0 {
+                return Err(self.decode_error("avcodec_send_packet", sent));
+            }
             if is_video {
                 return Ok(());
             }
@@ -721,6 +751,13 @@ mod tests {
     use super::*;
 
     const THRESHOLD: i64 = 2000;
+
+    #[test]
+    fn av1_without_a_gpu_decoder_says_so() {
+        assert!(decode_error(true, "avcodec_send_packet", AVERROR_ENOSYS).starts_with("this GPU cannot decode AV1"));
+        assert!(!decode_error(false, "avcodec_send_packet", AVERROR_ENOSYS).contains("AV1"), "other codecs keep the plain message");
+        assert!(!decode_error(true, "avcodec_send_packet", -22).contains("AV1"), "other AV1 errors keep the plain message");
+    }
 
     #[test]
     fn a_newer_request_stops_a_decode_only_after_the_grace() {

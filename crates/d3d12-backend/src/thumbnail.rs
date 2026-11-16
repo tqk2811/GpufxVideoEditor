@@ -88,8 +88,8 @@ pub struct FrameSampler {
     /// The newest decoded frame, the answer when the stream ends first.
     kept: *mut ffi::AVFrame,
     scaler: *mut ffi::SwsContext,
-    /// Width, height, pixel format, colour space and range the scaler was made for.
-    scaler_source: (i32, i32, i32, i32, i32),
+    /// Width, height, pixel format, swscale matrix, full range and tone mapping the scaler was made for.
+    scaler_source: (i32, i32, i32, i32, i32, i32),
     /// Clockwise quarter turns of the stream's display matrix.
     turns: u8,
     stream_index: i32,
@@ -118,7 +118,7 @@ impl FrameSampler {
             frame: ptr::null_mut(),
             kept: ptr::null_mut(),
             scaler: ptr::null_mut(),
-            scaler_source: (0, 0, -1, 0, 0),
+            scaler_source: (0, 0, -1, 0, 0, 0),
             turns: 0,
             stream_index: -1,
             time_base: ffi::AVRational { num: 1, den: 1 },
@@ -312,12 +312,17 @@ impl FrameSampler {
         if kept.width <= 0 || kept.height <= 0 || kept.format < 0 {
             return Err(format!("{}: the frame has no picture", self.path));
         }
-        let transfer = crate::decoder::transfer_of(kept.color_trc);
-        let primaries = crate::decoder::primaries_of(kept.color_primaries);
-        let to_sdr = transfer != gpufx_core::Transfer::Sdr || primaries != gpufx_core::Primaries::Bt709;
+        // The same colour description as the preview, defaults included.
+        let color = crate::decoder::frame_color_info(self.kept).map_err(|e| format!("{}: {e}", self.path))?;
+        let to_sdr = color.needs_sdr_conversion();
         let output_format = if to_sdr { ffi::AV_PIX_FMT_RGBA64LE } else { ffi::AV_PIX_FMT_RGBA };
-        let full_range = i32::from(kept.color_range == ffi::AVCOL_RANGE_JPEG);
-        let source = (kept.width, kept.height, kept.format, kept.colorspace as i32, full_range);
+        let full_range = i32::from(color.range == gpufx_core::Range::Full);
+        let matrix = match color.matrix {
+            gpufx_core::Matrix::Bt709 => ffi::SWS_CS_ITU709,
+            gpufx_core::Matrix::Bt2020 => ffi::SWS_CS_BT2020,
+            _ => ffi::SWS_CS_ITU601,
+        };
+        let source = (kept.width, kept.height, kept.format, matrix, full_range, i32::from(to_sdr));
         // Scaled unturned, so the turn below ends at the thumbnail's size.
         let (width, height) = crate::orientation::turned_size(self.shown_width, self.target_height, self.turns);
         if self.scaler.is_null() || self.scaler_source != source {
@@ -326,11 +331,6 @@ impl FrameSampler {
             if self.scaler.is_null() {
                 return Err(format!("{}: sws_getContext failed", self.path));
             }
-            let matrix = match kept.colorspace {
-                ffi::AVCOL_SPC_BT709 => ffi::SWS_CS_ITU709,
-                ffi::AVCOL_SPC_BT2020_NCL | ffi::AVCOL_SPC_BT2020_CL => ffi::SWS_CS_BT2020,
-                _ => ffi::SWS_CS_ITU601,
-            };
             // RGB output is full range; brightness, contrast and saturation are swscale's neutral values.
             let _ = ffi::sws_setColorspaceDetails(self.scaler, ffi::sws_getCoefficients(matrix), full_range, ffi::sws_getCoefficients(ffi::SWS_CS_ITU709), 1, 0, 1 << 16, 1 << 16);
             self.scaler_source = source;
@@ -345,12 +345,11 @@ impl FrameSampler {
         check(lines, "sws_scale")?;
         let row = width as usize * bytes_per_pixel;
         let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-        let peak_nits = crate::decoder::frame_peak_nits(self.kept);
-        for line in buffer.chunks_exact(stride).take(height as usize) {
+                for line in buffer.chunks_exact(stride).take(height as usize) {
             if to_sdr {
                 for pixel in line[..row].chunks_exact(8) {
                     let channel = |i: usize| f64::from(u16::from_le_bytes([pixel[2 * i], pixel[2 * i + 1]])) / 65535.0;
-                    let sdr = gpufx_core::hdr::to_sdr([channel(0), channel(1), channel(2)], transfer, primaries, peak_nits);
+                    let sdr = gpufx_core::hdr::to_sdr([channel(0), channel(1), channel(2)], color.transfer, color.primaries, color.peak_nits);
                     rgba.extend(sdr.map(|c| (c * 255.0).round() as u8));
                     rgba.push(255);
                 }
