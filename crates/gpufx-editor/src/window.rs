@@ -172,6 +172,8 @@ struct Session {
     proxies: ProxyManager,
     /// The revision of the proxies the paths were built with.
     proxy_revision: u64,
+    /// When the originals are next checked for a change, while the window redraws.
+    next_proxy_recheck: Instant,
     #[cfg(debug_assertions)]
     smoke: Smoke,
 }
@@ -277,6 +279,7 @@ impl Session {
             autosave,
             proxies,
             proxy_revision: 0,
+            next_proxy_recheck: Instant::now() + crate::proxy::RECHECK_INTERVAL,
             #[cfg(debug_assertions)]
             smoke,
         };
@@ -1010,6 +1013,11 @@ impl Session {
     /// ready proxies changes, gives the preview new paths: new paths make its worker drop the
     /// decoders that read the old files. Playback that is running keeps its files until it stops.
     fn sync_proxies(&mut self) {
+        let now = Instant::now();
+        if now >= self.next_proxy_recheck {
+            self.next_proxy_recheck = now + crate::proxy::RECHECK_INTERVAL;
+            self.proxies.recheck();
+        }
         let wanted = proxy_sources(self.state.project(), &self.paths);
         self.proxies.request(wanted.iter().map(|(_, path)| path.as_path()));
         self.state.ui.proxy_badges = wanted.into_iter().filter_map(|(source, path)| self.proxies.status(&path).map(|status| (source, status))).collect();
@@ -1363,6 +1371,11 @@ impl ApplicationHandler<AgentWake> for EditorApp {
                     session.state.ui.files_dropped.push((path, at));
                     session.presenter.window().request_redraw();
                 }
+            }
+            WindowEvent::Focused(true) => {
+                // A file may have been replaced while another program had the focus.
+                session.proxies.recheck();
+                session.next_proxy_recheck = Instant::now() + crate::proxy::RECHECK_INTERVAL;
             }
             WindowEvent::Focused(false) => {
                 session.presenter.focus_lost(&mut session.state);

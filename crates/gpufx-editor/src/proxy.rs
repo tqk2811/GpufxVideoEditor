@@ -11,7 +11,9 @@
 //! absolute path and one of its size and modification time, so a replaced file gets a new proxy.
 //! The export writes a temporary file and renames it, so a half-made proxy never has the final
 //! name. Older versions of the same original are removed once a new one is made, and files not
-//! used for [`MAX_AGE`] are swept at start.
+//! used for [`MAX_AGE`] are swept at start. While the editor runs, [`ProxyManager::recheck`]
+//! reads the size and time of the originals again (the window calls it on focus and every
+//! [`RECHECK_INTERVAL`]), so a file replaced meanwhile drops its old proxy and gets a new one.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -37,6 +39,8 @@ const PARTIAL_AGE: Duration = Duration::from_secs(24 * 3600);
 const FOLDER: &str = "gpufx-editor";
 const PROXIES: &str = "proxies";
 const EXTENSION: &str = "mp4";
+/// How often the window asks for the originals to be checked for a change.
+pub const RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// How often the worker reads the progress of the child.
 const PROGRESS_POLL: Duration = Duration::from_millis(100);
 
@@ -324,6 +328,9 @@ struct State {
     /// How the preview reads each ready proxy, and the upright height of its source: a ready
     /// proxy is used only while the mode wants a source that high.
     files: HashMap<PathBuf, (ProxyFile, u32)>,
+    /// The size and time of each settled source when its status was found; `None` when it could
+    /// not be read.
+    stamps: HashMap<PathBuf, Option<FileStamp>>,
     queue: VecDeque<PathBuf>,
     /// The source being made and how to stop it.
     running: Option<(PathBuf, Arc<AtomicBool>)>,
@@ -356,6 +363,8 @@ struct Shared {
     state: Mutex<State>,
     wake: Condvar,
     waker: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Set while a recheck thread runs, so a second one is not started.
+    rechecking: AtomicBool,
 }
 
 impl Shared {
@@ -375,17 +384,21 @@ impl Shared {
 pub struct ProxyManager {
     shared: Arc<Shared>,
     folder: Option<PathBuf>,
+    /// Reads the stamps of a recheck; shared with the worker.
+    stamper: Arc<dyn Fn(&Path) -> Option<FileStamp> + Send + Sync>,
 }
 
 impl ProxyManager {
     /// Starts the worker. Without a folder nothing is made and every source stays on its original.
     pub fn start<M: ProxyMaker>(maker: M, folder: Option<PathBuf>, mode: ProxyMode, waker: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
-        let shared = Arc::new(Shared { state: Mutex::new(State { mode, ..State::default() }), wake: Condvar::new(), waker });
+        let shared = Arc::new(Shared { state: Mutex::new(State { mode, ..State::default() }), wake: Condvar::new(), waker, rechecking: AtomicBool::new(false) });
+        let maker = Arc::new(maker);
         if let Some(folder) = folder.clone() {
-            let worker = shared.clone();
-            std::thread::Builder::new().name("proxy".to_owned()).spawn(move || work(&worker, &maker, &folder)).expect("spawn the proxy thread");
+            let (worker, maker) = (shared.clone(), maker.clone());
+            std::thread::Builder::new().name("proxy".to_owned()).spawn(move || work(&worker, &*maker, &folder)).expect("spawn the proxy thread");
         }
-        Self { shared, folder }
+        let stamper = Arc::new(move |path: &Path| maker.stamp(path));
+        Self { shared, folder, stamper }
     }
 
     pub fn folder(&self) -> Option<&Path> {
@@ -453,6 +466,24 @@ impl ProxyManager {
     }
 
     /// Where the proxy of `source` stands; a ready proxy the mode does not want is NotNeeded.
+    /// Reads the size and time of every settled source again on a thread of its own (a probe of
+    /// a network drive must not stall the window), and queues again each one that changed: its
+    /// old proxy stops being used at once. Does nothing while a recheck runs. Cheap enough for a
+    /// focus change or every few seconds, not for every frame.
+    pub fn recheck(&self) {
+        if self.folder.is_none() || self.shared.rechecking.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (shared, stamper) = (self.shared.clone(), self.stamper.clone());
+        let spawned = std::thread::Builder::new().name("proxy-recheck".to_owned()).spawn(move || {
+            recheck(&shared, &*stamper);
+            shared.rechecking.store(false, Ordering::SeqCst);
+        });
+        if spawned.is_err() {
+            self.shared.rechecking.store(false, Ordering::SeqCst);
+        }
+    }
+
     /// Queues again the sources whose proxy failed or was stopped.
     pub fn retry_failed(&self) {
         let mut state = self.shared.lock();
@@ -519,8 +550,44 @@ impl Drop for ProxyManager {
     }
 }
 
+/// Reads the stamps of the settled sources and queues again those that changed.
+fn recheck(shared: &Shared, stamper: &dyn Fn(&Path) -> Option<FileStamp>) {
+    let known: Vec<(PathBuf, Option<FileStamp>)> = {
+        let state = shared.lock();
+        state.stamps.iter().filter(|(source, _)| !matches!(state.entries.get(*source), Some(ProxyStatus::Queued | ProxyStatus::Running(_)) | None)).map(|(source, stamp)| (source.clone(), *stamp)).collect()
+    };
+    let changed: Vec<(PathBuf, Option<FileStamp>)> = known.into_iter().filter(|(source, stamp)| stamper(source) != *stamp).collect();
+    if changed.is_empty() {
+        return;
+    }
+    let mut state = shared.lock();
+    let mut queued = false;
+    state.changing(|state| {
+        for (source, stamp) in changed {
+            // Settled again meanwhile: that newer result read the file itself.
+            if state.stamps.get(&source) != Some(&stamp) || matches!(state.entries.get(&source), Some(ProxyStatus::Queued | ProxyStatus::Running(_)) | None) {
+                continue;
+            }
+            state.stamps.remove(&source);
+            state.files.remove(&source);
+            if state.mode == ProxyMode::Off {
+                state.entries.remove(&source);
+            } else {
+                state.entries.insert(source.clone(), ProxyStatus::Queued);
+                state.queue.push_back(source);
+                queued = true;
+            }
+        }
+    });
+    drop(state);
+    if queued {
+        shared.wake.notify_all();
+    }
+    shared.notify_ui();
+}
+
 /// Sets the status of `source`, if the mode it was made for still holds.
-fn settle(shared: &Shared, source: &Path, generation: u64, (status, file): (ProxyStatus, Option<(ProxyFile, u32)>)) {
+fn settle(shared: &Shared, source: &Path, generation: u64, (status, file, stamp): (ProxyStatus, Option<(ProxyFile, u32)>, Option<FileStamp>)) {
     let mut state = shared.lock();
     if state.generation != generation {
         return;
@@ -530,6 +597,7 @@ fn settle(shared: &Shared, source: &Path, generation: u64, (status, file): (Prox
     }
     state.changing(|state| {
         state.entries.insert(source.to_path_buf(), status);
+        state.stamps.insert(source.to_path_buf(), stamp);
         match file {
             Some(file) => state.files.insert(source.to_path_buf(), file),
             None => state.files.remove(source),
@@ -562,9 +630,16 @@ fn work<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path) {
     }
 }
 
-fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &Path, generation: u64, mode: ProxyMode, cancel: &Arc<AtomicBool>) -> (ProxyStatus, Option<(ProxyFile, u32)>) {
+fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &Path, generation: u64, mode: ProxyMode, cancel: &Arc<AtomicBool>) -> (ProxyStatus, Option<(ProxyFile, u32)>, Option<FileStamp>) {
+    let stamp = maker.stamp(source);
+    let (status, file) = make_stamped(shared, maker, folder, source, generation, mode, cancel, stamp);
+    (status, file, stamp)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_stamped<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &Path, generation: u64, mode: ProxyMode, cancel: &Arc<AtomicBool>, stamp: Option<FileStamp>) -> (ProxyStatus, Option<(ProxyFile, u32)>) {
     let failed = |message: String| (ProxyStatus::Failed(message), None);
-    let Some(stamp) = maker.stamp(source) else { return failed(format!("{} cannot be read", source.display())) };
+    let Some(stamp) = stamp else { return failed(format!("{} cannot be read", source.display())) };
     // The source's shape and frame rate are needed to read even a proxy made earlier.
     let (format, duration) = match maker.inspect(source) {
         Ok(Some(found)) => found,
@@ -768,13 +843,15 @@ mod tests {
     /// A maker driven by the test: each `make` waits for an outcome sent on the channel.
     struct FakeMaker {
         formats: HashMap<PathBuf, VideoFormat>,
+        /// Added to the size of every stamp, so a test can "replace" the files.
+        version: Arc<std::sync::atomic::AtomicU64>,
         made: Sender<PathBuf>,
         outcomes: Mutex<Receiver<MakeOutcome>>,
     }
 
     impl ProxyMaker for FakeMaker {
         fn stamp(&self, path: &Path) -> Option<FileStamp> {
-            (self.formats.contains_key(path) || path == Path::new(r"D:\music.m4a")).then(|| stamp(1, 1))
+            (self.formats.contains_key(path) || path == Path::new(r"D:\music.m4a")).then(|| stamp(1 + self.version.load(Ordering::SeqCst), 1))
         }
 
         fn inspect(&self, path: &Path) -> Result<Option<(VideoFormat, Time)>, String> {
@@ -811,12 +888,18 @@ mod tests {
     }
 
     fn manager(name: &str, mode: ProxyMode) -> (ProxyManager, Receiver<PathBuf>, Sender<MakeOutcome>, PathBuf) {
+        let (manager, made, outcomes, folder, _) = versioned_manager(name, mode);
+        (manager, made, outcomes, folder)
+    }
+
+    fn versioned_manager(name: &str, mode: ProxyMode) -> (ProxyManager, Receiver<PathBuf>, Sender<MakeOutcome>, PathBuf, Arc<std::sync::atomic::AtomicU64>) {
         let folder = scratch(name);
         let (made, made_rx) = channel();
         let (outcome_tx, outcomes) = channel();
         let formats = HashMap::from([(PathBuf::from(r"D:\big.mp4"), format(3840, 2160)), (PathBuf::from(r"D:\small.mp4"), format(1280, 720)), (PathBuf::from(r"D:\other.mp4"), format(3840, 2160)), (PathBuf::from(r"D:\low.mp4"), format(640, 360))]);
-        let maker = FakeMaker { formats, made, outcomes: Mutex::new(outcomes) };
-        (ProxyManager::start(maker, Some(folder.clone()), mode, None), made_rx, outcome_tx, folder)
+        let version = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let maker = FakeMaker { formats, version: version.clone(), made, outcomes: Mutex::new(outcomes) };
+        (ProxyManager::start(maker, Some(folder.clone()), mode, None), made_rx, outcome_tx, folder, version)
     }
 
     #[test]
@@ -878,6 +961,37 @@ mod tests {
         manager.set_mode(ProxyMode::Auto);
         manager.request([big]);
         assert_eq!(made.recv_timeout(Duration::from_secs(10)).unwrap(), big, "asked for again after a mode change");
+    }
+
+    #[test]
+    fn a_source_replaced_while_the_editor_runs_drops_its_proxy_and_gets_a_new_one() {
+        let (manager, made, outcomes, folder, version) = versioned_manager("recheck", ProxyMode::On);
+        let (big, other) = (Path::new(r"D:\big.mp4"), Path::new(r"D:\other.mp4"));
+        manager.request([big, other]);
+        assert_eq!(made.recv_timeout(Duration::from_secs(10)).unwrap(), big);
+        outcomes.send(MakeOutcome::Done).unwrap();
+        assert_eq!(made.recv_timeout(Duration::from_secs(10)).unwrap(), other);
+        outcomes.send(MakeOutcome::Failed("encoder broke".into())).unwrap();
+        wait_for(&manager, other, |s| matches!(s, ProxyStatus::Failed(_)));
+        let old = proxy_file(&folder, big, stamp(1, 1));
+        assert_eq!(manager.proxies()[big].path, old);
+        manager.recheck();
+        assert!(made.recv_timeout(Duration::from_millis(100)).is_err(), "nothing changed, nothing is made");
+
+        version.store(1, Ordering::SeqCst);
+        let revision = manager.revision();
+        manager.recheck();
+        let mut again = vec![made.recv_timeout(Duration::from_secs(10)).unwrap()];
+        assert!(!manager.proxies().contains_key(big), "the stale proxy is no longer used");
+        assert_ne!(manager.revision(), revision);
+        outcomes.send(MakeOutcome::Done).unwrap();
+        again.push(made.recv_timeout(Duration::from_secs(10)).unwrap());
+        outcomes.send(MakeOutcome::Done).unwrap();
+        again.sort();
+        assert_eq!(again, vec![big.to_path_buf(), other.to_path_buf()], "the changed files, the failed one included, are made again");
+        wait_for(&manager, big, |s| matches!(s, ProxyStatus::Ready(_)));
+        wait_for(&manager, other, |s| matches!(s, ProxyStatus::Ready(_)));
+        assert_eq!(manager.proxies()[big].path, proxy_file(&folder, big, stamp(2, 1)), "the new version");
     }
 
     #[test]
