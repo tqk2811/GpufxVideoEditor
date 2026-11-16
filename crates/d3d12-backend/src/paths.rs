@@ -73,6 +73,8 @@ impl ProxyTiming {
             }
             sample += 1;
         }
+        // Not reachable for rates the proxies are made for; a hit would show the wrong frame.
+        debug_assert!(false, "proxy_time found no sample for frame {frame} at {time:?}");
         time
     }
 }
