@@ -29,6 +29,14 @@
 //!   scales it, and an end trim or a move leaves it. A keyframe that lands outside the clip is kept:
 //!   the curve inside does not change, and growing the clip again brings it back. [`set_keyframe`]
 //!   and [`remove_keyframe`] only work inside the clip.
+//! * **Holds.** An enter or exit animation with a negative duration adds a still to the clip (see
+//!   [`Clip::hold_start`]), which is part of its `duration`. Setting, changing or removing one
+//!   ripples: the clip grows or shrinks at that edge and every later clip of the same track moves
+//!   by as much, and the keyframes keep their place on the moving part. A hold and a transition
+//!   never share a cut: [`set_animation_report`] removes the transition on an edge that gets a hold,
+//!   and [`add_transition_report`] turns the holds on its cut into plain animations of the same
+//!   length. Trims, splits and speed changes act on the moving part and keep the holds; a split
+//!   inside a hold is refused.
 //! * **Locked tracks.** Every command that changes the clips, effects or transitions of a locked
 //!   track is refused with [`EditError::TrackLocked`], so that every caller gets the same rule.
 //!   A move is refused when either its source track or its target track is locked. Locking and
@@ -75,6 +83,8 @@ pub enum EditError {
     SplitInsideFade { key: ClipKey, at: Time },
     /// The cut falls inside the window of a transition of the clip.
     SplitInsideTransition { key: ClipKey, at: Time },
+    /// The split point is inside a hold of the clip.
+    SplitInsideHold { key: ClipKey, at: Time },
     /// The track is locked: nothing on it can be changed.
     TrackLocked { track: usize },
     /// At this speed the clip would need to last past the start of the next clip.
@@ -136,6 +146,7 @@ impl fmt::Display for EditError {
                 "track {}, clip {}: {at} is inside a transition window",
                 key.track, key.clip
             ),
+            SplitInsideHold { key, at } => write!(f, "track {}, clip {}: {at} is inside a hold", key.track, key.clip),
             TrackLocked { track } => write!(f, "track {track} is locked"),
             SpeedOverlap { key, end, next_start } => write!(
                 f,
@@ -434,12 +445,56 @@ pub fn set_text(project: &Project, key: ClipKey, text: TextContent) -> Result<Pr
     finish(next)
 }
 
-/// Replaces the preset animations of a clip. Its time on the timeline does not change.
+/// Replaces the preset animations of a clip. Its time on the timeline changes only with its holds
+/// (see the module rules); a transition on an edge that gets a hold is removed.
 pub fn set_animation(project: &Project, key: ClipKey, animation: ClipAnimation) -> Result<Project, EditError> {
+    set_animation_report(project, key, animation).map(|(next, _)| next)
+}
+
+/// [`set_animation`], also giving the transitions it removed because an edge got a hold.
+pub fn set_animation_report(project: &Project, key: ClipKey, animation: ClipAnimation) -> Result<(Project, Vec<Transition>), EditError> {
     unlocked(project, key.track)?;
+    clip_of(project, key)?;
     let mut next = project.clone();
-    clip_mut(&mut next, key)?.animation = animation;
-    finish(next)
+    let track = &mut next.tracks[key.track];
+    let mut removed = Vec::new();
+    let edges = [(animation.enter.as_ref().is_some_and(|a| a.is_hold()), key.clip.checked_sub(1)), (animation.exit.as_ref().is_some_and(|a| a.is_hold()), Some(key.clip))];
+    for (hold, after) in edges {
+        let Some(after) = after.filter(|_| hold) else { continue };
+        if let Some(index) = track.transitions.iter().position(|tr| tr.after_clip == after) {
+            removed.push(track.transitions.remove(index));
+        }
+    }
+    retime_animation(track, key.clip, animation).ok_or(EditError::TimeOverflow { key })?;
+    finish(next).map(|next| (next, removed))
+}
+
+/// Gives clip `clip` of `track` its new animation and ripples the change of its holds: the clip
+/// grows or shrinks by it, later clips move by it, and the keyframes follow the start hold.
+fn retime_animation(track: &mut Track, clip: usize, animation: ClipAnimation) -> Option<()> {
+    let changed = &mut track.clips[clip];
+    let (old_start, old_end) = (changed.hold_start(), changed.hold_end());
+    let old_clip_end = changed.end()?;
+    changed.animation = animation;
+    let grow_start = changed.hold_start().checked_sub(old_start)?;
+    let grow = grow_start.checked_add(changed.hold_end().checked_sub(old_end)?)?;
+    if grow == Time::ZERO && grow_start == Time::ZERO {
+        return Some(());
+    }
+    changed.duration = changed.duration.checked_add(grow)?;
+    changed.shift_keyframes(grow_start);
+    for other in track.clips.iter_mut().skip(clip + 1).filter(|other| other.start >= old_clip_end) {
+        other.start = other.start.checked_add(grow)?;
+    }
+    Some(())
+}
+
+/// An edge of a clip whose hold [`add_transition_report`] turned into a plain animation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleasedHold {
+    pub key: ClipKey,
+    /// Enter (the start edge) or exit (the end edge).
+    pub group: crate::clip_animation::AnimationGroup,
 }
 
 /// Moves a clip to `target_track`, as close to `desired_start` as the other clips allow. A move
@@ -678,9 +733,17 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     if wanted < head || wanted_rest < tail {
         return Err(EditError::SplitInsideTransition { key, at });
     }
+    // The fades count on the moving part, after the start hold and before the end hold.
+    let (hold_start, hold_end) = (clip.hold_start(), clip.hold_end());
+    if wanted <= hold_start || wanted_rest <= hold_end {
+        return Err(EditError::SplitInsideHold { key, at });
+    }
+    if wanted < hold_start.saturating_add(clip.fade_in) || wanted_rest < hold_end.saturating_add(clip.fade_out) {
+        return Err(EditError::SplitInsideFade { key, at });
+    }
 
-    let earliest = clip.fade_in.max(head).ticks();
-    let latest = clip.duration.saturating_sub(clip.fade_out.max(tail)).ticks();
+    let earliest = clip.fade_in.saturating_add(hold_start).max(head).ticks();
+    let latest = clip.duration.saturating_sub(clip.fade_out.saturating_add(hold_end).max(tail)).ticks();
     let offset = Time::from_ticks(aligned_cut(clip, wanted.ticks(), earliest, latest).ok_or(outside)?);
     let rest = clip.duration.saturating_sub(offset);
 
@@ -692,9 +755,14 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     let mut second = whole.clone();
     second.start = clip.start.saturating_add(offset);
     // A still keeps no offset, as in trim_start, but a karaoke text does.
-    second.source_in = if clip.is_still() && !karaoke { Time::ZERO } else { clip.source_in.saturating_add(clip.source_offset(offset)) };
+    second.source_in = if clip.is_still() && !karaoke { Time::ZERO } else { clip.source_in.saturating_add(clip.source_offset(offset.saturating_sub(hold_start))) };
     second.duration = rest;
     second.fade_in = Time::ZERO;
+    // The start hold stays with the first half and the end hold with the second, each one's other
+    // edge keeping its preset as a plain animation of the same length.
+    if let Some(enter) = second.animation.enter.as_mut().filter(|enter| enter.is_hold()) {
+        enter.duration = enter.length();
+    }
     second.shift_keyframes(Time::from_ticks(-offset.ticks()));
 
     let mut next = project.clone();
@@ -703,6 +771,9 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     let first = &mut target.clips[key.clip];
     first.duration = offset;
     first.fade_out = Time::ZERO;
+    if let Some(exit) = first.animation.exit.as_mut().filter(|exit| exit.is_hold()) {
+        exit.duration = exit.length();
+    }
     target.clips.insert(key.clip + 1, second);
     // A transition after the clip now follows its second half.
     for transition in &mut target.transitions {
@@ -744,18 +815,37 @@ pub fn remove_effect(project: &Project, key: ClipKey, effect: usize) -> Result<P
 }
 
 /// Adds a transition. Its clips must touch, and validation decides everything else about it,
-/// including [`ValidationError::FadeBesideTransition`].
+/// including [`ValidationError::FadeBesideTransition`]. Holds on its cut become plain animations of
+/// the same length, which ripples (see the module rules).
 pub fn add_transition(
     project: &Project,
     track: usize,
     transition: Transition,
 ) -> Result<Project, EditError> {
+    add_transition_report(project, track, transition).map(|(next, _)| next)
+}
+
+/// [`add_transition`], also giving the holds it turned into plain animations.
+pub fn add_transition_report(project: &Project, track: usize, transition: Transition) -> Result<(Project, Vec<ReleasedHold>), EditError> {
+    use crate::clip_animation::AnimationGroup;
     unlocked(project, track)?;
     let mut next = project.clone();
     let target = track_mut(&mut next, track)?;
+    let mut released = Vec::new();
+    let after = transition.after_clip;
+    for (clip, group) in [(Some(after), AnimationGroup::Exit), (after.checked_add(1), AnimationGroup::Enter)] {
+        let Some(clip) = clip.filter(|&clip| clip < target.clips.len()) else { continue };
+        let mut animation = target.clips[clip].animation.clone();
+        let slot = if group == AnimationGroup::Enter { &mut animation.enter } else { &mut animation.exit };
+        let Some(reference) = slot.as_mut().filter(|reference| reference.is_hold()) else { continue };
+        reference.duration = reference.length();
+        let key = ClipKey { track, clip };
+        retime_animation(target, clip, animation).ok_or(EditError::TimeOverflow { key })?;
+        released.push(ReleasedHold { key, group });
+    }
     target.transitions.push(transition);
     target.transitions.sort_by_key(|tr| tr.after_clip);
-    finish(next)
+    finish(next).map(|next| (next, released))
 }
 
 /// Removes the transition after clip `after_clip`.
@@ -825,9 +915,11 @@ pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project,
     }
     let milli = speed_milli(speed);
     let track = &project.tracks[key.track];
-    let scaled = i128::from(clip.duration.ticks()) * i128::from(clip.speed_milli());
+    // The moving part is rescaled; the holds keep their length.
+    let holds = clip.duration.saturating_sub(clip.media_duration());
+    let scaled = i128::from(clip.media_duration().ticks()) * i128::from(clip.speed_milli());
     let rounded = (scaled + i128::from(milli) / 2) / i128::from(milli);
-    let duration = Time::from_ticks(i64::try_from(rounded.max(1)).map_err(|_| EditError::TimeOverflow { key })?);
+    let duration = Time::from_ticks(i64::try_from(rounded.max(1)).map_err(|_| EditError::TimeOverflow { key })?).checked_add(holds).ok_or(EditError::TimeOverflow { key })?;
     if duration != clip.duration && has_transition_after(track, key.clip) {
         return Err(EditError::TransitionOnEdge { key, edge: "end" });
     }

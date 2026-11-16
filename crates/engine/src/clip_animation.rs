@@ -782,7 +782,8 @@ fn curve_pose(group: AnimationGroup, curve: &AnimationCurve, progress: f64) -> A
 /// The preset and its ticks when it will run, `None` when it is unknown or does not last.
 fn usable<'a>(group: AnimationGroup, reference: &Option<AnimationRef>, packs: &'a PackPresets) -> Option<(Resolved<'a>, f64)> {
     let reference = reference.as_ref()?;
-    let ticks = reference.duration.ticks();
+    // A hold (negative duration) runs for its length, over the still it adds to the clip.
+    let ticks = reference.length().ticks();
     if ticks <= 0 {
         return None;
     }

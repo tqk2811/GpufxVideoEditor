@@ -155,8 +155,10 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
                 .and_then(|tr| Some((tr, track.clips.get(c + 1)?)))
                 .and_then(|(tr, next)| window_of(tr, next));
 
-            let clip_start = sample_position(clip.start);
-            let clip_end = sample_position(clip.start.saturating_add(clip.duration));
+            // The holds of a clip are silent: only its moving part sounds.
+            let (media_start, media_end) = clip.media_span();
+            let clip_start = sample_position(media_start);
+            let clip_end = sample_position(media_end);
             let span_start = crossfade_in.map_or(clip_start, |w| w.start.min(clip_start));
             let span_end = crossfade_out.map_or(clip_end, |w| w.end().max(clip_end));
 
@@ -210,12 +212,12 @@ fn envelope(
     crossfade_in: Option<Window>,
     crossfade_out: Option<Window>,
 ) -> GainEnvelope {
-    let clip_end_time = clip.start.saturating_add(clip.duration);
+    let (media_start, clip_end_time) = clip.media_span();
     GainEnvelope {
         amplitude: 10f64.powf(clip.gain_db / 20.0),
         clip_start,
         clip_end,
-        fade_in: sample_position(clip.start.saturating_add(clip.fade_in)) - clip_start,
+        fade_in: sample_position(media_start.saturating_add(clip.fade_in)) - clip_start,
         fade_out: clip_end - sample_position(clip_end_time.saturating_sub(clip.fade_out)),
         crossfade_in,
         crossfade_out,

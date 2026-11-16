@@ -144,7 +144,7 @@ pub struct Clip {
     pub start: Time,
     /// Position inside the source that plays at `start`.
     pub source_in: Time,
-    /// Length on the timeline.
+    /// Length on the timeline, holds included (see [`Clip::hold_start`]).
     pub duration: Time,
     /// Per-clip effects with static parameters.
     #[serde(default)]
@@ -482,7 +482,29 @@ impl ClipAnimation {
 pub struct AnimationRef {
     /// The preset id, such as `fade`.
     pub preset: String,
+    /// How long one run lasts. Negative on an enter or exit makes it a hold of that length: a
+    /// still of the first (enter) or last (exit) source frame is shown for that long before or
+    /// after the moving part of the clip, the clip is that much longer on the timeline, and the
+    /// preset plays over the still. See [`Clip::hold_start`]. Never 0, and never negative on a
+    /// repeat.
     pub duration: Time,
+}
+
+impl AnimationRef {
+    /// How long one run lasts, whether or not it is a hold.
+    pub fn length(&self) -> Time {
+        Time::from_ticks(self.duration.ticks().saturating_abs())
+    }
+
+    /// Whether the run is a hold (a negative duration).
+    pub fn is_hold(&self) -> bool {
+        self.duration < Time::ZERO
+    }
+
+    /// The length of the hold, 0 when it is not one.
+    pub fn hold(&self) -> Time {
+        if self.is_hold() { self.length() } else { Time::ZERO }
+    }
 }
 
 /// Where a clip sits in the output frame, in parts of the frame. The height follows from the shape
@@ -716,6 +738,48 @@ impl Clip {
         self.is_image() || self.is_text()
     }
 
+    /// The still of the first source frame shown before the moving part, set by an enter
+    /// animation with a negative duration. It is part of `duration`: the moving part starts this
+    /// long after `start`. The audio is silent over it.
+    pub fn hold_start(&self) -> Time {
+        self.animation.enter.as_ref().map_or(Time::ZERO, AnimationRef::hold)
+    }
+
+    /// The still of the last source frame shown after the moving part, set by an exit animation
+    /// with a negative duration. It is part of `duration`, at its end.
+    pub fn hold_end(&self) -> Time {
+        self.animation.exit.as_ref().map_or(Time::ZERO, AnimationRef::hold)
+    }
+
+    /// The timeline length of the moving part: `duration` without the holds.
+    pub fn media_duration(&self) -> Time {
+        self.duration.saturating_sub(self.hold_start()).saturating_sub(self.hold_end())
+    }
+
+    /// The timeline range of the moving part, where the source plays and the audio sounds.
+    pub fn media_span(&self) -> (Time, Time) {
+        let start = self.start.saturating_add(self.hold_start());
+        (start, start.saturating_add(self.media_duration()))
+    }
+
+    /// The source time shown `offset` timeline ticks after `start` (negative inside a transition
+    /// into the clip): `source_in` plus the scaled time since the moving part began. Inside a hold
+    /// it stays on the first frame of the moving part, or on its last one (one tick before
+    /// [`Clip::source_end`]).
+    pub fn source_time_at(&self, offset: Time) -> Time {
+        let hold_start = self.hold_start();
+        let mut into = offset.saturating_sub(hold_start);
+        if hold_start > Time::ZERO {
+            into = into.max(Time::ZERO);
+        }
+        let played = self.source_offset(into);
+        if self.hold_end() > Time::ZERO {
+            let last = self.source_offset(self.media_duration()).saturating_sub(Time::from_ticks(1)).max(Time::ZERO);
+            return self.source_in.saturating_add(played.min(last));
+        }
+        self.source_in.saturating_add(played)
+    }
+
     /// Timeline end (exclusive), or `None` on overflow.
     pub fn end(&self) -> Option<Time> {
         self.start.checked_add(self.duration)
@@ -740,7 +804,7 @@ impl Clip {
 
     /// The first source position past what the clip plays.
     pub fn source_end(&self) -> Time {
-        self.source_in.saturating_add(self.source_offset(self.duration))
+        self.source_in.saturating_add(self.source_offset(self.media_duration()))
     }
 
     /// Where a start trim asked for `new_start` lands: on the grid of [`Clip::speed_grid`], toward

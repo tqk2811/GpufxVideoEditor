@@ -180,6 +180,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::SplitOutsideClip { key, at } => Message::EditSplitOutsideClip { track: label(key.track), at: seconds_text(*at) },
         EditError::SplitInsideFade { key, at } => Message::EditSplitInsideFade { track: label(key.track), at: seconds_text(*at) },
         EditError::SplitInsideTransition { key, at } => Message::EditSplitInsideTransition { track: label(key.track), at: seconds_text(*at) },
+        EditError::SplitInsideHold { key, at } => Message::EditSplitInsideHold { track: label(key.track), at: seconds_text(*at) },
         EditError::TrackLocked { track } => Message::EditTrackLocked(label(*track)),
         EditError::SpeedOverlap { key, end, next_start } => Message::EditSpeedOverlap { track: label(key.track), end: seconds_text(*end), next: seconds_text(*next_start) },
         EditError::SpeedOfImage { key } if is_text_clip(project, *key) => Message::EditSpeedOfText(label(key.track)),
@@ -2745,6 +2746,7 @@ mod tests {
             EditError::SplitOutsideClip { key, at },
             EditError::SplitInsideFade { key, at },
             EditError::SplitInsideTransition { key, at },
+            EditError::SplitInsideHold { key, at },
             EditError::SpeedOverlap { key, end: at, next_start: at },
         ];
         for error in &errors {

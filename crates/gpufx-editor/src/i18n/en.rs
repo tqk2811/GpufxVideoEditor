@@ -161,6 +161,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditSplitOutsideClip { track, at } => format!("{}: cannot split at {at} s", track_label(*track)),
         Message::EditSplitInsideFade { track, at } => format!("{}: {at} s is inside a fade", track_label(*track)),
         Message::EditSplitInsideTransition { track, at } => format!("{}: {at} s is inside a transition", track_label(*track)),
+        Message::EditSplitInsideHold { track, at } => format!("{}: {at} s is inside a still hold", track_label(*track)),
         Message::EditTrackLocked(track) => format!("{}: the track is locked", track_label(*track)),
         Message::EditSpeedOverlap { track, end, next } => format!("{}: at this speed the clip would end at {end} s, past the next clip at {next} s", track_label(*track)),
         Message::EditInvalid(detail) => format!("The result is not valid: {detail}"),

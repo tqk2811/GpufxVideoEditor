@@ -142,6 +142,7 @@ pub enum Message {
     EditSplitOutsideClip { track: TrackLabel, at: String },
     EditSplitInsideFade { track: TrackLabel, at: String },
     EditSplitInsideTransition { track: TrackLabel, at: String },
+    EditSplitInsideHold { track: TrackLabel, at: String },
     /// The validator's own list, which stays in English under a translated prefix.
     EditInvalid(String),
     LanguageSaveFailed(String),

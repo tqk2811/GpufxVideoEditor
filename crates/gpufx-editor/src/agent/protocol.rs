@@ -244,6 +244,7 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::SplitOutsideClip { .. } => "split_outside_clip",
         EditError::SplitInsideFade { .. } => "split_inside_fade",
         EditError::SplitInsideTransition { .. } => "split_inside_transition",
+        EditError::SplitInsideHold { .. } => "split_inside_hold",
         EditError::TrackLocked { .. } => "track_locked",
         EditError::SpeedOverlap { .. } => "speed_overlap",
         EditError::SpeedOfImage { .. } => "speed_of_image",

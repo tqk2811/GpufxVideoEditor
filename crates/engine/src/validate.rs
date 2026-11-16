@@ -234,8 +234,13 @@ pub enum ValidationError {
     /// A clip names a preset animation that is not in [`crate::ANIMATION_PRESETS`] for
     /// its group (`in`, `out` or `loop`). It is left out when drawing.
     UnknownAnimation { track: usize, clip: usize, group: &'static str, preset: String },
-    /// A preset animation of a text clip lasts zero ticks or less.
+    /// A preset animation lasts zero ticks, or a repeat is negative (only an enter or exit may be
+    /// a hold).
     InvalidAnimationDuration { track: usize, clip: usize, group: &'static str, duration: Time },
+    /// The holds of a clip (see [`Clip::hold_start`]) leave no moving part.
+    HoldsFillClip { track: usize, clip: usize, holds: Time, duration: Time },
+    /// A clip edge has both a hold and a transition; only one of them may be on a cut.
+    HoldBesideTransition { track: usize, clip: usize, edge: &'static str },
     /// A clip on a track of kind `audio` has a preset animation, which has no picture to move.
     AnimationOnAudioTrack { track: usize, clip: usize },
     /// A clip that is not text names a built-in preset that moves the units of a text, such as
@@ -389,7 +394,9 @@ impl fmt::Display for ValidationError {
                     write!(f, " (it is a '{}' animation)", groups.join("' or '"))
                 }
             }
-            InvalidAnimationDuration { track, clip, group, duration } => write!(f, "track {track}, clip {clip}: the '{group}' animation lasts {duration}, which must be above 0"),
+            InvalidAnimationDuration { track, clip, group, duration } => write!(f, "track {track}, clip {clip}: the '{group}' animation lasts {duration}, which must not be 0 (only 'in' and 'out' may be negative, as a hold)"),
+            HoldsFillClip { track, clip, holds, duration } => write!(f, "track {track}, clip {clip}: its holds last {holds}, which leaves nothing of its duration {duration} to play"),
+            HoldBesideTransition { track, clip, edge } => write!(f, "track {track}, clip {clip}: its {edge} has both a hold and a transition"),
             AnimationOnAudioTrack { track, clip } => write!(f, "track {track}, clip {clip}: a clip on an audio track has no picture to animate"),
             PerUnitAnimationNotText { track, clip, group, preset } => write!(f, "track {track}, clip {clip}: the '{group}' animation '{preset}' moves the characters of a text, and the clip is not text"),
             SourceHasNoAudio { track, clip, source } => {
@@ -512,9 +519,13 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                     // A pack preset found on this machine is checked like a built-in one.
                     errors.push(PerUnitAnimationNotText { track: t, clip: c, group: group.name(), preset: reference.preset.clone() });
                 }
-                if reference.duration <= Time::ZERO {
+                if reference.duration == Time::ZERO || (group == AnimationGroup::Repeat && reference.duration < Time::ZERO) {
                     errors.push(InvalidAnimationDuration { track: t, clip: c, group: group.name(), duration: reference.duration });
                 }
+            }
+            let holds = clip.hold_start().saturating_add(clip.hold_end());
+            if holds > Time::ZERO && clip.duration > Time::ZERO && holds >= clip.duration {
+                errors.push(HoldsFillClip { track: t, clip: c, holds, duration: clip.duration });
             }
             if clip.start < Time::ZERO {
                 errors.push(NegativeClipTime {
@@ -629,14 +640,15 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                 && clip
                     .fade_in
                     .checked_add(clip.fade_out)
-                    .is_none_or(|total| total > clip.duration)
+                    .is_none_or(|total| total > clip.media_duration())
             {
+                // The fades shape the sound, which only the moving part between the holds has.
                 errors.push(FadesExceedClip {
                     track: t,
                     clip: c,
                     fade_in: clip.fade_in,
                     fade_out: clip.fade_out,
-                    duration: clip.duration,
+                    duration: clip.media_duration(),
                 });
             }
             for (e, effect) in clip.effects.iter().enumerate() {
@@ -758,6 +770,13 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                     clip: next,
                     field: "fade_in",
                 });
+            }
+            // A hold and a transition on the same cut exclude each other.
+            if track.clips[tr.after_clip].hold_end() > Time::ZERO {
+                errors.push(HoldBesideTransition { track: t, clip: tr.after_clip, edge: "end" });
+            }
+            if track.clips[next].hold_start() > Time::ZERO {
+                errors.push(HoldBesideTransition { track: t, clip: next, edge: "start" });
             }
         }
 

@@ -17,7 +17,8 @@
 //!   inside the clip when its start time is in that range. The source time is exactly
 //!   `source_in + floor((frame_time - start) * speed)` ticks (see [`Clip::source_offset`]); the
 //!   decoder picks the source frame for that time, dropping frames when fast and repeating them
-//!   when slow.
+//!   when slow. A clip with holds (see [`Clip::hold_start`]) counts that time from the end of its
+//!   start hold, and shows its first or last frame inside the holds ([`Clip::source_time_at`]).
 //! * **Transition window.** For a transition of `duration` after clip `i`, with the cut at the
 //!   start `s` of clip `i + 1`, the window is `[s - duration / 2, s - duration / 2 + duration)` where
 //!   `duration / 2` rounds down. The first clip supplies `duration / 2` ticks and the second the rest.
@@ -182,7 +183,7 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
         clip,
         model: c,
         source: &c.source,
-        source_time: c.source_in.saturating_add(c.source_offset(offset)).max(Time::ZERO),
+        source_time: c.source_time_at(offset).max(Time::ZERO),
         effects: &c.effects,
         transform,
         offset,

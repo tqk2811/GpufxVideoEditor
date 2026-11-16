@@ -143,6 +143,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::EditSplitOutsideClip { track, at } => format!("{}: không thể tách tại {at} giây", track_label(*track)),
         Message::EditSplitInsideFade { track, at } => format!("{}: {at} giây nằm trong đoạn tăng hoặc giảm dần âm lượng", track_label(*track)),
         Message::EditSplitInsideTransition { track, at } => format!("{}: {at} giây nằm trong chuyển cảnh", track_label(*track)),
+        Message::EditSplitInsideHold { track, at } => format!("{}: {at} giây nằm trong đoạn hình tĩnh", track_label(*track)),
         Message::EditTrackLocked(track) => format!("{}: track đang khoá", track_label(*track)),
         Message::EditSpeedOverlap { track, end, next } => format!("{}: ở tốc độ này clip sẽ kết thúc ở {end} giây, chồng lên clip tiếp theo ở {next} giây", track_label(*track)),
         Message::EditInvalid(detail) => format!("Kết quả không hợp lệ: {detail}"),
