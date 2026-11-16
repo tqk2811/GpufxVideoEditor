@@ -152,6 +152,8 @@ impl StretchStates {
                 if !cache.matches(spec, segment.source) {
                     *cache = DenoiseCache::new(spec, segment.source);
                 }
+                // Only the mode and the file are in the runs; a new strength keeps them.
+                cache.set_strength(spec.strength);
                 read_plain_or_stretched(&mut self.clips, &mut Denoised { inner: source, cache }, segment, out)
             }
             None => read_plain_or_stretched(&mut self.clips, source, segment, out),

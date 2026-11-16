@@ -382,3 +382,67 @@ fn cost_per_second_of_audio() {
         println!("{name:>24}: {per_second:6.2} ms per second of audio, first block after a seek {seek:6.2} ms");
     }
 }
+
+/// Both runs either side of a chunk boundary process the same audio, so their blend must keep the
+/// level: an equal-power blend of correlated runs rises 3 dB in its middle, once per second.
+#[test]
+fn chunk_boundaries_keep_the_level_of_a_steady_tone() {
+    for mode in [DenoiseMode::General, DenoiseMode::Voice] {
+        let seconds = 4;
+        let project = project_of(vec![clip_with(seconds, 0, denoise(mode, 1.0), ClipVoice::default(), 1.0)]);
+        let out = mix(&project, &mut source(Clean::Tone(1000.0), 0.0), 0, seconds as usize * RATE);
+        // The peak of each 10 ms window from the second second on: the tone fills every window.
+        let peaks: Vec<f32> = out[2 * RATE..].chunks_exact(2 * 480).map(|window| window.iter().fold(0.0f32, |peak, s| peak.max(s.abs()))).collect();
+        let mut sorted = peaks.clone();
+        sorted.sort_by(f32::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        let highest = sorted[sorted.len() - 1];
+        let bump = db(f64::from(highest / median));
+        println!("{mode:?}: highest window {bump:.2} dB above the median");
+        assert!(bump < 1.0, "{mode:?}: a window stands {bump:.2} dB above the median");
+    }
+}
+
+/// The runs hold only the mode's processing at full strength, so a new strength reuses them and
+/// sounds exactly as a fresh mix at that strength.
+#[test]
+fn a_new_strength_keeps_the_runs_and_equals_a_fresh_mix() {
+    struct Counting {
+        inner: Noisy,
+        frames: usize,
+    }
+    impl AudioSource for Counting {
+        fn read(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+            self.read_counted(key, source, position, out).map(|_| ())
+        }
+        fn read_counted(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<usize, RenderError> {
+            self.frames += out.len() / 2;
+            self.inner.read_counted(key, source, position, out)
+        }
+    }
+    for mode in [DenoiseMode::Voice, DenoiseMode::General] {
+        let at = |strength: f64| project_of(vec![clip_with(3, 0, denoise(mode, strength), ClipVoice::default(), 1.0)]);
+        let start = RATE as i64 + 4_321;
+        let mut states = StretchStates::default();
+        let mut counting = Counting { inner: source(Clean::Voiced, 0.05), frames: 0 };
+        let mut block = vec![0.0f32; 2 * 1024];
+        mix_audio_with(&at(1.0), &mut counting, &mut states, start, &mut block).unwrap();
+        let read = counting.frames;
+        mix_audio_with(&at(0.35), &mut counting, &mut states, start, &mut block).unwrap();
+        assert_eq!(counting.frames, read, "{mode:?}: the new strength read the source again");
+        let fresh = mix(&at(0.35), &mut source(Clean::Voiced, 0.05), start, 1024);
+        assert!(block == fresh, "{mode:?}: the reused runs sound different from a fresh mix");
+    }
+}
+
+/// The robot effect follows the timeline, so a clip split anywhere sounds as it did whole.
+#[test]
+fn a_split_robot_clip_keeps_its_phase_across_the_cut() {
+    let whole = project_of(vec![clip_with(2, 0, ClipDenoise::default(), voice(0.0, VoiceEffect::Robot), 1.0)]);
+    // 1 s and one frame: 49 600 samples, not a whole number of 50 Hz periods.
+    let cut = engine::split_clip(&whole, key(), t(SECOND + FRAME)).unwrap();
+    let before = mix(&whole, &mut source(Clean::Tone(1000.0), 0.0), 0, 2 * RATE);
+    let after = mix(&cut, &mut source(Clean::Tone(1000.0), 0.0), 0, 2 * RATE);
+    let worst = before.iter().zip(&after).fold(0.0f32, |worst, (a, b)| worst.max((a - b).abs()));
+    assert!(worst < 1e-6, "the split clip differs by {worst}");
+}

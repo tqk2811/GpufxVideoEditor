@@ -7,11 +7,16 @@
 //! fixed chunks of [`CHUNK`] samples on a grid of absolute source positions. Chunk `j` is produced
 //! by a fresh processor that starts [`PREROLL`] samples before it (silence before the file) and
 //! runs [`CROSSFADE`] samples past it. The first [`CROSSFADE`] samples of a chunk blend the tail
-//! of the run of chunk `j - 1` into the run of chunk `j`, so the restart is inaudible. A sample
+//! of the run of chunk `j - 1` into the run of chunk `j`, so the restart is inaudible. Both runs
+//! process the same audio and nearly agree there, so the two gains of the blend sum to one: an
+//! equal-power blend would raise the level 3 dB in its middle, once per second. A sample
 //! therefore depends only on the source audio, the method and the strength: a block read after a
 //! seek is bit for bit what a sequential export reads, as long as the source gives the same
 //! samples for a position however it is reached (see [`crate::stretch`]). Runs are kept between
 //! reads, which is only memoisation, and the source is read forward only.
+//!
+//! Runs are processed at full strength and keep the dry audio beside the wet; the strength only
+//! mixes the two when a block is read (see [`mix_weight`]), so a new strength keeps every run.
 //!
 //! The price is work: a chunk costs `(PREROLL + CHUNK + CROSSFADE) / CHUNK`, about 1.5 times the
 //! audio, and a seek computes two runs before the first sample. Half a second of preroll lets the
@@ -47,7 +52,8 @@ use crate::audio_schedule::MIX_CHANNELS;
 use crate::project::{ClipDenoise, DenoiseMode};
 use crate::render::{ClipKey, RenderError};
 
-/// Samples of one chunk: one second. A multiple of the RNNoise frame and of the gate hop.
+/// Samples of one chunk: one second. A multiple of the RNNoise frame. It need not be a multiple of
+/// the gate hop, because every run places its gate windows from its own start.
 pub const CHUNK: i64 = 48_000;
 /// Samples each chunk is processed ahead of its start: half a second.
 pub const PREROLL: i64 = 24_000;
@@ -107,6 +113,30 @@ impl DenoiseSpec {
 struct Run {
     chunk: i64,
     samples: Vec<f32>,
+    /// The source frames of the chunk itself, unprocessed.
+    dry: Vec<f32>,
+}
+
+/// A finished chunk: the processed frames, crossfade applied, and the dry frames beside them.
+struct Chunk {
+    chunk: i64,
+    wet: Vec<f32>,
+    dry: Vec<f32>,
+}
+
+/// How much of the processed audio a clip at `strength` takes, the rest being the dry audio.
+/// RNNoise mixes in proportion. For the gate, steady noise left at `1 - w + w g` of its level,
+/// `g` being the gain of the gate at full depth, matches a gate of depth `GATE_DEPTH_DB * strength`
+/// for this `w`.
+pub fn mix_weight(mode: DenoiseMode, strength: f32) -> f32 {
+    match mode {
+        DenoiseMode::Voice => strength,
+        _ => {
+            let deepest = 10f32.powf(-GATE_DEPTH_DB / 20.0);
+            let target = 10f32.powf(-GATE_DEPTH_DB * strength / 20.0);
+            ((1.0 - target) / (1.0 - deepest)).clamp(0.0, 1.0)
+        }
+    }
 }
 
 /// The processed audio of one clip.
@@ -114,8 +144,8 @@ pub struct DenoiseCache {
     spec: DenoiseSpec,
     source: String,
     runs: VecDeque<Run>,
-    /// Finished chunks, crossfade applied: `(chunk, CHUNK stereo frames)`.
-    chunks: VecDeque<(i64, Vec<f32>)>,
+    /// Finished chunks of [`CHUNK`] stereo frames.
+    chunks: VecDeque<Chunk>,
     /// The first frame past the end of the source, once a read has reached it.
     source_end: Option<i64>,
     /// Source frames from `raw_start`, kept so that consecutive runs read the source forward.
@@ -131,9 +161,15 @@ impl DenoiseCache {
         Self { spec, source: source.to_owned(), runs: VecDeque::new(), chunks: VecDeque::new(), source_end: None, raw: Vec::new(), raw_start: 0, input: Vec::new(), gate: None }
     }
 
-    /// Whether this cache computes `spec` over `source`.
+    /// Whether this cache can serve `spec` over `source`: the same mode and file. The strength
+    /// may differ; [`Self::set_strength`] takes it over and keeps every run.
     pub fn matches(&self, spec: DenoiseSpec, source: &str) -> bool {
-        self.spec == spec && self.source == source
+        self.spec.mode == spec.mode && self.source == source
+    }
+
+    /// The strength the next reads mix at.
+    pub fn set_strength(&mut self, strength: f32) {
+        self.spec.strength = strength;
     }
 
     /// Reads the denoised audio of `key` from `inner` like [`AudioSource::read_counted`].
@@ -141,17 +177,20 @@ impl DenoiseCache {
         let frames = (out.len() / MIX_CHANNELS) as i64;
         let end = position.saturating_add(frames);
         let mut at = position.max(0);
+        let weight = mix_weight(self.spec.mode, self.spec.strength);
         while at < end {
             if self.source_end.is_some_and(|source_end| at >= source_end) {
                 break;
             }
             let chunk = at.div_euclid(CHUNK);
             let take = ((chunk + 1) * CHUNK).min(end) - at;
-            let samples = self.chunk(inner, key, chunk)?;
+            let done = self.chunk(inner, key, chunk)?;
             let from = ((at - chunk * CHUNK) as usize) * MIX_CHANNELS;
             let to = ((at - position) as usize) * MIX_CHANNELS;
             let len = take as usize * MIX_CHANNELS;
-            out[to..to + len].copy_from_slice(&samples[from..from + len]);
+            for ((sample, &wet), &dry) in out[to..to + len].iter_mut().zip(&done.wet[from..from + len]).zip(&done.dry[from..from + len]) {
+                *sample = dry + (wet - dry) * weight;
+            }
             at += take;
         }
         let covered = match self.source_end {
@@ -164,34 +203,37 @@ impl DenoiseCache {
     }
 
     /// The finished samples of `chunk`.
-    fn chunk<S: AudioSource + ?Sized>(&mut self, inner: &mut S, key: ClipKey, chunk: i64) -> Result<&[f32], RenderError> {
-        if let Some(index) = self.chunks.iter().position(|(known, _)| *known == chunk) {
-            return Ok(&self.chunks[index].1);
+    fn chunk<S: AudioSource + ?Sized>(&mut self, inner: &mut S, key: ClipKey, chunk: i64) -> Result<&Chunk, RenderError> {
+        if let Some(index) = self.chunks.iter().position(|known| known.chunk == chunk) {
+            return Ok(&self.chunks[index]);
         }
         // The run before first, so that the source is read forward only.
         if chunk > 0 {
             self.run(inner, key, chunk - 1)?;
         }
         self.run(inner, key, chunk)?;
-        let mut samples = self.run_samples(chunk)[..CHUNK as usize * MIX_CHANNELS].to_vec();
+        let run = self.runs.iter().find(|run| run.chunk == chunk).expect("run computed");
+        let mut samples = run.samples[..CHUNK as usize * MIX_CHANNELS].to_vec();
+        let dry = run.dry.clone();
         // The first chunk of the file has nothing before it to blend with: its run starts in the
         // silence before the file like every other run.
         if chunk > 0 {
             let tail = &self.run_samples(chunk - 1)[CHUNK as usize * MIX_CHANNELS..];
             for i in 0..CROSSFADE as usize {
-                let fade = (i as f32 + 0.5) / CROSSFADE as f32 * PI / 2.0;
-                let (rise, fall) = (fade.sin(), fade.cos());
+                // Raised cosine: the two gains sum to one.
+                let rise = 0.5 - 0.5 * ((i as f32 + 0.5) / CROSSFADE as f32 * PI).cos();
+                let fall = 1.0 - rise;
                 for c in 0..MIX_CHANNELS {
                     let at = i * MIX_CHANNELS + c;
                     samples[at] = samples[at] * rise + tail[at] * fall;
                 }
             }
         }
-        self.chunks.push_back((chunk, samples));
+        self.chunks.push_back(Chunk { chunk, wet: samples, dry });
         while self.chunks.len() > KEPT_CHUNKS {
             self.chunks.pop_front();
         }
-        Ok(&self.chunks.back().expect("chunk just pushed").1)
+        Ok(self.chunks.back().expect("chunk just pushed"))
     }
 
     fn run_samples(&self, chunk: i64) -> &[f32] {
@@ -247,13 +289,16 @@ impl DenoiseCache {
         self.raw_start += (drop / MIX_CHANNELS) as i64;
 
         let mut samples = vec![0.0; len * MIX_CHANNELS];
+        // At full strength: the strength of the clip mixes when a block is read.
         match self.spec.mode {
-            DenoiseMode::Voice => voice(&self.input, self.spec.strength, &mut samples),
-            _ => self.gate.get_or_insert_with(Gate::new).process(&self.input, self.spec.strength, &mut samples),
+            DenoiseMode::Voice => voice(&self.input, 1.0, &mut samples),
+            _ => self.gate.get_or_insert_with(Gate::new).process(&self.input, 1.0, &mut samples),
         }
         // Keep only what follows the preroll, which was only there to settle the state.
         let kept = samples.split_off(PREROLL as usize * MIX_CHANNELS);
-        self.runs.push_back(Run { chunk, samples: kept });
+        let dry_from = PREROLL as usize * MIX_CHANNELS;
+        let dry = self.input[dry_from..dry_from + CHUNK as usize * MIX_CHANNELS].to_vec();
+        self.runs.push_back(Run { chunk, samples: kept, dry });
         while self.runs.len() > KEPT_CHUNKS {
             self.runs.pop_front();
         }

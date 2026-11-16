@@ -149,8 +149,6 @@ pub struct AudioSegment<'a> {
 pub struct VoiceFx {
     /// Which effect; never [`VoiceEffect::None`].
     pub effect: VoiceEffect,
-    /// Timeline sample of the first sample of the clip, where the effect starts its phase.
-    pub clip_start: i64,
 }
 
 impl VoiceFx {
@@ -159,10 +157,11 @@ impl VoiceFx {
         match self.effect {
             VoiceEffect::None => 1.0,
             // Ring modulation; the phase is taken modulo a whole period so that it stays exact far
-            // into a long clip.
+            // into a long project. It follows the timeline sample, not the start of the clip, so
+            // the two halves of a split clip go on in phase and the cut does not click.
             VoiceEffect::Robot => {
                 let period = (f64::from(MIX_SAMPLE_RATE) / ROBOT_HZ).round() as i64;
-                let phase = sample.saturating_sub(self.clip_start).rem_euclid(period) as f64 / period as f64;
+                let phase = sample.rem_euclid(period) as f64 / period as f64;
                 (phase * std::f64::consts::TAU).sin() as f32
             }
         }
@@ -219,7 +218,7 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
                 gain: envelope(clip, clip_start, clip_end, crossfade_in, crossfade_out),
                 stretch,
                 denoise: DenoiseSpec::of(&clip.denoise),
-                voice_effect: (clip.voice.effect != VoiceEffect::None).then_some(VoiceFx { effect: clip.voice.effect, clip_start }),
+                voice_effect: (clip.voice.effect != VoiceEffect::None).then_some(VoiceFx { effect: clip.voice.effect }),
             });
         }
     }
