@@ -275,6 +275,11 @@ impl ProjectPaths {
         Self { base: self.base.clone(), package_roots: self.package_roots.clone(), project_packages: self.project_packages, proxies: Arc::default() }
     }
 
+    /// The package roots, in the order they are searched.
+    pub fn package_roots(&self) -> &[PathBuf] {
+        &self.package_roots
+    }
+
     pub fn has_proxies(&self) -> bool {
         !self.proxies.is_empty()
     }

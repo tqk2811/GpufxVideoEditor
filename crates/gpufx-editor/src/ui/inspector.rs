@@ -182,8 +182,85 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
             placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some() || ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)));
             motion_rows(ui, state, key, &clip);
         });
+        if clip.text.is_none() {
+            ui.separator();
+            ui.add_enabled_ui(editable, |ui| matte_rows(ui, state, &clip.matte));
+        }
         ui.separator();
         effects(ui, state, key, editable);
+    }
+}
+
+/// The AI background removal of the clip: the model, whether it is installed, and the shaping.
+fn matte_rows(ui: &mut egui::Ui, state: &mut EditorState, matte: &engine::ClipMatte) {
+    let language = state.language();
+    ui.colored_label(theme::text_dim(), language.t(Message::FieldMatte));
+    ui.horizontal(|ui| {
+        for (model, label, hint) in [
+            (engine::MatteModel::Off, Message::MatteOff, None),
+            (engine::MatteModel::Quality, Message::MatteQuality, Some(Message::MatteQualityHint)),
+            (engine::MatteModel::Fast, Message::MatteFast, Some(Message::MatteFastHint)),
+        ] {
+            let mut response = ui.selectable_label(matte.model == model, language.t(label));
+            if let Some(hint) = hint {
+                response = response.on_hover_text(language.t(hint));
+            }
+            if response.clicked() && matte.model != model {
+                state.set_matte_model(model);
+            }
+        }
+    });
+    if matte.is_off() {
+        return;
+    }
+    if crate::matting_models::installed(matte.model, &crate::project_file::package_roots()).is_none() {
+        ui.colored_label(theme::text_dim(), language.t(Message::MatteModelMissing));
+        ui.horizontal(|ui| {
+            let source = crate::matting_models::ModelSource::of(matte.model);
+            if ui.add_enabled(source.enabled(), egui::Button::new(language.t(Message::MatteFetch))).on_disabled_hover_text(language.t(Message::MatteFetchUnavailable)).clicked() {
+                state.ui.matte_fetch_request = Some(matte.model);
+            }
+            if ui.button(language.t(Message::MatteImportZip)).clicked() {
+                state.ui.matte_import_request = Some(matte.model);
+            }
+        });
+    }
+    let max = engine::MAX_MATTE_PIXELS;
+    let mut next = *matte;
+    let mut changed = false;
+    for (label, value, range, step, decimals, suffix) in [
+        (Message::MatteThreshold, &mut next.threshold, 0.0..=1.0, 0.01, 2, ""),
+        (Message::MatteFeather, &mut next.feather, 0.0..=max, 0.1, 1, " px"),
+        (Message::MatteEdge, &mut next.edge, -max..=max, 0.1, 1, " px"),
+    ] {
+        ui.colored_label(theme::text_dim(), language.t(label));
+        changed |= ui
+            .horizontal(|ui| {
+                ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+                let mut changed = ui.add(slider(value, range.clone())).changed();
+                changed |= drag_field(ui, value, range, step, decimals, suffix, None).1;
+                changed
+            })
+            .inner;
+    }
+    let mut temporal = f64::from(next.temporal);
+    ui.colored_label(theme::text_dim(), language.t(Message::MatteTemporal)).on_hover_text(language.t(Message::MatteTemporalHint));
+    changed |= ui
+        .horizontal(|ui| {
+            let range = 0.0..=f64::from(engine::MAX_MATTE_TEMPORAL);
+            ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+            let mut changed = ui.add(slider(&mut temporal, range.clone()).step_by(1.0)).changed();
+            changed |= drag_field(ui, &mut temporal, range, 1.0, 0, "", None).1;
+            changed
+        })
+        .inner;
+    next.temporal = temporal.round().clamp(0.0, f64::from(engine::MAX_MATTE_TEMPORAL)) as u32;
+    if changed {
+        state.live_matte(next);
+    }
+    let mut invert = matte.invert;
+    if ui.checkbox(&mut invert, language.t(Message::MatteInvert)).changed() {
+        state.set_matte(engine::ClipMatte { invert, ..*matte });
     }
 }
 

@@ -15,6 +15,7 @@ pub mod export;
 pub mod i18n;
 pub mod layout;
 pub mod media;
+pub mod matting_models;
 pub mod package_import;
 pub mod packages;
 pub mod params;

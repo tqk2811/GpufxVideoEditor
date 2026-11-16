@@ -86,6 +86,11 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         step(&mut session, "clip_set_denoise", json!({"clip": clip0, "mode": "voice", "strength": 0.5}), next)
     };
     expected = {
+        let matte = engine::ClipMatte { model: engine::MatteModel::Fast, feather: 2.0, invert: true, ..Default::default() };
+        let next = engine::set_matte(&expected, key(0, 0), matte).unwrap();
+        step(&mut session, "clip_set_matte", json!({"clip": clip0, "model": "fast", "feather": 2.0, "invert": true}), next)
+    };
+    expected = {
         let voice = engine::ClipVoice { semitones: -6.0, effect: engine::VoiceEffect::Robot };
         let next = engine::set_voice(&expected, key(0, 1), voice).unwrap();
         step(&mut session, "clip_set_voice", json!({"clip": {"track": 0, "clip": 1}, "preset": "deep", "effect": "robot"}), next)
@@ -171,6 +176,7 @@ fn denoise_and_voice_tools_check_their_ranges_and_keep_what_is_absent() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
     let mut now = two_clips(&mut session);
     let clip0 = json!({"track": 0, "clip": 0});
+    assert_eq!(call_err(&mut session, "clip_set_matte", json!({"expected_revision": now, "clip": clip0, "feather": 25.0})).code, "out_of_range");
     assert_eq!(call_err(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "general", "strength": 1.5})).code, "out_of_range");
     assert_eq!(call_err(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "semitones": -12.5})).code, "out_of_range");
     assert_eq!(call_err(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "loud"})).code, "invalid_params");

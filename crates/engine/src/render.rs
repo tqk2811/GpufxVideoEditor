@@ -15,7 +15,7 @@ use crate::clip_animation::animation_effects;
 use crate::keyframe::effects_at;
 use crate::keyframe::ClipTransform;
 use crate::keyframe::ClipProperty;
-use crate::project::{text_step_up, Clip, Effect, Project, TextContent};
+use crate::project::{text_step_up, Clip, ClipMatte, Effect, Project, TextContent};
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, LayerContent, Progress, SourceSample,
 };
@@ -97,12 +97,15 @@ pub trait Compositor {
     /// Resizes `frame` to the project size, applies the clip's `effects` to it and puts the picture
     /// where `transform` says, with its opacity and rotation. What the picture does not cover is
     /// transparent. `effects` have no keyframes left: they carry the values of this frame. `clock`
-    /// is how far the clip has played, for effects that follow it.
+    /// is how far the clip has played, for effects that follow it. `matte` cuts the person out of
+    /// the picture before the effects (off for a text clip).
+    #[allow(clippy::too_many_arguments)]
     fn prepare_clip(
         &mut self,
         key: ClipKey,
         frame: &mut <Self::Decoder as Decoder>::Frame,
         effects: &[Effect],
+        matte: &ClipMatte,
         transform: ClipTransform,
         clock: ClipClock,
         at: FrameContext,
@@ -297,7 +300,8 @@ fn decode_sample<C: Compositor>(
 fn prepare_sample<C: Compositor>(compositor: &mut C, key: ClipKey, frame: &mut <C::Decoder as Decoder>::Frame, sample: &SourceSample<'_>, at: FrameContext, frame_duration: Time) -> Result<C::Image, RenderError> {
     let own = effects_at(sample.effects, sample.offset);
     let added = animation_effects(&sample.model.animation, sample.clock, frame_duration);
-    with_preset_fallback(&own, added, |effects| compositor.prepare_clip(key, frame, effects, sample.transform, sample.clock, at))
+    let matte = if sample.model.text.is_some() { ClipMatte::default() } else { sample.model.matte };
+    with_preset_fallback(&own, added, |effects| compositor.prepare_clip(key, frame, effects, &matte, sample.transform, sample.clock, at))
 }
 
 /// Runs `prepare` with `own` then `added`, and with `own` alone when that fails and `added` is not
@@ -580,6 +584,7 @@ mod tests {
             key: ClipKey,
             frame: &mut String,
             _effects: &[Effect],
+            matte: &ClipMatte,
             _transform: ClipTransform,
             _clock: ClipClock,
             at: FrameContext,
@@ -589,8 +594,9 @@ mod tests {
                 return Err(RenderError("broken effect".to_owned()));
             }
             journal.acquired += 1;
+            let matted = if matte.is_off() { String::new() } else { format!(" matte {:?}", matte.model) };
             journal.events.push(format!(
-                "f{} clip {}:{} {frame}",
+                "f{} clip {}:{} {frame}{matted}",
                 at.index, key.track, key.clip
             ));
             Ok(journal.acquired)
@@ -918,6 +924,17 @@ mod tests {
         let opened: Vec<_> = journal.borrow().events.iter().filter(|e| e.starts_with("open")).cloned().collect();
         assert_eq!(opened, ["open text:Hi"]);
         assert!(journal.borrow().events.iter().any(|e| e.starts_with("f0 clip 0:0 text:Hi@")), "{:?}", journal.borrow().events);
+    }
+
+    #[test]
+    fn the_matte_of_a_clip_reaches_the_compositor_but_not_that_of_a_text() {
+        let matted = TWO_TRACKS.replace(r#""duration":200}"#, r#""duration":200,"matte":{"model":"fast","feather":2.0}}"#);
+        let (journal, _) = run(&matted);
+        assert!(journal.events.iter().any(|e| e == "f1 clip 0:0 a@100 matte Fast"), "{:?}", journal.events);
+        assert!(journal.events.iter().any(|e| e == "f1 clip 1:0 b@500"), "the other clip has none: {:?}", journal.events);
+        let text = TEXT.replace(r#""size":0.1}"#, r#""size":0.1},"matte":{"model":"quality"}"#);
+        let (journal, _) = run(&text);
+        assert!(journal.events.iter().any(|e| e.starts_with("f0 clip 0:0 text:Hi@") && !e.contains("matte")), "{:?}", journal.events);
     }
 
     #[test]

@@ -285,6 +285,10 @@ pub struct UiState {
     pub font_file_request: Option<ClipKey>,
     /// The subtitle track the inspector asked to export; the window opens the Save dialog.
     pub subtitle_export_request: Option<usize>,
+    /// The matting model the inspector asked to import from a zip; the window opens the dialog.
+    pub matte_import_request: Option<engine::MatteModel>,
+    /// The matting model the inspector asked to download; the window fetches it.
+    pub matte_fetch_request: Option<engine::MatteModel>,
     pub left_tab: LeftTab,
     pub media_search: String,
     pub audio_search: String,
@@ -481,6 +485,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         denoise: Default::default(),
         voice: Default::default(),
         reverse: false,
+        matte: Default::default(),
     }
 }
 
@@ -1053,6 +1058,8 @@ impl EditorState {
         };
         self.ui.font_file_request = None;
         self.ui.subtitle_export_request = None;
+        self.ui.matte_import_request = None;
+        self.ui.matte_fetch_request = None;
         self.ui.drop_batches.clear();
         self.ui.clip_menu = None;
     }
@@ -1665,6 +1672,28 @@ impl EditorState {
             let denoise = engine::ClipDenoise { strength, ..clip_in(project, key)?.denoise };
             engine::set_denoise(project, key, denoise)
         });
+    }
+
+    /// Sets the background removal model of the selected clip, keeping its other settings: one
+    /// undo step.
+    pub fn set_matte_model(&mut self, model: engine::MatteModel) {
+        let Some(key) = self.selection else { return };
+        self.run(|project| {
+            let matte = engine::ClipMatte { model, ..clip_in(project, key)?.matte };
+            engine::set_matte(project, key, matte)
+        });
+    }
+
+    /// Sets the whole background removal of the selected clip as one undo step (a check box).
+    pub fn set_matte(&mut self, matte: engine::ClipMatte) {
+        let Some(key) = self.selection else { return };
+        self.run(|project| engine::set_matte(project, key, matte));
+    }
+
+    /// Moves a slider of the background removal of the selected clip, merged like the other sliders.
+    pub fn live_matte(&mut self, matte: engine::ClipMatte) {
+        let Some(key) = self.selection else { return };
+        self.live_edit(|project| engine::set_matte(project, key, matte));
     }
 
     /// The file a source of the project reads, as the thumbnails resolve it.
@@ -4112,6 +4141,31 @@ mod tests {
         assert_eq!(clip(&state).denoise, engine::ClipDenoise { mode: engine::DenoiseMode::Voice, strength: 1.0 }, "the strength drag was one step");
         state.undo();
         assert_eq!(clip(&state).denoise, engine::ClipDenoise::default());
+    }
+
+    #[test]
+    fn matte_edits_undo_like_the_other_clip_settings() {
+        let mut state = state_with_clip();
+        let clip = |state: &EditorState| state.project().tracks[0].clips[0].clone();
+        state.set_matte_model(engine::MatteModel::Fast);
+        let fast = clip(&state).matte;
+        state.live_matte(engine::ClipMatte { feather: 2.0, ..fast });
+        state.live_matte(engine::ClipMatte { feather: 4.0, ..fast });
+        state.commit_live();
+        state.set_matte(engine::ClipMatte { invert: true, ..clip(&state).matte });
+        assert_eq!(clip(&state).matte, engine::ClipMatte { model: engine::MatteModel::Fast, feather: 4.0, invert: true, ..Default::default() });
+        state.set_matte_model(engine::MatteModel::Quality);
+        assert_eq!(clip(&state).matte.feather, 4.0, "a new model keeps the shaping");
+        state.undo();
+        state.undo();
+        assert_eq!(clip(&state).matte.feather, 4.0);
+        assert!(!clip(&state).matte.invert);
+        state.undo();
+        assert_eq!(clip(&state).matte, fast, "the slider drag was one step");
+        state.undo();
+        assert!(clip(&state).matte.is_off());
+        state.redo();
+        assert_eq!(clip(&state).matte.model, engine::MatteModel::Fast);
     }
 
     #[test]

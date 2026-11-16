@@ -52,7 +52,7 @@
 use crate::audio_schedule::sample_position;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
-use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipMatte, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -447,6 +447,7 @@ pub fn text_clip(start: Time, duration: Time, text: TextContent) -> Clip {
         denoise: Default::default(),
         voice: Default::default(),
         reverse: false,
+        matte: Default::default(),
     }
 }
 
@@ -939,6 +940,14 @@ pub fn set_voice(project: &Project, key: ClipKey, voice: ClipVoice) -> Result<Pr
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.voice = voice;
+    finish(next)
+}
+
+/// Sets the AI background removal of a clip. Values out of range are refused as invalid.
+pub fn set_matte(project: &Project, key: ClipKey, matte: ClipMatte) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.matte = matte;
     finish(next)
 }
 

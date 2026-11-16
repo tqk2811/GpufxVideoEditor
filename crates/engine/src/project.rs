@@ -263,6 +263,10 @@ pub struct Clip {
     /// source frame and the end hold the first. Ignored on a still. Left out of the file when off.
     #[serde(default, skip_serializing_if = "is_false")]
     pub reverse: bool,
+    /// AI background removal of the picture. Ignored on text clips and audio tracks. Left out of
+    /// the file when off.
+    #[serde(default, skip_serializing_if = "ClipMatte::is_off")]
+    pub matte: ClipMatte,
 }
 
 /// The `source` of every text clip. It names no file and has no extension, so
@@ -762,6 +766,80 @@ impl ClipVoice {
     }
 }
 
+/// Which neural network cuts the person out of a clip's picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatteModel {
+    /// The picture is left as it is.
+    #[default]
+    Off,
+    /// MODNet webcam: finer edges (hair), slower.
+    Quality,
+    /// PP-HumanSeg V2 Lite: coarser edges, fast enough for every preview frame.
+    Fast,
+}
+
+impl MatteModel {
+    /// The package id of the model under `gpufx_ai_matting`, none when off.
+    pub fn package_id(self) -> Option<&'static str> {
+        match self {
+            MatteModel::Off => None,
+            MatteModel::Quality => Some("modnet-webcam"),
+            MatteModel::Fast => Some("pp-humanseg-v2-lite"),
+        }
+    }
+}
+
+/// The widest feather and the largest edge shrink or grow of a matte, in pixels of a 1080-line
+/// frame (scaled with the output height).
+pub const MAX_MATTE_PIXELS: f64 = 20.0;
+/// The most source frames before the current one a temporal matte averages.
+pub const MAX_MATTE_TEMPORAL: u32 = 4;
+
+/// AI background removal of a clip: the alpha of its picture taken from a matting network,
+/// then shaped. Applied to the source picture before the clip's effects.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ClipMatte {
+    /// Which network, or none.
+    #[serde(default)]
+    pub model: MatteModel,
+    /// 0 keeps the soft matte; above 0 the matte becomes hard at this level (0 to 1).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub threshold: f64,
+    /// Softening of the edge, in pixels of a 1080-line frame, 0 to [`MAX_MATTE_PIXELS`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub feather: f64,
+    /// Below 0 shrinks the kept part, above 0 grows it, in pixels of a 1080-line frame, at most
+    /// [`MAX_MATTE_PIXELS`] either way.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub edge: f64,
+    /// Keeps the background and removes the person instead.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert: bool,
+    /// Temporal smoothing: the matte is the mean of the current source frame's and those of the
+    /// `temporal` source frames before it, 0 (off) to [`MAX_MATTE_TEMPORAL`]. The window comes
+    /// from the source alone, so preview and export agree whatever was played or sought before.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub temporal: u32,
+}
+
+impl Default for ClipMatte {
+    fn default() -> Self {
+        Self { model: MatteModel::Off, threshold: 0.0, feather: 0.0, edge: 0.0, invert: false, temporal: 0 }
+    }
+}
+
+impl ClipMatte {
+    /// Whether it leaves the picture as it is, so the file leaves it out.
+    pub fn is_off(&self) -> bool {
+        self.model == MatteModel::Off
+    }
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 /// Ready-made voice changes, for the editor's buttons and the agent tools. They are not stored:
 /// choosing one sets [`ClipVoice`] to its values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1134,7 +1212,7 @@ pub(crate) mod tests_support {
 
     /// A plain clip of one second at the start of the timeline.
     pub(crate) fn clip() -> Clip {
-        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default(), reverse: false }
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default() }
     }
 }
 

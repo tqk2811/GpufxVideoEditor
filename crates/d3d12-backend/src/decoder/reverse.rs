@@ -115,6 +115,11 @@ impl Drop for CpuFrame {
 }
 
 impl ReverseDecoder {
+    /// The file this decoder reads.
+    pub fn path(&self) -> &str {
+        self.inner.path()
+    }
+
     /// Opens `path` for hardware decoding on `device`, with a pool large enough for the ring.
     pub fn open(path: &Path, device: &ID3D12Device) -> Result<Self, String> {
         Self::open_with_cache(path, device, CACHE_BUDGET)
@@ -434,7 +439,7 @@ fn upload(decoder: &SequentialDecoder, copy: &CpuFrame) -> Result<DecodedFrame, 
         if frames.is_null() {
             return Err("the decoder has no frame pool to upload into".to_owned());
         }
-        let frame = DecodedFrame { frame: ffi::av_frame_alloc(), pts: copy.pts, format: copy.format, turns: decoder.turns, aspect: None };
+        let frame = DecodedFrame { frame: ffi::av_frame_alloc(), pts: copy.pts, format: copy.format, turns: decoder.turns, aspect: None, origin: None };
         if frame.frame.is_null() {
             return Err("av_frame_alloc failed".to_owned());
         }
