@@ -21,11 +21,11 @@ pub fn snap_tolerance(pixels_per_second: f64) -> Time {
     Time::from_ticks((SNAP_DISTANCE / pixels_per_second * TICKS_PER_SECOND as f64).round() as i64)
 }
 
-/// The times that do not depend on the playhead: the start of the timeline, every marker, and the
-/// start, end and played beats of every clip except `ignore`.
-fn fixed_points(project: &Project, ignore: Option<ClipKey>) -> Vec<Time> {
+/// The times that do not depend on the playhead: the start of the timeline, every marker except
+/// `skip_marker`, and the start, end and played beats of every clip except `ignore`.
+fn fixed_points(project: &Project, ignore: Option<ClipKey>, skip_marker: Option<usize>) -> Vec<Time> {
     let mut points = vec![Time::ZERO];
-    points.extend(project.markers.iter().map(|marker| marker.at));
+    points.extend(project.markers.iter().enumerate().filter(|(index, _)| Some(*index) != skip_marker).map(|(_, marker)| marker.at));
     for (track_index, track) in project.tracks.iter().enumerate() {
         for (clip_index, clip) in track.clips.iter().enumerate() {
             if ignore == Some(ClipKey { track: track_index, clip: clip_index }) {
@@ -51,7 +51,7 @@ fn sorted(mut points: Vec<Time>) -> Vec<Time> {
 /// start, end and played beats of every clip except `ignore`. Locked and hidden tracks count,
 /// their clips are on screen. Sorted and without repeats.
 pub fn snap_points(project: &Project, ignore: Option<ClipKey>, playhead: Time) -> Vec<Time> {
-    let mut points = fixed_points(project, ignore);
+    let mut points = fixed_points(project, ignore, None);
     points.push(playhead);
     sorted(points)
 }
@@ -70,7 +70,12 @@ pub fn trim_snap_points(project: &Project, key: ClipKey, playhead: Time) -> Vec<
 /// The points the playhead snaps to when the ruler is pressed: those of [`snap_points`] of every
 /// clip, without the playhead itself.
 pub fn scrub_points(project: &Project) -> Vec<Time> {
-    sorted(fixed_points(project, None))
+    sorted(fixed_points(project, None, None))
+}
+
+/// The points a drag of marker `marker` snaps to: those of [`scrub_points`] without that marker.
+pub fn marker_drag_points(project: &Project, marker: usize) -> Vec<Time> {
+    sorted(fixed_points(project, None, Some(marker)))
 }
 
 /// The point of `points` nearest `time` within `tolerance`, the earlier one on a tie.

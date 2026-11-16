@@ -10,7 +10,7 @@ use crate::project_lock::ProjectLock;
 use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_command, ClipDrag, DragKind, EditCommand};
 use crate::timeline::hit::{ClipHit, TransitionKey};
-use crate::timeline::snap::{scrub_points, snap_command, snap_onto_track, snap_points, snap_span, snap_time, snap_tolerance, trim_snap_points, Snapped};
+use crate::timeline::snap::{marker_drag_points, scrub_points, snap_command, snap_onto_track, snap_points, snap_span, snap_time, snap_tolerance, trim_snap_points, Snapped};
 use crate::timeline::view::TimelineView;
 use crate::asset_install::InstalledAudioPack;
 use crate::audio_library::AudioLibrary;
@@ -134,6 +134,28 @@ pub struct EditorState {
     /// Detections the user started from a clip, whose beats go to the clip's source when they are
     /// ready; at most one per source.
     beat_requests: Vec<BeatRequest>,
+    /// The snap points of the drag or press going on, built once rather than every frame.
+    snap_cache: RefCell<Option<SnapCache>>,
+}
+
+/// What a set of snap points was built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapPurpose {
+    Move(ClipKey),
+    Trim(ClipKey),
+    Scrub,
+    /// A drag of this marker, whose own place is no point.
+    Marker(usize),
+}
+
+/// Snap points built for `purpose` while the project had revision `revision` (for a marker drag,
+/// the revision at its press, as its live moves change the revision but not what it snaps to) and
+/// the playhead was at `playhead` (`None` when the points leave it out).
+struct SnapCache {
+    purpose: SnapPurpose,
+    revision: u64,
+    playhead: Option<Time>,
+    points: std::rc::Rc<[Time]>,
 }
 
 /// A marker held on the ruler: it moves once the pointer has gone a few points from the press, and a
@@ -143,6 +165,8 @@ pub struct MarkerDrag {
     pub marker: usize,
     pub press_x: f32,
     pub moved: bool,
+    /// The revision when the press began: the snap points of the drag are built once for it.
+    pub revision: u64,
 }
 
 /// A detection started for the beats of `source`, resolved to `path`.
@@ -496,6 +520,7 @@ impl EditorState {
             language: Language::default(),
             beats: BeatDetector::default(),
             beat_requests: Vec::new(),
+            snap_cache: RefCell::new(None),
         }
     }
 
@@ -1204,11 +1229,28 @@ impl EditorState {
         if self.ui.snap_off || free {
             return Snapped { command: clamp_trim(self.project(), command), guide: None };
         }
-        let points = match drag.kind {
-            DragKind::Move => snap_points(self.project(), Some(drag.key), self.playhead()),
-            DragKind::TrimStart | DragKind::TrimEnd => trim_snap_points(self.project(), drag.key, self.playhead()),
+        let (purpose, playhead) = match drag.kind {
+            DragKind::Move => (SnapPurpose::Move(drag.key), self.playhead()),
+            DragKind::TrimStart | DragKind::TrimEnd => (SnapPurpose::Trim(drag.key), self.playhead()),
         };
+        let points = self.cached_snap_points(purpose, self.revision, Some(playhead), || match purpose {
+            SnapPurpose::Move(key) => snap_points(self.project(), Some(key), playhead),
+            _ => trim_snap_points(self.project(), drag.key, playhead),
+        });
         snap_command(self.project(), command, &points, snap_tolerance(self.view.pixels_per_second()))
+    }
+
+    /// The snap points for `purpose`, built by `build` unless the ones built last were for the same
+    /// purpose, revision and playhead: a drag asks every frame, and the project does not change
+    /// under it.
+    fn cached_snap_points(&self, purpose: SnapPurpose, revision: u64, playhead: Option<Time>, build: impl FnOnce() -> Vec<Time>) -> std::rc::Rc<[Time]> {
+        let mut cache = self.snap_cache.borrow_mut();
+        if let Some(cached) = cache.as_ref().filter(|cached| cached.purpose == purpose && cached.revision == revision && cached.playhead == playhead) {
+            return cached.points.clone();
+        }
+        let points: std::rc::Rc<[Time]> = build().into();
+        *cache = Some(SnapCache { purpose, revision, playhead, points: points.clone() });
+        points
     }
 
     /// Where a ruler press at `time` puts the playhead: on the nearest clip edge, marker or beat
@@ -1217,7 +1259,20 @@ impl EditorState {
         if self.ui.snap_off || free {
             return time;
         }
-        snap_time(&scrub_points(self.project()), time, snap_tolerance(self.view.pixels_per_second())).unwrap_or(time)
+        let points = self.cached_snap_points(SnapPurpose::Scrub, self.revision, None, || scrub_points(self.project()));
+        snap_time(&points, time, snap_tolerance(self.view.pixels_per_second())).unwrap_or(time)
+    }
+
+    /// Where the marker of `drag` goes with the pointer at `time`: pulled onto a clip edge, beat or
+    /// another marker, unless snapping is off or `free`.
+    /// The points come from the project as it was at the press, without the dragged marker: the
+    /// live project has it where the pointer just put it, and snapping to that would hold it back.
+    pub fn snapped_marker_time(&self, drag: MarkerDrag, time: Time, free: bool) -> Time {
+        if self.ui.snap_off || free {
+            return time;
+        }
+        let points = self.cached_snap_points(SnapPurpose::Marker(drag.marker), drag.revision, None, || marker_drag_points(self.history.current(), drag.marker));
+        snap_time(&points, time, snap_tolerance(self.view.pixels_per_second())).unwrap_or(time)
     }
 
     /// Where a library item dropped with its start at `at` begins: pulled onto a snap point by its
@@ -4778,6 +4833,33 @@ second line")), "Title…");
         assert_eq!(state.snapped_scrub_time(near, true), near, "Shift");
         state.ui.snap_off = true;
         assert_eq!(state.snapped_scrub_time(near, false), near);
+    }
+
+    #[test]
+    fn a_dragged_marker_does_not_snap_to_its_own_place() {
+        let mut state = state_with_clip();
+        let start = seconds(30);
+        state.set_playhead(start);
+        state.add_marker_at_playhead();
+        state.set_playhead(seconds(60));
+        state.add_marker_at_playhead();
+        let drag = MarkerDrag { marker: 0, press_x: 0.0, moved: true, revision: state.revision() };
+        let step = nudge();
+        let mut pointer = start;
+        // Each step stays within the snap distance of where the marker just was, and far from
+        // every other point: the marker follows the pointer exactly.
+        for index in 1..=6 {
+            pointer = pointer.saturating_add(step);
+            let at = state.snapped_marker_time(drag, pointer, false);
+            assert_eq!(at, pointer, "step {index}");
+            state.live_marker(0, at);
+        }
+        // Near the other marker it snaps there.
+        let near = seconds(60).saturating_sub(step);
+        assert_eq!(state.snapped_marker_time(drag, near, false), seconds(60));
+        state.live_marker(0, pointer);
+        state.pointer_released();
+        assert_eq!(state.project().markers[0].at, start.saturating_add(Time::from_ticks(step.ticks() * 6)));
     }
 
     #[test]

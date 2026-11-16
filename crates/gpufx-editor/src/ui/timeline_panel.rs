@@ -175,14 +175,14 @@ fn handle_ruler(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respons
     if response.is_pointer_button_down_on() && primary {
         if state.ui.marker_drag.is_none() && response.drag_started_by(egui::PointerButton::Primary) || state.ui.marker_drag.is_none() && ui.input(|input| input.pointer.primary_pressed()) {
             let press = ui.input(|input| input.pointer.press_origin());
-            state.ui.marker_drag = press.and_then(|press| marker_at(&state.view, &state.project().markers, x_of(press)).map(|marker| MarkerDrag { marker, press_x: press.x, moved: false }));
+            state.ui.marker_drag = press.and_then(|press| marker_at(&state.view, &state.project().markers, x_of(press)).map(|marker| MarkerDrag { marker, press_x: press.x, moved: false, revision: state.revision() }));
         }
         match (state.ui.marker_drag, response.interact_pointer_pos()) {
             (Some(mut drag), Some(pointer)) => {
                 if drag.moved || (pointer.x - drag.press_x).abs() >= MARKER_MOVE_POINTS {
                     drag.moved = true;
                     state.ui.marker_drag = Some(drag);
-                    let time = state.snapped_scrub_time(state.view.x_to_time(x_of(pointer)).max(Time::ZERO), free);
+                    let time = state.snapped_marker_time(drag, state.view.x_to_time(x_of(pointer)).max(Time::ZERO), free);
                     state.live_marker(drag.marker, time);
                 }
             }
