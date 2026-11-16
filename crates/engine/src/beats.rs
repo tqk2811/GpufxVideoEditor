@@ -65,9 +65,6 @@ pub struct BeatAnalysis {
     pub beats: Vec<f64>,
     /// For each beat, whether it starts a bar.
     pub downbeats: Vec<bool>,
-    /// Onset times in seconds: peaks of the envelope above an adaptive threshold (the local median
-    /// plus one deviation). Not used for the beats; for callers that want the hits themselves.
-    pub onsets: Vec<f64>,
 }
 
 impl BeatAnalysis {
@@ -108,9 +105,8 @@ pub fn detect_beats(samples: &[f32], sample_rate: u32, progress: &mut dyn FnMut(
     if !progress(0.8) {
         return None;
     }
-    let onsets = pick_onsets(&envelope, frames_per_second).into_iter().map(|frame| frame_seconds(frame as f64)).collect();
     let Some(period) = tempo_period(&envelope, frames_per_second) else {
-        return Some(BeatAnalysis { onsets, ..BeatAnalysis::default() });
+        return Some(BeatAnalysis::default());
     };
     if !progress(0.9) {
         return None;
@@ -127,7 +123,6 @@ pub fn detect_beats(samples: &[f32], sample_rate: u32, progress: &mut dyn FnMut(
         tempo: if frames.is_empty() { 0.0 } else { 60.0 * frames_per_second / period },
         beats: frames.iter().map(|&frame| frame_seconds(frame as f64)).collect(),
         downbeats,
-        onsets,
     })
 }
 
@@ -202,31 +197,6 @@ fn onset_envelope(flux: &[f32], frames_per_second: f64) -> Vec<f64> {
     smoothed.into_iter().map(|value| value / deviation).collect()
 }
 
-/// Frames where the envelope peaks above its local median plus one deviation (the envelope's
-/// deviation is 1), at least 50 ms from a stronger peak.
-fn pick_onsets(envelope: &[f64], frames_per_second: f64) -> Vec<usize> {
-    let near = ((0.05 * frames_per_second) as usize).max(1);
-    let wide = ((0.5 * frames_per_second) as usize).max(near);
-    let mut onsets = Vec::new();
-    for i in 0..envelope.len() {
-        let value = envelope[i];
-        if value <= 0.0 {
-            continue;
-        }
-        let (low, high) = (i.saturating_sub(near), (i + near + 1).min(envelope.len()));
-        if envelope[low..high].iter().any(|&other| other > value) || envelope[low..i].contains(&value) {
-            continue;
-        }
-        let (low, high) = (i.saturating_sub(wide), (i + wide + 1).min(envelope.len()));
-        let mut around: Vec<f64> = envelope[low..high].to_vec();
-        around.sort_by(f64::total_cmp);
-        if value > around[around.len() / 2] + 1.0 {
-            onsets.push(i);
-        }
-    }
-    onsets
-}
-
 /// The beat period in frames (fractional), or `None` when the envelope is too short or flat.
 fn tempo_period(envelope: &[f64], frames_per_second: f64) -> Option<f64> {
     let shortest = (60.0 * frames_per_second / MAX_TEMPO_SEARCHED).floor().max(1.0) as usize;
@@ -291,13 +261,14 @@ fn track_beats(envelope: &[f64], period: f64) -> Vec<usize> {
     let mut back: Vec<Option<usize>> = vec![None; count];
     let nearest = (period / 2.0).round().max(1.0) as usize;
     let farthest = (2.0 * period).round() as usize;
+    // The penalty depends on the gap alone: worked out once per gap, not per frame and gap.
+    let penalties: Vec<f64> = (0..=farthest).map(|gap| TIGHTNESS * (gap as f64 / period).ln().powi(2)).collect();
     for t in 0..count {
         let mut best: Option<(f64, usize)> = None;
         if t >= nearest {
             for gap in nearest..=farthest.min(t) {
                 let previous = t - gap;
-                let penalty = TIGHTNESS * (gap as f64 / period).ln().powi(2);
-                let value = score[previous] - penalty;
+                let value = score[previous] - penalties[gap];
                 if best.is_none_or(|(best_value, _)| value > best_value) {
                     best = Some((value, previous));
                 }

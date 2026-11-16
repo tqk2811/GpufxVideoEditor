@@ -1071,6 +1071,14 @@ impl Clip {
         let first = beats.partition_point(|beat| beat.at < self.source_in);
         beats[first..].iter().take_while(|beat| self.plays_source(beat.at)).map(|beat| (self.timeline_time_of(beat.at), *beat))
     }
+
+    /// [`Clip::beat_times`] from timeline time `from` to `to`, both included, found by binary
+    /// search: the timeline time of a beat grows with its source time, so a clip on screen costs
+    /// the beats it shows, not all those of its source.
+    pub fn beat_times_between<'a>(&'a self, beats: &'a [Beat], from: Time, to: Time) -> impl Iterator<Item = (Time, Beat)> + 'a {
+        let first = beats.partition_point(|beat| beat.at < self.source_in || self.timeline_time_of(beat.at) < from);
+        beats[first..].iter().take_while(move |beat| self.plays_source(beat.at) && self.timeline_time_of(beat.at) <= to).map(|beat| (self.timeline_time_of(beat.at), *beat))
+    }
 }
 
 #[cfg(test)]

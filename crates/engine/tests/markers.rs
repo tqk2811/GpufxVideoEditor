@@ -69,6 +69,17 @@ fn a_beat_maps_to_the_timeline_through_the_clip() {
 }
 
 #[test]
+fn the_beats_of_a_time_range_are_those_of_the_whole_list_inside_it() {
+    let project = set_speed(&with_beats(), key(), 1.5).unwrap();
+    let clip = &project.tracks[0].clips[0];
+    let beats = &project.beats["song.mp3"].beats;
+    for (from, to) in [(s(0), s(100)), (s(6), s(8)), (t(6 * SECOND + 1), t(7 * SECOND - 1)), (s(20), s(30))] {
+        let expected: Vec<(Time, Beat)> = clip.beat_times(beats).filter(|(at, _)| *at >= from && *at <= to).collect();
+        assert_eq!(clip.beat_times_between(beats, from, to).collect::<Vec<_>>(), expected, "{from} to {to}");
+    }
+}
+
+#[test]
 fn beats_follow_a_move() {
     let moved = move_clip(&with_beats(), key(), 0, s(20)).unwrap();
     assert_eq!(times(&moved, 0), (20..30).map(s).collect::<Vec<_>>());

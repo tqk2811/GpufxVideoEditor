@@ -695,7 +695,13 @@ fn draw_beat_ticks(painter: &egui::Painter, paint: &ClipPaint<'_>, top: f32) {
     let visible = painter.clip_rect().x_range();
     let color = theme::on_clip().gamma_multiply(0.75 * paint.opacity());
     let strong = theme::on_clip_accent().gamma_multiply(paint.opacity());
-    for (at, beat) in paint.clip.beat_times(&beats.beats) {
+    // Only the beats inside the visible part of the clip, found by binary search.
+    let time_at = |x: f32| {
+        let part = f64::from((x - paint.rect.left()) / paint.rect.width().max(f32::MIN_POSITIVE));
+        paint.clip.start.saturating_add(Time::from_ticks((part * f64::from(duration)).floor() as i64))
+    };
+    let (from, to) = (time_at(visible.min).saturating_sub(Time::from_ticks(1)), time_at(visible.max).saturating_add(Time::from_ticks(1)));
+    for (at, beat) in paint.clip.beat_times_between(&beats.beats, from, to) {
         if downbeats_only && !beat.downbeat {
             continue;
         }
