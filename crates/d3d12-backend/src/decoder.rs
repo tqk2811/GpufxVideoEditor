@@ -343,6 +343,15 @@ impl Drop for DecodedFrame {
     }
 }
 
+/// The pictures a stream decodes to, as its header says, for sizing what is kept of them.
+#[derive(Debug, Clone, Copy)]
+struct PictureSize {
+    width: i32,
+    height: i32,
+    /// More than 8 bits per sample: P010, two bytes a sample, instead of NV12.
+    ten_bit: bool,
+}
+
 /// Decodes one source and answers "which frame is shown at this time".
 pub struct SequentialDecoder {
     format_context: *mut ffi::AVFormatContext,
@@ -385,11 +394,12 @@ pub struct SequentialDecoder {
 impl SequentialDecoder {
     /// Opens `path` for hardware decoding on `device`.
     pub fn open(path: &Path, device: &ID3D12Device) -> Result<Self, String> {
-        Self::open_holding(path, device, 0)
+        Self::open_holding(path, device, &mut |_| 0)
     }
 
-    /// [`SequentialDecoder::open`] with room for `held` more frames kept alive by the caller.
-    fn open_holding(path: &Path, device: &ID3D12Device, held: i32) -> Result<Self, String> {
+    /// [`SequentialDecoder::open`] with room for more frames kept alive by the caller: as many as
+    /// `held` says for the size of the stream's pictures.
+    fn open_holding(path: &Path, device: &ID3D12Device, held: &mut dyn FnMut(PictureSize) -> i32) -> Result<Self, String> {
         let path_text = path.to_str().ok_or_else(|| format!("{}: the path is not valid UTF-8", path.display()))?;
         let c_path = CString::new(path_text).map_err(|_| format!("{path_text}: the path contains NUL"))?;
         let mut decoder = Self {
@@ -417,11 +427,11 @@ impl SequentialDecoder {
             native_av1: false,
         };
         // SAFETY: on error, Drop releases whatever has been created so far.
-        unsafe { decoder.initialize(&c_path, device, EXTRA_HW_FRAMES + held) }.map_err(|e| format!("{path_text}: {e}"))?;
+        unsafe { decoder.initialize(&c_path, device, &mut |size| EXTRA_HW_FRAMES + held(size)) }.map_err(|e| format!("{path_text}: {e}"))?;
         Ok(decoder)
     }
 
-    unsafe fn initialize(&mut self, path: &CStr, device: &ID3D12Device, extra_hw_frames: i32) -> Result<(), String> {
+    unsafe fn initialize(&mut self, path: &CStr, device: &ID3D12Device, extra_hw_frames: &mut dyn FnMut(PictureSize) -> i32) -> Result<(), String> {
         check(ffi::avformat_open_input(&mut self.format_context, path.as_ptr(), ptr::null(), ptr::null_mut()), "avformat_open_input")?;
         check(ffi::avformat_find_stream_info(self.format_context, ptr::null_mut()), "avformat_find_stream_info")?;
 
@@ -465,7 +475,10 @@ impl SequentialDecoder {
         (*self.codec_context).get_format = Some(choose_d3d12_format);
         (*self.codec_context).get_buffer2 = Some(track_started_frame);
         (*self.codec_context).opaque = (&raw mut *self.latest_started).cast();
-        (*self.codec_context).extra_hw_frames = extra_hw_frames;
+        let parameters = &*(*stream).codecpar;
+        let descriptor = ffi::av_pix_fmt_desc_get(parameters.format);
+        let ten_bit = !descriptor.is_null() && (*descriptor).comp[0].depth > 8;
+        (*self.codec_context).extra_hw_frames = extra_hw_frames(PictureSize { width: parameters.width, height: parameters.height, ten_bit });
         // Frame threading adds latency and does nothing for hardware decoding.
         (*self.codec_context).thread_count = 1;
         check(ffi::avcodec_open2(self.codec_context, codec, ptr::null_mut()), "avcodec_open2")?;

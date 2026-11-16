@@ -35,6 +35,28 @@ pub struct AVIndexEntry {
     pub min_distance: core::ffi::c_int,
 }
 
+/// One component of a pixel format, as `AVComponentDescriptor` lays it out.
+#[repr(C)]
+pub struct AVComponentDescriptor {
+    pub plane: core::ffi::c_int,
+    pub step: core::ffi::c_int,
+    pub offset: core::ffi::c_int,
+    pub shift: core::ffi::c_int,
+    pub depth: core::ffi::c_int,
+}
+
+/// A pixel format, as `av_pix_fmt_desc_get` returns it.
+#[repr(C)]
+pub struct AVPixFmtDescriptor {
+    pub name: *const core::ffi::c_char,
+    pub nb_components: u8,
+    pub log2_chroma_w: u8,
+    pub log2_chroma_h: u8,
+    pub flags: u64,
+    pub comp: [AVComponentDescriptor; 4],
+    pub alias: *const core::ffi::c_char,
+}
+
 /// libswscale's opaque context.
 #[repr(C)]
 pub struct SwsContext {
@@ -157,6 +179,7 @@ unsafe extern "C" {
     pub fn avio_open(context: *mut *mut AVIOContext, url: *const core::ffi::c_char, flags: core::ffi::c_int) -> core::ffi::c_int;
     pub fn avio_closep(context: *mut *mut AVIOContext) -> core::ffi::c_int;
     pub fn av_frame_get_buffer(frame: *mut AVFrame, align: core::ffi::c_int) -> core::ffi::c_int;
+    pub fn av_pix_fmt_desc_get(format: AVPixelFormat) -> *const AVPixFmtDescriptor;
     pub fn av_frame_make_writable(frame: *mut AVFrame) -> core::ffi::c_int;
     pub fn av_packet_rescale_ts(packet: *mut AVPacket, source: AVRational, destination: AVRational);
     pub fn av_opt_set(object: *mut core::ffi::c_void, name: *const core::ffi::c_char, value: *const core::ffi::c_char, flags: core::ffi::c_int) -> core::ffi::c_int;

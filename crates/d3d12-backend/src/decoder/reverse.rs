@@ -3,14 +3,17 @@
 //! A decoder only goes forward from a keyframe, so a frame is reached by seeking to the keyframe at
 //! or before it and decoding up to it. Doing that per frame would decode a whole GOP for each one.
 //! Instead each refill decodes from that keyframe up to the frame asked for and keeps the last
-//! [`RING`] frames on the way: the frames before it, which the next requests want. A GOP longer
-//! than the ring costs a refill per [`RING`] frames, each decoding from the keyframe again, so a
+//! frames on the way in a ring: the frames before it, which the next requests want. A GOP longer
+//! than the ring costs a refill per ring of frames, each decoding from the keyframe again, so a
 //! long GOP is decoded a few times over, never the whole file.
 //!
 //! The frames are references into the decoder's own texture pool, which is opened with room for
-//! the ring on top of what the decoder needs. A request just after the ring, as a scrub forward
-//! gives, goes on decoding from where the refill stopped, unless a seek would get there with fewer
-//! frames decoded, as for a forward decoder.
+//! the ring on top of what the decoder needs. The ring takes at most [`RING_BUDGET`] of video
+//! memory: [`MAX_RING`] frames up to 1080p, about ten at 4K in 10 bits, and never fewer than
+//! [`MIN_RING`], which a picture above 4K in 10 bits makes exceed the budget.
+//!
+//! A request just after the ring, as a scrub forward gives, goes on decoding from where the refill
+//! stopped, unless a seek would get there with fewer frames decoded, as for a forward decoder.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -24,14 +27,31 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 use super::{forward_seek_pays, stream_pts, DecodedFrame, PublishClock, SequentialDecoder, FORWARD_SEEK_SECONDS};
 
-/// Frames kept by a refill. About a second at 30 fps; a 4K P010 frame takes 24 MB of the pool.
-pub(crate) const RING: usize = 32;
+/// Video memory the ring of one reversed clip may take, on top of what its decoder needs.
+pub(crate) const RING_BUDGET: u64 = 256 << 20;
+/// The most frames a ring keeps: about a second at 30 fps.
+pub(crate) const MAX_RING: usize = 32;
+/// The fewest frames a ring keeps, whatever their size, so a refill still serves several requests.
+pub(crate) const MIN_RING: usize = 8;
+
+/// Bytes of one decoded 4:2:0 picture, with the padding a decoder may give its surfaces.
+fn frame_bytes(width: i32, height: i32, ten_bit: bool) -> u64 {
+    let padded = |side: i32| (u64::from(side.max(1).unsigned_abs()) + 127) / 128 * 128;
+    padded(width) * padded(height) * 3 / 2 * if ten_bit { 2 } else { 1 }
+}
+
+/// Frames of `bytes` each that fit in [`RING_BUDGET`], within [`MIN_RING`] and [`MAX_RING`].
+fn ring_frames(bytes: u64) -> usize {
+    usize::try_from(RING_BUDGET / bytes.max(1)).unwrap_or(MAX_RING).clamp(MIN_RING, MAX_RING)
+}
 /// Seeks retried further back, by four times more each, when one lands after the frame asked for.
 const SEEK_RETRIES: u32 = 4;
 
 /// Answers "which frame is shown at this time" for times that mostly go down.
 pub struct ReverseDecoder {
     inner: SequentialDecoder,
+    /// The most frames the ring keeps, from the size of the pictures.
+    capacity: usize,
     /// Consecutive frames in presentation order.
     ring: VecDeque<DecodedFrame>,
     /// Whether the first frame of the ring is the first frame of the stream: earlier times show it.
@@ -47,8 +67,12 @@ pub struct ReverseDecoder {
 impl ReverseDecoder {
     /// Opens `path` for hardware decoding on `device`, with a pool large enough for the ring.
     pub fn open(path: &Path, device: &ID3D12Device) -> Result<Self, String> {
-        let inner = SequentialDecoder::open_holding(path, device, RING as i32 + 1)?;
-        Ok(Self { inner, ring: VecDeque::new(), starts_stream: false, ends_stream: false, continues: false, decoded: 0 })
+        let mut capacity = MAX_RING;
+        let inner = SequentialDecoder::open_holding(path, device, &mut |size| {
+            capacity = ring_frames(frame_bytes(size.width, size.height, size.ten_bit));
+            capacity as i32 + 1
+        })?;
+        Ok(Self { inner, capacity, ring: VecDeque::new(), starts_stream: false, ends_stream: false, continues: false, decoded: 0 })
     }
 
     /// How many frames this decoder has decoded, to measure what a way of playing costs.
@@ -84,7 +108,7 @@ impl ReverseDecoder {
 
     fn push(&mut self, frame: DecodedFrame) {
         self.ring.push_back(frame);
-        if self.ring.len() > RING {
+        if self.ring.len() > self.capacity {
             self.ring.pop_front();
             self.starts_stream = false;
         }
@@ -214,7 +238,19 @@ impl Decoder for ReverseDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::{after_landing, floor_pts, Landing, SEEK_RETRIES};
+    use super::{after_landing, floor_pts, frame_bytes, ring_frames, Landing, MAX_RING, MIN_RING, RING_BUDGET, SEEK_RETRIES};
+
+    #[test]
+    fn the_ring_is_sized_to_its_video_memory_budget() {
+        assert_eq!(ring_frames(frame_bytes(1920, 1080, false)), MAX_RING, "1080p keeps a full second");
+        assert_eq!(ring_frames(frame_bytes(64, 64, true)), MAX_RING);
+        let uhd = frame_bytes(3840, 2160, true);
+        let frames = ring_frames(uhd);
+        assert!((MIN_RING..MAX_RING).contains(&frames), "4K in 10 bits keeps {frames} frames");
+        assert!(frames as u64 * uhd <= RING_BUDGET, "{} MB", frames as u64 * uhd >> 20);
+        assert!((frames as u64 + 1) * uhd > RING_BUDGET, "as many as fit");
+        assert_eq!(ring_frames(frame_bytes(7680, 4320, true)), MIN_RING, "8K still keeps a few");
+    }
 
     #[test]
     fn a_landing_after_the_target_is_never_taken_before_the_stream_start() {
