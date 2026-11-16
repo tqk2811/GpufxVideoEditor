@@ -175,9 +175,9 @@ Giải mã và ghép dùng shader gpufx, còn xuất dùng `rgba_to_nv12` ở `c
 
 `canvas` không được giải phóng trên đường lỗi (`crates/engine/src/render.rs:264-282`). `clip_graphs` không bao giờ bị loại bỏ (`crates/d3d12-backend/src/compositor.rs:186`), nên project nhiều clip giữ graph của mọi clip. Thư mục package mặc định là đường dẫn lúc build (`crates/gpufx-render/src/main.rs:68`), không chạy được khi file thực thi được chép đi. `Decoder::wait_idle` trong trait trung lập là khái niệm riêng của D3D12VA. Ghi ngày 2026-11-09.
 
-### [Thấp] Transition giữa hai file nguyên thành cắt thẳng, có thể nghe tiếng tách
+### [Thấp] Crossfade tiếng dựa vào độ dài file lấy từ duration của container
 
-Crossfade tiếng giờ chỉ chạy trên phần cửa sổ mà cả hai clip đều có tiếng (`fitted` trong `crates/engine/src/audio_schedule.rs`). Hai file nguyên nối nhau không có phần chung nên thành cắt thẳng ở chỗ file trước hết tiếng, mức tiếng giữ nguyên nhưng chỗ nối có thể tách nếu sóng không về 0. Đây là lựa chọn tạm (chưa được user chốt): giữ sync, không kéo dài hay lặp tiếng. Có thể thêm dốc chống tách vài ms ở hai phía chỗ cắt. Độ dài file lấy từ duration của container (`AudioFileDecoder::length`), nên với AAC có thể lệch vài chục ms so với mẫu cuối thật. Ghi ngày 2026-11-17.
+Crossfade tiếng chỉ chạy trên phần cửa sổ mà cả hai clip đều có tiếng (`fitted` trong `crates/engine/src/audio_schedule.rs`). Độ dài file lấy từ duration của container (`AudioFileDecoder::length`, cache theo đường dẫn trong `AudioFiles`), nên có thể sai: AAC lệch vài chục ms, MP3 VBR không có header Xing/VBRI có thể sai nhiều. Độ dài sai chỉ làm crossfade dài hoặc ngắn hơn, hoặc rơi vào chỗ im lặng, không làm lệch sync, và preview vẫn khớp export. Hai file nguyên nối nhau thành cắt có dốc chống tách 128 mẫu ở mỗi phía (lựa chọn tạm, chưa được user chốt). Cache độ dài không biết file đổi trên đĩa trong lúc luồng phát còn sống. Nên làm nếu gặp nguồn có duration sai: đo độ dài thật bằng cách decode tới cuối, một lần cho mỗi file. Ghi ngày 2026-11-17.
 
 ### [Thấp] Hai ghi chú về chất lượng tiếng
 

@@ -850,6 +850,8 @@ mod tests {
         open_gate(&thread);
         pull(&mut consumer, thread.shared(), 480);
         assert!(reads.load(Ordering::SeqCst) > 0, "the music is read");
+        assert_eq!(thread.shared().stats().played, 480, "the clock runs with the music");
+        assert!(!thread.reading().finished(), "the music goes on");
     }
 
     /// Plays a real-time device against the thread and returns the silence that a seek and an edit

@@ -28,9 +28,10 @@
 //!   (the length of a file comes from [`crate::AudioSource::source_len`]; unknown means audio
 //!   everywhere). Before that part the earlier clip plays at full gain and the later one is
 //!   silent, after it the other way round, so a clip without audio beyond its in or out point does
-//!   not fade towards silence. Nothing moves in time, so sync is kept. Two clips with no audio in
-//!   common (two whole files joined) get a plain cut where the earlier one ends. Both clips are
-//!   still read over the whole transition window.
+//!   not fade towards silence. Nothing moves in time, so sync is kept. Two clips with less than
+//!   [`ANTI_CLICK_SAMPLES`] of audio in common (two whole files joined) get a cut: the earlier one
+//!   ramps down over the last `ANTI_CLICK_SAMPLES` of its audio and the later one up over the first
+//!   of its, with the same curves. Both clips are still read over the whole transition window.
 //! * **Fades.** Linear in amplitude and anchored to the clip's own start and end. `fade_in` gives
 //!   `i / n` at `i` samples after the first clip sample. `fade_out` mirrors it, so the last clip
 //!   sample has gain 0. A fade on the side of a transition is rejected by [`crate::validate`]
@@ -113,7 +114,6 @@ impl GainEnvelope {
                 self.fade_out,
             );
         }
-        // A window of no samples is a plain cut at its start.
         if let Some(window) = self.crossfade_in {
             let elapsed = sample.saturating_sub(window.start);
             if elapsed < 0 {
@@ -236,8 +236,8 @@ pub fn audio_segments_with<'a>(
                 continue;
             }
             // The gains follow the part of each window where both clips have audio.
-            let crossfade_in = crossfade_in.map(|w| fitted(w, t, track, c - 1, source_len));
-            let crossfade_out = crossfade_out.map(|w| fitted(w, t, track, c, source_len));
+            let crossfade_in = crossfade_in.map(|w| fitted(w, t, track, c - 1, source_len).1);
+            let crossfade_out = crossfade_out.map(|w| fitted(w, t, track, c, source_len).0);
             let source_base = sample_position(clip.source_in);
             let stretch = (clip.has_speed() || clip.voice.pitch_cents() != 0).then_some(Stretch {
                 clip_start,
@@ -296,10 +296,15 @@ fn first_where(mut lo: i64, mut hi: i64, holds: impl Fn(i64) -> bool) -> i64 {
     lo
 }
 
-/// The part of transition window `window`, between clip `earlier` of track `t` and the next, where
-/// both clips have audio (see the module rules). Without such a part, a window of no samples at
-/// the point where the audio of the earlier clip ends: a plain cut.
-fn fitted(window: Window, t: usize, track: &Track, earlier: usize, source_len: &mut dyn FnMut(ClipKey, &str) -> Option<i64>) -> Window {
+/// Samples of the ramps of a cut without common audio, about 2.7 ms: short enough to keep the cut,
+/// long enough not to click.
+pub const ANTI_CLICK_SAMPLES: i64 = 128;
+
+/// The windows the earlier and the later clip of transition window `window`, between clip
+/// `earlier` of track `t` and the next, fade out and in over: the part where both clips have
+/// audio (see the module rules). When that part is shorter than [`ANTI_CLICK_SAMPLES`], the
+/// earlier clip ramps down over the last of its audio and the later one up over the first of its.
+fn fitted(window: Window, t: usize, track: &Track, earlier: usize, source_len: &mut dyn FnMut(ClipKey, &str) -> Option<i64>) -> (Window, Window) {
     let (a, b) = (&track.clips[earlier], &track.clips[earlier + 1]);
     let a_len = source_len(ClipKey { track: t, clip: earlier }, &a.source);
     let b_len = source_len(ClipKey { track: t, clip: earlier + 1 }, &b.source);
@@ -313,10 +318,12 @@ fn fitted(window: Window, t: usize, track: &Track, earlier: usize, source_len: &
     // The later clip has audio from its own start at least; look for where it begins before that.
     let b_clip_start = sample_position(b.media_span().0).clamp(window.start, window.end());
     let b_start = first_where(window.start, b_clip_start, |s| has_audio(b, b_len, s));
-    if a_end > b_start {
-        Window { start: b_start, len: a_end - b_start }
+    if a_end - b_start >= ANTI_CLICK_SAMPLES {
+        let common = Window { start: b_start, len: a_end - b_start };
+        (common, common)
     } else {
-        Window { start: a_end, len: 0 }
+        let ramp = ANTI_CLICK_SAMPLES;
+        (Window { start: a_end - ramp, len: ramp }, Window { start: b_start, len: ramp })
     }
 }
 
