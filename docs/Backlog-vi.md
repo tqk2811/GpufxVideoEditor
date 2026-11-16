@@ -16,9 +16,9 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 
 `D3d12Decoder::wait_until_idle` ở `crates/poc/src/decoder.rs` và `SequentialDecoder::wait_idle` ở `crates/d3d12-backend/src/decoder.rs:389-401` chờ CPU trước mỗi `mix` để khung không còn bị decode khác tham chiếu. Phát p99 có lần lên 31,4 ms, sát ngưỡng 33 ms, chưa rõ nguyên nhân. Bản editor cần đồng bộ trên GPU hoặc tách luồng. Ghi ngày 2026-11-09.
 
-### [Thấp] Playback đang chạy vẫn đọc file gốc khi proxy vừa xong
+### [Thấp] Recheck proxy mã lại liên tục khi nguồn còn đang được chép
 
-`crates/gpufx-editor/src/window.rs:1022` (`sync_proxies`) dựng lại `ProjectPaths` của preview khi có proxy mới; preview tĩnh đổi sang proxy ngay, còn `Playback` đang phát giữ paths cũ tới khi dừng rồi phát lại. Nên mở lại playback từ đầu phát như `sync_project_paths` nếu muốn đổi ngay. Ghi ngày 2026-11-17.
+`recheck` (`crates/gpufx-editor/src/proxy.rs:581-616`) đóng dấu file nguồn đang được ghi dở, nên cứ 5 giây dấu đổi là mã lại proxy cho tới khi chép xong. Nên chỉ xếp hàng lại khi dấu giữ nguyên qua hai lần recheck liên tiếp. Ghi ngày 2026-11-17.
 
 ### [Vừa] Hai editor cùng dọn thư mục proxy chung
 

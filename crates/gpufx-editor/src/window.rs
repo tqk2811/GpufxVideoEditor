@@ -145,7 +145,7 @@ struct Session {
     audio_revision: u64,
     package_roots: Vec<PathBuf>,
     /// How files of the open project resolve, always to the original files: playback, export,
-    /// thumbnails, probes and the agent use these.
+    /// thumbnails, probes, the agent and the audio playback (which decodes no video) use these.
     paths: Arc<ProjectPaths>,
     /// `paths` plus the ready proxies, for the preview worker alone (the same `Arc` while there is
     /// no proxy). Nothing else may read a proxy; see [`session_paths`].
@@ -1018,7 +1018,7 @@ impl Session {
 
     /// Asks for the proxies of the project's videos, shows where they stand, and once the set of
     /// ready proxies changes, gives the preview new paths: new paths make its worker drop the
-    /// decoders that read the old files. Playback that is running keeps its files until it stops.
+    /// decoders that read the old files. Playback is audio only, so it keeps reading the originals; the picture of a running playback comes from the preview worker and switches at once.
     fn sync_proxies(&mut self) {
         let now = Instant::now();
         if now >= self.next_proxy_recheck {
