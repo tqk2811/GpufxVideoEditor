@@ -336,6 +336,9 @@ struct State {
     running: Option<(PathBuf, Arc<AtomicBool>)>,
     /// Goes up whenever the map of proxies in use ([`State::active`]) changes, and only then.
     revision: u64,
+    /// Goes up whenever any status changes, progress included: the window rebuilds its badges
+    /// only then.
+    statuses: u64,
     /// Bumped by a mode change, so a result made for an old mode is dropped.
     generation: u64,
 }
@@ -425,6 +428,7 @@ impl ProxyManager {
                 cancel.store(true, Ordering::SeqCst);
             }
             state.entries.retain(|_, status| matches!(status, ProxyStatus::Ready(_)));
+            state.statuses += 1;
         });
     }
 
@@ -442,6 +446,7 @@ impl ProxyManager {
         for source in sources {
             if !state.entries.contains_key(source) {
                 state.entries.insert(source.to_path_buf(), ProxyStatus::Queued);
+                state.statuses += 1;
                 state.queue.push_back(source.to_path_buf());
                 added = true;
             }
@@ -458,10 +463,12 @@ impl ProxyManager {
         let queued: Vec<PathBuf> = state.queue.drain(..).collect();
         for source in queued {
             state.entries.insert(source, ProxyStatus::Cancelled);
+            state.statuses += 1;
         }
         if let Some((source, cancel)) = state.running.take() {
             cancel.store(true, Ordering::SeqCst);
             state.entries.insert(source, ProxyStatus::Cancelled);
+            state.statuses += 1;
         }
     }
 
@@ -493,6 +500,7 @@ impl ProxyManager {
         let failed: Vec<PathBuf> = state.entries.iter().filter(|(_, status)| matches!(status, ProxyStatus::Failed(_) | ProxyStatus::Cancelled)).map(|(source, _)| source.clone()).collect();
         for source in &failed {
             state.entries.insert(source.clone(), ProxyStatus::Queued);
+            state.statuses += 1;
             state.queue.push_back(source.clone());
         }
         drop(state);
@@ -518,6 +526,25 @@ impl ProxyManager {
             _ => None,
         });
         (state.queue.len() + usize::from(state.running.is_some()), running)
+    }
+
+    /// Changes whenever a status, the queue or the progress changes.
+    pub fn status_revision(&self) -> u64 {
+        self.shared.lock().statuses
+    }
+
+    /// The statuses of `sources` (see [`Self::status`]), how many proxies are pending with the
+    /// progress of the running one, and how many can be retried, under one lock.
+    pub fn snapshot<'a>(&self, sources: impl IntoIterator<Item = &'a Path>) -> (Vec<Option<ProxyStatus>>, (usize, Option<f32>), usize) {
+        let state = self.shared.lock();
+        let statuses = sources.into_iter().map(|source| status_of(&state, source)).collect();
+        let running = state.running.as_ref().and_then(|(source, _)| match state.entries.get(source) {
+            Some(ProxyStatus::Running(progress)) => Some(*progress),
+            _ => None,
+        });
+        let pending = (state.queue.len() + usize::from(state.running.is_some()), running);
+        let retryable = state.entries.values().filter(|status| matches!(status, ProxyStatus::Failed(_) | ProxyStatus::Cancelled)).count();
+        (statuses, pending, retryable)
     }
 
     /// Changes whenever [`Self::proxies`] would give another map.
@@ -572,8 +599,10 @@ fn recheck(shared: &Shared, stamper: &dyn Fn(&Path) -> Option<FileStamp>) {
             state.files.remove(&source);
             if state.mode == ProxyMode::Off {
                 state.entries.remove(&source);
+                state.statuses += 1;
             } else {
                 state.entries.insert(source.clone(), ProxyStatus::Queued);
+                state.statuses += 1;
                 state.queue.push_back(source);
                 queued = true;
             }
@@ -597,6 +626,7 @@ fn settle(shared: &Shared, source: &Path, generation: u64, (status, file, stamp)
     }
     state.changing(|state| {
         state.entries.insert(source.to_path_buf(), status);
+        state.statuses += 1;
         state.stamps.insert(source.to_path_buf(), stamp);
         match file {
             Some(file) => state.files.insert(source.to_path_buf(), file),
@@ -620,6 +650,7 @@ fn work<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path) {
                 if let Some(source) = state.queue.pop_front() {
                     let cancel = Arc::new(AtomicBool::new(false));
                     state.running = Some((source.clone(), cancel.clone()));
+                    state.statuses += 1;
                     break (source, state.generation, state.mode, cancel);
                 }
                 state = shared.wake.wait(state).unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -658,6 +689,7 @@ fn make_stamped<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source
         let mut state = shared.lock();
         if state.generation == generation && matches!(state.entries.get(source), Some(ProxyStatus::Queued | ProxyStatus::Running(_))) {
             state.entries.insert(source.to_path_buf(), ProxyStatus::Running(fraction.clamp(0.0, 1.0)));
+            state.statuses += 1;
             drop(state);
             shared.notify_ui();
         }
@@ -997,6 +1029,7 @@ mod tests {
     #[test]
     fn failed_and_stopped_proxies_can_be_retried_and_a_sound_file_needs_none() {
         let (manager, made, outcomes, _folder) = manager("retry", ProxyMode::On);
+        let statuses = manager.status_revision();
         let (big, other, music) = (Path::new(r"D:\big.mp4"), Path::new(r"D:\other.mp4"), Path::new(r"D:\music.m4a"));
         manager.request([music]);
         assert_eq!(wait_for(&manager, music, |s| *s != ProxyStatus::Queued), ProxyStatus::NotNeeded, "no video stream: not a failure");
@@ -1008,6 +1041,13 @@ mod tests {
         wait_for(&manager, other, |s| *s == ProxyStatus::Cancelled);
         wait_for(&manager, big, |s| matches!(s, ProxyStatus::Failed(_)));
         assert_eq!(manager.retryable(), 2);
+        assert_ne!(manager.status_revision(), statuses, "the badges are rebuilt after changes");
+        let statuses = manager.status_revision();
+        let (seen, pending, retryable) = manager.snapshot([big, other, music, Path::new(r"D:\unknown.mp4")]);
+        assert!(matches!(seen[0], Some(ProxyStatus::Failed(_))) && seen[1] == Some(ProxyStatus::Cancelled) && seen[2] == Some(ProxyStatus::NotNeeded) && seen[3].is_none());
+        assert_eq!((pending.0, retryable), (0, 2));
+        manager.request([big, other, music]);
+        assert_eq!(manager.status_revision(), statuses, "asking again for known sources changes nothing");
         manager.retry_failed();
         let mut again = vec![made.recv_timeout(Duration::from_secs(10)).unwrap()];
         outcomes.send(MakeOutcome::Done).unwrap();

@@ -174,6 +174,11 @@ struct Session {
     proxy_revision: u64,
     /// When the originals are next checked for a change, while the window redraws.
     next_proxy_recheck: Instant,
+    /// The video sources of the project as (clip source, absolute path), and the project revision
+    /// and paths they were found for: found again only when either changes.
+    proxy_sources: (Option<(u64, usize)>, Vec<(String, PathBuf)>),
+    /// The status revision of the proxies the badges were built from.
+    proxy_statuses: Option<u64>,
     #[cfg(debug_assertions)]
     smoke: Smoke,
 }
@@ -280,6 +285,8 @@ impl Session {
             proxies,
             proxy_revision: 0,
             next_proxy_recheck: Instant::now() + crate::proxy::RECHECK_INTERVAL,
+            proxy_sources: (None, Vec::new()),
+            proxy_statuses: None,
             #[cfg(debug_assertions)]
             smoke,
         };
@@ -1018,11 +1025,23 @@ impl Session {
             self.next_proxy_recheck = now + crate::proxy::RECHECK_INTERVAL;
             self.proxies.recheck();
         }
-        let wanted = proxy_sources(self.state.project(), &self.paths);
-        self.proxies.request(wanted.iter().map(|(_, path)| path.as_path()));
-        self.state.ui.proxy_badges = wanted.into_iter().filter_map(|(source, path)| self.proxies.status(&path).map(|status| (source, status))).collect();
-        self.state.ui.proxy_pending = self.proxies.pending();
-        self.state.ui.proxy_retryable = self.proxies.retryable();
+        // Per frame this costs two lookups; the clips are walked only when the project changed and
+        // the badges rebuilt only when a status did.
+        let key = (self.state.revision(), Arc::as_ptr(&self.paths) as usize);
+        if self.proxy_sources.0 != Some(key) {
+            self.proxy_sources = (Some(key), proxy_sources(self.state.project(), &self.paths));
+            self.proxies.request(self.proxy_sources.1.iter().map(|(_, path)| path.as_path()));
+            self.proxy_statuses = None;
+        }
+        let statuses = self.proxies.status_revision();
+        if self.proxy_statuses != Some(statuses) {
+            self.proxy_statuses = Some(statuses);
+            let wanted = &self.proxy_sources.1;
+            let (found, pending, retryable) = self.proxies.snapshot(wanted.iter().map(|(_, path)| path.as_path()));
+            self.state.ui.proxy_badges = wanted.iter().zip(found).filter_map(|((source, _), status)| status.map(|status| (source.clone(), status))).collect();
+            self.state.ui.proxy_pending = pending;
+            self.state.ui.proxy_retryable = retryable;
+        }
         let revision = self.proxies.revision();
         if revision != self.proxy_revision {
             self.proxy_revision = revision;
@@ -1139,6 +1158,8 @@ impl Session {
             UiRequest::SetProxyMode(mode) => {
                 self.state.ui.proxy_mode = mode;
                 self.proxies.set_mode(mode);
+                // The new mode asks for the sources again.
+                self.proxy_sources.0 = None;
                 if let Err(message) = crate::settings::save_proxy_mode(mode) {
                     self.state.report_error(Message::ProxySettingFailed(message));
                 }
@@ -1477,9 +1498,10 @@ fn preview_paths(shared: &Arc<ProjectPaths>, proxies: HashMap<PathBuf, d3d12_bac
 /// pictures or pack files, and each file once.
 fn proxy_sources(project: &Project, paths: &ProjectPaths) -> Vec<(String, PathBuf)> {
     let mut found: Vec<(String, PathBuf)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for track in project.tracks.iter().filter(|track| !track.is_audio()) {
         for clip in &track.clips {
-            if clip.is_text() || clip.is_image() || d3d12_backend::is_asset_source(&clip.source) || found.iter().any(|(source, _)| *source == clip.source) {
+            if clip.is_text() || clip.is_image() || d3d12_backend::is_asset_source(&clip.source) || !seen.insert(clip.source.as_str()) {
                 continue;
             }
             let path = paths.source_path(&clip.source);
