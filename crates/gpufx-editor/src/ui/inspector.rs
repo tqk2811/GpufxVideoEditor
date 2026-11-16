@@ -215,15 +215,44 @@ fn matte_rows(ui: &mut egui::Ui, state: &mut EditorState, matte: &engine::ClipMa
     }
     if crate::matting_models::installed(matte.model, &crate::project_file::package_roots()).is_none() {
         ui.colored_label(theme::text_dim(), language.t(Message::MatteModelMissing));
-        ui.horizontal(|ui| {
-            let source = crate::matting_models::ModelSource::of(matte.model);
-            if ui.add_enabled(source.enabled(), egui::Button::new(language.t(Message::MatteFetch))).on_disabled_hover_text(language.t(Message::MatteFetchUnavailable)).clicked() {
-                state.ui.matte_fetch_request = Some(matte.model);
+        let downloads = crate::matting_models::downloads();
+        match downloads.status(matte.model) {
+            Some(crate::matting_models::DownloadStatus::Running(progress)) => {
+                let (received, total) = progress.snapshot();
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("{} {}", language.t(Message::MatteFetching), crate::matting_models::format_progress(received, total)));
+                });
+                ui.horizontal(|ui| {
+                    let fraction = total.map_or(0.0, |total| received.min(total) as f32 / total.max(1) as f32);
+                    ui.add(egui::ProgressBar::new(fraction).desired_width((ui.available_width() - 80.0).max(40.0)));
+                    if ui.button(language.t(Message::MatteFetchCancel)).clicked() {
+                        downloads.cancel(matte.model);
+                    }
+                });
+                // The download thread does not wake the window: look again soon.
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
             }
-            if ui.button(language.t(Message::MatteImportZip)).clicked() {
-                state.ui.matte_import_request = Some(matte.model);
+            status => {
+                let failed = match status {
+                    Some(crate::matting_models::DownloadStatus::Failed(problem)) => {
+                        ui.colored_label(theme::refused(), language.t(Message::MatteImportFailed(problem)));
+                        true
+                    }
+                    _ => false,
+                };
+                ui.horizontal(|ui| {
+                    let source = crate::matting_models::ModelSource::of(matte.model);
+                    let label = if failed { Message::MatteFetchRetry } else { Message::MatteFetch };
+                    if ui.add_enabled(source.enabled(), egui::Button::new(language.t(label))).on_disabled_hover_text(language.t(Message::MatteFetchUnavailable)).clicked() {
+                        state.ui.matte_fetch_request = Some(matte.model);
+                    }
+                    if ui.button(language.t(Message::MatteImportZip)).clicked() {
+                        state.ui.matte_import_request = Some(matte.model);
+                    }
+                });
             }
-        });
+        }
     }
     let max = engine::MAX_MATTE_PIXELS;
     let mut next = *matte;

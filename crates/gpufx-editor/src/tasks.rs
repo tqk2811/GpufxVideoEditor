@@ -82,8 +82,6 @@ pub enum Request {
     ExportSubtitles { track: usize },
     /// The zip of a matting model, through the file dialog.
     ImportMatteModel { model: engine::MatteModel },
-    /// Downloads a matting model from its release.
-    FetchMatteModel { model: engine::MatteModel },
 }
 
 /// Which task a failure belongs to. A load carries the id it was started with, so the result of
@@ -281,10 +279,6 @@ impl Tasks {
             Request::ImportSubtitles => self.start_dialog(FileDialog::ImportSubtitles),
             Request::ExportSubtitles { track } => self.start_dialog(FileDialog::ExportSubtitles { track, revision: state.revision() }),
             Request::ImportMatteModel { model } => self.start_dialog(FileDialog::ImportMatteModel { model }),
-            Request::FetchMatteModel { model } => {
-                let load = self.start_load(state, Path::new(model.package_id().unwrap_or("model")), None);
-                Action::InstallMatteModel { load, model, path: None }
-            }
         }
     }
 

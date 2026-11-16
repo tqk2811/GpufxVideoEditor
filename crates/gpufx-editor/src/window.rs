@@ -705,8 +705,10 @@ impl Session {
             self.begin_task(Request::ImportMatteModel { model });
         }
         if let Some(model) = self.state.ui.matte_fetch_request.take() {
-            self.begin_task(Request::FetchMatteModel { model });
+            // Runs on its own thread, outside the load slot; a second click while it runs does nothing.
+            crate::matting_models::start_download(model);
         }
+        self.matte_downloads_finished();
         if let Some(track) = self.state.ui.subtitle_export_request.take() {
             self.begin_task(Request::ExportSubtitles { track });
         }
@@ -716,7 +718,7 @@ impl Session {
         let _ = ui_time;
         let delay = if self.state.is_exporting() {
             delay.min(EXPORT_REPAINT)
-        } else if self.state.is_playing() || self.tasks.has_waiting_load() || !self.state.ui.drop_batches.is_empty() || self.presenter.resize_pending() {
+        } else if self.state.is_playing() || self.tasks.has_waiting_load() || crate::matting_models::downloads().any_running() || !self.state.ui.drop_batches.is_empty() || self.presenter.resize_pending() {
             delay.min(PLAYING_REPAINT)
         } else {
             delay
@@ -1000,9 +1002,6 @@ impl Session {
                 });
             }
             Action::InstallMatteModel { load, model, path } => {
-                if path.is_none() {
-                    self.state.report_info(Message::MatteFetching);
-                }
                 self.spawn_task("matte-model-install", TaskId::Load(load), move || {
                     let result = crate::matting_models::install(model, path.as_deref());
                     Arrival::MatteModelInstalled { load, result }
@@ -1030,6 +1029,22 @@ impl Session {
                 self.exit_accepted = true;
                 self.autosave.finish_clean();
             }
+        }
+    }
+
+    /// Handles the model downloads that ended: an installed model is used at once, a failure stays
+    /// shown in the inspector with a retry.
+    fn matte_downloads_finished(&mut self) {
+        for (_, outcome) in crate::matting_models::downloads().take_finished() {
+            match outcome {
+                crate::matting_models::DownloadOutcome::Installed(_) => {
+                    self.state.report_info(Message::MatteImported);
+                    self.perform(Action::MatteModelInstalled);
+                }
+                crate::matting_models::DownloadOutcome::Failed(problem) => self.state.report_error(Message::MatteImportFailed(problem)),
+                crate::matting_models::DownloadOutcome::Cancelled => {}
+            }
+            self.window.request_redraw();
         }
     }
 

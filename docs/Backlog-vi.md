@@ -4,10 +4,6 @@
 
 Shader nn của xoá nền chỉ biên dịch được bằng DXC; thiếu `dxcompiler.dll` thì clip hiện chưa xoá nền (`D3d12Compositor::matte_problems`). `scripts/setup-poc.ps1` tải DLL và 3 file `LICENSE-dxcompiler-*.txt` vào `third_party/ffmpeg/bin`, `crates/d3d12-backend/build.rs` chép DLL cạnh exe; khi có script đóng gói phát hành thì phải kèm DLL và cả 3 file giấy phép. Model nằm ở release `models-matting-v1` của `tqk2811/FFmpegGpuFilter`; dựng lại zip thì cập nhật `sha256_zip` trong `source.json` của gói và upload lại. Ghi ngày 2026-11-17.
 
-### [Vừa] Xoá nền: tải model chạy đồng bộ một luồng, không có tiến độ hay huỷ
-
-`matting_models::fetch` gọi `curl.exe` và chờ hết; giao diện chỉ hiện dòng "đang tải", không có phần trăm, không huỷ được, và chiếm slot load nên các thao tác mở/nhập khác phải chờ. Ghi ngày 2026-11-17.
-
 ### [Thấp] Xoá nền: matte chạy trên ảnh đã kéo giãn theo khung project
 
 `crates/d3d12-backend/src/compositor.rs` (`matted_picture`) đưa model ảnh nguồn đã scale méo về kích thước project rồi mới đặt đúng tỉ lệ, nên MODNet (giữ tỉ lệ) thấy ảnh méo; nên chạy ở kích thước theo tỉ lệ nguồn. Mỗi clip có temporal mở thêm một decoder thứ hai; cửa sổ temporal bắt đầu `temporal` bước khung (theo fps của stream) trước khung hiện tại, nên nguồn VFR có khoảng trống lớn có thể lấy ít khung hơn. Ghi ngày 2026-11-17.
