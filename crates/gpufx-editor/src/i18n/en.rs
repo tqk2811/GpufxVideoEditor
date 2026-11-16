@@ -226,6 +226,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::ProxyAuto => "Auto (videos taller than 1080p)".to_owned(),
         Message::ProxyOn => "All videos".to_owned(),
         Message::ProxyCancel => "Stop making proxies".to_owned(),
+        Message::ProxyRetry => "Retry failed proxies".to_owned(),
         Message::ProxyMaking { left, percent } => format!("Making proxies: {left} left, {percent}%"),
         Message::ProxyBadge => "Proxy".to_owned(),
         Message::ProxyQueued => "Waiting to make a smaller proxy for the preview".to_owned(),

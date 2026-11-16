@@ -232,7 +232,7 @@ pub enum ProxyStatus {
     Ready(PathBuf),
     /// The mode does not want one for this source.
     NotNeeded,
-    /// Stopped by the user; asked for again only after the mode changes.
+    /// Stopped by the user; asked for again after a retry, a mode change or a change of the file.
     Cancelled,
     Failed(String),
 }
@@ -248,8 +248,9 @@ pub enum MakeOutcome {
 /// The file work behind the proxies. A trait so the queue can be tested without FFmpeg.
 pub trait ProxyMaker: Send + Sync + 'static {
     fn stamp(&self, path: &Path) -> Option<FileStamp>;
-    /// The picture of the video and how long it runs.
-    fn inspect(&self, path: &Path) -> Result<(VideoFormat, Time), String>;
+    /// The picture of the video and how long it runs; `None` for a file with no video stream (a
+    /// sound file on a video track), which needs no proxy.
+    fn inspect(&self, path: &Path) -> Result<Option<(VideoFormat, Time)>, String>;
     /// Writes the proxy of `original` to `out`, calling `progress` with 0 to 1 now and then.
     fn make(&self, original: &Path, format: &VideoFormat, duration: Time, out: &Path, cancel: &Arc<AtomicBool>, progress: &dyn Fn(f32)) -> MakeOutcome;
 }
@@ -265,13 +266,13 @@ impl ProxyMaker for ChildProxyMaker {
         file_stamp(path)
     }
 
-    fn inspect(&self, path: &Path) -> Result<(VideoFormat, Time), String> {
+    fn inspect(&self, path: &Path) -> Result<Option<(VideoFormat, Time)>, String> {
         let probe = probe_media(path)?;
         if !probe.has_video {
-            return Err(probe.video_problem.unwrap_or_else(|| "no video stream".to_owned()));
+            return probe.video_problem.map_or(Ok(None), Err);
         }
         let duration = probe.video_duration.ok_or("the video states no length")?;
-        Ok((probe_video_format(path)?, duration))
+        Ok(Some((probe_video_format(path)?, duration)))
     }
 
     fn make(&self, original: &Path, format: &VideoFormat, duration: Time, out: &Path, cancel: &Arc<AtomicBool>, progress: &dyn Fn(f32)) -> MakeOutcome {
@@ -452,6 +453,28 @@ impl ProxyManager {
     }
 
     /// Where the proxy of `source` stands; a ready proxy the mode does not want is NotNeeded.
+    /// Queues again the sources whose proxy failed or was stopped.
+    pub fn retry_failed(&self) {
+        let mut state = self.shared.lock();
+        if state.mode == ProxyMode::Off {
+            return;
+        }
+        let failed: Vec<PathBuf> = state.entries.iter().filter(|(_, status)| matches!(status, ProxyStatus::Failed(_) | ProxyStatus::Cancelled)).map(|(source, _)| source.clone()).collect();
+        for source in &failed {
+            state.entries.insert(source.clone(), ProxyStatus::Queued);
+            state.queue.push_back(source.clone());
+        }
+        drop(state);
+        if !failed.is_empty() {
+            self.shared.wake.notify_all();
+        }
+    }
+
+    /// How many proxies failed or were stopped.
+    pub fn retryable(&self) -> usize {
+        self.shared.lock().entries.values().filter(|status| matches!(status, ProxyStatus::Failed(_) | ProxyStatus::Cancelled)).count()
+    }
+
     pub fn status(&self, source: &Path) -> Option<ProxyStatus> {
         status_of(&self.shared.lock(), source)
     }
@@ -544,7 +567,8 @@ fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &P
     let Some(stamp) = maker.stamp(source) else { return failed(format!("{} cannot be read", source.display())) };
     // The source's shape and frame rate are needed to read even a proxy made earlier.
     let (format, duration) = match maker.inspect(source) {
-        Ok(found) => found,
+        Ok(Some(found)) => found,
+        Ok(None) => return (ProxyStatus::NotNeeded, None),
         Err(message) => return failed(message),
     };
     if !mode.wants(&format) {
@@ -750,11 +774,11 @@ mod tests {
 
     impl ProxyMaker for FakeMaker {
         fn stamp(&self, path: &Path) -> Option<FileStamp> {
-            self.formats.contains_key(path).then(|| stamp(1, 1))
+            (self.formats.contains_key(path) || path == Path::new(r"D:\music.m4a")).then(|| stamp(1, 1))
         }
 
-        fn inspect(&self, path: &Path) -> Result<(VideoFormat, Time), String> {
-            Ok((self.formats[path], Time::from_ticks(90_000)))
+        fn inspect(&self, path: &Path) -> Result<Option<(VideoFormat, Time)>, String> {
+            Ok(self.formats.get(path).map(|format| (*format, Time::from_ticks(90_000))))
         }
 
         fn make(&self, original: &Path, _: &VideoFormat, _: Time, out: &Path, cancel: &Arc<AtomicBool>, progress: &dyn Fn(f32)) -> MakeOutcome {
@@ -854,5 +878,31 @@ mod tests {
         manager.set_mode(ProxyMode::Auto);
         manager.request([big]);
         assert_eq!(made.recv_timeout(Duration::from_secs(10)).unwrap(), big, "asked for again after a mode change");
+    }
+
+    #[test]
+    fn failed_and_stopped_proxies_can_be_retried_and_a_sound_file_needs_none() {
+        let (manager, made, outcomes, _folder) = manager("retry", ProxyMode::On);
+        let (big, other, music) = (Path::new(r"D:\big.mp4"), Path::new(r"D:\other.mp4"), Path::new(r"D:\music.m4a"));
+        manager.request([music]);
+        assert_eq!(wait_for(&manager, music, |s| *s != ProxyStatus::Queued), ProxyStatus::NotNeeded, "no video stream: not a failure");
+        manager.request([big, other]);
+        assert_eq!(made.recv_timeout(Duration::from_secs(10)).unwrap(), big);
+        outcomes.send(MakeOutcome::Failed("encoder broke".into())).unwrap();
+        assert_eq!(made.recv_timeout(Duration::from_secs(10)).unwrap(), other);
+        manager.cancel_all();
+        wait_for(&manager, other, |s| *s == ProxyStatus::Cancelled);
+        wait_for(&manager, big, |s| matches!(s, ProxyStatus::Failed(_)));
+        assert_eq!(manager.retryable(), 2);
+        manager.retry_failed();
+        let mut again = vec![made.recv_timeout(Duration::from_secs(10)).unwrap()];
+        outcomes.send(MakeOutcome::Done).unwrap();
+        again.push(made.recv_timeout(Duration::from_secs(10)).unwrap());
+        outcomes.send(MakeOutcome::Done).unwrap();
+        again.sort();
+        assert_eq!(again, vec![big.to_path_buf(), other.to_path_buf()], "both are made again");
+        wait_for(&manager, big, |s| matches!(s, ProxyStatus::Ready(_)));
+        wait_for(&manager, other, |s| matches!(s, ProxyStatus::Ready(_)));
+        assert_eq!(manager.retryable(), 0);
     }
 }

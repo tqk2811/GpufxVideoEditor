@@ -19,7 +19,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
         ui.add_space(10.0);
         let (language, agent_access) = (state.language(), state.agent_access);
         file_menu(ui, language, state.ui.theme, agent_access, state.ui.autosave_seconds, state.is_exporting(), requests);
-        proxy_menu(ui, language, state.ui.proxy_mode, state.ui.proxy_pending, requests);
+        proxy_menu(ui, language, state.ui.proxy_mode, state.ui.proxy_pending, state.ui.proxy_retryable, requests);
         if state.agent_connected {
             ui.colored_label(theme::accent(), language.t(Message::AgentConnected));
         }
@@ -119,7 +119,7 @@ fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeCh
 }
 
 /// Which videos the preview plays from a proxy, and stopping the proxies being made.
-fn proxy_menu(ui: &mut egui::Ui, language: Language, mode: ProxyMode, pending: (usize, Option<f32>), requests: &mut Vec<UiRequest>) {
+fn proxy_menu(ui: &mut egui::Ui, language: Language, mode: ProxyMode, pending: (usize, Option<f32>), retryable: usize, requests: &mut Vec<UiRequest>) {
     ui.menu_button(language.t(Message::MenuProxy), |ui| {
         for choice in ProxyMode::ALL {
             let label = language.t(match choice {
@@ -135,6 +135,10 @@ fn proxy_menu(ui: &mut egui::Ui, language: Language, mode: ProxyMode, pending: (
         ui.separator();
         if ui.add_enabled(pending.0 > 0, egui::Button::new(language.t(Message::ProxyCancel))).clicked() {
             requests.push(UiRequest::CancelProxies);
+            ui.close();
+        }
+        if ui.add_enabled(retryable > 0 && mode != ProxyMode::Off, egui::Button::new(language.t(Message::ProxyRetry))).clicked() {
+            requests.push(UiRequest::RetryProxies);
             ui.close();
         }
     });

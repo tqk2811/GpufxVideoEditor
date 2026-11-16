@@ -333,6 +333,8 @@ pub struct UiState {
     pub proxy_badges: std::collections::HashMap<String, crate::proxy::ProxyStatus>,
     /// Proxies queued or being made, and the progress of the running one.
     pub proxy_pending: (usize, Option<f32>),
+    /// How many proxies failed or were stopped, so can be retried.
+    pub proxy_retryable: usize,
 }
 
 /// An autosave left behind by an editor that did not close cleanly.

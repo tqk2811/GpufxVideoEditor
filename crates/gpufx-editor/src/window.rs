@@ -1014,6 +1014,7 @@ impl Session {
         self.proxies.request(wanted.iter().map(|(_, path)| path.as_path()));
         self.state.ui.proxy_badges = wanted.into_iter().filter_map(|(source, path)| self.proxies.status(&path).map(|status| (source, status))).collect();
         self.state.ui.proxy_pending = self.proxies.pending();
+        self.state.ui.proxy_retryable = self.proxies.retryable();
         let revision = self.proxies.revision();
         if revision != self.proxy_revision {
             self.proxy_revision = revision;
@@ -1135,6 +1136,7 @@ impl Session {
                 }
             }
             UiRequest::CancelProxies => self.proxies.cancel_all(),
+            UiRequest::RetryProxies => self.proxies.retry_failed(),
             UiRequest::SetAutosave(seconds) => {
                 self.state.ui.autosave_seconds = seconds;
                 self.autosave.set_interval(seconds);

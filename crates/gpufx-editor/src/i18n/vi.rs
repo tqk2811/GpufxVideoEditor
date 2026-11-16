@@ -205,6 +205,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::ProxyAuto => "Tự động (video cao hơn 1080p)".to_owned(),
         Message::ProxyOn => "Mọi video".to_owned(),
         Message::ProxyCancel => "Dừng tạo proxy".to_owned(),
+        Message::ProxyRetry => "Tạo lại proxy bị lỗi".to_owned(),
         Message::ProxyMaking { left, percent } => format!("Đang tạo proxy: còn {left}, {percent}%"),
         Message::ProxyBadge => "Proxy".to_owned(),
         Message::ProxyQueued => "Đang chờ tạo bản proxy nhỏ để xem trước".to_owned(),

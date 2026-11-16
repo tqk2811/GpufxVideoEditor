@@ -43,6 +43,8 @@ pub enum UiRequest {
     SetAutosave(u64),
     SetProxyMode(crate::proxy::ProxyMode),
     CancelProxies,
+    /// Makes again the proxies that failed or were stopped.
+    RetryProxies,
     /// The choice for autosave `index` of the recovery dialog.
     Recovery { index: usize, choice: crate::editor::RecoveryChoice },
 }

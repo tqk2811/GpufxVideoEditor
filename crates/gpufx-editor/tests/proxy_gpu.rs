@@ -78,7 +78,7 @@ fn a_proxy_is_540p_short_gop_silent_and_the_preview_decodes_it_in_place_of_the_o
     let maker = ChildProxyMaker { tool, package_roots: package_roots() };
     let stamp: FileStamp = maker.stamp(&original).expect("stamp");
     let out = proxy_file(&folder, &original, stamp);
-    let (format, duration) = maker.inspect(&original).expect("inspect");
+    let (format, duration) = maker.inspect(&original).expect("inspect").expect("a video");
     let progress = Mutex::new(Vec::new());
     let outcome = maker.make(&original, &format, duration, &out, &Arc::new(AtomicBool::new(false)), &|fraction| progress.lock().unwrap().push(fraction));
     assert_eq!(outcome, MakeOutcome::Done);
@@ -132,7 +132,7 @@ fn synthesize(folder: &Path, name: &str, arguments: &[&str]) -> PathBuf {
 fn make_proxy(tool: &Path, folder: &Path, original: &Path) -> (Arc<ProjectPaths>, d3d12_backend::VideoFormat, PathBuf) {
     let maker = ChildProxyMaker { tool: tool.to_path_buf(), package_roots: package_roots() };
     let out = proxy_file(folder, original, maker.stamp(original).expect("stamp"));
-    let (format, duration) = maker.inspect(original).expect("inspect");
+    let (format, duration) = maker.inspect(original).expect("inspect").expect("a video");
     let outcome = maker.make(original, &format, duration, &out, &Arc::new(AtomicBool::new(false)), &|_| {});
     assert_eq!(outcome, MakeOutcome::Done, "the proxy of {}", original.display());
     let paths = Arc::new(ProjectPaths::new(Path::new("p.json"), package_roots()).with_proxies(Arc::new(HashMap::from([(original.to_path_buf(), preview_file(out.clone(), &format))]))));

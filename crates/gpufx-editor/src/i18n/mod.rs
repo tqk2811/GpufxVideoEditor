@@ -227,6 +227,8 @@ pub enum Message {
     ProxyOn,
     /// Stops the proxies queued or being made.
     ProxyCancel,
+    /// Makes again the proxies that failed or were stopped.
+    ProxyRetry,
     /// Proxies left to make, and the progress of the running one in percent.
     ProxyMaking { left: usize, percent: u32 },
     /// The short label on a video that has a proxy, or is getting one.
@@ -693,6 +695,7 @@ mod tests {
             Message::ProxyAuto,
             Message::ProxyOn,
             Message::ProxyCancel,
+            Message::ProxyRetry,
             Message::ProxyMaking { left: 2, percent: 40 },
             Message::ProxyBadge,
             Message::ProxyQueued,
