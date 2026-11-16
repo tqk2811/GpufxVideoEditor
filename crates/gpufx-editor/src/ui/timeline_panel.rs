@@ -8,7 +8,7 @@ use crate::media::MediaItem;
 use crate::timeline::drag::DragKind;
 use crate::timeline::hit::{hit_test, transition_hit_test, transition_span, ClipZone, TransitionKey, MIN_CLIP_WIDTH};
 use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
-use crate::timeline::view::{content_end, ViewArea, Wheel, TRACK_HEIGHT};
+use crate::timeline::view::{content_end, ViewArea, Wheel};
 use crate::visuals::levels::{bar_fraction, peak_bucket};
 use crate::visuals::plan::{bar_span, bucket_step, bucket_time, split_body, tile_source_ticks, tile_ticks, visible_cells, BAR_GAP, BAR_WIDTH};
 use crate::visuals::{ClipVisuals, SourceView};
@@ -93,7 +93,7 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
 /// The zoom slider moves around the middle of the track area, as the wheel moves around the pointer.
 fn zoom_controls(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
     let width = f64::from((toolbar_rect.width() - HEADER_WIDTH).max(1.0));
-    let area = ViewArea { content_end: content_end(state.project()), width, track_count: state.project().tracks.len(), rows_height: 0.0 };
+    let area = ViewArea { content_end: content_end(state.project()), width, content_height: state.view.content_height(&track_kinds(state)), rows_height: 0.0 };
     let center = width / 2.0;
     let language = state.language();
     if icons::button(ui, Icon::ZoomIn, &language.t(Message::ZoomIn), false).clicked() {
@@ -167,12 +167,12 @@ struct DropPreview {
 /// Whether `pointer` is on the ruler, which is always there, or in the track area but on no row:
 /// where a drop makes a new track.
 fn outside_the_rows(state: &EditorState, tracks_rect: Rect, pointer: Pos2) -> bool {
-    tracks_rect.with_min_y(tracks_rect.top() - RULER_HEIGHT).contains(pointer) && state.view.track_at_y(f64::from(pointer.y - tracks_rect.top()), state.project().tracks.len(), f64::from(tracks_rect.height())).is_none()
+    tracks_rect.with_min_y(tracks_rect.top() - RULER_HEIGHT).contains(pointer) && state.view.track_at_y(f64::from(pointer.y - tracks_rect.top()), &track_kinds(state), f64::from(tracks_rect.height())).is_none()
 }
 
 /// Where a drop at `pointer` goes: the row under it, or `None` for a new track, and the time.
 fn drop_target(state: &EditorState, tracks_rect: Rect, pointer: Pos2) -> (Option<usize>, Time) {
-    let track = state.view.track_at_y(f64::from(pointer.y - tracks_rect.top()), state.project().tracks.len(), f64::from(tracks_rect.height()));
+    let track = state.view.track_at_y(f64::from(pointer.y - tracks_rect.top()), &track_kinds(state), f64::from(tracks_rect.height()));
     (track, state.view.x_to_time(f64::from((pointer.x - tracks_rect.left()).max(0.0))))
 }
 
@@ -233,9 +233,9 @@ fn resolve_file_drops(ui: &egui::Ui, state: &mut EditorState, timeline_rect: Rec
 fn draw_drop_preview(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect, preview: DropPreview) {
     let painter = ui.painter_at(tracks_rect);
     let row = match preview.track {
-        Some(track) => row_rect(state, tracks_rect, track, state.project().tracks.len()),
+        Some(track) => row_rect(state, tracks_rect, track, &track_kinds(state)),
         None => {
-            let row = Rect::from_min_size(tracks_rect.left_top(), Vec2::new(tracks_rect.width(), TRACK_HEIGHT as f32));
+            let row = Rect::from_min_size(tracks_rect.left_top(), Vec2::new(tracks_rect.width(), state.view.row_height(TrackKind::Video) as f32));
             painter.rect_filled(row.shrink(1.0), CornerRadius::same(CLIP_RADIUS), theme::accent().gamma_multiply(0.18));
             painter.rect_stroke(row.shrink(1.0), CornerRadius::same(CLIP_RADIUS), Stroke::new(1.5, theme::accent()), StrokeKind::Inside);
             row
@@ -271,7 +271,7 @@ fn add_track_menu(ui: &mut egui::Ui, state: &mut EditorState, rect: Rect) {
 }
 
 fn view_area(state: &EditorState, tracks_rect: Rect) -> ViewArea {
-    ViewArea { content_end: content_end(state.project()), width: f64::from(tracks_rect.width()), track_count: state.project().tracks.len(), rows_height: f64::from(tracks_rect.height()) }
+    ViewArea { content_end: content_end(state.project()), width: f64::from(tracks_rect.width()), content_height: state.view.content_height(&track_kinds(state)), rows_height: f64::from(tracks_rect.height()) }
 }
 
 fn handle_wheel(ui: &egui::Ui, state: &mut EditorState, rect: Rect, tracks_rect: Rect, area: &ViewArea) {
@@ -291,7 +291,7 @@ fn handle_wheel(ui: &egui::Ui, state: &mut EditorState, rect: Rect, tracks_rect:
                 MouseWheelUnit::Line => *delta * LINE_SCROLL_POINTS,
                 MouseWheelUnit::Page => Vec2::new(delta.x * tracks_rect.width(), delta.y * tracks_rect.height()),
             };
-            let wheel = Wheel { ctrl: modifiers.command, shift: modifiers.shift, delta_x: f64::from(points.x), delta_y: f64::from(points.y), cursor_x };
+            let wheel = Wheel { ctrl: modifiers.command, shift: modifiers.shift, alt: modifiers.alt, delta_x: f64::from(points.x), delta_y: f64::from(points.y), cursor_x };
             let used = view.apply_wheel(wheel, area);
             consumed |= used;
             !used
@@ -303,14 +303,14 @@ fn handle_wheel(ui: &egui::Ui, state: &mut EditorState, rect: Rect, tracks_rect:
 }
 
 fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Response, tracks_rect: Rect) {
-    let track_count = state.project().tracks.len();
+    let kinds = track_kinds(state);
     let height = f64::from(tracks_rect.height());
     let local = |pos: Pos2| (f64::from(pos.x - tracks_rect.left()), f64::from(pos.y - tracks_rect.top()));
 
     if response.clicked() {
         if let Some(pointer) = response.interact_pointer_pos() {
             let (x, y) = local(pointer);
-            let track = state.view.track_at_y(y, track_count, height);
+            let track = state.view.track_at_y(y, &kinds, height);
             if let Some(transition) = track.and_then(|track| transition_hit_test(state.project(), &state.view, track, x)) {
                 state.select_transition(Some(transition));
             } else {
@@ -324,7 +324,7 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     if response.double_clicked() {
         if let Some(pointer) = response.interact_pointer_pos() {
             let (x, y) = local(pointer);
-            let track = state.view.track_at_y(y, track_count, height);
+            let track = state.view.track_at_y(y, &kinds, height);
             let on_transition = track.and_then(|track| transition_hit_test(state.project(), &state.view, track, x)).is_some();
             if let Some(hit) = track.and_then(|track| hit_test(state.project(), &state.view, track, x)).filter(|_| !on_transition) {
                 state.select_and_seek(hit.key);
@@ -336,7 +336,7 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     if response.secondary_clicked() {
         state.ui.clip_menu = response.interact_pointer_pos().and_then(|pointer| {
             let (x, y) = local(pointer);
-            state.view.track_at_y(y, track_count, height).and_then(|track| hit_test(state.project(), &state.view, track, x)).map(|hit| hit.key)
+            state.view.track_at_y(y, &kinds, height).and_then(|track| hit_test(state.project(), &state.view, track, x)).map(|hit| hit.key)
         });
         if let Some(key) = state.ui.clip_menu {
             state.select(Some(key));
@@ -365,7 +365,7 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
         let press = ui.ctx().input(|input| input.pointer.press_origin());
         if let Some(press) = press {
             let (x, y) = local(press);
-            let track = state.view.track_at_y(y, track_count, height);
+            let track = state.view.track_at_y(y, &kinds, height);
             if let Some(transition) = track.and_then(|track| transition_hit_test(state.project(), &state.view, track, x)) {
                 state.select_transition(Some(transition));
             } else if let Some(hit) = track.and_then(|track| hit_test(state.project(), &state.view, track, x)) {
@@ -382,7 +382,7 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
             if outside_the_rows(state, tracks_rect, pointer) {
                 state.finish_drag_on_new_track(drag, state.view.x_to_time(x), free);
             } else {
-                let snapped = state.snapped_drag(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height), free);
+                let snapped = state.snapped_drag(&drag, state.view.x_to_time(x), state.view.track_at_y(y, &kinds, height), free);
                 state.finish_drag(snapped.command);
             }
         }
@@ -394,7 +394,7 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     } else {
         response.hover_pos().and_then(|pointer| {
             let (x, y) = local(pointer);
-            let track = state.view.track_at_y(y, track_count, height)?;
+            let track = state.view.track_at_y(y, &kinds, height)?;
             if transition_hit_test(state.project(), &state.view, track, x).is_some() {
                 return Some(CursorIcon::PointingHand);
             }
@@ -413,17 +413,23 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     }
 }
 
-fn row_rect(state: &EditorState, tracks_rect: Rect, track: usize, track_count: usize) -> Rect {
-    let top = tracks_rect.top() + state.view.track_top(track, track_count) as f32;
-    Rect::from_min_size(Pos2::new(tracks_rect.left(), top), Vec2::new(tracks_rect.width(), TRACK_HEIGHT as f32))
+fn row_rect(state: &EditorState, tracks_rect: Rect, track: usize, kinds: &[TrackKind]) -> Rect {
+    let top = tracks_rect.top() + state.view.track_top(track, kinds) as f32;
+    let height = kinds.get(track).map_or(0.0, |&kind| state.view.row_height(kind));
+    Rect::from_min_size(Pos2::new(tracks_rect.left(), top), Vec2::new(tracks_rect.width(), height as f32))
+}
+
+/// The kind of every track, bottom first, which sets the row heights.
+fn track_kinds(state: &EditorState) -> Vec<TrackKind> {
+    state.project().tracks.iter().map(|track| track.kind).collect()
 }
 
 fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
     let painter = ui.painter_at(tracks_rect);
     let project = state.project();
-    let track_count = project.tracks.len();
+    let kinds = track_kinds(state);
     for (t, track) in project.tracks.iter().enumerate() {
-        let row = row_rect(state, tracks_rect, t, track_count);
+        let row = row_rect(state, tracks_rect, t, &kinds);
         painter.rect_filled(row, CornerRadius::ZERO, if t % 2 == 0 { theme::row_even() } else { theme::row_odd() });
         for (c, clip) in track.clips.iter().enumerate() {
             let key = ClipKey { track: t, clip: c };
@@ -653,14 +659,14 @@ fn draw_drag_preview(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
     if matches!(drag.kind, DragKind::Move) && outside_the_rows(state, tracks_rect, pointer) {
         return;
     }
-    let track_count = state.project().tracks.len();
+    let kinds = track_kinds(state);
     let height = f64::from(tracks_rect.height());
     let x = f64::from(pointer.x - tracks_rect.left());
     let y = f64::from(pointer.y - tracks_rect.top());
     let free = ui.input(|input| input.modifiers.shift);
-    let snapped = state.snapped_drag(&drag, state.view.x_to_time(x), state.view.track_at_y(y, track_count, height), free);
+    let snapped = state.snapped_drag(&drag, state.view.x_to_time(x), state.view.track_at_y(y, &kinds, height), free);
     let Some(span) = snapped.command.landing(state.project()) else { return };
-    let row = row_rect(state, tracks_rect, span.track, track_count);
+    let row = row_rect(state, tracks_rect, span.track, &kinds);
     let rect = span_rect(state, tracks_rect, row, span.start, span.end);
     let painter = ui.painter_at(tracks_rect);
     painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(2.0, theme::drop_outline()), StrokeKind::Inside);
@@ -716,8 +722,7 @@ fn header_button_rect(row: Rect, from_right: usize) -> Rect {
 }
 
 fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, requests: &mut Vec<UiRequest>) {
-    let track_count = state.project().tracks.len();
-    let kinds: Vec<TrackKind> = state.project().tracks.iter().map(|track| track.kind).collect();
+    let kinds = track_kinds(state);
     let language = state.language();
     let mut toggle_lock = None;
     let mut toggle_hide = None;
@@ -725,8 +730,8 @@ fn headers(ui: &mut egui::Ui, state: &mut EditorState, header_rect: Rect, reques
     ui.scope_builder(UiBuilder::new().max_rect(header_rect), |ui| {
         ui.set_clip_rect(header_rect);
         for (t, &kind) in kinds.iter().enumerate() {
-            let top = header_rect.top() + state.view.track_top(t, track_count) as f32;
-            let row = Rect::from_min_size(Pos2::new(header_rect.left(), top), Vec2::new(header_rect.width(), TRACK_HEIGHT as f32));
+            let top = header_rect.top() + state.view.track_top(t, &kinds) as f32;
+            let row = Rect::from_min_size(Pos2::new(header_rect.left(), top), Vec2::new(header_rect.width(), state.view.row_height(kind) as f32));
             if !row.intersects(header_rect) {
                 continue;
             }
@@ -796,8 +801,9 @@ pub(super) fn tracks_origin(panel: Rect) -> Pos2 {
 #[cfg(test)]
 pub(super) fn header_button_center(panel: Rect, state: &EditorState, t: usize, from_right: usize) -> Pos2 {
     let origin = tracks_origin(panel);
-    let top = origin.y + state.view.track_top(t, state.project().tracks.len()) as f32;
-    let row = Rect::from_min_size(Pos2::new(panel.left() + 1.0, top), Vec2::new(HEADER_WIDTH, TRACK_HEIGHT as f32));
+    let kinds = track_kinds(state);
+    let top = origin.y + state.view.track_top(t, &kinds) as f32;
+    let row = Rect::from_min_size(Pos2::new(panel.left() + 1.0, top), Vec2::new(HEADER_WIDTH, state.view.row_height(kinds[t]) as f32));
     header_button_rect(row, from_right).center()
 }
 
@@ -820,7 +826,7 @@ mod tests {
 
     #[test]
     fn the_track_label_stays_clear_of_the_header_buttons() {
-        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(HEADER_WIDTH, TRACK_HEIGHT as f32));
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(HEADER_WIDTH, crate::timeline::view::TRACK_HEIGHT as f32));
         let ctx = egui::Context::default();
         let mut right_of_label = 0.0;
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -833,7 +839,7 @@ mod tests {
 
     #[test]
     fn the_header_buttons_do_not_overlap_and_stay_in_the_row() {
-        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(HEADER_WIDTH, TRACK_HEIGHT as f32));
+        let row = Rect::from_min_size(Pos2::ZERO, Vec2::new(HEADER_WIDTH, crate::timeline::view::TEXT_TRACK_HEIGHT as f32));
         for place in 0..3 {
             assert!(row.contains_rect(header_button_rect(row, place)), "{place}");
             assert!(!header_button_rect(row, place).intersects(header_button_rect(row, place + 1)), "{place}");

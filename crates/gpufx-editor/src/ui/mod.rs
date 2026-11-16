@@ -1096,7 +1096,7 @@ mod tests {
     /// The screen position of `time` inside the only track.
     fn on_track(state: &EditorState, time: Time) -> egui::Pos2 {
         let origin = timeline_panel::tracks_origin(panels(egui::vec2(1280.0, 720.0)).timeline);
-        origin + egui::vec2(state.view.time_to_x(time) as f32, state.view.track_top(0, 1) as f32 + 30.0)
+        origin + egui::vec2(state.view.time_to_x(time) as f32, state.view.track_top(0, &[engine::TrackKind::Video]) as f32 + 30.0)
     }
 
     /// Presses on the clip at 2 s and moves away, leaving a timeline drag in progress.

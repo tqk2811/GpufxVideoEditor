@@ -2,12 +2,19 @@
 //!
 //! X coordinates are relative to the left edge of the track area, Y coordinates to its top.
 
-use engine::{Project, Time, TICKS_PER_SECOND};
+use engine::{Project, Time, TrackKind, TICKS_PER_SECOND};
 
 pub const MIN_PIXELS_PER_SECOND: f64 = 1.0;
 pub const MAX_PIXELS_PER_SECOND: f64 = 2000.0;
 pub const DEFAULT_PIXELS_PER_SECOND: f64 = 80.0;
+/// Starting height of a track row; Alt + wheel changes it for every kind but text.
 pub const TRACK_HEIGHT: f64 = 76.0;
+pub const MIN_TRACK_HEIGHT: f64 = TRACK_HEIGHT / 2.0;
+pub const MAX_TRACK_HEIGHT: f64 = TRACK_HEIGHT * 2.0;
+/// A text track row holds one line, the clip names, and does not follow the Alt + wheel height.
+pub const TEXT_TRACK_HEIGHT: f64 = 26.0;
+/// Points of row height per point of wheel movement.
+const HEIGHT_SPEED: f64 = 0.2;
 /// Empty space after the last clip, so a clip can be dragged past the end.
 pub const END_PADDING: f64 = 200.0;
 const ZOOM_SPEED: f64 = 0.0025;
@@ -17,7 +24,8 @@ const ZOOM_SPEED: f64 = 0.0025;
 pub struct ViewArea {
     pub content_end: Time,
     pub width: f64,
-    pub track_count: usize,
+    /// Height of all the track rows together; see [`TimelineView::content_height`].
+    pub content_height: f64,
     pub rows_height: f64,
 }
 
@@ -27,6 +35,7 @@ pub struct ViewArea {
 pub struct Wheel {
     pub ctrl: bool,
     pub shift: bool,
+    pub alt: bool,
     pub delta_x: f64,
     pub delta_y: f64,
     pub cursor_x: f64,
@@ -37,11 +46,12 @@ pub struct TimelineView {
     pixels_per_second: f64,
     scroll_x: f64,
     scroll_y: f64,
+    track_height: f64,
 }
 
 impl Default for TimelineView {
     fn default() -> Self {
-        Self { pixels_per_second: DEFAULT_PIXELS_PER_SECOND, scroll_x: 0.0, scroll_y: 0.0 }
+        Self { pixels_per_second: DEFAULT_PIXELS_PER_SECOND, scroll_x: 0.0, scroll_y: 0.0, track_height: TRACK_HEIGHT }
     }
 }
 
@@ -69,6 +79,28 @@ impl TimelineView {
         self.scroll_y
     }
 
+    /// Height of the row of a track of `kind`.
+    pub fn row_height(&self, kind: TrackKind) -> f64 {
+        if kind == TrackKind::Text {
+            TEXT_TRACK_HEIGHT
+        } else {
+            self.track_height
+        }
+    }
+
+    /// Height of the rows of tracks of `kinds` together.
+    pub fn content_height(&self, kinds: &[TrackKind]) -> f64 {
+        kinds.iter().map(|&kind| self.row_height(kind)).sum()
+    }
+
+    /// Changes the height of the rows of every kind but text by `delta` points; true when it changed.
+    pub fn resize_tracks_by(&mut self, delta: f64) -> bool {
+        let next = (self.track_height + delta).clamp(MIN_TRACK_HEIGHT, MAX_TRACK_HEIGHT);
+        let changed = next != self.track_height;
+        self.track_height = next;
+        changed
+    }
+
     pub fn x_to_time(&self, x: f64) -> Time {
         Time::from_ticks(self.x_to_ticks(x).round() as i64)
     }
@@ -87,7 +119,7 @@ impl TimelineView {
     }
 
     pub fn max_scroll_y(&self, area: &ViewArea) -> f64 {
-        (area.track_count as f64 * TRACK_HEIGHT - area.rows_height).max(0.0)
+        (area.content_height - area.rows_height).max(0.0)
     }
 
     /// Brings both scroll positions inside their limits, for when the content has shrunk.
@@ -139,7 +171,13 @@ impl TimelineView {
 
     /// Applies a wheel event; true when it did something, so the caller may consume it. An event
     /// that can do nothing here returns false and must be left for others.
+    /// Alt + wheel changes the row height and leaves the scroll limits to the next frame, which
+    /// measures the new content height.
     pub fn apply_wheel(&mut self, wheel: Wheel, area: &ViewArea) -> bool {
+        if wheel.alt {
+            let amount = if wheel.delta_y != 0.0 { wheel.delta_y } else { wheel.delta_x };
+            return self.resize_tracks_by(amount * HEIGHT_SPEED);
+        }
         if wheel.ctrl {
             let factor = ((wheel.delta_x + wheel.delta_y) * ZOOM_SPEED).exp();
             return self.zoom_at(factor, wheel.cursor_x.max(0.0), area);
@@ -157,21 +195,24 @@ impl TimelineView {
     }
 
     /// Top of the row of `track`. Track 0 is at the bottom, as in compositing order.
-    pub fn track_top(&self, track: usize, track_count: usize) -> f64 {
-        (track_count - 1 - track) as f64 * TRACK_HEIGHT - self.scroll_y
+    pub fn track_top(&self, track: usize, kinds: &[TrackKind]) -> f64 {
+        self.content_height(kinds.get(track + 1..).unwrap_or(&[])) - self.scroll_y
     }
 
     /// The track whose row contains `y`, or `None` when `y` is outside the visible area of
     /// `height` points, so a pointer over the ruler does not reach a track scrolled out of sight.
-    pub fn track_at_y(&self, y: f64, track_count: usize, height: f64) -> Option<usize> {
+    pub fn track_at_y(&self, y: f64, kinds: &[TrackKind], height: f64) -> Option<usize> {
         if y < 0.0 || y >= height {
             return None;
         }
-        let row = ((y + self.scroll_y) / TRACK_HEIGHT).floor();
-        if row < 0.0 || row >= track_count as f64 {
-            return None;
+        let mut bottom = -self.scroll_y;
+        for (track, &kind) in kinds.iter().enumerate().rev() {
+            bottom += self.row_height(kind);
+            if y < bottom {
+                return Some(track);
+            }
         }
-        Some(track_count - 1 - row as usize)
+        None
     }
 }
 
@@ -179,14 +220,15 @@ impl TimelineView {
 mod tests {
     use super::*;
 
+    const VIDEO3: [TrackKind; 3] = [TrackKind::Video; 3];
     const ZOOMS: [f64; 5] = [1.0, 7.5, 80.0, 613.0, 2000.0];
 
     fn area() -> ViewArea {
-        ViewArea { content_end: Time::from_ticks(3600 * TICKS_PER_SECOND), width: 1000.0, track_count: 3, rows_height: 100.0 }
+        ViewArea { content_end: Time::from_ticks(3600 * TICKS_PER_SECOND), width: 1000.0, content_height: 3.0 * TRACK_HEIGHT, rows_height: 100.0 }
     }
 
     fn view(pixels_per_second: f64, scroll_x: f64) -> TimelineView {
-        TimelineView { pixels_per_second, scroll_x, scroll_y: 0.0 }
+        TimelineView { pixels_per_second, scroll_x, scroll_y: 0.0, track_height: TRACK_HEIGHT }
     }
 
     #[test]
@@ -288,7 +330,7 @@ mod tests {
     }
 
     fn wheel(ctrl: bool, shift: bool, delta_y: f64) -> Wheel {
-        Wheel { ctrl, shift, delta_x: 0.0, delta_y, cursor_x: 100.0 }
+        Wheel { ctrl, shift, alt: false, delta_x: 0.0, delta_y, cursor_x: 100.0 }
     }
 
     #[test]
@@ -325,29 +367,29 @@ mod tests {
         let mut view = view(80.0, 0.0);
         assert!(view.apply_wheel(wheel(false, false, -30.0), &tall));
         assert_eq!(view.scroll_y(), 30.0);
-        let fits = ViewArea { track_count: 1, ..tall };
+        let fits = ViewArea { content_height: TRACK_HEIGHT, ..tall };
         let mut other = TimelineView::default();
         assert!(!other.apply_wheel(wheel(false, false, -30.0), &fits));
     }
 
     #[test]
     fn a_pointer_outside_the_visible_rows_hits_no_track() {
-        let view = TimelineView { pixels_per_second: 80.0, scroll_x: 0.0, scroll_y: TRACK_HEIGHT };
+        let view = TimelineView { pixels_per_second: 80.0, scroll_x: 0.0, scroll_y: TRACK_HEIGHT, track_height: TRACK_HEIGHT };
         // Over the ruler: y is negative, but y + scroll_y still lands in a row scrolled out of sight.
-        assert_eq!(view.track_at_y(-10.0, 3, 100.0), None);
-        assert_eq!(view.track_at_y(0.0, 3, 100.0), Some(1));
-        assert_eq!(view.track_at_y(99.0, 3, 100.0), Some(0));
-        assert_eq!(view.track_at_y(100.0, 3, 100.0), None);
+        assert_eq!(view.track_at_y(-10.0, &VIDEO3, 100.0), None);
+        assert_eq!(view.track_at_y(0.0, &VIDEO3, 100.0), Some(1));
+        assert_eq!(view.track_at_y(99.0, &VIDEO3, 100.0), Some(0));
+        assert_eq!(view.track_at_y(100.0, &VIDEO3, 100.0), None);
     }
 
     #[test]
     fn a_mostly_vertical_swipe_scrolls_vertically_at_the_left_limit() {
         let tall = area();
         let mut view = view(80.0, 0.0);
-        let swipe = Wheel { ctrl: false, shift: false, delta_x: 3.0, delta_y: -40.0, cursor_x: 100.0 };
+        let swipe = Wheel { ctrl: false, shift: false, alt: false, delta_x: 3.0, delta_y: -40.0, cursor_x: 100.0 };
         assert!(view.apply_wheel(swipe, &tall));
         assert_eq!(view.scroll_y(), 40.0);
-        let sideways = Wheel { ctrl: false, shift: false, delta_x: -40.0, delta_y: 3.0, cursor_x: 100.0 };
+        let sideways = Wheel { ctrl: false, shift: false, alt: false, delta_x: -40.0, delta_y: 3.0, cursor_x: 100.0 };
         assert!(view.apply_wheel(sideways, &tall));
         assert_eq!(view.scroll_x(), 40.0);
     }
@@ -355,11 +397,31 @@ mod tests {
     #[test]
     fn track_rows_put_track_zero_at_the_bottom() {
         let view = TimelineView::default();
-        assert_eq!(view.track_at_y(1.0, 3, 1000.0), Some(2));
-        assert_eq!(view.track_at_y(TRACK_HEIGHT * 2.5, 3, 1000.0), Some(0));
-        assert_eq!(view.track_at_y(-1.0, 3, 1000.0), None);
-        assert_eq!(view.track_at_y(TRACK_HEIGHT * 3.0, 3, 1000.0), None);
-        assert_eq!(view.track_top(2, 3), 0.0);
-        assert_eq!(view.track_top(0, 3), TRACK_HEIGHT * 2.0);
+        assert_eq!(view.track_at_y(1.0, &VIDEO3, 1000.0), Some(2));
+        assert_eq!(view.track_at_y(TRACK_HEIGHT * 2.5, &VIDEO3, 1000.0), Some(0));
+        assert_eq!(view.track_at_y(-1.0, &VIDEO3, 1000.0), None);
+        assert_eq!(view.track_at_y(TRACK_HEIGHT * 3.0, &VIDEO3, 1000.0), None);
+        assert_eq!(view.track_top(2, &VIDEO3), 0.0);
+        assert_eq!(view.track_top(0, &VIDEO3), TRACK_HEIGHT * 2.0);
+    }
+
+    #[test]
+    fn a_text_row_keeps_its_height_and_the_others_follow_alt_wheel() {
+        let kinds = [TrackKind::Video, TrackKind::Text, TrackKind::Audio];
+        let mut view = TimelineView::default();
+        let area = area();
+        assert!(view.apply_wheel(Wheel { alt: true, ..wheel(false, false, 50.0) }, &area));
+        let tall = TRACK_HEIGHT + 50.0 * HEIGHT_SPEED;
+        assert_eq!(view.row_height(TrackKind::Video), tall);
+        assert_eq!(view.row_height(TrackKind::Text), TEXT_TRACK_HEIGHT);
+        assert_eq!(view.track_top(2, &kinds), 0.0);
+        assert_eq!(view.track_top(1, &kinds), tall);
+        assert_eq!(view.track_top(0, &kinds), tall + TEXT_TRACK_HEIGHT);
+        assert_eq!(view.track_at_y(tall + 1.0, &kinds, 1000.0), Some(1));
+        assert_eq!(view.track_at_y(tall + TEXT_TRACK_HEIGHT, &kinds, 1000.0), Some(0));
+        assert_eq!(view.track_at_y(tall * 2.0 + TEXT_TRACK_HEIGHT, &kinds, 1000.0), None);
+        assert!(view.apply_wheel(Wheel { alt: true, ..wheel(false, false, -1e6) }, &area));
+        assert_eq!(view.row_height(TrackKind::Audio), MIN_TRACK_HEIGHT);
+        assert!(!view.apply_wheel(Wheel { alt: true, ..wheel(false, false, -10.0) }, &area), "a limit passes the event on");
     }
 }

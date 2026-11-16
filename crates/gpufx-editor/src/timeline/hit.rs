@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn hit_test_finds_the_clip_at_several_zooms() {
         let project = project();
-        let area = ViewArea { content_end: Time::from_seconds(100).unwrap(), width: 1000.0, track_count: 1, rows_height: 100.0 };
+        let area = ViewArea { content_end: Time::from_seconds(100).unwrap(), width: 1000.0, content_height: crate::timeline::view::TRACK_HEIGHT, rows_height: 100.0 };
         for factor in [1.0, 2.0, 12.5] {
             let mut view = TimelineView::default();
             view.zoom_at(factor, 0.0, &area);

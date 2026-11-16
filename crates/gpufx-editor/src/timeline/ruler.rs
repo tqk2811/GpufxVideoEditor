@@ -73,7 +73,7 @@ mod tests {
     use crate::timeline::view::{ViewArea, MAX_PIXELS_PER_SECOND, MIN_PIXELS_PER_SECOND};
 
     fn view_at(factor: f64) -> TimelineView {
-        let area = ViewArea { content_end: Time::ZERO, width: 1000.0, track_count: 0, rows_height: 0.0 };
+        let area = ViewArea { content_end: Time::ZERO, width: 1000.0, content_height: 0.0, rows_height: 0.0 };
         let mut view = TimelineView::default();
         view.zoom_at(factor, 0.0, &area);
         view
