@@ -247,7 +247,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Thấp] Display matrix có lật hoặc góc lẻ chỉ được xoay gần đúng
 
-`crates/d3d12-backend/src/orientation.rs` (`stream_turns`) chỉ lấy góc xoay của display matrix, làm tròn về bội 90 độ và bỏ phần lật gương. Video điện thoại thường chỉ có 0/90/180/270 nên đủ dùng; file đã lật (camera trước của vài app) sẽ hiện không lật. Xoay làm ngay sau scale: scale đưa ảnh về kích thước đã xoay rồi `turn_effect` chỉ đổi chỗ texel, không lấy mẫu lại lần hai. Ghi ngày 2026-11-16.
+`crates/d3d12-backend/src/orientation.rs` (`stream_turns`) chỉ lấy góc xoay của display matrix, làm tròn về bội 90 độ và bỏ phần lật gương (chỉ in cảnh báo ra stderr). Video điện thoại thường chỉ có 0/90/180/270 nên đủ dùng; file đã lật (camera trước của vài app) sẽ hiện không lật. Xoay làm ngay sau scale: scale đưa ảnh về kích thước đã xoay rồi `turn_effect` chỉ đổi chỗ texel, không lấy mẫu lại lần hai. Ghi ngày 2026-11-16.
 
 ### [Thấp] Tone map HDR cố định, chưa có tuỳ chọn và chưa có xuất HDR
 

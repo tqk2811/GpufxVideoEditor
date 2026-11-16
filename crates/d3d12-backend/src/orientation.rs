@@ -80,7 +80,18 @@ pub unsafe fn stream_turns(stream: *const ffi::AVStream) -> u8 {
     if side.is_null() || (*side).size < 9 * std::mem::size_of::<i32>() {
         return 0;
     }
-    turns_of_rotation(ffi::av_display_rotation_get((*side).data.cast()))
+    let matrix: *const i32 = (*side).data.cast();
+    if is_mirrored(&*matrix.cast::<[i32; 9]>()) {
+        eprintln!("orientation: the display matrix of the video mirrors the picture; only its rotation is applied");
+    }
+    turns_of_rotation(ffi::av_display_rotation_get(matrix))
+}
+
+/// Whether a display matrix (FFmpeg's 3x3 layout, 16.16 fixed point) mirrors the picture: its
+/// 2x2 part has a negative determinant.
+pub fn is_mirrored(matrix: &[i32; 9]) -> bool {
+    let determinant = i64::from(matrix[0]) * i64::from(matrix[4]) - i64::from(matrix[1]) * i64::from(matrix[3]);
+    determinant < 0
 }
 
 /// Width and height of a `width` x `height` picture once turned by `turns`.
@@ -133,6 +144,15 @@ mod tests {
         assert_eq!(turns_of_rotation(270.0), 1);
         assert_eq!(turns_of_rotation(-89.0), 1, "the nearest quarter turn");
         assert_eq!(turns_of_rotation(f64::NAN), 0);
+    }
+
+    #[test]
+    fn a_flipped_display_matrix_is_seen_as_mirrored() {
+        let one = 1 << 16;
+        assert!(!is_mirrored(&[one, 0, 0, 0, one, 0, 0, 0, 1 << 30]), "identity");
+        assert!(!is_mirrored(&[0, -one, 0, one, 0, 0, 0, 0, 1 << 30]), "a quarter turn");
+        assert!(is_mirrored(&[-one, 0, 0, 0, one, 0, 0, 0, 1 << 30]), "a horizontal flip");
+        assert!(is_mirrored(&[0, one, 0, one, 0, 0, 0, 0, 1 << 30]), "a turn with a flip");
     }
 
     #[test]
