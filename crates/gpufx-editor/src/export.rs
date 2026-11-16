@@ -212,8 +212,11 @@ mod tests {
 
     #[test]
     fn a_timeline_without_frames_cannot_be_exported() {
-        assert_eq!(export_blocker(&project(false)), Some(Message::NothingToExport));
+        let mut empty = project(true);
+        empty.tracks[0].clips.clear();
+        assert_eq!(export_blocker(&empty), Some(Message::NothingToExport));
         assert_eq!(export_blocker(&project(true)), None);
+        assert_eq!(export_blocker(&project(false)), None, "audio alone exports over a black picture");
     }
 
     fn status_except(missing: &'static [&'static str]) -> impl Fn(&str) -> EncoderStatus {

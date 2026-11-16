@@ -179,10 +179,6 @@ Giải mã và ghép dùng shader gpufx, còn xuất dùng `rgba_to_nv12` ở `c
 
 Trong cửa sổ transition, mỗi clip được kéo dài qua đầu hoặc đuôi của chính nó, nhưng khi nguồn không còn tiếng ngoài điểm in/out thì phần đầu và đuôi nằm ngoài nguồn là im lặng, trong khi hình giữ khung đầu hoặc khung cuối. Trường hợp thường gặp: nối hai file nguyên (`crates/engine/src/audio_schedule.rs:163-164`, `crates/engine/src/audio_mix.rs`). Nên làm vì tiếng tắt dần rồi bật lên thay vì hoà vào nhau. Ghi ngày 2026-11-09.
 
-### [Vừa] Track audio dài hơn khung hình video cuối bị cắt, project chỉ có track audio ra 0 mẫu
-
-Độ dài tiếng theo số khung hình video (`audio_sample_count` trong `crates/engine/src/audio_schedule.rs`), nên phần track audio vượt quá khung hình cuối bị cắt, và project chỉ có track audio có 0 mẫu. Nên làm vì nhạc nền dài hơn video bị mất đuôi và không xuất được project chỉ có tiếng. Ghi ngày 2026-11-09.
-
 ### [Thấp] Hai ghi chú về chất lượng tiếng
 
 Clip liên tục bị cắt tại tick không chia hết cho 15 thì lặp hoặc rớt tối đa 1 mẫu ở chỗ nối, có thể gây tiếng tách. Crossfade công suất đều của tiếng tương quan (hai nửa của một clip bị cắt) đạt đỉnh khoảng +3 dB và có thể bị chặn ở mức tối đa. Ghi ngày 2026-11-09.

@@ -7,11 +7,13 @@
 //!
 //! * **Frame time.** Output frame `n` starts at `n * frame_duration` ticks. This is exact, so
 //!   the 30000/1001 cadence (`frame_duration = 3003`) never drifts.
-//! * **Audio tracks.** Everything in this module ignores tracks of kind `audio`; they still
-//!   count in the [`Layer::track`] numbering.
+//! * **Audio tracks.** Tracks of kind `audio` give no layer, but they still count in the
+//!   [`Layer::track`] numbering and in the frame count.
 //! * **Hidden tracks.** A hidden track gives no layer, transitions included, but still counts in the
 //!   frame count, so hiding a track does not change the length of the project.
-//! * **Frame count.** The timeline end is the largest clip end over all video tracks. The count is
+//! * **Frame count.** The timeline end is the largest clip end over all tracks, audio tracks
+//!   included, so music longer than the picture is not cut and a project of only audio has a
+//!   length. Frames past the last visual clip have no layer and show black. The count is
 //!   `ceil(end / frame_duration)`, so a final partial frame is kept. An empty project has 0 frames.
 //! * **Clip coverage.** A clip covers the half-open range `[start, start + duration)`. A frame is
 //!   inside the clip when its start time is in that range. The source time is exactly
@@ -132,7 +134,6 @@ pub fn frame_count(project: &Project) -> i64 {
     let end = project
         .tracks
         .iter()
-        .filter(|t| !t.is_audio())
         .flat_map(|t| t.clips.iter())
         .map(|c| c.start.saturating_add(c.duration))
         .max()

@@ -839,14 +839,17 @@ mod tests {
     }
 
     #[test]
-    fn an_audio_only_project_has_no_length_and_does_not_panic() {
-        let (thread, mut consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Audio), Counting::default).unwrap();
-        assert_eq!(thread.reading().end, 0);
+    fn an_audio_only_project_has_the_length_of_its_audio_and_plays() {
+        let audio = project(2, true, TrackKind::Audio);
+        let source = Counting::default();
+        let reads = source.reads.clone();
+        let (thread, mut consumer) = PreparingThread::spawn(&audio, move || source).unwrap();
+        assert_eq!(thread.reading().end, engine::audio_sample_count(&audio));
+        assert!(thread.reading().end > 0);
         thread.play(Time::ZERO);
         open_gate(&thread);
         pull(&mut consumer, thread.shared(), 480);
-        assert!(thread.reading().finished());
-        assert_eq!(thread.reading().playhead(), Time::ZERO);
+        assert!(reads.load(Ordering::SeqCst) > 0, "the music is read");
     }
 
     /// Plays a real-time device against the thread and returns the silence that a seek and an edit

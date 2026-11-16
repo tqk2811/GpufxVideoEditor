@@ -219,15 +219,27 @@ fn sample_count_covers_a_final_partial_frame() {
 }
 
 #[test]
-fn audio_tracks_add_no_length() {
+fn an_audio_track_longer_than_the_video_sets_the_length() {
     let p = project(
         3000,
         vec![
             track(vec![clip("a", 0, 0, 3000)], vec![]),
-            audio_track(vec![clip("m", 0, 0, 90_000)]),
+            audio_track(vec![clip("m", 0, 0, 90_001)]),
         ],
     );
-    assert_eq!(audio_sample_count(&p), 1600);
+    // 90001 ticks round up to 31 whole frames, and the audio runs to the end of the last one.
+    assert_eq!(frame_count(&p), 31);
+    assert_eq!(audio_sample_count(&p), sample_position(t(93_000)));
+    let tail = audio_segments(&p, sample_position(t(60_000)), 100);
+    assert_eq!(tail.len(), 1, "the music still sounds past the last video frame");
+    assert_eq!(tail[0].source, "m");
+}
+
+#[test]
+fn an_audio_only_project_has_samples() {
+    let p = project(3000, vec![audio_track(vec![clip("m", 0, 0, 30_000)])]);
+    assert_eq!(frame_count(&p), 10);
+    assert_eq!(audio_sample_count(&p), 16_000);
 }
 
 #[test]

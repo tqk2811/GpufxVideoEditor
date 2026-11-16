@@ -91,7 +91,7 @@ fn video_scheduling_ignores_audio_tracks() {
             track(vec![clip("b.mp4", 0, 0, 30_000)], vec![]),
         ],
     );
-    assert_eq!(frame_count(&p), 10, "the longer audio track adds no frames");
+    assert_eq!(frame_count(&p), 100, "the longer audio track sets the length");
     let layers = layers_at_frame(&p, 0);
     assert_eq!(layers.len(), 1);
     assert_eq!(layers[0].track, 1, "layers keep their project track index");
@@ -102,8 +102,8 @@ fn video_scheduling_ignores_audio_tracks() {
 }
 
 #[test]
-fn only_audio_tracks_give_no_frames() {
-    assert_eq!(frame_count(&audio_clip()), 0);
+fn only_audio_tracks_give_black_frames() {
+    assert_eq!(frame_count(&audio_clip()), 10);
     assert!(layers_at_frame(&audio_clip(), 0).is_empty());
 }
 

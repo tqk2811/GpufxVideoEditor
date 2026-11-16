@@ -59,7 +59,8 @@ pub fn sample_position(t: Time) -> i64 {
 }
 
 /// Number of mixed samples per channel in the output: the position of the end of the last video
-/// frame, so audio and video end together. A project without video tracks has 0.
+/// frame, so audio and video end together. The frame count covers audio clips too (see
+/// [`frame_count`]), so the end of the last audio clip is always inside. An empty project has 0.
 pub fn audio_sample_count(project: &Project) -> i64 {
     let end = frame_time(project, frame_count(project)).unwrap_or(Time::MAX);
     sample_position(end)
