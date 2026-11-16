@@ -70,11 +70,18 @@ impl ProxyMode {
 
     /// Whether a video of `format` gets a proxy in this mode.
     pub fn wants(self, format: &VideoFormat) -> bool {
-        match self {
-            ProxyMode::Off => false,
-            ProxyMode::Auto => format.height > AUTO_MIN_HEIGHT,
-            ProxyMode::On => true,
-        }
+        self.wants_height(format.height)
+    }
+
+    /// Whether a video this many pixels high (upright) gets a proxy in this mode. One not taller
+    /// than a proxy never does: its proxy would be no smaller.
+    pub fn wants_height(self, height: u32) -> bool {
+        height > PROXY_HEIGHT
+            && match self {
+                ProxyMode::Off => false,
+                ProxyMode::Auto => height > AUTO_MIN_HEIGHT,
+                ProxyMode::On => true,
+            }
     }
 }
 
@@ -313,15 +320,35 @@ pub fn file_stamp(path: &Path) -> Option<FileStamp> {
 struct State {
     mode: ProxyMode,
     entries: HashMap<PathBuf, ProxyStatus>,
-    /// How the preview reads each ready proxy.
-    files: HashMap<PathBuf, ProxyFile>,
+    /// How the preview reads each ready proxy, and the upright height of its source: a ready
+    /// proxy is used only while the mode wants a source that high.
+    files: HashMap<PathBuf, (ProxyFile, u32)>,
     queue: VecDeque<PathBuf>,
     /// The source being made and how to stop it.
     running: Option<(PathBuf, Arc<AtomicBool>)>,
-    /// Goes up whenever the set of ready proxies in use changes.
+    /// Goes up whenever the map of proxies in use ([`State::active`]) changes, and only then.
     revision: u64,
     /// Bumped by a mode change, so a result made for an old mode is dropped.
     generation: u64,
+}
+
+impl State {
+    /// The ready proxies the mode uses now, by source.
+    fn active(&self) -> HashMap<PathBuf, ProxyFile> {
+        self.entries.iter().filter_map(|(source, status)| match status {
+            ProxyStatus::Ready(_) => self.files.get(source).filter(|(_, height)| self.mode.wants_height(*height)).map(|(file, _)| (source.clone(), file.clone())),
+            _ => None,
+        }).collect()
+    }
+
+    /// Runs `change` and bumps the revision if it changed the map in use.
+    fn changing(&mut self, change: impl FnOnce(&mut Self)) {
+        let before = self.active();
+        change(self);
+        if self.active() != before {
+            self.revision += 1;
+        }
+    }
 }
 
 struct Shared {
@@ -368,21 +395,23 @@ impl ProxyManager {
         self.shared.lock().mode
     }
 
-    /// Changes which sources get a proxy. What is queued or running stops; ready proxies are kept
-    /// and are used again once the mode is not Off.
+    /// Changes which sources get a proxy. What is queued or running stops; ready proxies are kept,
+    /// with their files on disk, and used while the mode wants their source (Auto drops a 720p
+    /// proxy made under On, and On brings it back).
     pub fn set_mode(&self, mode: ProxyMode) {
         let mut state = self.shared.lock();
         if state.mode == mode {
             return;
         }
-        state.mode = mode;
-        state.generation += 1;
-        state.queue.clear();
-        if let Some((_, cancel)) = state.running.take() {
-            cancel.store(true, Ordering::SeqCst);
-        }
-        state.entries.retain(|_, status| matches!(status, ProxyStatus::Ready(_)));
-        state.revision += 1;
+        state.changing(|state| {
+            state.mode = mode;
+            state.generation += 1;
+            state.queue.clear();
+            if let Some((_, cancel)) = state.running.take() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            state.entries.retain(|_, status| matches!(status, ProxyStatus::Ready(_)));
+        });
     }
 
     /// Queues the sources that have no status yet. Called with the video sources of the project,
@@ -422,8 +451,9 @@ impl ProxyManager {
         }
     }
 
+    /// Where the proxy of `source` stands; a ready proxy the mode does not want is NotNeeded.
     pub fn status(&self, source: &Path) -> Option<ProxyStatus> {
-        self.shared.lock().entries.get(source).cloned()
+        status_of(&self.shared.lock(), source)
     }
 
     /// How many proxies are queued or being made, and the progress of the running one.
@@ -443,15 +473,14 @@ impl ProxyManager {
 
     /// The ready proxies to decode in place of their originals; empty while the mode is Off.
     pub fn proxies(&self) -> HashMap<PathBuf, ProxyFile> {
-        let state = self.shared.lock();
-        if state.mode == ProxyMode::Off {
-            return HashMap::new();
-        }
-        state.entries.iter().filter_map(|(source, status)| match status {
-            ProxyStatus::Ready(_) => state.files.get(source).map(|file| (source.clone(), file.clone())),
-            _ => None,
-        }).collect()
+        self.shared.lock().active()
     }
+}
+
+fn status_of(state: &State, source: &Path) -> Option<ProxyStatus> {
+    let status = state.entries.get(source)?;
+    let unwanted = matches!(status, ProxyStatus::Ready(_)) && state.files.get(source).is_none_or(|(_, height)| !state.mode.wants_height(*height));
+    Some(if unwanted { ProxyStatus::NotNeeded } else { status.clone() })
 }
 
 impl Drop for ProxyManager {
@@ -468,7 +497,7 @@ impl Drop for ProxyManager {
 }
 
 /// Sets the status of `source`, if the mode it was made for still holds.
-fn settle(shared: &Shared, source: &Path, generation: u64, (status, file): (ProxyStatus, Option<ProxyFile>)) {
+fn settle(shared: &Shared, source: &Path, generation: u64, (status, file): (ProxyStatus, Option<(ProxyFile, u32)>)) {
     let mut state = shared.lock();
     if state.generation != generation {
         return;
@@ -476,17 +505,15 @@ fn settle(shared: &Shared, source: &Path, generation: u64, (status, file): (Prox
     if matches!(state.entries.get(source), Some(ProxyStatus::Cancelled)) && !matches!(status, ProxyStatus::Ready(_)) {
         return;
     }
-    let ready = matches!(status, ProxyStatus::Ready(_));
-    state.entries.insert(source.to_path_buf(), status);
-    match file {
-        Some(file) => state.files.insert(source.to_path_buf(), file),
-        None => state.files.remove(source),
-    };
+    state.changing(|state| {
+        state.entries.insert(source.to_path_buf(), status);
+        match file {
+            Some(file) => state.files.insert(source.to_path_buf(), file),
+            None => state.files.remove(source),
+        };
+    });
     if state.running.as_ref().is_some_and(|(running, _)| running == source) {
         state.running = None;
-    }
-    if ready {
-        state.revision += 1;
     }
     drop(state);
     shared.notify_ui();
@@ -512,7 +539,7 @@ fn work<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path) {
     }
 }
 
-fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &Path, generation: u64, mode: ProxyMode, cancel: &Arc<AtomicBool>) -> (ProxyStatus, Option<ProxyFile>) {
+fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &Path, generation: u64, mode: ProxyMode, cancel: &Arc<AtomicBool>) -> (ProxyStatus, Option<(ProxyFile, u32)>) {
     let failed = |message: String| (ProxyStatus::Failed(message), None);
     let Some(stamp) = maker.stamp(source) else { return failed(format!("{} cannot be read", source.display())) };
     // The source's shape and frame rate are needed to read even a proxy made earlier.
@@ -526,7 +553,7 @@ fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &P
     let target = proxy_file(folder, source, stamp);
     if target.is_file() {
         touch(&target);
-        return (ProxyStatus::Ready(target.clone()), Some(preview_file(target, &format)));
+        return (ProxyStatus::Ready(target.clone()), Some((preview_file(target, &format), format.height)));
     }
     let progress = |fraction: f32| {
         let mut state = shared.lock();
@@ -540,7 +567,7 @@ fn make_one<M: ProxyMaker>(shared: &Shared, maker: &M, folder: &Path, source: &P
     match maker.make(source, &format, duration, &target, cancel, &progress) {
         MakeOutcome::Done if target.is_file() => {
             remove_other_versions(folder, &target);
-            (ProxyStatus::Ready(target.clone()), Some(preview_file(target, &format)))
+            (ProxyStatus::Ready(target.clone()), Some((preview_file(target, &format), format.height)))
         }
         MakeOutcome::Done => failed(format!("{} was not written", target.display())),
         MakeOutcome::Cancelled => (ProxyStatus::Cancelled, None),
@@ -579,7 +606,43 @@ mod tests {
         assert!(ProxyMode::Auto.wants(&format(3840, 2160)));
         assert!(ProxyMode::Auto.wants(&format(1080, 1920)), "a tall phone video");
         assert!(!ProxyMode::Auto.wants(&format(1920, 1080)), "1080 itself is not taller than 1080");
-        assert!(ProxyMode::On.wants(&format(640, 360)));
+        assert!(ProxyMode::On.wants(&format(1280, 720)));
+        assert!(!ProxyMode::On.wants(&format(640, 360)), "not taller than a proxy: nothing to gain");
+        assert!(!ProxyMode::On.wants(&format(960, 540)));
+        assert!(ProxyMode::On.wants(&format(540, 960)), "an upright video is taller than a proxy");
+    }
+
+    #[test]
+    fn the_proxies_in_use_follow_the_mode_and_the_revision_moves_only_when_they_change() {
+        let (manager, made, outcomes, folder) = manager("follow", ProxyMode::On);
+        let (big, small, low) = (Path::new(r"D:\big.mp4"), Path::new(r"D:\small.mp4"), Path::new(r"D:\low.mp4"));
+        manager.request([small, big, low]);
+        for _ in 0..2 {
+            made.recv_timeout(Duration::from_secs(10)).unwrap();
+            outcomes.send(MakeOutcome::Done).unwrap();
+        }
+        wait_for(&manager, big, |s| matches!(s, ProxyStatus::Ready(_)));
+        assert_eq!(wait_for(&manager, low, |s| *s != ProxyStatus::Queued), ProxyStatus::NotNeeded, "On does not remake a 360p source");
+        assert!(made.try_recv().is_err());
+        assert_eq!(manager.proxies().len(), 2);
+        let revision = manager.revision();
+
+        manager.set_mode(ProxyMode::Auto);
+        assert_eq!(manager.proxies().keys().collect::<Vec<_>>(), vec![big], "Auto stops using the 720p proxy");
+        assert_eq!(manager.status(small), Some(ProxyStatus::NotNeeded));
+        assert_ne!(manager.revision(), revision);
+        assert!(proxy_file(&folder, small, stamp(1, 1)).is_file(), "its file stays for a later On");
+        let revision = manager.revision();
+        manager.set_mode(ProxyMode::On);
+        assert_eq!(manager.proxies().len(), 2, "On uses it again without making it");
+        assert!(made.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(matches!(manager.status(small), Some(ProxyStatus::Ready(_))));
+        assert_ne!(manager.revision(), revision);
+
+        let (other, _made, _outcomes, _folder) = self::manager("follow-none", ProxyMode::Auto);
+        let revision = other.revision();
+        other.set_mode(ProxyMode::On);
+        assert_eq!(other.revision(), revision, "no proxy before or after: the map did not change");
     }
 
     #[test]
@@ -727,7 +790,7 @@ mod tests {
         let folder = scratch(name);
         let (made, made_rx) = channel();
         let (outcome_tx, outcomes) = channel();
-        let formats = HashMap::from([(PathBuf::from(r"D:\big.mp4"), format(3840, 2160)), (PathBuf::from(r"D:\small.mp4"), format(1280, 720)), (PathBuf::from(r"D:\other.mp4"), format(3840, 2160))]);
+        let formats = HashMap::from([(PathBuf::from(r"D:\big.mp4"), format(3840, 2160)), (PathBuf::from(r"D:\small.mp4"), format(1280, 720)), (PathBuf::from(r"D:\other.mp4"), format(3840, 2160)), (PathBuf::from(r"D:\low.mp4"), format(640, 360))]);
         let maker = FakeMaker { formats, made, outcomes: Mutex::new(outcomes) };
         (ProxyManager::start(maker, Some(folder.clone()), mode, None), made_rx, outcome_tx, folder)
     }
