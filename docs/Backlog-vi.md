@@ -147,6 +147,10 @@ Blend của `crates/poc/src/mix_bench.rs` chỉ kiểm ở 3 vị trí tua, ma t
 
 Mỗi khung của `FrameConverter::convert` chờ `av_hwframe_transfer_data` upload xong (FFmpeg chờ queue rỗng) và chuyển đổi trên CPU, nên nguồn 4K 4:2:2 phát chậm. Nên upload bất đồng bộ hoặc chuyển màu bằng shader; tạm thời proxy là cách xem mượt. Ghi ngày 2026-11-17.
 
+### [Thấp] Giải mã phần mềm H.264/HEVC 4:2:2 / 4:4:4 gần như chạy một luồng
+
+`SequentialDecoder` dùng slice threads cho nguồn dự đoán là phần mềm (frame threads sẽ gọi `track_started_frame` từ nhiều luồng), mà x264/x265 mặc định mã hoá một slice mỗi khung nên thực tế chỉ một luồng giải mã. Cân nhắc `FF_THREAD_FRAME` cho stream chắc chắn đi phần mềm (khi không có D3D12 thì không cần theo dõi fence), kèm kiểm an toàn luồng của callback. Ghi ngày 2026-11-17.
+
 ### [Thấp] Clip đảo ngược lệch một khung với time base 1/1000 (MKV)
 
 `ReverseDecoder` làm tròn xuống (`floor_pts`) còn khung MKV lưu timestamp đã làm tròn lên (khung 61 ở 2033 ms thay vì 2033,33), nên tại ranh giới khung clip đảo ngược hiện khung sau đó một khung. Thấy khi viết `source_formats.rs` với clip MKV (đã đổi sang MP4 để tránh); chưa sửa. Ghi ngày 2026-11-17.

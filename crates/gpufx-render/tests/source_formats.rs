@@ -186,6 +186,7 @@ fn format_clip(case: &FormatCase) -> Option<PathBuf> {
         assert!(status.success(), "generating {} failed", path.display());
         if std::fs::rename(&temporary, &path).is_err() {
             let _ = std::fs::remove_file(&temporary);
+            assert!(path.is_file(), "publishing {} failed", path.display());
         }
     }
     Some(path)
@@ -285,4 +286,36 @@ fn hevc_422_10_bit_matches_ffmpeg() {
 #[test]
 fn hevc_444_8_bit_matches_ffmpeg() {
     check_format(&FormatCase { name: "hevc-444-8", encoder: &["libx265", "-crf", "12", "-x265-params", "log-level=error"], pix_fmt: "yuv444p", extension: "mp4", needs_gpl: true });
+}
+
+#[test]
+fn an_odd_sized_software_source_is_not_stretched_to_its_even_surface() {
+    let _lock = gpu_lock();
+    // Grey stripes 1 to 5 pixels wide across a 641x361 picture: luma only, so halving the chroma
+    // changes nothing, and stretching to 642x362 moves the edges on the right and bottom.
+    let (w, h) = (641u32, 361u32);
+    let dir = clips_dir();
+    std::fs::create_dir_all(&dir).expect("create the clips directory");
+    let clip = dir.join("format-ffv1-444-odd.mkv");
+    if !clip.is_file() {
+        let temporary = dir.join(format!("format-ffv1-444-odd.{}.tmp.mkv", std::process::id()));
+        let source = format!(r"nullsrc=s={w}x{h}:r=30:d=1,geq=lum='if(lt(mod(X+Y\,7)\,3)\,220\,30)':cb=128:cr=128");
+        let status = Command::new(ffmpeg_tool())
+            .args(["-hide_banner", "-y", "-v", "error", "-f", "lavfi", "-i", &source, "-c:v", "ffv1", "-pix_fmt", "yuv444p", "-colorspace", "bt709"])
+            .arg(&temporary)
+            .status()
+            .expect("ffmpeg runs");
+        assert!(status.success(), "generating {} failed", clip.display());
+        if std::fs::rename(&temporary, &clip).is_err() {
+            let _ = std::fs::remove_file(&temporary);
+            assert!(clip.is_file(), "publishing {} failed", clip.display());
+        }
+    }
+    let Some(gpu) = gpu() else { return };
+    let reference = reference_rgb(&clip);
+    assert_eq!(reference.len(), (w * h * 3) as usize);
+    let capture = render_clips(&gpu, &clip_json(&clip, 0, 3, false), w, h, &[1]);
+    let rgba = capture.frame(1);
+    let wrong = rgba.chunks_exact(4).zip(reference.chunks_exact(3)).filter(|(a, b)| a[0].abs_diff(b[0]) > 40).count();
+    assert!(wrong < 50, "{wrong} pixels differ from ffmpeg's decode");
 }

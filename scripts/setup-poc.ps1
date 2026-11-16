@@ -188,6 +188,12 @@ function New-FormatClip {
         Write-Host "Clip already present: $output"
         return
     }
+    # Only for looking at by eye: an ffmpeg without the encoder skips the clip instead of failing.
+    $encoders = & ffmpeg -hide_banner -encoders 2>$null
+    if (-not ($encoders | Select-String -SimpleMatch " $($Encoder[0]) ")) {
+        Write-Warning "Skipping ${Name}: the ffmpeg on PATH has no $($Encoder[0]) encoder"
+        return
+    }
     & ffmpeg -hide_banner -loglevel warning -y -f lavfi -i 'smptehdbars=size=1280x720:rate=30:duration=3' `
         -vf "format=$PixelFormat" -an -c:v @Encoder -pix_fmt $PixelFormat `
         -colorspace bt709 -color_primaries bt709 -color_trc bt709 $output

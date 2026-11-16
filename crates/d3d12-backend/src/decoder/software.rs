@@ -65,6 +65,26 @@ pub(super) fn surface_side(side: i32) -> i32 {
     (side.max(1) + 1) & !1
 }
 
+/// Repeats the last column and row of a `width` x `height` plane of `bytes`-byte samples into
+/// the rest of its `surface_width` x `surface_height`.
+///
+/// # Safety
+/// `plane` must hold `surface_height` rows of `stride` bytes, each of at least
+/// `surface_width * bytes`.
+unsafe fn pad_luma(plane: *mut u8, stride: usize, width: usize, height: usize, surface_width: usize, surface_height: usize, bytes: usize) {
+    if width < surface_width {
+        for row in 0..height {
+            let line = plane.add(row * stride);
+            for column in width..surface_width {
+                ptr::copy_nonoverlapping(line.add((width - 1) * bytes), line.add(column * bytes), bytes);
+            }
+        }
+    }
+    for row in height..surface_height {
+        ptr::copy_nonoverlapping(plane.add((height - 1) * stride), plane.add(row * stride), surface_width * bytes);
+    }
+}
+
 /// Converts pictures to NV12 or P010 and uploads them into D3D12 surfaces of its own pool.
 pub(super) struct FrameConverter {
     /// A reference to the D3D12 device the pool is made on.
@@ -122,7 +142,8 @@ impl FrameConverter {
             check(ffi::av_hwframe_transfer_data(self.downloaded, frame, 0), "av_hwframe_transfer_data (download)")?;
             source = self.downloaded;
         }
-        let (width, height) = ((*source).width, (*source).height);
+        // The decoded frame's own size: a downloaded surface may carry its pool's padded size.
+        let (width, height) = ((*frame).width, (*frame).height);
         let (read_as, target) = conversion((*source).format)?;
         let rgb = is_rgb((*source).format);
         let (surface_width, surface_height) = (surface_side(width), surface_side(height));
@@ -131,7 +152,7 @@ impl FrameConverter {
         let key = (width, height, read_as, surface_width, surface_height, target_format);
         if self.scaler.is_null() || self.scaler_key != key {
             ffi::sws_freeContext(self.scaler);
-            self.scaler = ffi::sws_getContext(width, height, read_as, surface_width, surface_height, target_format, SWS_FLAGS, ptr::null_mut(), ptr::null_mut(), ptr::null());
+            self.scaler = ffi::sws_getContext(width, height, read_as, width, height, target_format, SWS_FLAGS, ptr::null_mut(), ptr::null_mut(), ptr::null());
             if self.scaler.is_null() {
                 return Err(format!("sws_getContext failed for pixel format {} at {width}x{height}", (*source).format));
             }
@@ -161,6 +182,11 @@ impl FrameConverter {
         if scaled <= 0 {
             return Err(format!("sws_scale failed ({scaled})"));
         }
+        // An odd side leaves the last luma column or row of the even surface unwritten: it
+        // repeats the edge, so a filter sampling past the picture sees no garbage. The chroma
+        // plane, rounded up, is covered by the scaler.
+        let bytes = if target == PixelFormat::P010 { 2 } else { 1 };
+        pad_luma((*self.staging).data[0], (*self.staging).linesize[0] as usize, width as usize, height as usize, surface_width as usize, surface_height as usize, bytes);
 
         let pool = self.pool(surface_width, surface_height, target_format)?;
         let mut uploaded = ffi::av_frame_alloc();
@@ -250,6 +276,21 @@ mod tests {
     #[test]
     fn hardware_formats_are_not_converted() {
         assert!(conversion(ffi::AV_PIX_FMT_D3D12).is_err());
+    }
+
+    #[test]
+    fn padding_repeats_the_last_column_and_row() {
+        // 3x3 picture in a 4x4 surface with a stride of 5.
+        let mut plane: Vec<u8> = vec![0; 5 * 4];
+        for row in 0..3 {
+            for column in 0..3 {
+                plane[row * 5 + column] = (10 * row + column) as u8;
+            }
+        }
+        unsafe { pad_luma(plane.as_mut_ptr(), 5, 3, 3, 4, 4, 1) };
+        assert_eq!(&plane[0..4], &[0, 1, 2, 2]);
+        assert_eq!(&plane[10..14], &[20, 21, 22, 22]);
+        assert_eq!(&plane[15..19], &[20, 21, 22, 22], "the last row is repeated");
     }
 
     #[test]

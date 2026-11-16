@@ -200,10 +200,12 @@ pub(crate) unsafe fn wait_for_surface(frame: *const ffi::AVFrame) -> Result<(), 
 /// A frame decoded in software has no fence: its data are the samples.
 unsafe extern "C" fn track_started_frame(context: *mut ffi::AVCodecContext, frame: *mut ffi::AVFrame, flags: std::ffi::c_int) -> std::ffi::c_int {
     let status = ffi::avcodec_default_get_buffer2(context, frame, flags);
-    if status >= 0 && (*frame).format == ffi::AV_PIX_FMT_D3D12 {
+    if status >= 0 {
         let slot = (*context).opaque.cast::<*mut ffi::AVFrame>();
         ffi::av_frame_free(slot);
-        *slot = ffi::av_frame_clone(frame);
+        if (*frame).format == ffi::AV_PIX_FMT_D3D12 {
+            *slot = ffi::av_frame_clone(frame);
+        }
     }
     status
 }
