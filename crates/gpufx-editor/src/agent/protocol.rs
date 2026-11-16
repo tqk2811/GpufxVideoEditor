@@ -125,6 +125,9 @@ pub enum AgentEdit {
     TrackAdd { kind: TrackKind },
     TrackSetLocked { track: usize, locked: bool },
     TrackSetHidden { track: usize, hidden: bool },
+    /// Changes the output frame size and frame duration; `None` keeps that one. An odd side is
+    /// rounded down to even, as encoders of 4:2:0 video need.
+    ProjectSetOutput { width: Option<u32>, height: Option<u32>, frame_duration: Option<Time> },
     /// `duration` defaults to the length of the stream the track plays.
     ClipAdd { track: usize, source: PathBuf, start: Time, source_in: Option<Time>, duration: Option<Time>, speed: Option<f64> },
     /// A text clip with `content` in the style of `style` on top of a new text. `track` of `None`

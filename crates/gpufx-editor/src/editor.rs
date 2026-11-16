@@ -341,13 +341,13 @@ pub fn speed_limits(project: &Project, key: ClipKey) -> Option<(f64, f64)> {
 
 /// The sizes offered for the output, widest shapes first.
 pub const OUTPUT_PRESETS: [(u32, u32); 6] = [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720), (1080, 1920), (1080, 1080)];
-const MAX_OUTPUT_SIDE: u32 = 7680;
+pub const MAX_OUTPUT_SIDE: u32 = 7680;
 /// The frame rates offered for the output, as ticks per frame: 24, 25, 29.97, 30, 50 and 60 fps.
 /// Only rates with a whole number of ticks per frame can be kept exactly, which leaves out 23.976 and 59.94.
 pub const OUTPUT_FRAME_DURATIONS: [Time; 6] = [Time::from_ticks(3750), Time::from_ticks(3600), Time::from_ticks(3003), Time::from_ticks(3000), Time::from_ticks(1800), Time::from_ticks(1500)];
 
 /// `side` as an output side: encoders of 4:2:0 video need it even.
-fn even_side(side: u32) -> u32 {
+pub(crate) fn even_side(side: u32) -> u32 {
     side.clamp(2, MAX_OUTPUT_SIDE) & !1
 }
 
