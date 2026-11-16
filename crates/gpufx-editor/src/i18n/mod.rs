@@ -360,6 +360,7 @@ pub enum Message {
 
     // Inspector.
     ClipTitle,
+    TransitionTitle,
     ProjectTitle,
     FieldSize,
     FieldFrameRate,

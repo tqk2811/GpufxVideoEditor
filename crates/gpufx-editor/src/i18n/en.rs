@@ -342,6 +342,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::PackageProblems(count) => format!("{} could not be read", counted(*count as i64, "package")),
 
         Message::ClipTitle => "Clip".to_owned(),
+        Message::TransitionTitle => "Transition".to_owned(),
         Message::ProjectTitle => "Project".to_owned(),
         Message::FieldSize => "Size".to_owned(),
         Message::FieldFrameRate => "Frame rate".to_owned(),

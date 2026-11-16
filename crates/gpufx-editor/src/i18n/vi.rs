@@ -324,6 +324,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::PackageProblems(count) => format!("{count} gói không đọc được"),
 
         Message::ClipTitle => "Clip".to_owned(),
+        Message::TransitionTitle => "Chuyển cảnh".to_owned(),
         Message::ProjectTitle => "Dự án".to_owned(),
         Message::FieldSize => "Kích thước".to_owned(),
         Message::FieldFrameRate => "Tốc độ khung hình".to_owned(),

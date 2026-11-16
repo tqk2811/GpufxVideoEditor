@@ -1,7 +1,7 @@
 //! Which clip, and which part of it, is under the pointer.
 
 use super::view::TimelineView;
-use engine::{ClipKey, Project};
+use engine::{ClipKey, Project, Time};
 
 /// The narrowest a clip is drawn, so one thinner than this can still be grabbed where it shows.
 pub const MIN_CLIP_WIDTH: f64 = 1.0;
@@ -35,6 +35,33 @@ pub fn clip_zone(x: f64, left: f64, right: f64) -> Option<ClipZone> {
         ClipZone::EndEdge
     } else {
         ClipZone::Body
+    })
+}
+
+/// A transition, named by its track and the first clip of the pair it joins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransitionKey {
+    pub track: usize,
+    pub after_clip: usize,
+}
+
+/// Where transition `after_clip` of `track` is drawn, from its start to its end, centred on the cut.
+pub fn transition_span(project: &Project, track: usize, after_clip: usize) -> Option<(Time, Time)> {
+    let track = project.tracks.get(track)?;
+    let transition = track.transitions.iter().find(|tr| tr.after_clip == after_clip)?;
+    let next = track.clips.get(after_clip + 1)?;
+    let start = next.start.saturating_sub(transition.duration.half_floor());
+    Some((start, start.saturating_add(transition.duration)))
+}
+
+/// The transition of `track` whose block is under `x`. Blocks sit over the clip edges they join,
+/// so this goes before [`hit_test`].
+pub fn transition_hit_test(project: &Project, view: &TimelineView, track: usize, x: f64) -> Option<TransitionKey> {
+    project.tracks.get(track)?.transitions.iter().find_map(|tr| {
+        let (start, end) = transition_span(project, track, tr.after_clip)?;
+        let left = view.time_to_x(start);
+        let right = view.time_to_x(end).max(left + MIN_CLIP_WIDTH);
+        (x >= left && x < right).then_some(TransitionKey { track, after_clip: tr.after_clip })
     })
 }
 
@@ -98,6 +125,32 @@ mod tests {
             let past = view.time_to_x(Time::from_seconds(3).unwrap());
             assert_eq!(hit_test(&project, &view, 0, past), None);
         }
+    }
+
+    #[test]
+    fn a_transition_block_is_hit_around_its_cut_and_before_the_clip_edges() {
+        let mut project = project();
+        let duration = Time::from_ticks(Time::from_seconds(1).unwrap().ticks() / 2);
+        project.tracks[0].transitions.push(engine::Transition { after_clip: 0, package: "mix".to_owned(), duration, params: Default::default() });
+        let view = TimelineView::default();
+        let cut = view.time_to_x(Time::from_seconds(1).unwrap());
+        let key = TransitionKey { track: 0, after_clip: 0 };
+        assert_eq!(transition_hit_test(&project, &view, 0, cut), Some(key));
+        let (start, end) = transition_span(&project, 0, 0).unwrap();
+        assert_eq!(transition_hit_test(&project, &view, 0, view.time_to_x(start)), Some(key));
+        assert_eq!(transition_hit_test(&project, &view, 0, view.time_to_x(end)), None);
+        assert_eq!(transition_hit_test(&project, &view, 0, view.time_to_x(start) - 1.0), None);
+        assert_eq!(transition_hit_test(&project, &view, 0, view.time_to_x(Time::ZERO)), None, "the start edge of the first clip still trims");
+        assert_eq!(transition_hit_test(&project, &view, 1, cut), None);
+    }
+
+    #[test]
+    fn a_transition_without_its_second_clip_is_not_hit() {
+        let mut project = project();
+        project.tracks[0].transitions.push(engine::Transition { after_clip: 1, package: "mix".to_owned(), duration: Time::from_seconds(1).unwrap(), params: Default::default() });
+        let view = TimelineView::default();
+        assert_eq!(transition_span(&project, 0, 1), None);
+        assert_eq!(transition_hit_test(&project, &view, 0, view.time_to_x(Time::from_seconds(2).unwrap())), None);
     }
 
     #[test]

@@ -4,10 +4,11 @@ use super::icons::{self, Icon};
 use super::numeric::{drag_field, speed_field};
 use super::param_widgets;
 use super::theme;
-use crate::editor::{applied_to, clip_name, speed_limits, transition_duration_limits, ClipField, EditorState};
+use crate::editor::{clip_name, speed_limits, transition_duration_limits, ClipField, EditorState};
 use crate::i18n::{Language, Message};
 use crate::packages::short_name;
 use crate::timecode::{aspect_label, format_fps, format_timecode, from_seconds, to_seconds};
+use crate::timeline::hit::TransitionKey;
 use crate::timeline::view::content_end;
 use egui::{Rect, Stroke, UiBuilder, Vec2};
 use engine::{ClipKey, ClipProperty, Easing, Keyframe, KeyframeTarget, Time, Transition, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MAX_ROTATION, MIN_PLACEMENT_WIDTH};
@@ -29,7 +30,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEADER_HEIGHT.min(rect.height())));
     let key = state.selection().filter(|key| clip_of(state, *key).is_some());
     follow_clip(ui.ctx(), state, key);
-    let title = state.language().t(if key.is_some() { Message::ClipTitle } else { Message::ProjectTitle });
+    let transition = if key.is_none() { state.selected_transition() } else { None };
+    let title = state.language().t(if key.is_some() {
+        Message::ClipTitle
+    } else if transition.is_some() {
+        Message::TransitionTitle
+    } else {
+        Message::ProjectTitle
+    });
     ui.painter_at(rect).text(header.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), theme::accent_text());
     ui.painter_at(rect).hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::border()));
     let body = Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max).shrink2(Vec2::new(10.0, 8.0));
@@ -37,9 +45,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
         return;
     }
     ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
-        egui::ScrollArea::vertical().id_salt("inspector").auto_shrink([false, false]).show(ui, |ui| match key {
-            Some(key) => clip_inspector(ui, state, key),
-            None => project_summary(ui, state),
+        egui::ScrollArea::vertical().id_salt("inspector").auto_shrink([false, false]).show(ui, |ui| match (key, transition) {
+            (Some(key), _) => clip_inspector(ui, state, key),
+            (None, Some(transition)) => transition_inspector(ui, state, transition),
+            (None, None) => project_summary(ui, state),
         });
     });
 }
@@ -157,7 +166,6 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         });
         ui.separator();
         effects(ui, state, key, editable);
-        transitions(ui, state, key, editable);
     }
 }
 
@@ -438,30 +446,23 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: b
     }
 }
 
-fn transitions(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: bool) {
-    let (_, applied) = applied_to(state.project(), key);
-    if applied.is_empty() {
-        return;
-    }
-    ui.separator();
-    ui.strong(state.language().t(Message::Transitions));
-    let track = key.track;
-    let mut remove = None;
-    for (after_clip, _) in applied {
-        let Some(transition) = state.project().tracks[track].transitions.iter().find(|tr| tr.after_clip == after_clip).cloned() else { continue };
-        let first = state.project().tracks[track].clips.get(after_clip).map(|clip| clip_identity(ClipKey { track, clip: after_clip }, clip));
-        ui.push_id(("transition", first, after_clip, &transition.package), |ui| transition_section(ui, state, track, &transition, &mut remove, editable));
-    }
-    if let Some(after_clip) = remove {
-        state.remove_transition_after(track, after_clip);
-    }
-}
-
-fn transition_section(ui: &mut egui::Ui, state: &mut EditorState, track: usize, transition: &Transition, remove: &mut Option<usize>, editable: bool) {
+/// The card of the selected transition: its package, duration and parameters, and a button that removes it.
+fn transition_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: TransitionKey) {
     let language = state.language();
-    egui::CollapsingHeader::new(short_name(&transition.package)).default_open(true).show(ui, |ui| {
-        ui.add_enabled_ui(editable, |ui| transition_controls(ui, state, track, transition, remove, language));
+    let Some(transition) = state.project().tracks[key.track].transitions.iter().find(|tr| tr.after_clip == key.after_clip).cloned() else { return };
+    let editable = !state.is_track_locked(key.track);
+    ui.add(egui::Label::new(egui::RichText::new(short_name(&transition.package)).strong()).truncate());
+    if !editable {
+        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::text_dim())).wrap());
+    }
+    let first = state.project().tracks[key.track].clips.get(key.after_clip).map(|clip| clip_identity(ClipKey { track: key.track, clip: key.after_clip }, clip));
+    let mut remove = None;
+    ui.push_id(("transition", first, key.after_clip, &transition.package), |ui| {
+        ui.add_enabled_ui(editable, |ui| transition_controls(ui, state, key.track, &transition, &mut remove, language));
     });
+    if let Some(after_clip) = remove {
+        state.remove_transition_after(key.track, after_clip);
+    }
 }
 
 fn transition_controls(ui: &mut egui::Ui, state: &mut EditorState, track: usize, transition: &Transition, remove: &mut Option<usize>, language: crate::i18n::Language) {

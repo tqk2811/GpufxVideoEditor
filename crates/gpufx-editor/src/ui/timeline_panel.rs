@@ -6,7 +6,7 @@ use crate::editor::{clip_name, format_speed, DropBatch, EditorState};
 use crate::i18n::{Language, Message};
 use crate::media::MediaItem;
 use crate::timeline::drag::DragKind;
-use crate::timeline::hit::{hit_test, ClipZone, MIN_CLIP_WIDTH};
+use crate::timeline::hit::{hit_test, transition_hit_test, transition_span, ClipZone, TransitionKey, MIN_CLIP_WIDTH};
 use crate::timeline::ruler::{format_time, major_step, ruler_ticks};
 use crate::timeline::view::{content_end, ViewArea, Wheel, TRACK_HEIGHT};
 use crate::visuals::levels::{bar_fraction, peak_bucket};
@@ -73,6 +73,9 @@ fn toolbar(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect) {
             if icons::button(ui, Icon::TrimRight, &language.t(Message::TrimAfter), false).clicked() {
                 state.trim_end_to_playhead();
             }
+        });
+        let can_delete_transition = state.selected_transition().is_some_and(|key| !state.is_track_locked(key.track));
+        ui.add_enabled_ui(can_edit_selection || can_delete_transition, |ui| {
             if icons::button(ui, Icon::Trash, &language.t(Message::DeleteShortcut), false).clicked() {
                 state.delete_selected();
             }
@@ -305,8 +308,13 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
     if response.clicked() {
         if let Some(pointer) = response.interact_pointer_pos() {
             let (x, y) = local(pointer);
-            let hit = state.view.track_at_y(y, track_count, height).and_then(|track| hit_test(state.project(), &state.view, track, x));
-            state.select(hit.map(|hit| hit.key));
+            let track = state.view.track_at_y(y, track_count, height);
+            if let Some(transition) = track.and_then(|track| transition_hit_test(state.project(), &state.view, track, x)) {
+                state.select_transition(Some(transition));
+            } else {
+                let hit = track.and_then(|track| hit_test(state.project(), &state.view, track, x));
+                state.select(hit.map(|hit| hit.key));
+            }
         }
     }
 
@@ -343,8 +351,10 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
         let press = ui.ctx().input(|input| input.pointer.press_origin());
         if let Some(press) = press {
             let (x, y) = local(press);
-            let hit = state.view.track_at_y(y, track_count, height).and_then(|track| hit_test(state.project(), &state.view, track, x));
-            if let Some(hit) = hit {
+            let track = state.view.track_at_y(y, track_count, height);
+            if let Some(transition) = track.and_then(|track| transition_hit_test(state.project(), &state.view, track, x)) {
+                state.select_transition(Some(transition));
+            } else if let Some(hit) = track.and_then(|track| hit_test(state.project(), &state.view, track, x)) {
                 state.select(Some(hit.key));
                 state.begin_clip_drag(hit, state.view.x_to_time(x));
             }
@@ -371,6 +381,9 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
         response.hover_pos().and_then(|pointer| {
             let (x, y) = local(pointer);
             let track = state.view.track_at_y(y, track_count, height)?;
+            if transition_hit_test(state.project(), &state.view, track, x).is_some() {
+                return Some(CursorIcon::PointingHand);
+            }
             let hit = hit_test(state.project(), &state.view, track, x)?;
             if state.is_track_locked(hit.key.track) {
                 return None;
@@ -406,7 +419,7 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
                 draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, hidden: track.hidden, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second() });
             }
         }
-        draw_transitions(&painter, state, tracks_rect, row, track);
+        draw_transitions(&painter, state, tracks_rect, row, t, track);
     }
     draw_drag_preview(ui, state, tracks_rect);
 }
@@ -570,15 +583,18 @@ fn draw_level_bars(painter: &egui::Painter, paint: &ClipPaint<'_>, visuals: &mut
     painter.add(Shape::mesh(mesh));
 }
 
-fn draw_transitions(painter: &egui::Painter, state: &EditorState, tracks_rect: Rect, row: Rect, track: &engine::Track) {
+fn draw_transitions(painter: &egui::Painter, state: &EditorState, tracks_rect: Rect, row: Rect, index: usize, track: &engine::Track) {
+    let selected = state.selected_transition();
     for transition in &track.transitions {
-        let Some(next) = track.clips.get(transition.after_clip + 1) else { continue };
-        let start = next.start.saturating_sub(transition.duration.half_floor());
-        let rect = span_rect(state, tracks_rect, row, start, start.saturating_add(transition.duration));
+        let Some((start, end)) = transition_span(state.project(), index, transition.after_clip) else { continue };
+        let rect = span_rect(state, tracks_rect, row, start, end);
         if rect.intersects(tracks_rect) {
             let opacity = if track.hidden { HIDDEN_OPACITY } else { 1.0 };
             painter.rect_filled(rect, CornerRadius::same(CLIP_RADIUS), theme::transition().gamma_multiply(opacity));
             painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(1.0, theme::accent_text().gamma_multiply(opacity)), StrokeKind::Inside);
+            if selected == Some(TransitionKey { track: index, after_clip: transition.after_clip }) {
+                painter.rect_stroke(rect, CornerRadius::same(CLIP_RADIUS), Stroke::new(2.0, theme::selected()), StrokeKind::Inside);
+            }
         }
     }
 }

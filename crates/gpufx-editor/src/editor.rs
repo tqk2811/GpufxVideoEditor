@@ -9,7 +9,7 @@ use crate::packages::{Catalog, PackageKind, PickerState};
 use crate::project_lock::ProjectLock;
 use crate::playback::plan::{start_time, TransportCommand};
 use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_command, ClipDrag, EditCommand};
-use crate::timeline::hit::ClipHit;
+use crate::timeline::hit::{ClipHit, TransitionKey};
 use crate::timeline::snap::{snap_command, snap_onto_track, snap_points, snap_span, snap_tolerance, Snapped};
 use crate::timeline::view::TimelineView;
 use crate::asset_install::InstalledAudioPack;
@@ -64,6 +64,8 @@ pub enum Status {
 pub struct EditorState {
     history: EditHistory,
     selection: Option<ClipKey>,
+    /// The selected transition. A clip selection wins over it, so setting one drops the other.
+    transition_selection: Option<TransitionKey>,
     playhead: Time,
     status: Status,
     /// Counts the changes of the project; equal values mean an equal project.
@@ -395,6 +397,7 @@ impl EditorState {
         Self {
             history: EditHistory::new(project, UNDO_DEPTH),
             selection: None,
+            transition_selection: None,
             playhead: Time::ZERO,
             status: Status::Idle,
             revision: 0,
@@ -535,6 +538,7 @@ impl EditorState {
         };
         self.project_file = file;
         self.selection = None;
+        self.transition_selection = None;
         self.playhead = Time::ZERO;
         self.playing = false;
         self.scrub_target = None;
@@ -695,6 +699,20 @@ impl EditorState {
 
     pub fn select(&mut self, selection: Option<ClipKey>) {
         self.selection = selection;
+        self.transition_selection = None;
+    }
+
+    /// Selects the transition `key`, dropping the clip selection.
+    pub fn select_transition(&mut self, key: Option<TransitionKey>) {
+        self.selection = None;
+        self.transition_selection = key;
+    }
+
+    /// The selected transition while no clip is selected and the transition is still in the project.
+    pub fn selected_transition(&self) -> Option<TransitionKey> {
+        let key = self.transition_selection.filter(|_| self.selection.is_none())?;
+        let track = self.project().tracks.get(key.track)?;
+        (track.transitions.iter().any(|tr| tr.after_clip == key.after_clip) && key.after_clip + 1 < track.clips.len()).then_some(key)
     }
 
     fn refuse(&mut self, error: &EditError) {
@@ -770,6 +788,7 @@ impl EditorState {
         self.apply_command(command)?;
         if self.revision != revision {
             self.selection = None;
+            self.transition_selection = None;
             self.library.adopt_project_media(self.history.current());
         }
         Ok(())
@@ -884,6 +903,11 @@ impl EditorState {
         self.selection = match self.selection {
             Some(key) if key.track == track => None,
             Some(key) if key.track > track => Some(ClipKey { track: key.track - 1, ..key }),
+            other => other,
+        };
+        self.transition_selection = match self.transition_selection {
+            Some(key) if key.track == track => None,
+            Some(key) if key.track > track => Some(TransitionKey { track: key.track - 1, ..key }),
             other => other,
         };
         self.ui.font_file_request = None;
@@ -2061,10 +2085,19 @@ impl EditorState {
     }
 
     pub fn remove_transition_after(&mut self, track: usize, after_clip: usize) {
-        self.run(|project| remove_transition(project, track, after_clip));
+        if self.run(|project| remove_transition(project, track, after_clip)) && self.transition_selection == Some(TransitionKey { track, after_clip }) {
+            self.transition_selection = None;
+        }
     }
 
+    /// Deletes the selected clip, or the selected transition when no clip is selected.
     pub fn delete_selected(&mut self) {
+        if let Some(key) = self.selected_transition() {
+            if self.run(|project| remove_transition(project, key.track, key.after_clip)) {
+                self.transition_selection = None;
+            }
+            return;
+        }
         let Some(key) = self.selection else {
             self.status = Status::Info(Message::SelectClip(ClipAction::Delete));
             return;
@@ -2112,6 +2145,7 @@ impl EditorState {
         self.revision += 1;
         self.audio_revision = self.revision;
         self.selection = None;
+        self.transition_selection = None;
         self.ui.clip_menu = None;
         self.status = Status::Idle;
     }
@@ -3319,6 +3353,49 @@ mod tests {
         assert_eq!(track.transitions[0].duration, DEFAULT_TRANSITION_DURATION);
         state.undo();
         assert!(state.project().tracks[0].transitions.is_empty());
+    }
+
+    #[test]
+    fn selecting_a_transition_drops_the_clip_selection_and_back() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        let transition = TransitionKey { track: 0, after_clip: 0 };
+        state.select_transition(Some(transition));
+        assert_eq!(state.selection(), None);
+        assert_eq!(state.selected_transition(), Some(transition));
+        state.select(Some(key(1)));
+        assert_eq!(state.selected_transition(), None);
+        assert_eq!(state.selection(), Some(key(1)));
+    }
+
+    #[test]
+    fn delete_removes_the_selected_transition_and_undo_brings_it_back() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        state.select_transition(Some(TransitionKey { track: 0, after_clip: 0 }));
+        state.delete_selected();
+        assert!(state.project().tracks[0].transitions.is_empty());
+        assert_eq!(state.project().tracks[0].clips.len(), 2, "the clips stay");
+        assert_eq!(state.selected_transition(), None);
+        state.undo();
+        assert_eq!(state.project().tracks[0].transitions.len(), 1);
+        assert_eq!(state.selected_transition(), None, "undo drops a stale selection");
+    }
+
+    #[test]
+    fn a_transition_selection_goes_stale_with_its_transition() {
+        let mut state = two_touching_clips();
+        state.add_transition_package("mix");
+        let transition = TransitionKey { track: 0, after_clip: 0 };
+        state.select_transition(Some(transition));
+        state.remove_transition_after(0, 0);
+        assert_eq!(state.selected_transition(), None);
+        state.undo();
+        state.select_transition(Some(transition));
+        state.select(Some(key(1)));
+        state.delete_selected();
+        state.select_transition(Some(transition));
+        assert_eq!(state.selected_transition(), None, "a transition without its second clip is not selectable");
     }
 
     #[test]
