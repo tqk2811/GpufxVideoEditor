@@ -251,7 +251,7 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 ### [Thấp] Tone map HDR cố định, chưa có tuỳ chọn và chưa có xuất HDR
 
-Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2 (`external/FFmpegGpuFilter/crates/gpufx-core/src/hdr.rs`), đỉnh lấy từ MaxCLL hoặc mastering display của từng khung (`crates/d3d12-backend/src/decoder.rs`, `frame_peak_nits`), mặc định 1000 cd/m2. Chưa có tuỳ chọn cho người dùng (đỉnh, độ sáng trắng), Dolby Vision profile 5 (IPT) không được nhận ra và sẽ ra màu sai, và chưa xuất được HDR. Màu sau tone map mới được kiểm bằng số; cần người dùng xem bằng mắt với video HDR thật của điện thoại. Ghi ngày 2026-11-16.
+Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đường cong chạy trên 0,75 max(R,G,B) + 0,25 độ sáng (`external/FFmpegGpuFilter/crates/gpufx-core/src/hdr.rs`), đỉnh lấy từ MaxCLL hoặc mastering display của từng khung (`crates/d3d12-backend/src/decoder.rs`, `frame_peak_nits`), kẹp trong 400..10000, mặc định 1000 cd/m2. Chưa có tuỳ chọn cho người dùng (đỉnh, độ sáng trắng), Dolby Vision profile 5 (IPT) không được nhận ra và sẽ ra màu sai, và chưa xuất được HDR. Màu sau tone map mới được kiểm bằng số; cần người dùng xem bằng mắt với video HDR thật của điện thoại. Ghi ngày 2026-11-16.
 
 ### [Thấp] Worker thumbnail có thể kẹt trên ổ mạng chết
 
