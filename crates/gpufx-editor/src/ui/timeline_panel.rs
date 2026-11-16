@@ -27,6 +27,8 @@ const CLIP_HEADER_HEIGHT: f32 = 14.0;
 /// The side of the letter that marks a text clip in its name strip.
 const TEXT_ICON_SIDE: f32 = 10.0;
 const KEYFRAME_MARK_RADIUS: f32 = 3.5;
+/// Pixels between the hatch lines of a hold.
+const HOLD_HATCH_PITCH: f32 = 6.0;
 /// How far above the bottom edge of a clip its keyframe marks sit.
 const KEYFRAME_MARK_MARGIN: f32 = 5.0;
 const CLIP_RADIUS: u8 = 4;
@@ -498,10 +500,38 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
         draw_clip_media(painter, paint, &mut visuals.borrow_mut(), paint.rect.with_min_y(strip.bottom()));
     }
     if paint.kind.shows_picture() {
+        draw_holds(&text, paint, paint.rect.with_min_y(strip.bottom()));
         draw_keyframe_marks(&text, paint);
     }
     if paint.selected {
         painter.rect_stroke(paint.rect, radius, Stroke::new(2.0, theme::selected()), StrokeKind::Inside);
+    }
+}
+
+/// The parts of `body` that show a hold (a still of the first or last source frame, see
+/// [`Clip::hold_start`]): the start one and the end one, each only when the clip has it.
+fn hold_rects(clip: &Clip, body: Rect) -> [Option<Rect>; 2] {
+    let duration = clip.duration.ticks().max(1) as f32;
+    let width = |hold: Time| body.width() * (hold.ticks() as f32 / duration).min(1.0);
+    let start = Some(clip.hold_start()).filter(|hold| *hold > Time::ZERO).map(|hold| body.with_max_x(body.left() + width(hold)));
+    let end = Some(clip.hold_end()).filter(|hold| *hold > Time::ZERO).map(|hold| body.with_min_x(body.right() - width(hold)));
+    [start, end]
+}
+
+/// Shades the holds of a clip and hatches them, so the still parts read apart from the video.
+fn draw_holds(painter: &egui::Painter, paint: &ClipPaint<'_>, body: Rect) {
+    let opacity = paint.opacity();
+    let line = Stroke::new(1.0, theme::on_clip().gamma_multiply(0.35 * opacity));
+    for rect in hold_rects(paint.clip, body).into_iter().flatten() {
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::from_black_alpha((110.0 * opacity) as u8));
+        let hatch = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+        let mut x = rect.left() - rect.height();
+        while x < rect.right() {
+            hatch.line_segment([Pos2::new(x, rect.bottom()), Pos2::new(x + rect.height(), rect.top())], line);
+            x += HOLD_HATCH_PITCH;
+        }
+        let edge = if rect.left() <= body.left() { rect.right() } else { rect.left() };
+        painter.vline(edge, rect.y_range(), Stroke::new(1.0, theme::on_clip().gamma_multiply(0.6 * opacity)));
     }
 }
 
@@ -774,6 +804,19 @@ pub(super) fn header_button_center(panel: Rect, state: &EditorState, t: usize, f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_holds_cover_their_share_of_the_clip_body() {
+        let fade = |ticks: i64| Some(engine::AnimationRef { preset: "fade".to_owned(), duration: Time::from_ticks(ticks) });
+        let mut clip = crate::editor::new_clip("a.mp4", Time::ZERO, Time::from_ticks(400));
+        let body = Rect::from_min_max(Pos2::new(100.0, 10.0), Pos2::new(500.0, 50.0));
+        assert_eq!(hold_rects(&clip, body), [None, None], "no hold, nothing shaded");
+        clip.animation.enter = fade(-100);
+        clip.animation.exit = fade(50);
+        assert_eq!(hold_rects(&clip, body), [Some(Rect::from_min_max(Pos2::new(100.0, 10.0), Pos2::new(200.0, 50.0))), None], "a plain out animation is no hold");
+        clip.animation.exit = fade(-50);
+        assert_eq!(hold_rects(&clip, body)[1], Some(Rect::from_min_max(Pos2::new(450.0, 10.0), Pos2::new(500.0, 50.0))));
+    }
 
     #[test]
     fn the_track_label_stays_clear_of_the_header_buttons() {
