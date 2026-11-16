@@ -93,6 +93,33 @@ fn the_detector_caches_per_version_of_the_file_and_can_cancel() {
 }
 
 #[test]
+fn detections_queue_on_a_few_threads_and_a_queued_one_cancels_at_once() {
+    let paths: Vec<PathBuf> = (0..5).map(|index| scratch(&format!("queue-{index}.wav"))).collect();
+    for (index, path) in paths.iter().enumerate() {
+        write_click_wav(path, 90.0 + 10.0 * index as f64, 20.0, 0.2);
+    }
+    let mut detector = BeatDetector::default();
+    for path in &paths {
+        assert!(matches!(detector.start(path), BeatStatus::Running(_)));
+    }
+    assert!(detector.active_workers() <= gpufx_editor::beats::WORKERS, "{} threads for {} files", detector.active_workers(), paths.len());
+    // The last one waits in the queue: cancelling it is immediate and leaves the others running.
+    detector.cancel(&paths[4]);
+    assert_eq!(detector.status(&paths[4]), BeatStatus::Idle);
+    let started = Instant::now();
+    while detector.running() {
+        assert!(detector.active_workers() <= gpufx_editor::beats::WORKERS);
+        assert!(started.elapsed() < Duration::from_secs(120), "detection hangs");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for (index, path) in paths[..4].iter().enumerate() {
+        let BeatStatus::Ready(analysis) = detector.status(path) else { panic!("file {index} finished") };
+        assert!((analysis.tempo - (90.0 + 10.0 * index as f64)).abs() < 1.0, "file {index}: {}", analysis.tempo);
+    }
+    assert_eq!(detector.status(&paths[4]), BeatStatus::Idle, "the cancelled one never ran");
+}
+
+#[test]
 fn a_file_without_sound_fails() {
     let missing = scratch("nothing-here.wav");
     let mut detector = BeatDetector::default();
