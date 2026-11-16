@@ -248,6 +248,8 @@ impl<S: ToOwned + PartialEq + ?Sized, V> ClipCache<S, V> {
 pub struct DecoderSpec {
     pub source: String,
     pub text: Option<TextSpec>,
+    /// Whether the clip plays backwards, which takes a decoder of its own (see [`Clip::plays_reversed`]).
+    pub reverse: bool,
 }
 
 /// The part of a text clip its picture is drawn from.
@@ -271,7 +273,7 @@ impl DecoderSpec {
             let widest = clip.placement.map(|placement| placement.width).into_iter().chain(keys.iter().map(|key| key.value)).filter(|value| value.is_finite()).reduce(f64::max);
             TextSpec { text: text.clone(), fitted: clip.placement.is_none(), widest_step: widest.map(|value| text_step_up(value).to_bits()), karaoke_cue_end: text.karaoke.as_ref().filter(|karaoke| karaoke.is_on() && karaoke.words.is_empty()).map(|_| crate::karaoke::cue_end(clip)) }
         });
-        DecoderSpec { source: clip.source.clone(), text }
+        DecoderSpec { source: clip.source.clone(), text, reverse: clip.plays_reversed() }
     }
 }
 

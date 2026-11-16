@@ -194,6 +194,75 @@ fn half_speed_repeats_source_frames() {
     assert_eq!(capture.hashes[0], capture.hashes[1], "a repeated frame is the same picture");
 }
 
+/// A reversed clip, in frames of the output, at `speed`.
+fn reversed_clip_json(source: &Path, start: i64, source_in: i64, duration: i64, speed: f64) -> String {
+    format!(r#"{{"source":"{}","start":{},"source_in":{},"duration":{},"speed":{speed},"reverse":true}}"#, json_path(source), start * FRAME, source_in * FRAME, duration * FRAME)
+}
+
+#[test]
+fn a_reversed_clip_shows_its_source_frames_from_the_last_to_the_first() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}}"#, reversed_clip_json(&a, 0, 10, 40, 1.0));
+    let wanted: Vec<i64> = (0..40).collect();
+    let mut capture = Capture::new(&wanted);
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
+    for frame in wanted {
+        assert_eq!(read_frame_number(capture.frame(frame), W), 49 - frame, "output frame {frame}");
+    }
+}
+
+#[test]
+fn a_reversed_clip_at_double_speed_shows_every_second_frame_backwards() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}}"#, reversed_clip_json(&a, 0, 10, 40, 2.0));
+    let wanted = [0, 1, 39];
+    let mut capture = Capture::new(&wanted);
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
+    for frame in wanted {
+        assert_eq!(read_frame_number(capture.frame(frame), W), 89 - 2 * frame, "output frame {frame}");
+    }
+}
+
+#[test]
+fn a_reversed_clip_with_one_keyframe_decodes_every_frame_backwards() {
+    let _lock = gpu_lock();
+    let clip = long_gop_clip();
+    let Some(gpu) = gpu() else { return };
+    // 150 frames back from source frame 169, several times the decoder ring, inside one GOP.
+    let tracks = format!(r#"{{"clips":[{}]}}"#, reversed_clip_json(&clip, 0, 20, 150, 1.0));
+    let wanted: Vec<i64> = (0..150).collect();
+    let mut capture = Capture::new(&wanted);
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
+    for frame in wanted {
+        assert_eq!(read_frame_number(capture.frame(frame), W), 169 - frame, "output frame {frame}");
+    }
+}
+
+#[test]
+fn a_split_reversed_clip_renders_the_same_frames_and_a_transition_reads_on_backwards() {
+    let _lock = gpu_lock();
+    let (a, b) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let whole = format!(r#"{{"clips":[{}]}}"#, reversed_clip_json(&a, 0, 10, 40, 1.0));
+    let split = format!(r#"{{"clips":[{},{}]}}"#, reversed_clip_json(&a, 0, 35, 15, 1.0), reversed_clip_json(&a, 15, 10, 25, 1.0));
+    let mut first = Capture::new(&[]);
+    render_project(&gpu, &project_json(W, H, &whole), &mut first).expect("render whole");
+    let mut second = Capture::new(&[]);
+    render_project(&gpu, &project_json(W, H, &split), &mut second).expect("render split");
+    assert_eq!(first.hashes, second.hashes, "the halves show what the whole clip showed");
+    // A cut to clip b with a transition: inside the window the reversed clip goes on below its source_in.
+    let transition = r#""transitions":[{"after_clip":0,"package":"xfade","duration":30000}]"#;
+    let tracks = format!(r#"{{"clips":[{},{}],{transition}}}"#, reversed_clip_json(&a, 0, 30, 30, 1.0), clip_json(&b, 30, 100, 30));
+    let mut capture = Capture::new(&[0, 59]);
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render with a transition");
+    assert_eq!(read_frame_number(capture.frame(0), W), 59);
+    assert_eq!(read_frame_number(capture.frame(59), W), 129);
+}
+
 #[test]
 fn a_speed_of_one_renders_exactly_as_a_project_without_the_field() {
     let _lock = gpu_lock();

@@ -21,6 +21,9 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12Device, ID3D12Fence};
 
 use crate::ffi::{self, check, describe_error};
 
+mod reverse;
+pub use reverse::ReverseDecoder;
+
 /// Frames the consumer may hold on top of what the decoder needs for references.
 const EXTRA_HW_FRAMES: i32 = 8;
 const TICKS_PER_SECOND: i128 = engine::TICKS_PER_SECOND as i128;
@@ -382,6 +385,11 @@ pub struct SequentialDecoder {
 impl SequentialDecoder {
     /// Opens `path` for hardware decoding on `device`.
     pub fn open(path: &Path, device: &ID3D12Device) -> Result<Self, String> {
+        Self::open_holding(path, device, 0)
+    }
+
+    /// [`SequentialDecoder::open`] with room for `held` more frames kept alive by the caller.
+    fn open_holding(path: &Path, device: &ID3D12Device, held: i32) -> Result<Self, String> {
         let path_text = path.to_str().ok_or_else(|| format!("{}: the path is not valid UTF-8", path.display()))?;
         let c_path = CString::new(path_text).map_err(|_| format!("{path_text}: the path contains NUL"))?;
         let mut decoder = Self {
@@ -409,11 +417,11 @@ impl SequentialDecoder {
             native_av1: false,
         };
         // SAFETY: on error, Drop releases whatever has been created so far.
-        unsafe { decoder.initialize(&c_path, device) }.map_err(|e| format!("{path_text}: {e}"))?;
+        unsafe { decoder.initialize(&c_path, device, EXTRA_HW_FRAMES + held) }.map_err(|e| format!("{path_text}: {e}"))?;
         Ok(decoder)
     }
 
-    unsafe fn initialize(&mut self, path: &CStr, device: &ID3D12Device) -> Result<(), String> {
+    unsafe fn initialize(&mut self, path: &CStr, device: &ID3D12Device, extra_hw_frames: i32) -> Result<(), String> {
         check(ffi::avformat_open_input(&mut self.format_context, path.as_ptr(), ptr::null(), ptr::null_mut()), "avformat_open_input")?;
         check(ffi::avformat_find_stream_info(self.format_context, ptr::null_mut()), "avformat_find_stream_info")?;
 
@@ -457,7 +465,7 @@ impl SequentialDecoder {
         (*self.codec_context).get_format = Some(choose_d3d12_format);
         (*self.codec_context).get_buffer2 = Some(track_started_frame);
         (*self.codec_context).opaque = (&raw mut *self.latest_started).cast();
-        (*self.codec_context).extra_hw_frames = EXTRA_HW_FRAMES;
+        (*self.codec_context).extra_hw_frames = extra_hw_frames;
         // Frame threading adds latency and does nothing for hardware decoding.
         (*self.codec_context).thread_count = 1;
         check(ffi::avcodec_open2(self.codec_context, codec, ptr::null_mut()), "avcodec_open2")?;
