@@ -25,15 +25,16 @@ pub const MODEL_BASE_URL_ENV: &str = "GPUFX_MODEL_BASE_URL";
 /// The built-in base URL of the models: the release of the matting models of FFmpegGpuFilter.
 pub const DEFAULT_MODEL_BASE_URL: Option<&str> = Some("https://github.com/tqk2811/FFmpegGpuFilter/releases/download/models-matting-v1");
 
-/// The SHA-256 of the released zip of each model (the zips `scripts/convert-matting-models.py`
-/// built for that release). The `source.json` of a package records only the hashes of the
-/// intermediate ncnn files, not of the zip.
-pub fn expected_zip_sha256(model: MatteModel) -> Option<&'static str> {
-    match model {
-        MatteModel::Off => None,
-        MatteModel::Quality => Some("b591b624c4564782719a4f6c23a344c1848d805c648d6e90fc0bcc1cb04952f9"),
-        MatteModel::Fast => Some("ed81a1278a4e9cd2031dd6571ba264fe9e22a5c2a7a25e91b18bbc622b3f3835"),
-    }
+/// The SHA-256 of the released zip of each model: `sha256_zip` of the package's `source.json`
+/// in the FFmpegGpuFilter checkout, built into the editor.
+pub fn expected_zip_sha256(model: MatteModel) -> Option<String> {
+    let source = match model {
+        MatteModel::Off => return None,
+        MatteModel::Quality => include_str!("../../../external/FFmpegGpuFilter/packages/gpufx_ai_matting/modnet-webcam/source.json"),
+        MatteModel::Fast => include_str!("../../../external/FFmpegGpuFilter/packages/gpufx_ai_matting/pp-humanseg-v2-lite/source.json"),
+    };
+    let source: serde_json::Value = serde_json::from_str(source).ok()?;
+    source.get("sha256_zip")?.as_str().filter(|hash| hash.len() == 64).map(str::to_ascii_lowercase)
 }
 
 /// Where and how to fetch a model.
@@ -49,7 +50,7 @@ impl ModelSource {
     /// The source of `model` from the build and the environment.
     pub fn of(model: MatteModel) -> Self {
         let base_url = std::env::var(MODEL_BASE_URL_ENV).ok().filter(|url| !url.trim().is_empty()).or_else(|| DEFAULT_MODEL_BASE_URL.map(str::to_owned));
-        Self { base_url, sha256: expected_zip_sha256(model).map(str::to_owned) }
+        Self { base_url, sha256: expected_zip_sha256(model) }
     }
 
     /// Whether fetching can run: a URL and a hash to check against.
@@ -121,7 +122,7 @@ fn install_file(model: MatteModel, source: &Path, folder: &Path) -> Result<PathB
     let id = model.package_id().ok_or("no model")?;
     std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
     let target = folder.join(format!("{id}.zip"));
-    let temporary = folder.join(format!("{id}.zip.part"));
+    let temporary = folder.join(format!("{id}.zip.{}.part", std::process::id()));
     std::fs::copy(source, &temporary).map_err(|e| format!("copying {}: {e}", source.display()))?;
     std::fs::rename(&temporary, &target).map_err(|e| {
         let _ = std::fs::remove_file(&temporary);
@@ -146,9 +147,9 @@ pub fn fetch(model: MatteModel, source: &ModelSource, folder: &Path) -> Result<P
     };
     let id = model.package_id().ok_or("no model")?;
     std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
-    let download = folder.join(format!("{id}.zip.download"));
+    let download = folder.join(format!("{id}.zip.{}.download", std::process::id()));
     let url = format!("{}/{id}.zip", base.trim_end_matches('/'));
-    let status = Command::new("curl.exe").args(["--fail", "--location", "--silent", "--show-error", "--output"]).arg(&download).arg(&url).status().map_err(|e| format!("running curl: {e}"))?;
+    let status = Command::new("curl.exe").args(["--fail", "--location", "--silent", "--show-error", "--proto", "=https,file", "--proto-redir", "=https", "--connect-timeout", "30", "--max-time", "1800", "--output"]).arg(&download).arg(&url).status().map_err(|e| format!("running curl: {e}"))?;
     let result = (|| {
         if !status.success() {
             return Err(format!("fetching {url} failed ({status})"));
@@ -222,7 +223,7 @@ mod tests {
                 eprintln!("skipping: the {} zip is not built", model.package_id().unwrap());
                 continue;
             };
-            assert_eq!(Some(file_sha256(&zip).unwrap().as_str()), expected_zip_sha256(model), "{} was rebuilt: update expected_zip_sha256 and the release", zip.display());
+            assert_eq!(Some(file_sha256(&zip).unwrap()), expected_zip_sha256(model), "{} was rebuilt: update sha256_zip of its source.json and the release", zip.display());
         }
     }
 

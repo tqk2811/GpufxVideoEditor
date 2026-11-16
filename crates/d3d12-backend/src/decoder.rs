@@ -759,6 +759,30 @@ impl SequentialDecoder {
         self.frame_at_target(target)
     }
 
+    /// Goes through the frames before the one at `pts`, oldest first, handing each to `each`, and
+    /// returns the timestamps of the last `count` of them. The window starts `count` frame steps
+    /// (from the stream's frame rate) before `pts`, so it depends on the stream and `pts` alone;
+    /// none without a frame rate.
+    pub fn frames_before(&mut self, pts: i64, count: usize, mut each: impl FnMut(&mut DecodedFrame) -> Result<(), String>) -> Result<Vec<i64>, String> {
+        let Some(step) = self.frame_step_pts().filter(|_| count > 0) else { return Ok(Vec::new()) };
+        self.request_started = Instant::now();
+        let start = pts.saturating_sub(step.saturating_mul(count as i64)).saturating_add(step / 2);
+        let mut frame = self.frame_at_target(start)?;
+        let mut seen = std::collections::VecDeque::with_capacity(count + 1);
+        while frame.pts < pts {
+            each(&mut frame)?;
+            seen.push_back(frame.pts);
+            if seen.len() > count {
+                seen.pop_front();
+            }
+            self.fill_lookahead()?;
+            let Some(next) = self.lookahead.as_ref().map(|next| next.pts) else { break };
+            drop(frame);
+            frame = self.frame_at_target(next)?;
+        }
+        Ok(seen.into())
+    }
+
     fn frame_at_inner(&mut self, time: Time) -> Result<DecodedFrame, String> {
         self.request_started = Instant::now();
         let time = self.proxy.as_ref().and_then(|proxy| proxy.timing).map_or(time, |timing| timing.proxy_time(time));

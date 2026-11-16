@@ -488,6 +488,9 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 .map_err(refused)?;
         }
         AgentEdit::ClipSetMatte { clip, model, threshold, feather, edge, invert, temporal } => {
+            if state.project().tracks.get(clip.track).is_some_and(|track| !track.kind.shows_picture()) {
+                return Err(AgentError::new("no_picture", format!("track {} shows no picture, so its clips have no background to remove", clip.track)));
+            }
             let max = engine::MAX_MATTE_PIXELS;
             for (name, value, range) in [("threshold", threshold, 0.0..=1.0), ("feather", feather, 0.0..=max), ("edge", edge, -max..=max), ("temporal", temporal.map(f64::from), 0.0..=f64::from(engine::MAX_MATTE_TEMPORAL))] {
                 if let Some(value) = value.filter(|value| !range.contains(value)) {
@@ -1299,6 +1302,23 @@ mod tests {
         let revision = host.state.revision();
         let edit = AgentEdit::ClipSetSpeed { clip: ClipRef { track: 0, clip: 0 }, speed: 0.01 };
         assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: revision, edit })), "out_of_range");
+    }
+
+    #[test]
+    fn an_agent_sets_the_matte_of_a_video_clip_but_not_of_an_audio_clip() {
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Video);
+        host.state.add_clip_from_file(0, Path::new("a.mp4"));
+        let set = |host: &mut FakeHost, edit: AgentEdit| {
+            let revision = host.state.revision();
+            host.run(AgentRequest::Edit { expected_revision: revision, edit })
+        };
+        let matte = |track| AgentEdit::ClipSetMatte { clip: ClipRef { track, clip: 0 }, model: Some(engine::MatteModel::Fast), threshold: None, feather: Some(3.0), edge: None, invert: None, temporal: None };
+        set(&mut host, matte(0)).expect("video clip");
+        assert_eq!(host.state.project().tracks[0].clips[0].matte, engine::ClipMatte { model: engine::MatteModel::Fast, feather: 3.0, ..Default::default() });
+        host.state.add_track(TrackKind::Audio);
+        let audio = host.state.project().tracks.iter().rposition(|track| track.is_audio()).expect("an audio track");
+        assert_eq!(code(set(&mut host, matte(audio))), "no_picture");
     }
 
     #[test]

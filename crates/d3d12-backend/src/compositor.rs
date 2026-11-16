@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SA
 use crate::alpha_merge::{larger_alpha_effect, restore_alpha_effect};
 use crate::decoder::{DecodedFrame, PublishClock, ReverseDecoder, SequentialDecoder};
 use crate::gpu::Gpu;
-use crate::matte::{find_matting_model, matte_texture, temporal_window, MatteCache, MatteKey, MatteShaper, MATTE_CACHE_BYTES};
+use crate::matte::{find_matting_model, matte_texture, MatteCache, MatteKey, MatteShaper, MATTE_CACHE_BYTES};
 use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
 use crate::rotated_place::rotated_place_effect;
@@ -419,6 +419,8 @@ fn decoded_input(frame: &DecodedFrame) -> Result<D3d12Frame, String> {
 /// A still on the GPU, shared by every clip that shows it. The GPU only ever reads it; the fence
 /// value goes up with each read, like the transparent image's.
 pub struct StillImage {
+    /// The file and its size and time, for an image file: names the picture in the matte cache.
+    origin: Option<Arc<str>>,
     image: Image,
     fence_value: AtomicU64,
     /// Width over height of the picture without its margin.
@@ -816,7 +818,12 @@ pub struct D3d12Compositor {
     matte_leads: ClipCache<[String], EffectGraph>,
     /// A second decoder of a matted clip's file, for the frames of its temporal window.
     matte_neighbours: HashMap<ClipKey, (Arc<str>, SequentialDecoder)>,
+    /// The timestamps of the temporal window of a frame (file, pts, length), once decoded.
+    matte_windows: HashMap<(Arc<str>, i64, u32), Vec<i64>>,
 }
+
+/// How many temporal windows are remembered before the list starts over.
+const MAX_MATTE_WINDOWS: usize = 8192;
 
 /// Runs `matte` on `image` (the project size) and returns the raw matte at the model size.
 fn run_matte(gpu: &Gpu, matte: &mut gpufx_core::nn::FrameMatte, image: &Image) -> Result<Arc<wgpu::Texture>, String> {
@@ -862,7 +869,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new() })
+        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
     }
 
     /// Why matting models could not be used, once per model: missing or failing to load. A clip
@@ -931,22 +938,68 @@ impl D3d12Compositor {
         Ok(raw)
     }
 
-    /// The raw matte of the source frame `matte_key` names, for the temporal window of clip
-    /// `key`: from the cache, or decoded by the clip's second decoder.
-    fn neighbour_matte(&mut self, key: ClipKey, model: MatteModel, matte_key: MatteKey, info: &FrameInfo) -> Result<Arc<wgpu::Texture>, String> {
-        if let Some(found) = self.matte_cache.get(&matte_key) {
-            return Ok(found);
+    /// A decoder of `origin` for the temporal window of clip `key`, with the abort policy of the
+    /// clip's own decoder.
+    fn open_neighbour_decoder(&self, origin: &str) -> Result<SequentialDecoder, String> {
+        let mut decoder = SequentialDecoder::open(Path::new(origin), self.gpu.raw_device())?;
+        if let Some((flag, grace)) = &self.abort {
+            decoder.set_abort(flag.clone(), *grace);
+            decoder.set_abort_policy(self.closing.clone(), Some(self.publish_clock.clone()));
+        } else {
+            decoder.set_abort_policy(self.closing.clone(), None);
         }
-        let mut frame = {
-            let (_, decoder) = self.matte_neighbours.get_mut(&key).ok_or("no neighbour decoder")?;
-            decoder.frame_at_pts(matte_key.pts)?
+        Ok(decoder)
+    }
+
+    /// The raw mattes of the `temporal` source frames before `pts` in `origin`, oldest first: from
+    /// the cache when the window is known and every frame of it is there, else decoded oldest
+    /// first by the clip's second decoder, the frames already cached not run again. A frame whose
+    /// matte fails is left out; a failed decode leaves the whole window out (a cancel stops it).
+    fn neighbour_mattes(&mut self, key: ClipKey, origin: &Arc<str>, pts: i64, temporal: u32, key_of: &dyn Fn(i64) -> MatteKey, model: MatteModel, info: &FrameInfo) -> Result<Vec<Arc<wgpu::Texture>>, String> {
+        let window_key = (origin.clone(), pts, temporal);
+        if let Some(window) = self.matte_windows.get(&window_key).cloned() {
+            let found: Option<Vec<_>> = window.iter().map(|neighbour| self.matte_cache.get(&key_of(*neighbour))).collect();
+            if let Some(found) = found {
+                return Ok(found);
+            }
+        }
+        let mut decoder = match self.matte_neighbours.remove(&key) {
+            Some((open, decoder)) if open == *origin => decoder,
+            _ => self.open_neighbour_decoder(origin)?,
         };
-        let mut input = decoded_input(&frame)?;
-        let image = self.run_matte_lead(key, &mut input, matte_key.turns, false, info)?;
-        frame.raise_fence_value(input.fence_value);
-        let raw = self.raw_matte(model, Some(matte_key), image);
-        self.release_image(image);
-        raw
+        let mut mattes: HashMap<i64, Arc<wgpu::Texture>> = HashMap::new();
+        let turns = key_of(pts).turns;
+        let walked = decoder.frames_before(pts, temporal as usize, |frame| {
+            let matte_key = key_of(frame.pts);
+            if let Some(found) = self.matte_cache.get(&matte_key) {
+                mattes.insert(frame.pts, found);
+                return Ok(());
+            }
+            let mut input = decoded_input(frame)?;
+            let image = self.run_matte_lead(key, &mut input, turns, false, info)?;
+            frame.raise_fence_value(input.fence_value);
+            let raw = self.raw_matte(model, Some(matte_key), image);
+            self.release_image(image);
+            match raw {
+                Ok(raw) => {
+                    mattes.insert(frame.pts, raw);
+                }
+                Err(message) if crate::decoder::is_cancelled(&message) => return Err(message),
+                Err(_) => {}
+            }
+            Ok(())
+        });
+        self.matte_neighbours.insert(key, (origin.clone(), decoder));
+        let window = match walked {
+            Ok(window) => window,
+            Err(message) if crate::decoder::is_cancelled(&message) => return Err(message),
+            Err(_) => Vec::new(),
+        };
+        if self.matte_windows.len() >= MAX_MATTE_WINDOWS {
+            self.matte_windows.clear();
+        }
+        self.matte_windows.insert(window_key, window.clone());
+        Ok(window.iter().filter_map(|neighbour| mattes.get(neighbour).cloned()).collect())
     }
 
     /// The picture of `frame` at the project size with its alpha cut out by `matte`, in a new
@@ -966,22 +1019,19 @@ impl D3d12Compositor {
 
     fn cut_out(&mut self, key: ClipKey, frame: &SourceFrame, matte: &ClipMatte, turns: u8, picture: ImageId, info: &FrameInfo) -> Result<ImageId, String> {
         let (width, height) = (self.width, self.height);
-        let identity = match frame {
-            SourceFrame::Video(decoded) => decoded.origin.clone().map(|origin| (origin, decoded.pts)),
-            _ => None,
+        let (identity, video) = match frame {
+            SourceFrame::Video(decoded) => (decoded.origin.clone().map(|origin| (origin, decoded.pts)), true),
+            SourceFrame::Still(still) => (still.origin.clone().map(|origin| (origin, 0)), false),
+            _ => (None, false),
         };
-        let key_of = |origin: &Arc<str>, pts: i64| MatteKey { origin: origin.clone(), pts, model: matte.model, width, height, turns };
-        let mut raws = vec![self.raw_matte(matte.model, identity.as_ref().map(|(origin, pts)| key_of(origin, *pts)), picture)?];
-        if let Some((origin, pts)) = identity.as_ref().filter(|_| matte.temporal > 0) {
-            if !matches!(self.matte_neighbours.get(&key), Some((open, _)) if open == origin) {
-                let decoder = SequentialDecoder::open(Path::new(&**origin), self.gpu.raw_device())?;
-                self.matte_neighbours.insert(key, (origin.clone(), decoder));
-            }
-            let step = self.matte_neighbours.get(&key).and_then(|(_, decoder)| decoder.frame_step_pts());
-            for neighbour in temporal_window(*pts, step, matte.temporal).into_iter().skip(1) {
-                raws.push(self.neighbour_matte(key, matte.model, key_of(origin, neighbour), info)?);
-            }
+        let model = matte.model;
+        let mut raws = Vec::new();
+        if let Some((origin, pts)) = identity.as_ref().filter(|_| video && matte.temporal > 0) {
+            let key_of = |pts: i64| MatteKey { origin: origin.clone(), pts, model, width, height, turns };
+            raws = self.neighbour_mattes(key, origin, *pts, matte.temporal.min(engine::MAX_MATTE_TEMPORAL), &key_of, model, info)?;
         }
+        let current = identity.as_ref().map(|(origin, pts)| MatteKey { origin: origin.clone(), pts: *pts, model, width, height, turns });
+        raws.push(self.raw_matte(model, current, picture)?);
         let out = self.acquire()?;
         if let Err(message) = self.shape_into(&raws, matte, picture, out) {
             self.release_image(out);
@@ -1241,7 +1291,7 @@ impl D3d12Compositor {
         let picture = premultiplied_still(image.width, image.height, image.pixels);
         let aspect = if margin == (0.0, 0.0) { picture.aspect() } else { f64::from(inner.0) / f64::from(inner.1) };
         let uploaded = Image::upload(&self.gpu, &picture)?;
-        let still = Arc::new(StillImage { aspect, has_alpha: picture.has_alpha, fence_value: AtomicU64::new(uploaded.fence_value), image: uploaded, margin });
+        let still = Arc::new(StillImage { origin: None, aspect, has_alpha: picture.has_alpha, fence_value: AtomicU64::new(uploaded.fence_value), image: uploaded, margin });
         *moving.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((key, still.clone()));
         Ok(still)
     }
@@ -1274,7 +1324,11 @@ impl D3d12Compositor {
     fn insert_still(&mut self, key: StillKey, stamp: (u64, Option<SystemTime>), picture: StillPicture) -> Result<Arc<StillImage>, String> {
         let image = Image::upload(&self.gpu, &picture)?;
         let bytes = u64::from(picture.width) * u64::from(picture.height) * 4;
-        let still = Arc::new(StillImage { aspect: picture.aspect(), has_alpha: picture.has_alpha, fence_value: AtomicU64::new(image.fence_value), image, margin: (0.0, 0.0) });
+        let origin = match &key {
+            StillKey::File(path) => Some(Arc::from(format!("{}|{}|{:?}", path.display(), stamp.0, stamp.1))),
+            StillKey::Text { .. } => None,
+        };
+        let still = Arc::new(StillImage { origin, aspect: picture.aspect(), has_alpha: picture.has_alpha, fence_value: AtomicU64::new(image.fence_value), image, margin: (0.0, 0.0) });
         self.stills.insert(key, CachedStill { stamp, still: still.clone(), bytes, last_used: self.stills_used });
         self.trim_stills();
         Ok(still)
@@ -1860,6 +1914,8 @@ impl D3d12Compositor {
         self.images.trim(Image::idle);
         self.spares.clear();
         self.matte_neighbours.clear();
+        self.matte_cache.clear();
+        self.matte_windows.clear();
         self.gpu.context.trim_pool();
     }
 }

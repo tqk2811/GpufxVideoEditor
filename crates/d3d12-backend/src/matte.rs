@@ -8,8 +8,8 @@
 //! filter), the feather (a gaussian blur), the inversion; and writes the picture with that alpha.
 //! The clip's effects run after, on the cut-out picture.
 //!
-//! The temporal window is the current source frame and the `temporal` frames before it in the
-//! source, found from the current frame's timestamp alone, so a frame gets the same matte in the
+//! The temporal window is the current source frame and the `temporal` frames decoded before it
+//! in the source (see `SequentialDecoder::frames_before`), found from the current frame's timestamp alone, so a frame gets the same matte in the
 //! preview and the export whatever was shown before it.
 
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use engine::{ClipMatte, MatteModel, MAX_MATTE_TEMPORAL};
+use engine::{ClipMatte, MatteModel};
 
 /// The package folder of the matting models, under a package root's `packages` or the models folder.
 pub const MATTING_FOLDER: &str = "gpufx_ai_matting";
@@ -78,17 +78,6 @@ pub fn matte_radii(matte: &ClipMatte, height: u32) -> (i32, u32) {
     let feather = (matte.feather * scale).round();
     let limit = (engine::MAX_MATTE_PIXELS * scale).ceil().max(1.0);
     (edge.clamp(-limit, limit) as i32, feather.clamp(0.0, limit) as u32)
-}
-
-/// The timestamps of the temporal window of the frame at `pts`, the current one first, `step`
-/// apart. Determined by the frame alone.
-pub fn temporal_window(pts: i64, step: Option<i64>, temporal: u32) -> Vec<i64> {
-    let count = match step {
-        Some(step) if step > 0 => temporal.min(MAX_MATTE_TEMPORAL),
-        _ => 0,
-    };
-    let step = step.unwrap_or(0);
-    (0..=i64::from(count)).map(|i| pts.saturating_sub(i * step)).collect()
 }
 
 /// Names one raw matte: which model ran on which frame, brought to which size.
@@ -430,14 +419,6 @@ mod tests {
         assert_eq!(matte_radii(&matte, 540), (-2, 3));
         assert_eq!(matte_radii(&matte, 2160), (-8, 12));
         assert_eq!(matte_radii(&ClipMatte::default(), 1080), (0, 0));
-    }
-
-    #[test]
-    fn the_temporal_window_comes_from_the_frame_alone() {
-        assert_eq!(temporal_window(1000, Some(100), 0), vec![1000]);
-        assert_eq!(temporal_window(1000, Some(100), 3), vec![1000, 900, 800, 700]);
-        assert_eq!(temporal_window(1000, None, 3), vec![1000], "no frame rate, no window");
-        assert_eq!(temporal_window(1000, Some(100), 99).len(), MAX_MATTE_TEMPORAL as usize + 1);
     }
 
     #[test]
