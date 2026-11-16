@@ -584,7 +584,10 @@ fn markers_list(project: &Project) -> Value {
     json!({"markers": markers, "beats": beats})
 }
 
-fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef) -> Result<Value, AgentError> {
+/// Polls first and starts a detection only when nothing is known for the file (or a failure is to
+/// be retried), so a live agent that calls again and again neither restarts a failed detection nor
+/// decodes the file anew; a failure is reported as `detect_failed` on every call until `retry`.
+fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef, retry: bool) -> Result<Value, AgentError> {
     writable(host, expected)?;
     let paths = host.paths();
     let wait = host.mode() == "file";
@@ -598,7 +601,17 @@ fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef) -> Res
     }
     let source = found.source.clone();
     let path = paths.source_path(&source);
-    let status = if wait { state.beats.wait(&path) } else { state.beats.start(&path) };
+    let begin = match state.beats.status(&path) {
+        BeatStatus::Idle => true,
+        BeatStatus::Failed(_) => retry,
+        BeatStatus::Running(_) => wait,
+        BeatStatus::Ready(_) => false,
+    };
+    let status = match (begin, wait) {
+        (true, true) => state.beats.wait(&path),
+        (true, false) => state.beats.start(&path),
+        (false, _) => state.beats.status(&path),
+    };
     match status {
         BeatStatus::Idle => Ok(json!({"state": "running", "progress": 0.0, "clip": clip})),
         BeatStatus::Running(progress) => Ok(json!({"state": "running", "progress": progress, "clip": clip})),
@@ -863,7 +876,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::AssetList { kind, filter } => asset_list(host.state(), kind.as_deref(), filter.as_deref().unwrap_or("")),
         AgentRequest::SubtitleExport { track, path, overwrite } => subtitle_export(host, track, path.as_deref(), overwrite),
         AgentRequest::MarkersList => Ok(markers_list(host.state().project())),
-        AgentRequest::BeatsDetect { expected_revision, clip } => beats_detect(host, expected_revision, clip),
+        AgentRequest::BeatsDetect { expected_revision, clip, retry } => beats_detect(host, expected_revision, clip, retry),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
             None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe)),
@@ -1033,12 +1046,12 @@ mod tests {
         let project = engine::add_clip(host.state.project(), 0, new_clip(&path.to_string_lossy(), Time::ZERO, Time::from_ticks(8 * 90_000))).unwrap();
         host.state.replace_project(project, None);
         let clip = ClipRef { track: 0, clip: 0 };
-        let first = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip }).expect("started");
+        let first = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect("started");
         assert_eq!(first["state"], "running", "{first}");
         assert!(host.state.project().beats.is_empty(), "no edit while it runs");
         let started = std::time::Instant::now();
         let done = loop {
-            let answer = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip }).expect("polled");
+            let answer = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect("polled");
             if answer["state"] == "done" {
                 break answer;
             }
@@ -1047,6 +1060,67 @@ mod tests {
         };
         assert!((done["tempo"].as_f64().unwrap() - 120.0).abs() < 1.0, "{done}");
         assert!(host.state.project().clip_beats(&host.state.project().tracks[0].clips[0]).is_some());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn in_live_mode_a_failed_detection_is_reported_and_not_run_again() {
+        let folder = std::env::temp_dir().join(format!("gpufx-live-beats-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        // Not a sound file: probing it fails.
+        let path = folder.join("broken.wav");
+        std::fs::write(&path, b"not a wave file").unwrap();
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Audio);
+        let project = engine::add_clip(host.state.project(), 0, new_clip(&path.to_string_lossy(), Time::ZERO, Time::from_ticks(90_000))).unwrap();
+        host.state.replace_project(project, None);
+        let clip = ClipRef { track: 0, clip: 0 };
+        let started = std::time::Instant::now();
+        let failed = loop {
+            match host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }) {
+                Ok(answer) => assert_eq!(answer["state"], "running", "{answer}"),
+                Err(error) => break error,
+            }
+            assert!(started.elapsed() < std::time::Duration::from_secs(30), "the failure is never reported");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(failed.code, "detect_failed", "{failed:?}");
+        // A later call reports the same failure without decoding the file again.
+        let again = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect_err("still failed");
+        assert_eq!(again.code, "detect_failed");
+        assert!(!host.state.beats.running(), "no new detection was started");
+        assert!(host.state.project().beats.is_empty() && !host.state.can_undo());
+        // An explicit retry runs it again.
+        let retried = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: true });
+        assert!(retried.as_ref().is_ok_and(|answer| answer["state"] == "running") || retried.as_ref().is_err_and(|error| error.code == "detect_failed"), "{retried:?}");
+        assert!(host.state.beats.running() || retried.is_err(), "the retry started a detection");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn in_live_mode_polling_after_done_adds_no_undo_step() {
+        let folder = std::env::temp_dir().join(format!("gpufx-live-beats-again-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("clicks.wav");
+        click_wav(&path);
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Audio);
+        let project = engine::add_clip(host.state.project(), 0, new_clip(&path.to_string_lossy(), Time::ZERO, Time::from_ticks(8 * 90_000))).unwrap();
+        host.state.replace_project(project, None);
+        let clip = ClipRef { track: 0, clip: 0 };
+        let started = std::time::Instant::now();
+        while host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect("polled")["state"] != "done" {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "detection hangs");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let revision = host.state.revision();
+        for _ in 0..3 {
+            let answer = host.run(AgentRequest::BeatsDetect { expected_revision: host.state.revision(), clip, retry: false }).expect("again");
+            assert_eq!(answer["state"], "done");
+        }
+        assert_eq!(host.state.revision(), revision, "a repeated call changes nothing");
+        host.state.undo();
+        assert!(!host.state.can_undo(), "one undo step for the beats");
         let _ = std::fs::remove_dir_all(&folder);
     }
 

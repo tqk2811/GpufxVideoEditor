@@ -206,10 +206,16 @@ pub enum AgentRequest {
     SubtitleExport { track: usize, path: Option<PathBuf>, overwrite: bool },
     /// The markers of the ruler and the beats every clip plays, in timeline time.
     MarkersList,
-    /// Detects the beats of the sound of `clip` and writes them to it as one undo step. A session
-    /// without a window waits for the result; an open window detects in the background and answers
-    /// `running` with the progress until a later call finds the result ready.
-    BeatsDetect { expected_revision: u64, clip: ClipRef },
+    /// Detects the beats of the sound of the source of `clip` and writes them to that source as one
+    /// undo step. A session without a window waits for the result; an open window detects in the
+    /// background and answers `running` with the progress until a later call finds the result
+    /// ready. A failed detection is reported, not run again, unless `retry` is set.
+    BeatsDetect {
+        expected_revision: u64,
+        clip: ClipRef,
+        #[serde(default)]
+        retry: bool,
+    },
     Edit { expected_revision: u64, edit: AgentEdit },
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },
