@@ -28,9 +28,9 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 
 `crates/gpufx-editor/src/proxy.rs:75` (`ProxyMode::wants`) chỉ xét cao hơn 1080; chưa xét fps cao hay codec nặng (HEVC 10-bit, AV1). `proxy.rs:186` kẹp tốc độ khung về 60 fps vì project không cho nhanh hơn, nên nguồn 120 fps có proxy 60 fps. Ghi ngày 2026-11-17.
 
-### [Thấp] Chụp khung cho agent dùng proxy khi có
+### [Thấp] Agent không xem được trạng thái proxy
 
-`crates/gpufx-editor/src/window.rs:1166` chụp khung cho agent bằng `self.paths`, nên khi đã có proxy ảnh agent nhận là từ bản 540p phóng lên. Chưa có tool MCP `proxy_status`/`proxy_create`. Nên cân nhắc cho capture dùng `without_proxies()` hoặc thêm tham số, và thêm tool nếu agent cần biết trạng thái proxy. Ghi ngày 2026-11-17.
+Chưa có tool MCP `proxy_status`/`proxy_create` (`crates/gpufx-editor/src/window.rs`, `impl AgentHost for Session`). Capture của agent luôn đọc file gốc; nên thêm tool nếu agent cần biết hoặc yêu cầu tạo proxy. Ghi ngày 2026-11-17.
 
 ### [Thấp] `still_dimensions` bỏ qua hướng EXIF
 

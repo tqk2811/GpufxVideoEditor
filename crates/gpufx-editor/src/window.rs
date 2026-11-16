@@ -1,5 +1,6 @@
 //! The window and its event loop.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -143,8 +144,12 @@ struct Session {
     /// The revision the audio thread has.
     audio_revision: u64,
     package_roots: Vec<PathBuf>,
-    /// How files of the open project resolve; shared by preview, playback and export.
+    /// How files of the open project resolve, always to the original files: playback, export,
+    /// thumbnails, probes and the agent use these.
     paths: Arc<ProjectPaths>,
+    /// `paths` plus the ready proxies, for the preview worker alone (the same `Arc` while there is
+    /// no proxy). Nothing else may read a proxy; see [`session_paths`].
+    preview_paths: Arc<ProjectPaths>,
     /// The project file the paths were built for.
     paths_file: Option<PathBuf>,
     /// The title now on the window.
@@ -255,6 +260,7 @@ impl Session {
             was_playing: false,
             audio_revision: 0,
             package_roots,
+            preview_paths: paths.clone(),
             paths,
             paths_file: None,
             title: String::new(),
@@ -638,7 +644,7 @@ impl Session {
             self.snapshot = Some((revision, Arc::new(self.state.project().clone())));
         }
         if let Some((_, project)) = &self.snapshot {
-            self.preview.request(PreviewRequest { revision, project: project.clone(), paths: self.paths.clone(), frame });
+            self.preview.request(PreviewRequest { revision, project: project.clone(), paths: self.preview_paths.clone(), frame });
         }
     }
 
@@ -759,7 +765,7 @@ impl Session {
             None => self.state.release_project_lock(),
         }
         self.paths_file = self.state.project_file().map(Path::to_path_buf);
-        self.paths = self.build_paths();
+        self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         // The audio played on since this frame polled it, so catch up first.
         self.poll_playback();
@@ -994,9 +1000,10 @@ impl Session {
         }
     }
 
-    /// The paths of the open project, with the proxies ready now.
-    fn build_paths(&self) -> Arc<ProjectPaths> {
-        Arc::new(project_paths(self.paths_file.as_deref(), &self.package_roots).with_proxies(Arc::new(self.proxies.proxies())))
+    /// Builds the paths of the open project again: the originals for everyone, and the preview's
+    /// copy with the proxies ready now.
+    fn build_paths(&mut self) {
+        (self.paths, self.preview_paths) = session_paths(project_paths(self.paths_file.as_deref(), &self.package_roots), self.proxies.proxies());
     }
 
     /// Asks for the proxies of the project's videos, shows where they stand, and once the set of
@@ -1010,7 +1017,7 @@ impl Session {
         let revision = self.proxies.revision();
         if revision != self.proxy_revision {
             self.proxy_revision = revision;
-            self.paths = self.build_paths();
+            self.preview_paths = preview_paths(&self.paths, self.proxies.proxies());
             self.tracker = RequestTracker::default();
             self.shown = None;
         }
@@ -1023,7 +1030,7 @@ impl Session {
         // The effects of clip animation items are found among the gpufx packages.
         self.clip_animation_library = Some(spawn_clip_animation_scan(self.package_roots.clone(), self.window.clone()));
         self.state.previews.get_mut().forget(package);
-        self.paths = self.build_paths();
+        self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         self.tracker = RequestTracker::default();
         self.shown = None;
@@ -1032,7 +1039,7 @@ impl Session {
     /// Reads the installed packs again and drops what still points at files of the old one.
     fn audio_pack_installed(&mut self) {
         self.audio_library = Some(spawn_audio_scan(self.package_roots.clone(), self.window.clone()));
-        self.paths = self.build_paths();
+        self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         self.tracker = RequestTracker::default();
         self.shown = None;
@@ -1041,7 +1048,7 @@ impl Session {
     /// Reads the installed sticker packs again, for the new pack and any replaced files.
     fn sticker_pack_installed(&mut self) {
         self.sticker_library = Some(spawn_sticker_scan(self.package_roots.clone(), self.window.clone()));
-        self.paths = self.build_paths();
+        self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
         self.tracker = RequestTracker::default();
         self.shown = None;
@@ -1433,6 +1440,24 @@ pub fn run() -> Result<(), String> {
     app.error.map_or(Ok(()), Err)
 }
 
+/// The paths of a session from `originals`: (shared, preview). Only the preview worker gets the
+/// proxies; capture, agent, thumbnails, probes and export read the shared paths, which never hold
+/// any, so none of them has to remember [`ProjectPaths::without_proxies`].
+fn session_paths(originals: ProjectPaths, proxies: HashMap<PathBuf, PathBuf>) -> (Arc<ProjectPaths>, Arc<ProjectPaths>) {
+    let shared = Arc::new(originals);
+    let preview = preview_paths(&shared, proxies);
+    (shared, preview)
+}
+
+/// `shared` plus `proxies`, for the preview worker: `shared` itself when there is none.
+fn preview_paths(shared: &Arc<ProjectPaths>, proxies: HashMap<PathBuf, PathBuf>) -> Arc<ProjectPaths> {
+    if proxies.is_empty() {
+        shared.clone()
+    } else {
+        Arc::new(shared.without_proxies().with_proxies(Arc::new(proxies)))
+    }
+}
+
 /// The video files of `project` that may get a proxy, as (clip source, absolute path): not text,
 /// pictures or pack files, and each file once.
 fn proxy_sources(project: &Project, paths: &ProjectPaths) -> Vec<(String, PathBuf)> {
@@ -1462,6 +1487,18 @@ mod tests {
     fn other_events_ask_only_when_egui_wants_a_repaint() {
         assert!(should_request_redraw(&WindowEvent::Focused(true), true));
         assert!(!should_request_redraw(&WindowEvent::Focused(true), false));
+    }
+
+    #[test]
+    fn only_the_preview_paths_hold_the_proxies() {
+        let original = PathBuf::from(r"D:\work\a.mp4");
+        let proxy = PathBuf::from(r"C:\cache\a-proxy.mp4");
+        let (shared, preview) = session_paths(ProjectPaths::new(std::path::Path::new(r"D:\work\p.json"), Vec::new()), HashMap::from([(original.clone(), proxy.clone())]));
+        assert!(!shared.has_proxies(), "capture, agent paths, thumbnails and export read the originals");
+        assert_eq!(shared.video_decode_path("a.mp4"), original);
+        assert_eq!(preview.video_decode_path("a.mp4"), proxy, "the preview decodes the proxy");
+        let (shared, preview) = session_paths(ProjectPaths::new(std::path::Path::new(r"D:\work\p.json"), Vec::new()), HashMap::new());
+        assert!(Arc::ptr_eq(&shared, &preview), "no proxy: one set of paths, so the preview keeps its compositor across captures");
     }
 
     #[test]
