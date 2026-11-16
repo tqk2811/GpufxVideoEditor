@@ -174,6 +174,9 @@ pub struct DecodedFrame {
     turns: u8,
     /// The shape to show instead of the frame's own: a proxy's original (see [`crate::ProxyFile`]).
     aspect: Option<f64>,
+    /// The file the frame was decoded from, set by [`crate::SourceDecoder`]: with `pts` it names
+    /// the frame, for the matte cache.
+    pub origin: Option<Arc<str>>,
 }
 
 impl DecodedFrame {
@@ -190,7 +193,7 @@ impl DecodedFrame {
         if frame.is_null() {
             return Err("av_frame_clone failed".to_owned());
         }
-        Ok(Self { frame, pts: self.pts, format: self.format, turns: self.turns, aspect: self.aspect })
+        Ok(Self { frame, pts: self.pts, format: self.format, turns: self.turns, aspect: self.aspect, origin: self.origin.clone() })
     }
 
     /// `ID3D12Resource *` of the frame, borrowed.
@@ -583,7 +586,7 @@ impl SequentialDecoder {
                         ffi::av_frame_free(&mut frame);
                         return Err("the decoded frame has neither a best-effort timestamp nor a pts; frames cannot be placed on the timeline".to_owned());
                     }
-                    Ok(Some(DecodedFrame { frame, pts, format, turns: self.turns, aspect: self.proxy.as_ref().and_then(|proxy| proxy.display_aspect) }))
+                    Ok(Some(DecodedFrame { frame, pts, format, turns: self.turns, aspect: self.proxy.as_ref().and_then(|proxy| proxy.display_aspect), origin: None }))
                 }
                 Ok(false) => {
                     ffi::av_frame_free(&mut frame);
@@ -738,10 +741,32 @@ impl SequentialDecoder {
         self.proxy = Some(proxy);
     }
 
+    /// The file this decoder reads.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The step between two frames in stream time base units, from the stream's frame rate; `None`
+    /// when unknown.
+    pub fn frame_step_pts(&self) -> Option<i64> {
+        Some(self.frame_step).filter(|step| *step > 0)
+    }
+
+    /// The frame shown at stream timestamp `target`: the last frame whose `pts` is not after it
+    /// (the first frame for an earlier one). For finding neighbours of a frame by its `pts`.
+    pub fn frame_at_pts(&mut self, target: i64) -> Result<DecodedFrame, String> {
+        self.request_started = Instant::now();
+        self.frame_at_target(target)
+    }
+
     fn frame_at_inner(&mut self, time: Time) -> Result<DecodedFrame, String> {
         self.request_started = Instant::now();
         let time = self.proxy.as_ref().and_then(|proxy| proxy.timing).map_or(time, |timing| timing.proxy_time(time));
         let target = self.target_pts(time);
+        self.frame_at_target(target)
+    }
+
+    fn frame_at_target(&mut self, target: i64) -> Result<DecodedFrame, String> {
         let cannot_continue = match (&self.held, self.seek_target) {
             (_, None) => true,
             // A held frame later than the target is fine only when it is the first frame after

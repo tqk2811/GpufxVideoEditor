@@ -6,7 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 
 const LINKED_LIBRARIES: [&str; 5] = ["avcodec", "avformat", "avutil", "swresample", "swscale"];
-const RUNTIME_DLL_PREFIXES: [&str; 5] = ["avcodec-", "avformat-", "avutil-", "swresample-", "swscale-"];
+// `dxcompiler.dll` (DXC) is needed by the gpufx-nn shaders of AI background removal; FXC cannot compile them.
+const RUNTIME_DLL_PREFIXES: [&str; 6] = ["avcodec-", "avformat-", "avutil-", "swresample-", "swscale-", "dxcompiler"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
