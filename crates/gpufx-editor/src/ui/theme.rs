@@ -96,6 +96,8 @@ pub struct Palette {
     /// The level bars drawn on a clip, which is dark in both palettes.
     pub bars: Color32,
     pub bars_muted: Color32,
+    /// A marker on the ruler without a colour of its own.
+    pub marker: Color32,
 }
 
 pub const DARK: Palette = Palette {
@@ -131,6 +133,7 @@ pub const DARK: Palette = Palette {
     hover: Color32::from_rgb(42, 42, 58),
     bars: Color32::from_rgb(96, 208, 158),
     bars_muted: Color32::from_rgb(120, 120, 130),
+    marker: Color32::from_rgb(255, 190, 60),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -166,6 +169,7 @@ pub const LIGHT: Palette = Palette {
     hover: Color32::from_rgb(226, 226, 240),
     bars: Color32::from_rgb(96, 208, 158),
     bars_muted: Color32::from_rgb(120, 120, 130),
+    marker: Color32::from_rgb(214, 120, 0),
 };
 
 impl Variant {
@@ -201,7 +205,7 @@ macro_rules! colours {
 colours!(
     background, panel, panel_raised, border, text, text_dim, accent, accent_soft, accent_text, refused, row_even, row_odd, ruler, tick, video_clip,
     video_clip_header, text_clip, text_clip_header, audio_clip, audio_clip_header, selected, playhead, transition, on_accent, on_clip, on_clip_accent, drop_outline, thumb_bg,
-    field_bg, hover, bars, bars_muted,
+    field_bg, hover, bars, bars_muted, marker,
 );
 
 pub const PANEL_RADIUS: u8 = 10;

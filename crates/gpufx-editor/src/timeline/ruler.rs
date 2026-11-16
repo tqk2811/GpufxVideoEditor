@@ -1,7 +1,22 @@
 //! Time ruler ticks and labels.
 
 use super::view::TimelineView;
-use engine::{Time, TICKS_PER_SECOND};
+use engine::{Marker, Time, TICKS_PER_SECOND};
+
+/// How close, in points, the pointer must be to a marker on the ruler to take it.
+pub const MARKER_GRAB: f64 = 6.0;
+
+/// The marker nearest `x` (in points from the left of the track area) within [`MARKER_GRAB`], the
+/// later one in the list on a tie, so the one drawn on top is taken.
+pub fn marker_at(view: &TimelineView, markers: &[Marker], x: f64) -> Option<usize> {
+    markers
+        .iter()
+        .enumerate()
+        .map(|(index, marker)| (index, (view.time_to_x(marker.at) - x).abs()))
+        .filter(|(_, distance)| *distance <= MARKER_GRAB)
+        .min_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0)))
+        .map(|(index, _)| index)
+}
 
 const MIN_MAJOR_SPACING: f64 = 80.0;
 const MINOR_PER_MAJOR: i64 = 5;
@@ -98,6 +113,18 @@ mod tests {
         assert!(ticks[0].major);
         assert!(ticks.iter().all(|tick| tick.x >= 0.0 && tick.x <= 400.0));
         assert!(ticks.iter().any(|tick| !tick.major));
+    }
+
+    #[test]
+    fn a_marker_is_taken_within_the_grab_distance_the_nearest_first() {
+        let view = TimelineView::default();
+        let at = |seconds: f64| Time::from_ticks((seconds * TICKS_PER_SECOND as f64) as i64);
+        let markers = [Marker::at(at(1.0)), Marker::at(at(1.0)), Marker::at(at(2.0))];
+        let x = |seconds: f64| view.time_to_x(at(seconds));
+        assert_eq!(marker_at(&view, &markers, x(1.0) + MARKER_GRAB - 0.5), Some(1), "the later of two at one time");
+        assert_eq!(marker_at(&view, &markers, x(2.0) - 1.0), Some(2));
+        assert_eq!(marker_at(&view, &markers, x(1.5)), None);
+        assert_eq!(marker_at(&view, &[], x(1.0)), None);
     }
 
     #[test]

@@ -14,7 +14,7 @@ pub mod plan;
 pub mod worker;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -267,8 +267,13 @@ impl ClipVisuals {
         slot
     }
 
+    /// The file `source` names, resolved against the project folder and the package roots.
+    pub fn source_path(&self, source: &str) -> PathBuf {
+        self.paths.as_ref().map_or_else(|| Path::new(source).to_path_buf(), |paths| paths.source_path(source))
+    }
+
     fn intern(&mut self, source: &str) -> usize {
-        let path = self.paths.as_ref().map_or_else(|| Path::new(source).to_path_buf(), |paths| paths.source_path(source));
+        let path = self.source_path(source);
         let normalized = normalize(&path);
         let slot = match self.by_path.get(&normalized) {
             Some(slot) => *slot,

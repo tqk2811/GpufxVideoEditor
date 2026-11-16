@@ -73,6 +73,7 @@ pub enum Icon {
     EyeOff,
     Magnet,
     Warning,
+    Marker,
 }
 
 const ICON_STROKE: f32 = 1.5;
@@ -240,6 +241,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(painter, vec![p(0.0, -0.85), p(0.95, 0.8), p(-0.95, 0.8), p(0.0, -0.85)], stroke);
             painter.line_segment([p(0.0, -0.3), p(0.0, 0.25)], stroke);
             painter.circle_filled(p(0.0, 0.52), s * 0.07, color);
+        }
+        Icon::Marker => {
+            // A flag on a pole, as a marker sits on the ruler.
+            painter.line_segment([p(-0.55, -0.85), p(-0.55, 0.9)], stroke);
+            line(painter, vec![p(-0.55, -0.85), p(0.75, -0.5), p(-0.55, -0.15)], stroke);
         }
     }
 }

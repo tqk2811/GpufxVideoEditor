@@ -8,9 +8,9 @@ use crate::package_import::InstalledPackage;
 use crate::packages::{Catalog, PackageKind, PickerState};
 use crate::project_lock::ProjectLock;
 use crate::playback::plan::{start_time, TransportCommand};
-use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_command, ClipDrag, EditCommand};
+use crate::timeline::drag::{begin_drag, clamp_source_in, clamp_trim, drag_command, ClipDrag, DragKind, EditCommand};
 use crate::timeline::hit::{ClipHit, TransitionKey};
-use crate::timeline::snap::{snap_command, snap_onto_track, snap_points, snap_span, snap_tolerance, Snapped};
+use crate::timeline::snap::{scrub_points, snap_command, snap_onto_track, snap_points, snap_span, snap_time, snap_tolerance, trim_snap_points, Snapped};
 use crate::timeline::view::TimelineView;
 use crate::asset_install::InstalledAudioPack;
 use crate::audio_library::AudioLibrary;
@@ -26,6 +26,7 @@ use crate::effect_previews::PreviewManager;
 use crate::visuals::{ClipVisuals, SourceView};
 use crate::text_shapes::TextShapes;
 use crate::text_clip::{default_text, natural_placement, rescaled_placement};
+use crate::beats::{BeatDetector, BeatStatus};
 use engine::{
     keyframe_neighbors, keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, Keyframe, remove_keyframe, set_effect_params_at, set_keyframe, set_motion_value, set_placement_at, ClipPlacement, ClipProperty, Easing, KeyframeTarget, PlacedRect,
     add_clip, add_effect, add_track, remove_track, add_transition_report, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
@@ -128,6 +129,34 @@ pub struct EditorState {
     /// The shapes of the pictures of text clips; asked for while drawing, so behind a cell.
     pub text_shapes: RefCell<TextShapes>,
     language: Language,
+    /// Beat detection of source files, in the background.
+    pub beats: BeatDetector,
+    /// Detections the user started from a clip, whose beats go to that clip when they are ready.
+    beat_requests: Vec<BeatRequest>,
+}
+
+/// A marker held on the ruler: it moves once the pointer has gone a few points from the press, and a
+/// press that never moved is a click, which brings the playhead to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MarkerDrag {
+    pub marker: usize,
+    pub press_x: f32,
+    pub moved: bool,
+}
+
+/// A detection started for clip `key`, which showed `source` (resolved to `path`) at the time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BeatRequest {
+    key: ClipKey,
+    source: String,
+    path: PathBuf,
+}
+
+/// The tempo of beats as the panel and the status line write it: up to two decimals, without
+/// trailing zeros.
+pub fn tempo_text(tempo: f64) -> String {
+    let text = format!("{tempo:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 /// An export started by an agent. `outcome` stays `None` while it runs.
@@ -258,6 +287,10 @@ pub struct UiState {
     pub drop_batches: VecDeque<DropBatch>,
     /// Snapping to clip edges is off. The default, false, keeps it on.
     pub snap_off: bool,
+    /// The marker held on the ruler.
+    pub marker_drag: Option<MarkerDrag>,
+    /// The marker whose menu shows, and the label being typed in it.
+    pub marker_menu: Option<(usize, String)>,
     /// A library sound waiting to be measured and placed.
     pub library_add: Option<(MediaItem, LibraryTarget)>,
     /// What the Audio tab asked of the preview this frame.
@@ -462,6 +495,8 @@ impl EditorState {
             previews: RefCell::new(PreviewManager::default()),
             text_shapes: RefCell::new(TextShapes::default()),
             language: Language::default(),
+            beats: BeatDetector::default(),
+            beat_requests: Vec::new(),
         }
     }
 
@@ -1170,8 +1205,20 @@ impl EditorState {
         if self.ui.snap_off || free {
             return Snapped { command: clamp_trim(self.project(), command), guide: None };
         }
-        let points = snap_points(self.project(), Some(drag.key), self.playhead());
+        let points = match drag.kind {
+            DragKind::Move => snap_points(self.project(), Some(drag.key), self.playhead()),
+            DragKind::TrimStart | DragKind::TrimEnd => trim_snap_points(self.project(), drag.key, self.playhead()),
+        };
         snap_command(self.project(), command, &points, snap_tolerance(self.view.pixels_per_second()))
+    }
+
+    /// Where a ruler press at `time` puts the playhead: on the nearest clip edge, marker or beat
+    /// within the snap distance, unless snapping is off or `free`.
+    pub fn snapped_scrub_time(&self, time: Time, free: bool) -> Time {
+        if self.ui.snap_off || free {
+            return time;
+        }
+        snap_time(&scrub_points(self.project()), time, snap_tolerance(self.view.pixels_per_second())).unwrap_or(time)
     }
 
     /// Where a library item dropped with its start at `at` begins: pulled onto a snap point by its
@@ -1509,6 +1556,106 @@ impl EditorState {
             let denoise = engine::ClipDenoise { strength, ..clip_in(project, key)?.denoise };
             engine::set_denoise(project, key, denoise)
         });
+    }
+
+    /// The file a source of the project reads, as the thumbnails resolve it.
+    pub fn source_file(&self, source: &str) -> PathBuf {
+        self.visuals.borrow().source_path(source)
+    }
+
+    /// Starts detecting the beats of clip `key`; they are written to it, as one undo step, when
+    /// ready. A file already analysed gives them at once. Refused on a locked track, and on a still
+    /// or text, which have no sound.
+    pub fn detect_beats(&mut self, key: ClipKey) {
+        let Ok(clip) = clip_in(self.project(), key) else { return };
+        if clip.is_still() {
+            return;
+        }
+        if self.is_track_locked(key.track) {
+            self.refuse(&EditError::TrackLocked { track: key.track });
+            return;
+        }
+        let source = clip.source.clone();
+        let path = self.source_file(&source);
+        self.beat_requests.retain(|request| request.key != key);
+        self.beats.start(&path);
+        self.beat_requests.push(BeatRequest { key, source, path });
+        self.poll_beats();
+    }
+
+    /// Stops the detection started for clip `key`.
+    pub fn cancel_beats(&mut self, key: ClipKey) {
+        let Some(index) = self.beat_requests.iter().position(|request| request.key == key) else { return };
+        let request = self.beat_requests.remove(index);
+        if !self.beat_requests.iter().any(|other| other.path == request.path) {
+            self.beats.cancel(&request.path);
+        }
+    }
+
+    /// How far the detection started for clip `key` is, from 0 to 1, while it runs.
+    pub fn beat_progress(&mut self, key: ClipKey) -> Option<f32> {
+        let path = self.beat_requests.iter().find(|request| request.key == key)?.path.clone();
+        match self.beats.status(&path) {
+            BeatStatus::Running(progress) => Some(progress),
+            _ => None,
+        }
+    }
+
+    /// Writes the beats of finished detections to the clips they were started for, and says
+    /// whether any still runs. A clip that no longer shows the same source at its place gets
+    /// nothing; the result stays cached, so starting again on it is instant. While edits wait (a
+    /// drag or an export) finished results wait too.
+    pub fn poll_beats(&mut self) -> bool {
+        let blocked = self.export.is_some() || self.is_holding();
+        let mut index = 0;
+        while index < self.beat_requests.len() {
+            let request = self.beat_requests[index].clone();
+            let status = self.beats.status(&request.path);
+            if matches!(status, BeatStatus::Running(_)) || (blocked && !matches!(status, BeatStatus::Idle)) {
+                index += 1;
+                continue;
+            }
+            self.beat_requests.remove(index);
+            let current = clip_in(self.project(), request.key).ok().filter(|clip| clip.source == request.source).is_some();
+            match status {
+                BeatStatus::Ready(analysis) if current => {
+                    let beats = analysis.clip_beats();
+                    let (count, tempo) = (beats.beats.len(), beats.tempo);
+                    if self.run(|project| engine::set_beats(project, request.key, beats)) {
+                        self.status = Status::Info(if count == 0 { Message::BeatsNotFound } else { Message::BeatsFound { count, tempo: tempo_text(tempo) } });
+                    }
+                }
+                BeatStatus::Failed(message) if current => self.status = Status::Error(Message::BeatsFailed(message)),
+                _ => {}
+            }
+        }
+        self.beats.running()
+    }
+
+    /// Takes the beats off clip `key`: one undo step.
+    pub fn clear_beats(&mut self, key: ClipKey) {
+        self.cancel_beats(key);
+        self.run(|project| engine::set_beats(project, key, engine::ClipBeats::default()));
+    }
+
+    /// Adds a marker at the playhead: one undo step.
+    pub fn add_marker_at_playhead(&mut self) {
+        let at = self.playhead;
+        self.run(|project| engine::add_marker(project, engine::Marker::at(at)));
+    }
+
+    /// Moves marker `marker` while it is dragged; the release makes it one undo step.
+    pub fn live_marker(&mut self, marker: usize, at: Time) {
+        self.live_edit(|project| engine::move_marker(project, marker, at.max(Time::ZERO)));
+    }
+
+    pub fn remove_marker(&mut self, marker: usize) {
+        self.run(|project| engine::remove_marker(project, marker));
+    }
+
+    /// Changes the label and colour of marker `marker`, leaving its time: one undo step.
+    pub fn set_marker(&mut self, marker: usize, label: String, color: Option<engine::Rgba>) {
+        self.run(|project| engine::set_marker(project, marker, label, color));
     }
 
     /// Gives the selected clip the voice of `preset`: one undo step.
@@ -4607,5 +4754,56 @@ second line")), "Title…");
         assert_eq!(refusal_message(state.project(), &EditError::SpeedOfImage { key }), Message::EditSpeedOfText(TrackLabel::Text(1)));
         let image = state_with_clip();
         assert_eq!(refusal_message(image.project(), &EditError::SpeedOfImage { key: ClipKey { track: 0, clip: 0 } }), Message::EditSpeedOfImage(TrackLabel::Video(1)));
+    }
+
+    #[test]
+    fn a_marker_drag_is_one_undo_step_and_a_ruler_press_snaps_to_markers() {
+        let mut state = state_with_clip();
+        state.set_playhead(seconds(3));
+        state.add_marker_at_playhead();
+        state.live_marker(0, seconds(5));
+        state.live_marker(0, seconds(6));
+        state.pointer_released();
+        assert_eq!(state.project().markers[0].at, seconds(6));
+        state.undo();
+        assert_eq!(state.project().markers[0].at, seconds(3), "the drag was one step");
+        let near = seconds(3).saturating_add(nudge());
+        assert_eq!(state.snapped_scrub_time(near, false), seconds(3));
+        assert_eq!(state.snapped_scrub_time(near, true), near, "Shift");
+        state.ui.snap_off = true;
+        assert_eq!(state.snapped_scrub_time(near, false), near);
+    }
+
+    #[test]
+    fn a_start_trim_snaps_to_a_beat_of_the_clip_itself() {
+        let mut state = state_with_two_clips();
+        // Clip b (at 20 s, source from 0) gets a beat at source 1 s, so at 21 s.
+        let beats = engine::ClipBeats { tempo: 60.0, beats: vec![engine::Beat { at: seconds(1), downbeat: true }] };
+        let b = key(1);
+        state.history.apply(|project| engine::set_beats(project, b, beats)).unwrap();
+        let hit = ClipHit { key: b, zone: crate::timeline::hit::ClipZone::StartEdge };
+        let trim = begin_drag(state.project(), hit, seconds(20)).unwrap();
+        let snapped = state.snapped_drag(&trim, seconds(21).saturating_add(nudge()), Some(0), false);
+        assert_eq!(snapped.guide, Some(seconds(21)), "its own beat stays put under a trim");
+        // A move of clip b does not snap to its own beat, which moves with it.
+        let hit = ClipHit { key: b, zone: crate::timeline::hit::ClipZone::Body };
+        let moving = begin_drag(state.project(), hit, seconds(20)).unwrap();
+        assert_eq!(state.snapped_drag(&moving, seconds(21).saturating_add(nudge()), Some(0), false).guide, None);
+    }
+
+    #[test]
+    fn beats_of_a_still_or_on_a_locked_track_are_not_detected() {
+        let mut state = state_with_clip();
+        state.toggle_track_locked(0);
+        state.detect_beats(key(0));
+        assert!(matches!(state.status(), Status::Refused(_)));
+        assert_eq!(state.beat_progress(key(0)), None);
+    }
+
+    #[test]
+    fn the_tempo_is_written_without_trailing_zeros() {
+        assert_eq!(tempo_text(120.0), "120");
+        assert_eq!(tempo_text(103.5), "103.5");
+        assert_eq!(tempo_text(99.456), "99.46");
     }
 }
