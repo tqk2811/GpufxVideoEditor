@@ -368,8 +368,19 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 return Err(AgentError::new("invalid_params", format!("track {} is an audio track: its clips have no picture to animate", clip.track)));
             }
             let next = patched_animation(&state.clip_animation_library, AnimatedClipKind::of(found), &found.animation, &animation)?;
-            state.apply_agent_command(|project| engine::set_animation(project, key, next)).map_err(refused)?;
+            let mut removed = Vec::new();
+            state
+                .apply_agent_command(|project| {
+                    engine::set_animation_report(project, key, next).map(|(next, transitions)| {
+                        removed = transitions;
+                        next
+                    })
+                })
+                .map_err(refused)?;
             result.insert("clip".to_owned(), json!(clip));
+            // A hold takes the transition of its cut away; say which.
+            let removed: Vec<Value> = removed.iter().map(|tr| json!({"track": clip.track, "after_clip": tr.after_clip, "package": tr.package})).collect();
+            result.insert("removed_transitions".to_owned(), Value::Array(removed));
         }
         AgentEdit::ClipMove { clip, track, start } => {
             let landing = landing_start(state.project(), clip, track, start);
@@ -432,7 +443,21 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         AgentEdit::EffectRemove { clip, effect } => state.apply_agent_command(|project| engine::remove_effect(project, clip.into(), effect)).map_err(refused)?,
         AgentEdit::TransitionAdd { track, after_clip, package, duration, params } => {
             let transition = Transition { after_clip, package, duration: duration.unwrap_or(DEFAULT_TRANSITION_DURATION), params };
-            state.apply_agent_command(|project| engine::add_transition(project, track, transition)).map_err(refused)?;
+            let mut released = Vec::new();
+            state
+                .apply_agent_command(|project| {
+                    engine::add_transition_report(project, track, transition).map(|(next, holds)| {
+                        released = holds;
+                        next
+                    })
+                })
+                .map_err(refused)?;
+            // The holds on the cut became plain animations; say which.
+            let released: Vec<Value> = released
+                .iter()
+                .map(|hold| json!({"clip": {"track": hold.key.track, "clip": hold.key.clip}, "group": if hold.group == engine::AnimationGroup::Enter { "in" } else { "out" }}))
+                .collect();
+            result.insert("released_holds".to_owned(), Value::Array(released));
         }
         AgentEdit::TransitionRemove { track, after_clip } => state.apply_agent_command(|project| engine::remove_transition(project, track, after_clip)).map_err(refused)?,
         AgentEdit::ClipSetSpeed { clip, speed } => {

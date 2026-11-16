@@ -362,6 +362,22 @@ fn clip_animation_set_takes_a_negative_in_as_a_hold_and_refuses_a_negative_loop(
 }
 
 #[test]
+fn a_hold_and_a_transition_on_one_cut_say_what_they_took_away() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let (video, _) = clip_paths();
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": video, "start": 0, "duration": SECOND}));
+    let added = call_ok(&mut session, "clip_add", json!({"expected_revision": 2, "track": 0, "source": video, "start": SECOND, "duration": SECOND}));
+    let package = "xfade";
+    let transition = call_ok(&mut session, "transition_add", json!({"expected_revision": revision(&added), "track": 0, "after_clip": 0, "package": package}));
+    assert_eq!(transition["released_holds"], json!([]));
+    let held = call_ok(&mut session, "clip_animation_set", json!({"expected_revision": revision(&transition), "clip": {"track": 0, "clip": 0}, "out": {"preset": "fade", "duration": -SECOND / 4}}));
+    assert_eq!(held["removed_transitions"], json!([{"track": 0, "after_clip": 0, "package": package}]));
+    let again = call_ok(&mut session, "transition_add", json!({"expected_revision": revision(&held), "track": 0, "after_clip": 0, "package": package}));
+    assert_eq!(again["released_holds"], json!([{"clip": {"track": 0, "clip": 0}, "group": "out"}]));
+}
+
+#[test]
 fn clip_animation_set_refuses_a_pack_preset_that_is_not_for_the_kind_of_clip() {
     let root = scratch("animation-applies-to");
     let folder = root.join("packages/clip-animation/kinds");
@@ -389,8 +405,14 @@ fn clip_animation_set_refuses_a_pack_preset_that_is_not_for_the_kind_of_clip() {
 }
 
 /// A root with a text style pack `styles` (item `bold`) and a subtitle style pack `subs` (item
-/// `low`, anchored at 0.85 of the frame height).
+/// `low`, anchored at 0.85 of the frame height). Built once: the tests that share it run at the
+/// same time, and building it again would delete it under the others.
 fn style_root() -> std::path::PathBuf {
+    static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    ROOT.get_or_init(build_style_root).clone()
+}
+
+fn build_style_root() -> std::path::PathBuf {
     let root = scratch("text-styles");
     let write = |kind: &str, id: &str, items: &str| {
         let folder = root.join("packages").join(kind).join(id);
