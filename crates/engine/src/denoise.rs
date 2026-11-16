@@ -416,6 +416,12 @@ impl DenoiseCache {
         }
         // Windows that start past the end of the file hold only its silence.
         let past = self.source_end.map_or(past, |end| past.min((end + hop - 1).div_euclid(hop)));
+        // CHUNK is not a multiple of the hop, so a file may end after the chunk starts but before
+        // its first window does: no window starts in it, and it counts as outside the file.
+        if past <= first {
+            state.stats.insert(chunk, None);
+            return Ok(());
+        }
         let bins = GATE_SIZE / 2 + 1;
         let count = (past - first) as usize;
         let mut powers = vec![0.0f32; count * bins];

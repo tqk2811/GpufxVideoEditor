@@ -574,3 +574,7 @@ Preset dựng sẵn `typewriter` (`crates/engine/src/clip_animation.rs`, `typewr
 ### [Thấp] Khử nhiễu "giọng nói" còn làm tiếng ồn còn lại "thở" khoảng 1,5 dB mỗi giây
 
 RNNoise trong `crates/engine/src/denoise.rs` (`DenoiseCache::run`) khởi động lại mỗi chunk 1 giây sau 0,5 giây preroll, nên trên nhiễu trắng đều tiếng ồn còn lại cao hơn ở đầu chunk khoảng 1,5 dB (`steady_noise_stays_level_after_general_denoise` in ra số này, chỉ chặn chế độ "chung"). Preroll 1 giây còn 1,23 dB, 2 giây còn 1,13 dB, tốn gấp đôi trở lên nên chưa đổi. Chế độ "chung" đã hết nhờ hồ sơ nhiễu cố định theo vị trí nguồn. Ghi ngày 2026-11-16.
+
+### [Thấp] Khử nhiễu "chung" coi một lần đọc ngắn là hết file
+
+`crates/engine/src/denoise.rs` (`source_end`, gán khi `read_counted` trả ít mẫu hơn yêu cầu) dùng mốc này để cắt thống kê và hồ sơ nhiễu. Nếu nguồn trả đọc ngắn khi chưa hết file (decoder trục trặc giữa chừng) thì các khối sau bị coi là ngoài file, và preview có thể khác export. Nên xác nhận `read_counted` của `crates/d3d12-backend/src/audio.rs` chỉ trả ngắn ở cuối file, hoặc lấy độ dài từ probe. Ghi ngày 2026-11-16.

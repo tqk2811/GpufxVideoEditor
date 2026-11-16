@@ -314,6 +314,18 @@ fn the_end_of_the_source_stays_silent_after_denoise() {
 }
 
 #[test]
+fn a_file_ending_before_the_first_window_of_its_last_second_mixes() {
+    // The second second starts at 48000 but its first gate window at 48128 (the hop is 512): a
+    // file ending between them has a chunk with no window in it.
+    for length in [48_001, 48_100, 48_128, 96_000 + 100] {
+        let project = project_of(vec![clip_with(3, 0, denoise(DenoiseMode::General, 1.0), ClipVoice::default(), 1.0)]);
+        let mut short = Noisy { clean: Clean::Tone(440.0), noise: 0.05, length };
+        let out = mix(&project, &mut short, 0, 3 * RATE);
+        assert!(out[2 * length as usize..].iter().all(|sample| *sample == 0.0), "{length}: sound past the end of the file");
+    }
+}
+
+#[test]
 fn defaults_are_left_out_of_the_file_and_settings_survive_a_round_trip() {
     let plain = project_of(vec![clip_with(1, 0, ClipDenoise::default(), ClipVoice::default(), 1.0)]);
     let json = serde_json::to_string(&plain).unwrap();
