@@ -9,7 +9,8 @@
 //!
 //! The frames are references into the decoder's own texture pool, which is opened with room for
 //! the ring on top of what the decoder needs. A request just after the ring, as a scrub forward
-//! gives, goes on decoding from where the refill stopped.
+//! gives, goes on decoding from where the refill stopped, unless a seek would get there with fewer
+//! frames decoded, as for a forward decoder.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -21,7 +22,7 @@ use engine::render::{Decoder, RenderError};
 use engine::Time;
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
-use super::{stream_pts, DecodedFrame, PublishClock, SequentialDecoder};
+use super::{forward_seek_pays, stream_pts, DecodedFrame, PublishClock, SequentialDecoder, FORWARD_SEEK_SECONDS};
 
 /// Frames kept by a refill. About a second at 30 fps; a 4K P010 frame takes 24 MB of the pool.
 pub(crate) const RING: usize = 32;
@@ -39,13 +40,27 @@ pub struct ReverseDecoder {
     ends_stream: bool,
     /// Whether the decoder stands right after the last frame of the ring, so decoding on extends it.
     continues: bool,
+    /// Frames decoded so far.
+    decoded: u64,
 }
 
 impl ReverseDecoder {
     /// Opens `path` for hardware decoding on `device`, with a pool large enough for the ring.
     pub fn open(path: &Path, device: &ID3D12Device) -> Result<Self, String> {
         let inner = SequentialDecoder::open_holding(path, device, RING as i32 + 1)?;
-        Ok(Self { inner, ring: VecDeque::new(), starts_stream: false, ends_stream: false, continues: false })
+        Ok(Self { inner, ring: VecDeque::new(), starts_stream: false, ends_stream: false, continues: false, decoded: 0 })
+    }
+
+    /// How many frames this decoder has decoded, to measure what a way of playing costs.
+    pub fn decoded_frames(&self) -> u64 {
+        self.decoded
+    }
+
+    /// The next frame from the decoder, counted.
+    fn next_frame(&mut self) -> Result<Option<DecodedFrame>, String> {
+        let frame = self.inner.next_frame()?;
+        self.decoded += u64::from(frame.is_some());
+        Ok(frame)
     }
 
     /// See [`SequentialDecoder::set_abort`].
@@ -80,7 +95,7 @@ impl ReverseDecoder {
     fn decode_through(&mut self, target: i64) -> Result<(), String> {
         loop {
             self.inner.check_abort()?;
-            let Some(frame) = self.inner.next_frame()? else {
+            let Some(frame) = self.next_frame()? else {
                 self.ends_stream = true;
                 self.continues = false;
                 return Ok(());
@@ -105,7 +120,7 @@ impl ReverseDecoder {
         loop {
             self.inner.seek(point)?;
             self.inner.check_abort()?;
-            let Some(first) = self.inner.next_frame()? else {
+            let Some(first) = self.next_frame()? else {
                 // Nothing at all from there: the stream ended before its keyframe.
                 self.ends_stream = true;
                 return Ok(());
@@ -127,13 +142,19 @@ impl ReverseDecoder {
         self.decode_through(target)
     }
 
+    /// Whether a refill gets to `target` with fewer frames decoded than decoding on from `position`.
+    fn seek_pays(&self, position: i64, target: i64) -> bool {
+        let threshold = stream_pts(FORWARD_SEEK_SECONDS * engine::TICKS_PER_SECOND, self.inner.time_base.num, self.inner.time_base.den, 0);
+        forward_seek_pays(position, target, threshold, None, || self.inner.keyframe_before(target))
+    }
+
     fn frame_at_inner(&mut self, time: Time) -> Result<DecodedFrame, String> {
         self.inner.request_started = Instant::now();
         let target = floor_pts(time.ticks(), self.inner.time_base.num, self.inner.time_base.den, self.inner.start_pts);
         if let Some(index) = self.find(target) {
             return self.ring[index].reference();
         }
-        let just_after = self.continues && self.ring.back().is_some_and(|last| target >= last.pts) && self.ring.front().is_some_and(|first| target >= first.pts);
+        let just_after = self.continues && self.ring.back().is_some_and(|last| target >= last.pts && !self.seek_pays(last.pts, target)) && self.ring.front().is_some_and(|first| target >= first.pts);
         let moved = if just_after { self.decode_through(target) } else { self.refill(target) };
         if moved.is_err() {
             // An interrupted refill leaves a ring that may not reach the target; start over next time.

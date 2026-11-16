@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common::*;
-use d3d12_backend::{AudioFiles, D3d12Compositor, Gpu, ProjectPaths, SequentialDecoder};
+use d3d12_backend::{AudioFiles, D3d12Compositor, Gpu, ProjectPaths, ReverseDecoder, SequentialDecoder};
 use engine::render::{render, render_with_audio, Decoder, FrameSink, RenderError};
 use engine::{validate, Project, Time};
 use sha2::{Digest, Sha256};
@@ -240,6 +240,23 @@ fn a_reversed_clip_with_one_keyframe_decodes_every_frame_backwards() {
     for frame in wanted {
         assert_eq!(read_frame_number(capture.frame(frame), W), 169 - frame, "output frame {frame}");
     }
+}
+
+#[test]
+fn a_reversed_decoder_seeks_to_a_far_later_frame_instead_of_decoding_up_to_it() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let mut decoder = ReverseDecoder::open(&a, gpu.raw_device()).expect("open the clip");
+    let at = |n: i64| Time::from_ticks(n * FRAME);
+    decoder.frame_at(at(30)).expect("frame 30");
+    let before = decoder.decoded_frames();
+    // 120 frames later, four GOPs on: decoding on would decode them all, a seek only its own GOP.
+    let later = decoder.frame_at(at(150)).expect("frame 150").pts;
+    let decoded = decoder.decoded_frames() - before;
+    assert!(decoded <= 40, "{decoded} frames decoded to go 120 frames forward");
+    let mut forward = SequentialDecoder::open(&a, gpu.raw_device()).expect("open the clip");
+    assert_eq!(later, forward.frame_at(at(150)).expect("frame 150").pts, "the same frame");
 }
 
 #[test]
