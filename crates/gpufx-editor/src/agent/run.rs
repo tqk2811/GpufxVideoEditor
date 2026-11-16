@@ -487,6 +487,28 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 })
                 .map_err(refused)?;
         }
+        AgentEdit::ClipSetMatte { clip, model, threshold, feather, edge, invert, temporal } => {
+            let max = engine::MAX_MATTE_PIXELS;
+            for (name, value, range) in [("threshold", threshold, 0.0..=1.0), ("feather", feather, 0.0..=max), ("edge", edge, -max..=max), ("temporal", temporal.map(f64::from), 0.0..=f64::from(engine::MAX_MATTE_TEMPORAL))] {
+                if let Some(value) = value.filter(|value| !range.contains(value)) {
+                    return Err(AgentError::new("out_of_range", format!("matte {name} {value} is outside {} to {}", range.start(), range.end())));
+                }
+            }
+            state
+                .apply_agent_command(|project| {
+                    let current = current_clip(project, clip)?.matte;
+                    let matte = engine::ClipMatte {
+                        model: model.unwrap_or(current.model),
+                        threshold: threshold.unwrap_or(current.threshold),
+                        feather: feather.unwrap_or(current.feather),
+                        edge: edge.unwrap_or(current.edge),
+                        invert: invert.unwrap_or(current.invert),
+                        temporal: temporal.unwrap_or(current.temporal),
+                    };
+                    engine::set_matte(project, clip.into(), matte)
+                })
+                .map_err(refused)?;
+        }
         AgentEdit::ClipSetVoice { clip, semitones, effect } => {
             if let Some(semitones) = semitones.filter(|semitones| !(-engine::MAX_PITCH_SEMITONES..=engine::MAX_PITCH_SEMITONES).contains(semitones)) {
                 return Err(AgentError::new("out_of_range", format!("semitones {semitones} is outside -{max} to {max}", max = engine::MAX_PITCH_SEMITONES)));

@@ -153,6 +153,8 @@ pub enum AgentEdit {
     ClipSetFades { clip: ClipRef, fade_in: Time, fade_out: Time },
     /// Sets the noise reduction of a clip; `None` keeps the clip's current value.
     ClipSetDenoise { clip: ClipRef, mode: Option<engine::DenoiseMode>, strength: Option<f64> },
+    /// Sets the AI background removal of a clip; `None` keeps the clip's current value.
+    ClipSetMatte { clip: ClipRef, model: Option<engine::MatteModel>, threshold: Option<f64>, feather: Option<f64>, edge: Option<f64>, invert: Option<bool>, temporal: Option<u32> },
     /// Sets the pitch shift and voice effect of a clip; `None` keeps the clip's current value.
     ClipSetVoice { clip: ClipRef, semitones: Option<f64>, effect: Option<engine::VoiceEffect> },
     /// Sets the static place, opacity and rotation of a clip; `None` leaves that one alone.
