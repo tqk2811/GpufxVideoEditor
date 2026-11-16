@@ -211,6 +211,32 @@ pub enum Message {
     AgentConnected,
     ProjectInUse(String),
     AgentAccessFailed(String),
+    MenuAutosave,
+    AutosaveOff,
+    /// Autosave every so many seconds.
+    AutosaveEvery(u64),
+    AutosaveSettingFailed(String),
+    /// Writing the autosave copy failed.
+    AutosaveFailed(String),
+
+    // Recovery of autosaves after an unclean exit.
+    RecoveryTitle,
+    RecoveryIntro,
+    RecoveryRestore,
+    RecoveryDiscard,
+    RecoveryLater,
+    /// The autosave was written so many seconds ago.
+    RecoveryAgo(u64),
+    RecoveryOriginalNewer,
+    /// Restored, with the project file it belongs to, empty for one never saved.
+    RecoveryRestored(String),
+    RecoveryFailed(String),
+    /// A restore must not replace unsaved changes or race a running task.
+    RecoveryBusy,
+    /// Another editor restored or discarded the autosave first.
+    RecoveryTaken(String),
+    /// Autosaves are kept this many days.
+    RecoveryKeptDays(u64),
     Cancel,
     ExportVideo,
 
@@ -598,6 +624,29 @@ mod tests {
             Message::ThemeDark,
             Message::ThemeLight,
             Message::ThemeSaveFailed(name()),
+            Message::MenuAutosave,
+            Message::AutosaveOff,
+            Message::AutosaveEvery(30),
+            Message::AutosaveEvery(60),
+            Message::AutosaveEvery(300),
+            Message::AutosaveSettingFailed(name()),
+            Message::AutosaveFailed(name()),
+            Message::RecoveryTitle,
+            Message::RecoveryIntro,
+            Message::RecoveryRestore,
+            Message::RecoveryDiscard,
+            Message::RecoveryLater,
+            Message::RecoveryAgo(0),
+            Message::RecoveryAgo(90),
+            Message::RecoveryAgo(5000),
+            Message::RecoveryAgo(900_000),
+            Message::RecoveryOriginalNewer,
+            Message::RecoveryRestored(String::new()),
+            Message::RecoveryRestored(name()),
+            Message::RecoveryFailed(name()),
+            Message::RecoveryBusy,
+            Message::RecoveryTaken(name()),
+            Message::RecoveryKeptDays(14),
             Message::TabMedia,
             Message::FieldDuration,
             Message::FieldSourceIn,

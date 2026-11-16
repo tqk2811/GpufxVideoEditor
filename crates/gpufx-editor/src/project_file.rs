@@ -128,10 +128,16 @@ pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
 /// Writes `project` to `file` through a temporary file, so a failure leaves any earlier save intact.
 pub fn save_project_file(project: &Project, file: &Path) -> Result<(), String> {
     let text = serde_json::to_string_pretty(&with_relative_sources(project, file)).map_err(|e| format!("serialising the project failed: {e}"))?;
+    write_file_atomically(file, text.as_bytes())
+}
+
+/// Writes `bytes` to `file` through a temporary file beside it, synced before it replaces `file`,
+/// so a failure or a crash leaves any earlier content intact.
+pub fn write_file_atomically(file: &Path, bytes: &[u8]) -> Result<(), String> {
     let temporary = reserve_temporary(file).map_err(|e| format!("saving {} failed: {e}", file.display()))?;
     let written = (|| {
         let mut output = std::fs::OpenOptions::new().write(true).open(&temporary)?;
-        output.write_all(text.as_bytes())?;
+        output.write_all(bytes)?;
         output.sync_all()?;
         drop(output);
         std::fs::rename(&temporary, file)

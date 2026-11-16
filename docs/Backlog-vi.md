@@ -574,3 +574,11 @@ Preset dựng sẵn `typewriter` (`crates/engine/src/clip_animation.rs`, `typewr
 ### [Thấp] Editor dò encoder trong tiến trình của nó, export chạy ở tiến trình con gpufx-render dò lại nên kết quả có thể lệch
 
 Editor gọi `encoder_available` (`crates/d3d12-backend/src/encoder.rs`) trong tiến trình riêng, còn export chạy ở tiến trình con `gpufx-render` với cache trống và mở encoder lại. Hai lần dò có thể khác nhau (vd phiên NVENC đang bận khi export), nên giao diện có thể báo một encoder dùng được trong khi tiến trình con rơi sang encoder sau hoặc lỗi. Cân nhắc cho tiến trình con báo encoder thực sự đã mở về editor, hoặc truyền kết quả dò cho nó. Ghi ngày 2026-11-16.
+
+### [Thấp] Tự lưu: không đọc được giờ khởi động của chính tiến trình thì editor khác coi nó đã chết
+
+`current_process` (`crates/gpufx-editor/src/recovery.rs`) trả `started = 0` khi probe không đọc được chính tiến trình này. Editor khác khi đó thấy giờ khởi động khác nên coi bản tự lưu của một editor còn sống là mồ côi, có thể Khôi phục hoặc Bỏ nó. Hiếm; nên tắt tự lưu khi không lấy được `started`. Ghi ngày 2026-11-16.
+
+### [Thấp] Khôi phục ghi lại ngay bản vừa đọc lên chỗ bản tự lưu gốc
+
+`Autosave::adopt` (`crates/gpufx-editor/src/recovery.rs`) ghi project vừa parse đè lên `project.json` của bản vừa giành. Nếu parse rồi serialize lại làm rơi dữ liệu (trường lạ, phiên bản khác) thì mất bản gốc. Nên giữ bản gốc tới lần tự lưu kế tiếp hoặc chép sang `.orig`. Ghi ngày 2026-11-16.

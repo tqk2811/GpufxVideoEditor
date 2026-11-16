@@ -22,7 +22,7 @@ use crate::sticker_library::{scan_sticker_packs, StickerLibrary};
 use crate::clip_animation_library::{scan_clip_animation_packs, ClipAnimationLibrary};
 use crate::text_style_library::{scan_text_style_packs, TextStyleLibrary};
 use crate::asset_install::recover_interrupted_install;
-use crate::editor::{EditorState, LeftTab, SoundPreviewWish, Status};
+use crate::editor::{EditorState, LeftTab, RecoveryChoice, RecoveryOffer, SoundPreviewWish, Status};
 use crate::export::{encoder_options, export_blocker, reselect, EncoderOption, EncoderStatus, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
 use crate::i18n::{Language, Message};
 use crate::packages::{scan, Catalog};
@@ -34,7 +34,8 @@ use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, PlaybackFrames, PlaybackRun, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
 use crate::package_import::{install_zip, ImportProblem};
-use crate::project_file::{load_project_file, package_roots, project_paths, save_project_file, user_package_root};
+use crate::project_file::{load_project_file, package_roots, parse_project, project_paths, save_project_file, user_package_root};
+use crate::recovery::{current_process, ClaimError, unix_now, Autosave, RecoveryStore, SystemProbe};
 use crate::project_lock::held_elsewhere;
 use crate::tasks::{run_guarded, Action, Arrival, FileDialog, Prompt, Request, TaskId, Tasks};
 use crate::ui::{self, UiRequest};
@@ -159,6 +160,8 @@ struct Session {
     arrival_sender: Sender<Arrival>,
     /// Set when a finished prompt decided the app should close.
     exit_accepted: bool,
+    /// Copies of the unsaved project for recovery after a crash.
+    autosave: Autosave,
     #[cfg(debug_assertions)]
     smoke: Smoke,
 }
@@ -179,6 +182,7 @@ impl Session {
         state.set_language(crate::settings::startup_language());
         state.ui.panel_sizes = crate::settings::startup_panel_sizes();
         state.ui.theme = crate::settings::startup_theme();
+        state.ui.autosave_seconds = crate::settings::startup_autosave_seconds();
         #[cfg(debug_assertions)]
         let smoke = {
             let mut smoke = Smoke::default();
@@ -208,6 +212,14 @@ impl Session {
         let encoder_probe = spawn_encoder_probe(window_for_scan.clone());
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
         state.encoders = encoder_options(|name| if encoder_exists(name) { EncoderStatus::Probing } else { EncoderStatus::Missing }, cfg!(feature = "ffmpeg-gpl"));
+        // A smoke check never offers or leaves autosaves.
+        #[cfg(debug_assertions)]
+        let store = RecoveryStore::default_location().filter(|_| !smoke.enabled);
+        #[cfg(not(debug_assertions))]
+        let store = RecoveryStore::default_location();
+        let orphans = store.as_ref().map(|store| store.prune_and_list_orphans(&SystemProbe, unix_now())).unwrap_or_default();
+        let autosave = Autosave::start(store, current_process(), state.ui.autosave_seconds, Instant::now());
+        state.ui.recovery_offers = orphans.into_iter().map(|orphan| RecoveryOffer { id: orphan.id, original: orphan.meta.original, saved_at: orphan.meta.saved_at, original_newer: orphan.original_newer }).collect();
         let (arrival_sender, arrivals) = channel();
         let mut session = Self {
             gateway: None,
@@ -243,6 +255,7 @@ impl Session {
             arrivals,
             arrival_sender,
             exit_accepted: false,
+            autosave,
             #[cfg(debug_assertions)]
             smoke,
         };
@@ -683,6 +696,7 @@ impl Session {
         self.sync_audio_preview();
         self.sync_project_paths();
         self.sync_title();
+        self.tick_autosave();
         self.sync_audio_project();
         self.apply_transport();
         self.request_preview();
@@ -744,6 +758,99 @@ impl Session {
             self.presenter.window().set_title(&title);
             self.title = title;
         }
+    }
+
+    /// Writes the recovery copy when due, and wakes the loop for the next one.
+    fn tick_autosave(&mut self) {
+        // Offers still open do not block: this window only ever writes entries named for itself.
+        let blocked = self.state.is_holding() || !self.tasks.is_idle();
+        if let Some(at) = self.autosave.tick(&self.state, blocked, Instant::now()) {
+            self.next_repaint = Some(self.next_repaint.map_or(at, |next| next.min(at)));
+        }
+        if let Some(message) = self.autosave.take_failure() {
+            self.state.report_error(Message::AutosaveFailed(message));
+        }
+    }
+
+    /// Restores, discards or puts off autosave `index` of the recovery dialog.
+    fn answer_recovery(&mut self, index: usize, choice: RecoveryChoice) {
+        let Some(offer) = self.state.ui.recovery_offers.get(index).cloned() else { return };
+        match choice {
+            RecoveryChoice::Later => {}
+            RecoveryChoice::Discard => {
+                match self.autosave.discard(&offer.id) {
+                    Ok(()) | Err(ClaimError::Off) => {}
+                    // Another editor took it first: it is no longer this one's to offer.
+                    Err(ClaimError::Taken(message)) => self.state.report_refused(Message::RecoveryTaken(message)),
+                    // Still there but held open: kept on offer to try again.
+                    Err(ClaimError::Locked(message)) => {
+                        self.state.report_error(Message::RecoveryFailed(message));
+                        return;
+                    }
+                }
+            }
+            RecoveryChoice::Restore => {
+                if !self.restore(&offer) {
+                    return;
+                }
+            }
+        }
+        self.state.ui.recovery_offers.remove(index);
+    }
+
+    /// Opens the autosave of `offer` as an unsaved project; false, with the reason shown, when not.
+    fn restore(&mut self, offer: &RecoveryOffer) -> bool {
+        if self.state.is_dirty() || !self.tasks.is_idle() || self.state.is_exporting() || self.state.is_holding() {
+            self.state.report_refused(Message::RecoveryBusy);
+            return false;
+        }
+        let Some(store) = self.autosave.store().cloned() else { return false };
+        if let Some(file) = &offer.original {
+            if held_elsewhere(file) {
+                self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
+                return false;
+            }
+        }
+        // Taken over on disk first, so no other editor restores or discards it meanwhile.
+        let claimed = match self.autosave.claim(&offer.id) {
+            Ok(claimed) => claimed,
+            Err(ClaimError::Taken(message)) => {
+                self.state.report_refused(Message::RecoveryTaken(message));
+                // Dropped from the offers: another editor has it now.
+                return true;
+            }
+            // Still there but held open: kept on offer to try again.
+            Err(ClaimError::Locked(message)) => {
+                self.state.report_error(Message::RecoveryFailed(message));
+                return false;
+            }
+            Err(ClaimError::Off) => return false,
+        };
+        // The copy holds absolute sources; missing ones are refused as when opening a project.
+        let loaded = store.project_text(&claimed).and_then(|text| {
+            let file = offer.original.clone().unwrap_or_else(|| store.project_file(&claimed));
+            parse_project(&text, &file, &project_paths(offer.original.as_deref(), &self.package_roots))
+        });
+        let project = match loaded {
+            Ok(project) => project,
+            Err(message) => {
+                self.autosave.unclaim(&claimed, &offer.id);
+                self.state.report_error(Message::RecoveryFailed(message));
+                return false;
+            }
+        };
+        // Locked as opening a project locks it; the check above may have raced another process.
+        if let Some(file) = &offer.original {
+            if !self.state.claim_project_lock(file) {
+                self.autosave.unclaim(&claimed, &offer.id);
+                self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
+                return false;
+            }
+        }
+        self.state.restore_project(project, offer.original.clone());
+        self.perform(Action::ProjectReplaced);
+        self.autosave.adopt(&claimed, offer.original.as_deref(), &self.state, Instant::now());
+        true
     }
 
     fn save_project(&mut self, file: PathBuf) {
@@ -864,7 +971,10 @@ impl Session {
                 self.playback = None;
                 self.audio_preview.stop();
             }
-            Action::Exit => self.exit_accepted = true,
+            Action::Exit => {
+                self.exit_accepted = true;
+                self.autosave.finish_clean();
+            }
         }
     }
 
@@ -972,6 +1082,14 @@ impl Session {
                     self.state.report_error(Message::PanelSizesSaveFailed(message));
                 }
             }
+            UiRequest::SetAutosave(seconds) => {
+                self.state.ui.autosave_seconds = seconds;
+                self.autosave.set_interval(seconds);
+                if let Err(message) = crate::settings::save_autosave_seconds(seconds) {
+                    self.state.report_error(Message::AutosaveSettingFailed(message));
+                }
+            }
+            UiRequest::Recovery { index, choice } => self.answer_recovery(index, choice),
             // winit restores the placement it saved on entry, maximised or not, on leaving.
             UiRequest::ToggleFullscreen => {
                 let leaving = self.presenter.window().fullscreen().is_some();
@@ -1208,6 +1326,7 @@ impl ApplicationHandler<AgentWake> for EditorApp {
                 } else if session.exit_accepted {
                     event_loop.exit();
                 } else if session.smoke_finished() {
+                    session.autosave.finish_clean();
                     #[cfg(debug_assertions)]
                     {
                         session.smoke.ui_generating.report("while generating");
