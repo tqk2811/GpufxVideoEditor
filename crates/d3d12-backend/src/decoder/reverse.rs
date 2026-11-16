@@ -96,6 +96,8 @@ pub struct ReverseDecoder {
     slow_gop: bool,
     /// Frames copied to system memory so far.
     downloaded: u64,
+    /// Test hook: the next copy between video and system memory fails.
+    fail_next_transfer: bool,
 }
 
 /// A decoded frame copied to system memory, with the properties of the frame it came from.
@@ -144,6 +146,7 @@ impl ReverseDecoder {
             step,
             slow_gop: false,
             downloaded: 0,
+            fail_next_transfer: false,
         })
     }
 
@@ -162,6 +165,43 @@ impl ReverseDecoder {
     /// How many frames this decoder has copied to system memory for the cache.
     pub fn downloaded_frames(&self) -> u64 {
         self.downloaded
+    }
+
+    /// Whether frames pushed out of the ring are still kept in system memory. A failed copy
+    /// turns this off for the rest of the decoder's life: the frames are decoded again instead.
+    pub fn cache_enabled(&self) -> bool {
+        self.below_capacity > 0
+    }
+
+    /// Makes the next copy between video and system memory fail, to test the fallback.
+    #[doc(hidden)]
+    pub fn fail_next_transfer(&mut self) {
+        self.fail_next_transfer = true;
+    }
+
+    /// Stops keeping frames in system memory after a failed copy, and says so once. Playing on
+    /// without the cache only decodes more, where failing the request would end the clip.
+    fn disable_cache(&mut self, what: &str, message: &str) {
+        eprintln!("reversed clip {}: {what} failed ({message}); playing without the frame cache", self.inner.path);
+        self.below_capacity = 0;
+        self.below.clear();
+        self.below_starts_stream = false;
+    }
+
+    /// [`download`], failing once when the test hook says so.
+    fn download_frame(&mut self, frame: &DecodedFrame) -> Result<CpuFrame, String> {
+        if std::mem::take(&mut self.fail_next_transfer) {
+            return Err("transfer failure injected by a test".to_owned());
+        }
+        download(frame)
+    }
+
+    /// [`upload`], failing once when the test hook says so.
+    fn upload_frame(&mut self, copy: &CpuFrame) -> Result<DecodedFrame, String> {
+        if std::mem::take(&mut self.fail_next_transfer) {
+            return Err("transfer failure injected by a test".to_owned());
+        }
+        upload(&self.inner, copy)
     }
 
     /// The next frame from the decoder, counted.
@@ -214,7 +254,13 @@ impl ReverseDecoder {
             self.below_starts_stream = false;
             return Ok(());
         }
-        let copy = download(&out)?;
+        let copy = match self.download_frame(&out) {
+            Ok(copy) => copy,
+            Err(message) => {
+                self.disable_cache("a download", &message);
+                return Ok(());
+            }
+        };
         self.downloaded += 1;
         if self.below.is_empty() {
             self.below_starts_stream = starts_stream;
@@ -264,8 +310,17 @@ impl ReverseDecoder {
         self.continues = false;
         self.ends_stream = false;
         for copy in &moved {
-            let frame = upload(&self.inner, copy)?;
-            self.ring.push_back(frame);
+            match self.upload_frame(copy) {
+                Ok(frame) => self.ring.push_back(frame),
+                Err(message) => {
+                    // The ring is left empty, so the caller refills it by decoding.
+                    self.disable_cache("an upload", &message);
+                    self.ring.clear();
+                    self.starts_stream = false;
+                    self.next_pts = None;
+                    return Ok(false);
+                }
+            }
         }
         self.starts_stream = self.below.is_empty() && self.below_starts_stream;
         if self.below.is_empty() {
@@ -333,10 +388,10 @@ impl ReverseDecoder {
         if let Some(index) = self.find(target) {
             return self.ring[index].reference();
         }
-        let just_after = self.continues && self.ring.back().is_some_and(|last| target >= last.pts && !self.seek_pays(last.pts, target)) && self.ring.front().is_some_and(|first| target >= first.pts);
         let moved = match self.take_from_below(target) {
             Ok(true) => Ok(()),
-            Ok(false) if just_after => self.decode_through(target, None),
+            // Judged after the cache had its turn: a failed upload leaves the ring empty.
+            Ok(false) if self.continues && self.ring.back().is_some_and(|last| target >= last.pts && !self.seek_pays(last.pts, target)) && self.ring.front().is_some_and(|first| target >= first.pts) => self.decode_through(target, None),
             Ok(false) => self.refill(target),
             Err(message) => Err(message),
         };

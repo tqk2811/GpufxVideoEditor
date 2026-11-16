@@ -316,6 +316,44 @@ fn the_first_refill_of_a_long_gop_downloads_only_the_frames_it_keeps() {
     assert!(downloaded <= 60, "{downloaded} frames downloaded for a cache of 50");
 }
 
+/// Plays the first 600 frames of the long GOP clip backwards from the last, checking each one
+/// against a forward decoder; `hook` runs before the request for frame `at_frame` of the 600.
+fn plays_backwards_through_a_transfer_failure(gpu: &Gpu, at_frame: i64) -> ReverseDecoder {
+    let clip = longer_gop_clip();
+    let at = |n: i64| Time::from_ticks(n * FRAME);
+    let mut forward = SequentialDecoder::open(&clip, gpu.raw_device()).expect("open the clip");
+    let zero = forward.frame_at(at(0)).expect("frame 0").pts;
+    let step = forward.frame_at(at(1)).expect("frame 1").pts - zero;
+    // A cache of about 50 frames of 640x360, so refills and uploads both happen.
+    let mut decoder = ReverseDecoder::open_with_cache(&clip, gpu.raw_device(), 50 * 640 * 384 * 3 / 2).expect("open the clip");
+    for n in (0..600).rev() {
+        if n == at_frame {
+            assert!(decoder.cache_enabled(), "the cache is still on before the failure");
+            decoder.fail_next_transfer();
+        }
+        assert_eq!(decoder.frame_at(at(n)).expect("a frame despite the failed transfer").pts, zero + n * step, "frame {n}");
+    }
+    decoder
+}
+
+#[test]
+fn a_failed_download_turns_the_cache_off_and_the_clip_still_plays_backwards() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    // The very first copy of the first refill fails.
+    let decoder = plays_backwards_through_a_transfer_failure(&gpu, 599);
+    assert!(!decoder.cache_enabled(), "the cache is off after a failed copy");
+}
+
+#[test]
+fn a_failed_upload_turns_the_cache_off_and_the_clip_still_plays_backwards() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    // Frame 540 is below the ring after the first refill, so the cache is read for it.
+    let decoder = plays_backwards_through_a_transfer_failure(&gpu, 540);
+    assert!(!decoder.cache_enabled(), "the cache is off after a failed copy");
+}
+
 #[test]
 fn a_split_reversed_clip_renders_the_same_frames_and_a_transition_reads_on_backwards() {
     let _lock = gpu_lock();
