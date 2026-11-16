@@ -92,6 +92,29 @@ fn a_split_reversed_clip_at_another_speed_keeps_its_frames() {
 }
 
 #[test]
+fn a_reversed_clip_split_off_the_grid_keeps_its_bottom_and_its_frames() {
+    // Speeds whose source offsets round, cut at ticks that are not on any frame or speed grid.
+    for speed in [1.5, 0.7, 1.3, 2.37, 0.333] {
+        let mut before = set_speed(&reversed(), key(0), speed).unwrap();
+        before.tracks[0].clips[0].source_in = t(SECOND + 7);
+        let original = before.tracks[0].clips[0].clone();
+        let length = original.duration.ticks();
+        let whole = shown(&before, 0, length);
+        for at in [SECOND / 3 + 1, SECOND / 2 + 17, 2 * SECOND / 3 + 4_001] {
+            if at >= length {
+                continue;
+            }
+            let cut = split_clip(&before, key(0), t(at)).unwrap();
+            let (first, second) = (&cut.tracks[0].clips[0], &cut.tracks[0].clips[1]);
+            assert_eq!(second.source_in, original.source_in, "speed {speed}, cut {at}: the second half ends on the frame at source_in");
+            assert_eq!(first.source_end(), original.source_end(), "speed {speed}, cut {at}: the first half starts on the top frame");
+            assert_eq!(second.source_end(), first.source_in, "speed {speed}, cut {at}: the halves' spans add up to the whole");
+            assert_eq!(shown(&cut, 0, length), whole, "speed {speed}, cut {at}");
+        }
+    }
+}
+
+#[test]
 fn trimming_the_start_of_a_reversed_clip_keeps_the_frames_under_its_end() {
     let before = reversed();
     let whole = shown(&before, 0, 2 * SECOND);

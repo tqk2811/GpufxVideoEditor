@@ -801,7 +801,9 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     // `source_end - first_span`, and the second half goes on below it.
     let reversed_first_in = clip.plays_reversed().then(|| clip.source_end().saturating_sub(first_span));
     if let Some(first_in) = reversed_first_in {
-        second.source_in = first_in.saturating_sub(clip.source_offset(rest.saturating_sub(hold_end))).max(Time::ZERO);
+        // The second half ends the clip, on the frame at source_in, and reaches up to the first.
+        second.source_in = clip.source_in;
+        debug_assert_eq!(clip.source_in.saturating_add(clip.source_offset(rest.saturating_sub(hold_end))), first_in, "the halves of a reversed clip cover its source range");
     }
     second.fade_in = Time::ZERO;
     // The start hold stays with the first half and the end hold with the second, each one's other
