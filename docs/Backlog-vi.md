@@ -10,11 +10,27 @@
 
 ### [Vừa] Tua clip GOP dài vượt ngưỡng đề xuất
 
-Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 200 ms (`docs/plans/result-poc-phase0-vi.md`). Footage thật thường có GOP dài, nên giai đoạn sau cần proxy, cache hoặc giải mã trước. Ghi ngày 2026-11-09.
+Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 200 ms (`docs/plans/result-poc-phase0-vi.md`). Footage thật thường có GOP dài. Menu "Xem trước bằng proxy" (`crates/gpufx-editor/src/proxy.rs`) đã giải quyết khi bật "Mọi video", còn chế độ Tự động chỉ tạo proxy cho video cao hơn 1080p nên clip 1080p GOP dài vẫn tua chậm; nên cân nhắc thêm tiêu chí GOP dài (đọc khoảng keyframe lúc probe), cache hoặc giải mã trước. Ghi ngày 2026-11-09, cập nhật 2026-11-17.
 
 ### [Vừa] Chờ decoder rảnh trước mỗi lần mix làm mất giải mã song song
 
 `D3d12Decoder::wait_until_idle` ở `crates/poc/src/decoder.rs` và `SequentialDecoder::wait_idle` ở `crates/d3d12-backend/src/decoder.rs:389-401` chờ CPU trước mỗi `mix` để khung không còn bị decode khác tham chiếu. Phát p99 có lần lên 31,4 ms, sát ngưỡng 33 ms, chưa rõ nguyên nhân. Bản editor cần đồng bộ trên GPU hoặc tách luồng. Ghi ngày 2026-11-09.
+
+### [Thấp] Playback đang chạy vẫn đọc file gốc khi proxy vừa xong
+
+`crates/gpufx-editor/src/window.rs:1005` (`sync_proxies`) dựng lại `ProjectPaths` khi có proxy mới; preview tĩnh đổi sang proxy ngay, còn `Playback` đang phát giữ paths cũ tới khi dừng rồi phát lại. Nên mở lại playback từ đầu phát như `sync_project_paths` nếu muốn đổi ngay. Ghi ngày 2026-11-17.
+
+### [Thấp] Proxy không biết file gốc bị thay trong phiên
+
+`crates/gpufx-editor/src/proxy.rs:490` (`make_one`) chỉ đọc cỡ + mtime của file gốc lúc tạo proxy; file gốc bị ghi đè trong lúc editor mở thì preview vẫn dùng proxy cũ tới lần mở sau (lần sau tên proxy đổi theo dấu mới nên tự tạo lại). Nên kiểm lại dấu file khi project đổi hoặc theo chu kỳ. Ghi ngày 2026-11-17.
+
+### [Thấp] Proxy chế độ Tự động chỉ xét chiều cao, proxy tối đa 60 fps
+
+`crates/gpufx-editor/src/proxy.rs:75` (`ProxyMode::wants`) chỉ xét cao hơn 1080; chưa xét fps cao hay codec nặng (HEVC 10-bit, AV1). `proxy.rs:186` kẹp tốc độ khung về 60 fps vì project không cho nhanh hơn, nên nguồn 120 fps có proxy 60 fps. Ghi ngày 2026-11-17.
+
+### [Thấp] Chụp khung cho agent dùng proxy khi có
+
+`crates/gpufx-editor/src/window.rs:1166` chụp khung cho agent bằng `self.paths`, nên khi đã có proxy ảnh agent nhận là từ bản 540p phóng lên. Chưa có tool MCP `proxy_status`/`proxy_create`. Nên cân nhắc cho capture dùng `without_proxies()` hoặc thêm tham số, và thêm tool nếu agent cần biết trạng thái proxy. Ghi ngày 2026-11-17.
 
 ### [Thấp] `still_dimensions` bỏ qua hướng EXIF
 
