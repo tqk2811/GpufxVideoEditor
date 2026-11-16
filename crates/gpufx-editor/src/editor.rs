@@ -481,6 +481,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         denoise: Default::default(),
         voice: Default::default(),
         reverse: false,
+        matte: Default::default(),
     }
 }
 

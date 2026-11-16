@@ -1,7 +1,7 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
-use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
+use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -190,6 +190,8 @@ pub enum ValidationError {
     InvalidDenoiseStrength { track: usize, clip: usize, strength: f64 },
     /// A clip `voice.semitones` is not a number from -12 to 12.
     InvalidPitch { track: usize, clip: usize, semitones: f64 },
+    /// A clip `matte` value is out of its range: `field` names it.
+    InvalidMatte { track: usize, clip: usize, field: &'static str, value: f64 },
     /// `output.audio.bitrate` is zero.
     InvalidAudioBitrate,
     /// A marker is at a negative time.
@@ -378,6 +380,9 @@ impl fmt::Display for ValidationError {
             }
             InvalidPitch { track, clip, semitones } => {
                 write!(f, "track {track}, clip {clip}: voice semitones {semitones} must be from -{MAX_PITCH_SEMITONES} to {MAX_PITCH_SEMITONES}")
+            }
+            InvalidMatte { track, clip, field, value } => {
+                write!(f, "track {track}, clip {clip}: matte {field} {value} is out of range")
             }
             InvalidAudioBitrate => write!(f, "output: audio bitrate must be positive"),
             NegativeMarkerTime { marker, at } => write!(f, "marker {marker}: time {at} is negative"),
@@ -691,6 +696,17 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             }
             if !(-MAX_PITCH_SEMITONES..=MAX_PITCH_SEMITONES).contains(&clip.voice.semitones) {
                 errors.push(InvalidPitch { track: t, clip: c, semitones: clip.voice.semitones });
+            }
+            let matte = &clip.matte;
+            for (field, value, range) in [
+                ("threshold", matte.threshold, 0.0..=1.0),
+                ("feather", matte.feather, 0.0..=MAX_MATTE_PIXELS),
+                ("edge", matte.edge, -MAX_MATTE_PIXELS..=MAX_MATTE_PIXELS),
+                ("temporal", f64::from(matte.temporal), 0.0..=f64::from(MAX_MATTE_TEMPORAL)),
+            ] {
+                if !range.contains(&value) {
+                    errors.push(InvalidMatte { track: t, clip: c, field, value });
+                }
             }
             let mut fades_ok = true;
             for (field, value) in [("fade_in", clip.fade_in), ("fade_out", clip.fade_out)] {
