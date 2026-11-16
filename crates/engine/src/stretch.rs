@@ -205,7 +205,9 @@ impl ReverseReader {
             self.chunks.push_front(chunk);
         } else {
             let mut frames = vec![0.0; REVERSE_CHUNK as usize * MIX_CHANNELS];
-            inner.read(key, &self.source, start, &mut frames)?;
+            // Fresh: a chunk read right after the one below it would otherwise continue the
+            // decoder, and differ from the same chunk read after a seek, as an export reads it.
+            inner.read_fresh(key, &self.source, start, &mut frames)?;
             self.chunks.push_front((start, frames));
             self.chunks.truncate(REVERSE_CHUNKS_KEPT);
         }

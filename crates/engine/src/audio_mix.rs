@@ -36,6 +36,20 @@ pub trait AudioSource {
         self.read(key, source, position, out)?;
         Ok(out.len() / MIX_CHANNELS)
     }
+
+    /// Like [`AudioSource::read`], with samples that depend on `position` only. A source whose
+    /// output carries state over from the read before (a decoder and resampler continuing where
+    /// they stopped, instead of starting again from a seek) starts afresh for it. Reads that must
+    /// match whatever order they come in, as the chunks of a reversed clip, use it.
+    fn read_fresh(
+        &mut self,
+        key: ClipKey,
+        source: &str,
+        position: i64,
+        out: &mut [f32],
+    ) -> Result<(), RenderError> {
+        self.read(key, source, position, out)
+    }
 }
 
 /// What happened during one mix.
