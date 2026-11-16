@@ -10,7 +10,7 @@ use std::sync::mpsc::{channel, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use d3d12_backend::{reserve_temporary, EncoderChoice, ExportJob, ProjectPaths, CANCEL_LINE};
+use d3d12_backend::{reserve_temporary, ExportJob, ProjectPaths, CANCEL_LINE};
 use engine::Project;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
@@ -187,11 +187,12 @@ fn supervise(mut child: Child, cancel: &AtomicBool, done: &AtomicI64, grace: Dur
 
 /// The arguments of `gpufx-render` for this job.
 fn render_arguments(project_file: &Path, job: &ExportJob, package_roots: &[PathBuf], headless: bool) -> Vec<std::ffi::OsString> {
-    let mut arguments: Vec<std::ffi::OsString> = vec![project_file.into(), "--out".into(), job.out.clone().into(), "--encoder".into()];
-    arguments.push(match &job.encoder {
-        EncoderChoice::Auto => "auto".into(),
-        EncoderChoice::Named(name) => name.into(),
-    });
+    let mut arguments: Vec<std::ffi::OsString> = vec![project_file.into(), "--out".into(), job.out.clone().into()];
+    let (codec, encoder) = job.encoder.to_args();
+    if let Some(codec) = codec {
+        arguments.extend(["--codec".into(), codec.into()]);
+    }
+    arguments.extend(["--encoder".into(), encoder.into()]);
     if let Some(hashes) = &job.hashes {
         arguments.extend(["--hashes".into(), hashes.clone().into()]);
     }
@@ -257,7 +258,7 @@ fn run_child_with(job: &ExportJob, package_roots: &[PathBuf], tool: &Path, cance
 mod tests {
     use super::*;
     use crate::child_process::{MAX_LINE, STDERR_TAIL};
-    use d3d12_backend::ExportJob;
+    use d3d12_backend::{EncoderChoice, ExportJob};
     use engine::{Clip, Effect, Output, Time, Track, TrackKind, SUPPORTED_VERSION};
     use serde_json::Map;
     use std::sync::mpsc::channel;
@@ -319,6 +320,17 @@ mod tests {
         let outcome = run(&own, false, SHORT_GRACE);
         assert!(matches!(&outcome, ExportOutcome::Failed(Message::ExportFailed(text)) if text.contains("the project file")), "{outcome:?}");
         assert_eq!(std::fs::read(&own.out).expect("read"), b"{}");
+    }
+
+    #[test]
+    fn auto_passes_its_codec_to_the_child() {
+        let dir = scratch("codec");
+        let mut job = job(&dir, "ok");
+        job.encoder = EncoderChoice::Auto(d3d12_backend::VideoCodec::Hevc);
+        let arguments = render_arguments(Path::new("p.json"), &job, &[], false);
+        let codec = arguments.iter().position(|a| a == "--codec").expect("--codec is passed");
+        assert_eq!(arguments[codec + 1], "hevc");
+        assert_eq!(arguments[codec + 2..codec + 4], ["--encoder", "auto"]);
     }
 
     #[test]

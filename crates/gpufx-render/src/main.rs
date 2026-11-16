@@ -13,9 +13,13 @@ use std::time::{Duration, Instant};
 use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu, ProgressEvent, ProjectPaths, CANCEL_LINE, PROGRESS_PROTOCOL};
 use engine::{frame_count, Project};
 
-const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]... [--progress <text|json>] [--cancel-on-stdin-eof]\n\
+const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--codec <h264|hevc>] [--encoder <name|auto>] [--hashes <file>] [--packages <dir>]... [--progress <text|json>] [--cancel-on-stdin-eof]\n\
     \n\
-    --encoder   H.264 encoder: auto (default), libx264, h264_nvenc, h264_amf, h264_qsv, h264_mf or any encoder name FFmpeg accepts\n\
+    --codec     video codec: h264 (default) or hevc; with --encoder auto, picks which encoders Auto tries\n\
+    --encoder   auto (default): the first encoder that opens on this machine, hardware first\n\
+    \x20           (h264_nvenc, h264_qsv, h264_amf, h264_mf, then libx264 in the GPL build, then libopenh264;\n\
+    \x20           for hevc: hevc_nvenc, hevc_qsv, hevc_amf, hevc_mf, libx265, libkvazaar), or one of those names,\n\
+    \x20           or any encoder name FFmpeg accepts. A named encoder that fails stops the render.\n\
     --hashes    write 'frame sha256-of-RGBA' lines to a file\n\
     --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>\n\
     --progress  text (default), or json: one JSON event per stdout line, and a 'cancel' line on stdin stops the render\n\
@@ -49,7 +53,8 @@ struct Arguments {
 fn parse_arguments() -> Result<Arguments, String> {
     let mut project = None;
     let mut out = None;
-    let mut encoder = EncoderChoice::Auto;
+    let mut codec = None;
+    let mut encoder = None;
     let mut hashes = None;
     let mut package_roots = Vec::new();
     let mut progress = ProgressMode::Text;
@@ -61,10 +66,8 @@ fn parse_arguments() -> Result<Arguments, String> {
         let flag = argument.to_string_lossy();
         match flag.as_ref() {
             "--out" => out = Some(PathBuf::from(value("--out")?)),
-            "--encoder" => {
-                let name = value("--encoder")?.to_string_lossy().into_owned();
-                encoder = if name == "auto" { EncoderChoice::Auto } else { EncoderChoice::Named(name) };
-            }
+            "--codec" => codec = Some(value("--codec")?.to_string_lossy().into_owned()),
+            "--encoder" => encoder = Some(value("--encoder")?.to_string_lossy().into_owned()),
             "--hashes" => hashes = Some(PathBuf::from(value("--hashes")?)),
             "--packages" => package_roots.push(PathBuf::from(value("--packages")?)),
             "--progress" => {
@@ -87,6 +90,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     if cancel_on_stdin_eof && progress != ProgressMode::Json {
         return Err("--cancel-on-stdin-eof needs --progress json".to_owned());
     }
+    let encoder = EncoderChoice::parse(codec.as_deref(), encoder.as_deref())?;
     Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, package_roots, progress, cancel_on_stdin_eof })
 }
 

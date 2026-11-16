@@ -197,7 +197,8 @@ pub enum AgentRequest {
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },
     FrameCapture { target: CaptureTarget, max_width: u32 },
-    ExportStart { out: PathBuf, overwrite: bool, encoder: Option<String> },
+    /// `codec` is h264 (default) or hevc; `encoder` is auto (default) or an encoder name.
+    ExportStart { out: PathBuf, overwrite: bool, codec: Option<String>, encoder: Option<String> },
     ExportStatus { job: Option<u64> },
     ExportCancel { job: Option<u64> },
 }

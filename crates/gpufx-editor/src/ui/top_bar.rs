@@ -113,10 +113,20 @@ fn export_area(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
     if icons::label_button(ui, Icon::Export, &language.t(Message::ExportVideo), theme::accent(), theme::on_accent(), None).clicked() {
         requests.push(UiRequest::Export);
     }
-    let selected = state.encoders.get(state.encoder).map_or_else(String::new, |option| language.text(&option.label));
     let options = state.encoders.clone();
+    let codec = options.get(state.encoder).map_or_else(Default::default, |option| option.codec);
+    egui::ComboBox::from_id_salt("codec").width(100.0).selected_text(crate::export::codec_label(codec)).show_ui(ui, |ui| {
+        for choice in d3d12_backend::VideoCodec::ALL {
+            if ui.selectable_label(choice == codec, crate::export::codec_label(choice)).clicked() && choice != codec {
+                if let Some(auto) = options.iter().position(|option| option.choice == d3d12_backend::EncoderChoice::Auto(choice)) {
+                    state.encoder = auto;
+                }
+            }
+        }
+    });
+    let selected = options.get(state.encoder).map_or_else(String::new, |option| language.text(&option.label));
     egui::ComboBox::from_id_salt("encoder").width(150.0).selected_text(selected).show_ui(ui, |ui| {
-        for (index, option) in options.iter().enumerate() {
+        for (index, option) in options.iter().enumerate().filter(|(_, option)| option.codec == codec) {
             ui.add_enabled_ui(option.available, |ui| {
                 ui.selectable_value(&mut state.encoder, index, language.text(&option.label));
             });

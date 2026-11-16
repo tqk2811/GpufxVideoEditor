@@ -119,7 +119,13 @@ unsafe extern "C" {
     pub fn av_frame_make_writable(frame: *mut AVFrame) -> core::ffi::c_int;
     pub fn av_packet_rescale_ts(packet: *mut AVPacket, source: AVRational, destination: AVRational);
     pub fn av_opt_set(object: *mut core::ffi::c_void, name: *const core::ffi::c_char, value: *const core::ffi::c_char, flags: core::ffi::c_int) -> core::ffi::c_int;
+    /// `config` 0 is `AV_CODEC_CONFIG_PIX_FORMAT`: a list of `AVPixelFormat` ending in -1, or null
+    /// when the codec accepts any format.
+    pub fn avcodec_get_supported_config(context: *const AVCodecContext, codec: *const AVCodec, config: core::ffi::c_int, flags: core::ffi::c_uint, out_configs: *mut *const core::ffi::c_void, out_count: *mut core::ffi::c_int) -> core::ffi::c_int;
 }
+
+/// `AV_CODEC_CONFIG_PIX_FORMAT`
+pub const AV_CODEC_CONFIG_PIX_FORMAT: core::ffi::c_int = 0;
 
 /// Turns an FFmpeg error code into text.
 pub fn describe_error(code: i32) -> String {

@@ -55,7 +55,7 @@ fn project_with_transition_and_sound() -> Project {
 fn export_job(file: &Path, out: &Path, hashes: Option<&Path>) -> ExportJob {
     let roots = package_roots();
     let project = load_project_file(file, &roots).expect("the saved project opens");
-    ExportJob { project, project_file: Some(file.to_path_buf()), paths: Arc::new(project_paths(Some(file), &roots)), out: out.to_path_buf(), encoder: EncoderChoice::Auto, hashes: hashes.map(Path::to_path_buf) }
+    ExportJob { project, project_file: Some(file.to_path_buf()), paths: Arc::new(project_paths(Some(file), &roots)), out: out.to_path_buf(), encoder: EncoderChoice::default(), hashes: hashes.map(Path::to_path_buf) }
 }
 
 /// Starts the UI's worker on `file`, already past the wait for the preview.

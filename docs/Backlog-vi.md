@@ -64,9 +64,9 @@ Debug layer báo #1334 (CopyTextureRegion trên COPY list) 24 lần. Số lần 
 
 Blend của `crates/poc/src/mix_bench.rs` chỉ kiểm ở 3 vị trí tua, ma trận màu lấy cùng nguồn với gpufx, khung lúc phát chưa kiểm, player chưa thao tác bằng tay. Bộ test tự động của engine đã có (`crates/gpufx-render/tests/`), nhưng không có test nào chứng minh được việc chờ decoder (`wait_idle`) thật sự chặn đúng lỗi tham chiếu đồng thời: bỏ nó đi thì test có thể vẫn xanh, vì lỗi loại này không lộ thành sai ảnh ổn định. Ghi ngày 2026-11-09.
 
-### [Vừa] Encoder phần cứng h264_d3d12va chưa dùng được
+### [Vừa] Encoder d3d12va (zero-copy) chưa dùng được
 
-`crates/d3d12-backend/src/encoder.rs` chỉ gửi khung NV12 CPU. `h264_d3d12va` đòi `AV_PIX_FMT_D3D12`, nên hiện báo lỗi `Invalid argument`; `libopenh264` đòi `yuv420p` nên cũng không mở được. Hai encoder này có trong FFmpeg LGPL; muốn dùng cần upload khung lên hw frames context và thêm nhánh `yuv420p`. Ghi ngày 2026-11-09.
+`crates/d3d12-backend/src/encoder.rs` đã dùng các encoder phần cứng nhận khung NV12 từ CPU (`*_nvenc`, `*_qsv`, `*_amf`, `*_mf`) cho cả H.264 và HEVC, nhưng `h264_d3d12va`/`hevc_d3d12va` vẫn chưa dùng được: chúng đòi `AV_PIX_FMT_D3D12` (hw frames context). Muốn dùng cần đưa khung đã ghép trên GPU thẳng vào hw frames context của FFmpeg (zero-copy), bỏ bước đọc RGBA về CPU và đổi sang NV12 trên CPU. Ghi ngày 2026-11-09, thu hẹp ngày 2026-11-16.
 
 ### [Vừa] Bộ giải mã chưa xử lý nguồn đổi kích thước giữa chừng và nguồn 10-bit
 

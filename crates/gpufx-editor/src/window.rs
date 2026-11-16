@@ -10,7 +10,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Fullscreen, Window, WindowId};
 
-use d3d12_backend::{encoder_exists, probe_media, read_package_info, EncoderChoice, ExportJob, Gpu, ProjectPaths};
+use d3d12_backend::{encoder_available, encoder_exists, probe_media, read_package_info, EncoderChoice, ExportJob, Gpu, ProjectPaths};
 use engine::Project;
 #[cfg(debug_assertions)]
 use engine::{Time, TrackKind};
@@ -23,7 +23,7 @@ use crate::clip_animation_library::{scan_clip_animation_packs, ClipAnimationLibr
 use crate::text_style_library::{scan_text_style_packs, TextStyleLibrary};
 use crate::asset_install::recover_interrupted_install;
 use crate::editor::{EditorState, LeftTab, SoundPreviewWish, Status};
-use crate::export::{encoder_options, export_blocker, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
+use crate::export::{encoder_options, export_blocker, reselect, EncoderOption, EncoderStatus, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
 use crate::i18n::{Language, Message};
 use crate::packages::{scan, Catalog};
 use crate::playback::device::Playback;
@@ -150,6 +150,8 @@ struct Session {
     catalog: Option<Receiver<Catalog>>,
     audio_library: Option<Receiver<AudioLibrary>>,
     sticker_library: Option<Receiver<StickerLibrary>>,
+    /// The encoder list once each encoder has been tried, until it is taken.
+    encoder_probe: Option<Receiver<Vec<EncoderOption>>>,
     clip_animation_library: Option<Receiver<(ClipAnimationLibrary, engine::PackPresets)>>,
     text_style_library: Option<Receiver<TextStyleLibrary>>,
     tasks: Tasks,
@@ -203,8 +205,9 @@ impl Session {
         let sticker_library = spawn_sticker_scan(package_roots.clone(), window_for_scan.clone());
         let clip_animation_library = spawn_clip_animation_scan(package_roots.clone(), window_for_scan.clone());
         let text_style_library = spawn_text_style_scan(package_roots.clone(), window_for_scan.clone());
+        let encoder_probe = spawn_encoder_probe(window_for_scan.clone());
         let catalog = spawn_catalog_scan(package_roots.clone(), window_for_scan);
-        state.encoders = encoder_options(encoder_exists, cfg!(feature = "ffmpeg-gpl"));
+        state.encoders = encoder_options(|name| if encoder_exists(name) { EncoderStatus::Probing } else { EncoderStatus::Missing }, cfg!(feature = "ffmpeg-gpl"));
         let (arrival_sender, arrivals) = channel();
         let mut session = Self {
             gateway: None,
@@ -233,6 +236,7 @@ impl Session {
             catalog: Some(catalog),
             audio_library: Some(audio_library),
             sticker_library: Some(sticker_library),
+            encoder_probe: Some(encoder_probe),
             clip_animation_library: Some(clip_animation_library),
             text_style_library: Some(text_style_library),
             tasks: Tasks::default(),
@@ -348,6 +352,15 @@ impl Session {
         if let Some(Ok(library)) = self.sticker_library.as_ref().map(Receiver::try_recv) {
             self.state.sticker_library = library;
             self.sticker_library = None;
+        }
+    }
+
+    /// Takes the encoder list once each encoder has been tried, keeping the selection.
+    fn collect_encoder_probe(&mut self) {
+        if let Some(Ok(options)) = self.encoder_probe.as_ref().map(Receiver::try_recv) {
+            self.state.encoder = reselect(&options, &self.state.encoders, self.state.encoder);
+            self.state.encoders = options;
+            self.encoder_probe = None;
         }
     }
 
@@ -617,6 +630,7 @@ impl Session {
         self.collect_catalog();
         self.collect_audio_library();
         self.collect_sticker_library();
+        self.collect_encoder_probe();
         self.collect_clip_animation_library();
         self.collect_text_style_library();
         self.collect_arrivals();
@@ -1100,6 +1114,24 @@ fn spawn_sticker_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<Stic
     });
     if let Err(e) = scanner {
         eprintln!("gpufx-editor: the sticker pack scan could not start: {e}");
+    }
+    receiver
+}
+
+/// Tries each encoder on a thread: a hardware encoder can take most of a second to open.
+fn spawn_encoder_probe(window: Arc<Window>) -> Receiver<Vec<EncoderOption>> {
+    let (sender, receiver) = channel();
+    let prober = std::thread::Builder::new().name("encoder-probe".to_owned()).spawn(move || {
+        let status = |name: &str| match (encoder_exists(name), encoder_available(name)) {
+            (false, _) => EncoderStatus::Missing,
+            (true, true) => EncoderStatus::Available,
+            (true, false) => EncoderStatus::Unavailable,
+        };
+        let _ = sender.send(encoder_options(status, cfg!(feature = "ffmpeg-gpl")));
+        window.request_redraw();
+    });
+    if let Err(e) = prober {
+        eprintln!("gpufx-editor: the encoder probe could not start: {e}");
     }
     receiver
 }

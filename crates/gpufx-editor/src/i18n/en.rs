@@ -193,6 +193,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::EncoderAuto => "Auto".to_owned(),
         Message::EncoderNeedsGpl(name) => format!("{name} (needs the GPL build)"),
         Message::EncoderMissing(name) => format!("{name} (not in this build)"),
+        Message::EncoderProbing(name) => format!("{name} (checking...)"),
+        Message::EncoderUnavailable(name) => format!("{name} (does not open on this machine)"),
 
         Message::FilterMedia => "Media".to_owned(),
         Message::FilterAudio => "Audio".to_owned(),

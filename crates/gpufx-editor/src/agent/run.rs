@@ -669,7 +669,8 @@ fn export_json(state: &EditorState, record: &AgentExport) -> Value {
     value
 }
 
-fn export_start<H: AgentHost>(host: &mut H, out: &Path, overwrite: bool, encoder: Option<String>) -> Result<Value, AgentError> {
+fn export_start<H: AgentHost>(host: &mut H, out: &Path, overwrite: bool, codec: Option<String>, encoder: Option<String>) -> Result<Value, AgentError> {
+    let encoder = EncoderChoice::parse(codec.as_deref(), encoder.as_deref()).map_err(|e| AgentError::new("invalid_encoder", e))?;
     if host.tasks_busy() {
         return Err(busy(TASKS_BUSY));
     }
@@ -684,10 +685,6 @@ fn export_start<H: AgentHost>(host: &mut H, out: &Path, overwrite: bool, encoder
     if out.exists() && !overwrite {
         return Err(AgentError::new("file_exists", format!("{} exists: pass overwrite to replace it", out.display())));
     }
-    let encoder = match encoder.as_deref() {
-        None | Some("auto") => EncoderChoice::Auto,
-        Some(name) => EncoderChoice::Named(name.to_owned()),
-    };
     host.start_export(out.clone(), encoder)?;
     let job = host.state().begin_agent_export(out.clone());
     Ok(json!({"job": job, "out": out}))
@@ -751,7 +748,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
             Ok(frame) => return Step::Frame(frame),
             Err(error) => Err(error),
         },
-        AgentRequest::ExportStart { out, overwrite, encoder } => export_start(host, &out, overwrite, encoder),
+        AgentRequest::ExportStart { out, overwrite, codec, encoder } => export_start(host, &out, overwrite, codec, encoder),
         AgentRequest::ExportStatus { job } => {
             let state = host.state();
             export_record(state, job).map(|record| export_json(state, &record))
@@ -1002,8 +999,18 @@ mod tests {
     fn export_start_waits_for_a_dialog_or_a_load() {
         let mut host = FakeHost::new("live");
         host.busy = true;
-        let result = host.run(AgentRequest::ExportStart { out: PathBuf::from("out.mp4"), overwrite: false, encoder: None });
+        let result = host.run(AgentRequest::ExportStart { out: PathBuf::from("out.mp4"), overwrite: false, codec: None, encoder: None });
         assert_eq!(code(result), "busy");
+        assert!(host.started.is_empty());
+    }
+
+    #[test]
+    fn export_start_refuses_an_unknown_codec_or_an_encoder_of_another_codec() {
+        let mut host = FakeHost::new("live");
+        for (codec, encoder) in [("vp9", None), ("hevc", Some("h264_nvenc"))] {
+            let result = host.run(AgentRequest::ExportStart { out: PathBuf::from("out.mp4"), overwrite: false, codec: Some(codec.to_owned()), encoder: encoder.map(str::to_owned) });
+            assert_eq!(code(result), "invalid_encoder");
+        }
         assert!(host.started.is_empty());
     }
 

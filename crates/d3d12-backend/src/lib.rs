@@ -36,7 +36,7 @@ pub use compositor::{D3d12Compositor, SharedImage, SourceDecoder, SourceFrame};
 pub use decoder::{is_cancelled, DecodedFrame, PublishClock, SequentialDecoder};
 pub use effect_preview::{preview_image_files, PreviewError, PreviewLoop, PreviewRenderer, PREVIEW_FPS, PREVIEW_FRAMES, PREVIEW_SIZE};
 pub use effect_preview_protocol::{InvalidJob, PreviewBlame, PreviewEvent, PreviewJob, PreviewJobKind, PREVIEW_PROTOCOL};
-pub use encoder::{encoder_exists, EncoderChoice, Mp4Encoder, AUTO_ENCODERS};
+pub use encoder::{auto_select, encoder_available, encoder_exists, needs_gpl, probe_encoder, EncoderChoice, Mp4Encoder, VideoCodec};
 pub use export::{overwritten_input, reserve_temporary, same_file, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;
 pub use clip_animation_pack::{check_clip_animation_fields, is_clip_animation_type, parse_clip_animation_manifest, scan_clip_animation_folders, ClipAnimationManifest, ClipAnimationManifestItem, ClipAnimationScan, ItemEffect, ManifestProblem, PackLicense, PackReadProblem, CLIP_ANIMATION_FOLDER, CLIP_KINDS, DEFAULT_PROGRESS_PARAM, MAX_DEFAULT_DURATION, MAX_MANIFEST_ITEMS as MAX_CLIP_ANIMATION_ITEMS};

@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use d3d12_backend::{EncoderChoice, ExportJob, ExportReport, AUTO_ENCODERS};
+use d3d12_backend::{needs_gpl, EncoderChoice, ExportJob, ExportReport, VideoCodec};
 use engine::{frame_count, Project};
 
 use crate::i18n::Message;
@@ -53,22 +53,58 @@ pub fn export_blocker(project: &Project) -> Option<Message> {
 pub struct EncoderOption {
     pub label: Message,
     pub choice: EncoderChoice,
+    pub codec: VideoCodec,
     pub available: bool,
 }
 
-/// Auto and every encoder the CLI offers, each marked with whether this FFmpeg build has it.
-pub fn encoder_options(exists: impl Fn(&str) -> bool, gpl: bool) -> Vec<EncoderOption> {
-    let mut options = vec![EncoderOption { label: Message::EncoderAuto, choice: EncoderChoice::Auto, available: true }];
-    for name in AUTO_ENCODERS {
-        let available = exists(name);
-        let label = match (available, name == "libx264" && !gpl) {
-            (true, _) => Message::Technical(name.to_owned()),
-            (false, true) => Message::EncoderNeedsGpl(name.to_owned()),
-            (false, false) => Message::EncoderMissing(name.to_owned()),
-        };
-        options.push(EncoderOption { label, choice: EncoderChoice::Named(name.to_owned()), available });
+/// What is known about one encoder of this FFmpeg build on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncoderStatus {
+    /// It opened in a test (`d3d12_backend::encoder_available`).
+    Available,
+    /// The build has it; the test has not finished yet.
+    Probing,
+    /// The build has it but it does not open here: no such GPU, or its driver refused.
+    Unavailable,
+    /// The build does not have it.
+    Missing,
+}
+
+/// For each codec, Auto and every encoder it tries, in that order, each marked with `status`.
+/// Only Auto and the available encoders can be picked.
+pub fn encoder_options(status: impl Fn(&str) -> EncoderStatus, gpl: bool) -> Vec<EncoderOption> {
+    let mut options = Vec::new();
+    for codec in VideoCodec::ALL {
+        options.push(EncoderOption { label: Message::EncoderAuto, choice: EncoderChoice::Auto(codec), codec, available: true });
+        for &name in codec.auto_order() {
+            let state = status(name);
+            let label = match state {
+                EncoderStatus::Available => Message::Technical(name.to_owned()),
+                EncoderStatus::Probing => Message::EncoderProbing(name.to_owned()),
+                EncoderStatus::Unavailable => Message::EncoderUnavailable(name.to_owned()),
+                EncoderStatus::Missing if needs_gpl(name) && !gpl => Message::EncoderNeedsGpl(name.to_owned()),
+                EncoderStatus::Missing => Message::EncoderMissing(name.to_owned()),
+            };
+            options.push(EncoderOption { label, choice: EncoderChoice::Named(name.to_owned()), codec, available: state == EncoderStatus::Available });
+        }
     }
     options
+}
+
+/// The display name of a codec.
+pub fn codec_label(codec: VideoCodec) -> &'static str {
+    match codec {
+        VideoCodec::H264 => "H.264",
+        VideoCodec::Hevc => "HEVC (H.265)",
+    }
+}
+
+/// The index in `options` of the same choice as `options_before[selected]`, else of the Auto of
+/// its codec, else 0: the selection survives a new list, such as the one after the probes.
+pub fn reselect(options: &[EncoderOption], options_before: &[EncoderOption], selected: usize) -> usize {
+    let Some(before) = options_before.get(selected) else { return 0 };
+    let same = options.iter().position(|option| option.choice == before.choice && option.available);
+    same.or_else(|| options.iter().position(|option| option.choice == EncoderChoice::Auto(before.codec))).unwrap_or(0)
 }
 
 /// The status line after a finished export. A project without an audio output has no audio stream,
@@ -180,20 +216,52 @@ mod tests {
         assert_eq!(export_blocker(&project(true)), None);
     }
 
+    fn status_except(missing: &'static [&'static str]) -> impl Fn(&str) -> EncoderStatus {
+        move |name| if missing.contains(&name) { EncoderStatus::Missing } else { EncoderStatus::Available }
+    }
+
     #[test]
-    fn the_lgpl_build_says_libx264_needs_gpl() {
-        let options = encoder_options(|name| name != "libx264", false);
-        let x264 = options.iter().find(|o| o.choice == EncoderChoice::Named("libx264".into())).unwrap();
-        assert!(!x264.available);
-        assert_eq!(x264.label, Message::EncoderNeedsGpl("libx264".to_owned()));
+    fn the_lgpl_build_says_libx264_and_libx265_need_gpl() {
+        let options = encoder_options(status_except(&["libx264", "libx265"]), false);
+        for name in ["libx264", "libx265"] {
+            let option = options.iter().find(|o| o.choice == EncoderChoice::Named(name.into())).unwrap();
+            assert!(!option.available);
+            assert_eq!(option.label, Message::EncoderNeedsGpl(name.to_owned()));
+        }
         assert!(options[0].available, "Auto is always offered");
     }
 
     #[test]
     fn a_missing_encoder_in_the_gpl_build_is_not_blamed_on_the_license() {
-        let options = encoder_options(|_| false, true);
+        let options = encoder_options(|_| EncoderStatus::Missing, true);
         let x264 = options.iter().find(|o| o.choice == EncoderChoice::Named("libx264".into())).unwrap();
         assert_eq!(x264.label, Message::EncoderMissing("libx264".to_owned()));
+    }
+
+    #[test]
+    fn each_codec_lists_auto_first_then_its_encoders_and_only_available_ones_can_be_picked() {
+        let options = encoder_options(|name| if name.ends_with("_amf") { EncoderStatus::Unavailable } else if name.ends_with("_qsv") { EncoderStatus::Probing } else { EncoderStatus::Available }, true);
+        let hevc: Vec<&EncoderOption> = options.iter().filter(|o| o.codec == VideoCodec::Hevc).collect();
+        assert_eq!(hevc[0].choice, EncoderChoice::Auto(VideoCodec::Hevc));
+        assert_eq!(hevc[1].choice, EncoderChoice::Named("hevc_nvenc".into()));
+        assert!(hevc.iter().all(|o| o.choice == EncoderChoice::Auto(VideoCodec::Hevc) || VideoCodec::of_encoder(match &o.choice { EncoderChoice::Named(n) => n, _ => "" }) == Some(VideoCodec::Hevc)));
+        let amf = options.iter().find(|o| o.choice == EncoderChoice::Named("h264_amf".into())).unwrap();
+        assert_eq!((amf.available, &amf.label), (false, &Message::EncoderUnavailable("h264_amf".into())));
+        let qsv = options.iter().find(|o| o.choice == EncoderChoice::Named("hevc_qsv".into())).unwrap();
+        assert_eq!((qsv.available, &qsv.label), (false, &Message::EncoderProbing("hevc_qsv".into())));
+    }
+
+    #[test]
+    fn the_selection_survives_the_probe_results_or_falls_back_to_auto_of_its_codec() {
+        let probing = encoder_options(|_| EncoderStatus::Probing, true);
+        let probed = encoder_options(|name| if name == "hevc_nvenc" { EncoderStatus::Unavailable } else { EncoderStatus::Available }, true);
+        let auto_hevc = probing.iter().position(|o| o.choice == EncoderChoice::Auto(VideoCodec::Hevc)).unwrap();
+        assert_eq!(reselect(&probed, &probing, auto_hevc), auto_hevc);
+        let nvenc = probed.iter().position(|o| o.choice == EncoderChoice::Named("hevc_nvenc".into())).unwrap();
+        assert_eq!(reselect(&probed, &probed, nvenc), auto_hevc, "an encoder that does not open falls back to Auto");
+        let x264 = probed.iter().position(|o| o.choice == EncoderChoice::Named("libx264".into())).unwrap();
+        assert_eq!(reselect(&probed, &probed, x264), x264);
+        assert_eq!(reselect(&probed, &[], 3), 0);
     }
 
     #[test]

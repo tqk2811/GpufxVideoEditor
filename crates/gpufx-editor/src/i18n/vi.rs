@@ -175,6 +175,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::EncoderAuto => "Tự động".to_owned(),
         Message::EncoderNeedsGpl(name) => format!("{name} (cần bản GPL)"),
         Message::EncoderMissing(name) => format!("{name} (bản này không có)"),
+        Message::EncoderProbing(name) => format!("{name} (đang kiểm tra...)"),
+        Message::EncoderUnavailable(name) => format!("{name} (máy này không mở được)"),
 
         Message::FilterMedia => "Phương tiện".to_owned(),
         Message::FilterAudio => "Âm thanh".to_owned(),

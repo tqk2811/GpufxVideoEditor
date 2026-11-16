@@ -182,6 +182,10 @@ pub enum Message {
     EncoderAuto,
     EncoderNeedsGpl(String),
     EncoderMissing(String),
+    /// The encoder is being tested to see whether it opens on this machine.
+    EncoderProbing(String),
+    /// The build has the encoder but it does not open on this machine.
+    EncoderUnavailable(String),
 
     // File dialogs.
     FilterMedia,

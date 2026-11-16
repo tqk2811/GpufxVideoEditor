@@ -567,7 +567,7 @@ params!(TransformParams { expected_revision: u64, clip: ClipParam, placement: Op
 params!(KeyframeSetParams { expected_revision: u64, clip: ClipParam, property: Option<ClipPropertyParam>, effect: Option<usize>, param: Option<String>, at: i64, value: f64, easing: Option<EasingParam> });
 params!(KeyframeRemoveParams { expected_revision: u64, clip: ClipParam, property: Option<ClipPropertyParam>, effect: Option<usize>, param: Option<String>, at: i64 });
 params!(RevisionParams { expected_revision: u64 });
-params!(ExportStartParams { out: PathBuf, #[serde(default)] overwrite: bool, encoder: Option<String> });
+params!(ExportStartParams { out: PathBuf, #[serde(default)] overwrite: bool, codec: Option<String>, encoder: Option<String> });
 params!(ExportJobParams { job: Option<u64> });
 params!(FrameCaptureParams { time: Option<i64>, frame: Option<i64>, max_width: Option<u32> });
 
@@ -689,7 +689,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("undo", "Undoes the last edit.", RevisionParams, |p| Ok(AgentRequest::Undo { expected_revision: p.expected_revision })),
         tool!("redo", "Redoes an undone edit.", RevisionParams, |p| Ok(AgentRequest::Redo { expected_revision: p.expected_revision })),
         tool!("frame_capture", "The composited frame at a time (ticks) or frame index, exactly one of them, as a PNG no wider than max_width (default 1280). A position outside the timeline is an error.", FrameCaptureParams, frame_capture),
-        tool!("export_start", "Exports the project to an MP4 in the background; returns a job. Refused with file_exists unless overwrite is true. One export at a time; edits wait for it.", ExportStartParams, |p| Ok(AgentRequest::ExportStart { out: p.out, overwrite: p.overwrite, encoder: p.encoder })),
+        tool!("export_start", "Exports the project to an MP4 in the background; returns a job. Refused with file_exists unless overwrite is true. One export at a time; edits wait for it. codec: h264 (default) or hevc. encoder: auto (default; the first that opens, hardware first: *_nvenc, *_qsv, *_amf, *_mf, then libx264/libx265 in the GPL build, then libopenh264/libkvazaar) or an encoder name such as hevc_nvenc; a named encoder of another codec is refused with invalid_encoder.", ExportStartParams, |p| Ok(AgentRequest::ExportStart { out: p.out, overwrite: p.overwrite, codec: p.codec, encoder: p.encoder })),
         tool!("export_status", "The state of an export (the last one when job is absent): running with done and total, finished with its report, cancelled, or failed with a message.", ExportJobParams, |p| Ok(AgentRequest::ExportStatus { job: p.job })),
         tool!("export_cancel", "Asks the running export to stop; export_status tells when it has.", ExportJobParams, |p| Ok(AgentRequest::ExportCancel { job: p.job })),
     ]

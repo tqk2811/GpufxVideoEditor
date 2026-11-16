@@ -114,7 +114,7 @@ Karaoke: `text_add` (trong `style`) và `text_set` nhận `karaoke: {mode?, acti
 
 ### Xuất file
 
-`export_start` trả ngay một mã công việc, `export_status` trả tiến độ, `export_cancel` huỷ. Ghi đè file có sẵn phải có `overwrite: true`. Mỗi lúc chỉ một lần xuất. Không sửa được trong lúc xuất, ở cả hai chế độ; ở chế độ live preview cũng tạm dừng, giống thao tác từ giao diện.
+`export_start` trả ngay một mã công việc, `export_status` trả tiến độ, `export_cancel` huỷ. Ghi đè file có sẵn phải có `overwrite: true`. `codec` là `h264` (mặc định) hoặc `hevc`; `encoder` là `auto` (mặc định, encoder đầu tiên mở được trên máy, ưu tiên phần cứng) hoặc tên một encoder, tên encoder của codec khác bị từ chối với `invalid_encoder`. Mỗi lúc chỉ một lần xuất. Không sửa được trong lúc xuất, ở cả hai chế độ; ở chế độ live preview cũng tạm dừng, giống thao tác từ giao diện.
 
 `export_start`, `export_status` và `export_cancel` chạy `gpufx-render --progress json` thành tiến trình con, giống hệt cách editor đang làm, và dùng lại giao thức dưới đây.
 
