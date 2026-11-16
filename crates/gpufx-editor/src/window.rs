@@ -193,6 +193,14 @@ impl Session {
         let producer_gpu = gpu.clone();
         let window_for_scan = window.clone();
         let session_window = window.clone();
+        let download_window = window.clone();
+        crate::matting_models::downloads().set_waker(move || download_window.request_redraw());
+        // What a killed editor left in the models folder.
+        std::thread::spawn(|| {
+            if let Some(folder) = crate::matting_models::install_dir() {
+                crate::matting_models::clean_stale_files(&folder, crate::matting_models::STALE_AFTER);
+            }
+        });
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
         crate::text_shapes::warm_up_shared();
         let mut state = EditorState::default();
@@ -718,7 +726,7 @@ impl Session {
         let _ = ui_time;
         let delay = if self.state.is_exporting() {
             delay.min(EXPORT_REPAINT)
-        } else if self.state.is_playing() || self.tasks.has_waiting_load() || crate::matting_models::downloads().any_running() || !self.state.ui.drop_batches.is_empty() || self.presenter.resize_pending() {
+        } else if self.state.is_playing() || self.tasks.has_waiting_load() || !self.state.ui.drop_batches.is_empty() || self.presenter.resize_pending() {
             delay.min(PLAYING_REPAINT)
         } else {
             delay

@@ -199,8 +199,14 @@ fn read_curl_stderr(stderr: impl Read, progress: &Progress) -> Vec<String> {
     let mut messages = Vec::new();
     let mut line = Vec::new();
     let mut handle = |line: &mut Vec<u8>| {
-        let text = String::from_utf8_lossy(line).trim().to_owned();
+        let mut text = String::from_utf8_lossy(line).trim().to_owned();
         line.clear();
+        // curl prints its error right after the last progress line, without a line break.
+        if let Some(at) = text.find("curl: (").filter(|&at| at > 0) {
+            messages.push(text[at..].trim().to_owned());
+            text.truncate(at);
+            text = text.trim().to_owned();
+        }
         if text.is_empty() {
             return;
         }
@@ -237,7 +243,11 @@ fn wait_or_cancel(child: &mut Child, progress: &Progress) -> Result<bool, String
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status.success()),
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => return Err(format!("waiting for curl: {e}")),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("waiting for curl: {e}"));
+            }
         }
     }
 }
@@ -272,6 +282,13 @@ pub fn fetch_with_progress(model: MatteModel, source: &ModelSource, folder: &Pat
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("running curl: {e}"))?;
+        // The job takes curl down with the editor, even when it exits or crashes mid-download.
+        let job = crate::child_process::KillOnClose::new().and_then(|job| job.assign(&child, "curl").map(|()| job));
+        if let Err(problem) = job {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(problem);
+        }
         let stderr = child.stderr.take();
         let (waited, messages) = std::thread::scope(|scope| {
             let reader = scope.spawn(|| stderr.map(|stderr| read_curl_stderr(stderr, progress)).unwrap_or_default());
@@ -288,10 +305,43 @@ pub fn fetch_with_progress(model: MatteModel, source: &ModelSource, folder: &Pat
         if !got.eq_ignore_ascii_case(sha256) {
             return Err(format!("{url}: SHA-256 {got} is not the expected {sha256}"));
         }
+        // From here a cancel is not looked at: the install is a copy and a rename, quick and atomic.
         import_zip(model, &download, folder)
     })();
-    let _ = std::fs::remove_file(&download);
+    remove_with_retry(&download);
     result
+}
+
+/// Removes `path`, trying again for a moment while something (an antivirus, a curl still
+/// closing) holds it; [`clean_stale_files`] takes what is left at the next start.
+fn remove_with_retry(path: &Path) {
+    for _ in 0..10 {
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => std::thread::sleep(Duration::from_millis(50)),
+            _ => return,
+        }
+    }
+}
+
+/// How old a leftover download or temporary file must be before [`clean_stale_files`] removes
+/// it, so the running download of another editor is left alone.
+pub const STALE_AFTER: Duration = Duration::from_secs(10 * 60);
+
+/// Removes the `*.download` and `*.part` files of `folder` older than `stale_after`: what a
+/// killed editor left behind. Returns how many went.
+pub fn clean_stale_files(folder: &Path, stale_after: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(folder) else { return 0 };
+    let now = std::time::SystemTime::now();
+    entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            let leftover = name.ends_with(".download") || name.ends_with(".part");
+            let old = entry.metadata().and_then(|meta| meta.modified()).is_ok_and(|modified| now.duration_since(modified).unwrap_or_default() >= stale_after);
+            leftover && old && entry.file_type().is_ok_and(|kind| kind.is_file())
+        })
+        .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
+        .count()
 }
 
 /// Where a background download of a model stands.
@@ -312,36 +362,60 @@ pub enum DownloadOutcome {
 }
 
 /// The background downloads of the models, one at most per model.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Downloads {
-    status: Mutex<HashMap<MatteModel, DownloadStatus>>,
-    finished: Mutex<Vec<(MatteModel, DownloadOutcome)>>,
+    /// The status and the finished downloads under one lock, so a frame never sees a download
+    /// that is neither running nor finished.
+    inner: Mutex<DownloadsInner>,
+    /// Wakes the window when a download ends.
+    waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+#[derive(Debug, Default)]
+struct DownloadsInner {
+    status: HashMap<MatteModel, DownloadStatus>,
+    finished: Vec<(MatteModel, DownloadOutcome)>,
+}
+
+impl std::fmt::Debug for Downloads {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Downloads").field("inner", &self.inner).finish_non_exhaustive()
+    }
 }
 
 impl Downloads {
+    fn lock(&self) -> std::sync::MutexGuard<'_, DownloadsInner> {
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets what wakes the window when a download ends.
+    pub fn set_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
+        *self.waker.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(waker));
+    }
+
     /// Where the download of `model` stands; `None` when none ran, or the last one succeeded or
     /// was cancelled.
     pub fn status(&self, model: MatteModel) -> Option<DownloadStatus> {
-        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&model).cloned()
+        self.lock().status.get(&model).cloned()
     }
 
     /// Whether a download is running.
     pub fn any_running(&self) -> bool {
-        self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).values().any(|status| matches!(status, DownloadStatus::Running(_)))
+        self.lock().status.values().any(|status| matches!(status, DownloadStatus::Running(_)))
     }
 
     /// Marks `model` running and returns its progress, or `None` when it already runs.
     pub fn begin(&self, model: MatteModel) -> Option<Arc<Progress>> {
-        let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if matches!(status.get(&model), Some(DownloadStatus::Running(_))) {
+        let mut inner = self.lock();
+        if matches!(inner.status.get(&model), Some(DownloadStatus::Running(_))) {
             return None;
         }
         let progress = Arc::new(Progress::default());
-        status.insert(model, DownloadStatus::Running(progress.clone()));
+        inner.status.insert(model, DownloadStatus::Running(progress.clone()));
         Some(progress)
     }
 
-    /// Records the end of the download of `model`.
+    /// Records the end of the download of `model` and wakes the window.
     pub fn end(&self, model: MatteModel, result: Result<PathBuf, String>) {
         let outcome = match result {
             Ok(path) => DownloadOutcome::Installed(path),
@@ -349,17 +423,21 @@ impl Downloads {
             Err(problem) => DownloadOutcome::Failed(problem),
         };
         {
-            let mut status = self.status.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut inner = self.lock();
             match &outcome {
                 DownloadOutcome::Failed(problem) => {
-                    status.insert(model, DownloadStatus::Failed(problem.clone()));
+                    inner.status.insert(model, DownloadStatus::Failed(problem.clone()));
                 }
                 _ => {
-                    status.remove(&model);
+                    inner.status.remove(&model);
                 }
             }
+            inner.finished.push((model, outcome));
         }
-        self.finished.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((model, outcome));
+        let waker = self.waker.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        if let Some(waker) = waker {
+            waker();
+        }
     }
 
     /// Asks the download of `model` to stop.
@@ -371,7 +449,7 @@ impl Downloads {
 
     /// The downloads that ended since the last call.
     pub fn take_finished(&self) -> Vec<(MatteModel, DownloadOutcome)> {
-        std::mem::take(&mut *self.finished.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+        std::mem::take(&mut self.lock().finished)
     }
 
     /// Runs `work` for `model` on a background thread; `false` when `model` already downloads.
@@ -508,34 +586,85 @@ mod tests {
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
     }
 
-    #[test]
-    fn cancelling_a_running_fetch_kills_curl_and_removes_the_partial_file() {
-        // A local address nothing answers on stands for a slow server, without network.
-        let folder = scratch("kill");
-        let source = ModelSource { base_url: Some("https://127.0.0.1:9".into()), sha256: Some("0".repeat(64)) };
-        let progress = Arc::new(Progress::default());
-        let cancel = progress.clone();
-        let canceller = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(300));
-            cancel.cancel.store(true, Ordering::Relaxed);
-        });
-        let result = fetch_with_progress(MatteModel::Fast, &source, &folder, &progress);
-        canceller.join().unwrap();
-        // curl either was still connecting (cancelled) or already failed to connect: both leave no file.
-        assert!(result.is_err());
-        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0, "no partial file is left");
+    /// Whether `curl.exe` can be run here.
+    fn curl_available() -> bool {
+        Command::new("curl.exe").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success())
     }
 
     #[test]
-    fn wait_or_cancel_kills_the_child() {
-        let Ok(mut child) = Command::new("curl.exe").args(["--silent", "--max-time", "60", "file:///CON"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
+    fn cancelling_a_running_fetch_kills_curl_and_removes_the_partial_file() {
+        if !curl_available() {
             eprintln!("skipping: curl.exe is not available");
             return;
+        }
+        // A local server that accepts and never answers: a download that hangs, without network.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream));
+        let folder = scratch("kill");
+        let source = ModelSource { base_url: Some(format!("https://127.0.0.1:{port}")), sha256: Some("0".repeat(64)) };
+        let progress = Arc::new(Progress::default());
+        let cancel = progress.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            cancel.cancel.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let result = fetch_with_progress(MatteModel::Fast, &source, &folder, &progress);
+        canceller.join().unwrap();
+        assert_eq!(result.unwrap_err(), CANCELLED);
+        assert!(started.elapsed() < Duration::from_secs(20), "the cancel stopped curl");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0, "no partial file is left");
+        drop(server.join());
+    }
+
+    #[test]
+    fn wait_or_cancel_kills_a_hanging_child() {
+        // `ping -n 600` runs for ten minutes: a child that truly hangs.
+        let Ok(mut child) = Command::new("ping.exe").args(["-n", "600", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
+            eprintln!("skipping: ping.exe is not available");
+            return;
         };
+        assert!(child.try_wait().unwrap().is_none(), "the child runs");
         let progress = Progress::default();
         progress.cancel.store(true, Ordering::Relaxed);
         assert_eq!(wait_or_cancel(&mut child, &progress), Err(CANCELLED.to_owned()));
-        assert!(child.try_wait().unwrap().is_some(), "curl was stopped");
+        assert!(child.try_wait().unwrap().is_some(), "the child was stopped");
+    }
+
+    #[test]
+    fn a_curl_error_after_a_progress_line_is_kept() {
+        let progress = Progress::default();
+        let messages = read_curl_stderr(&b" 50  1024   50   512    0     0curl: (28) Operation timed out\n"[..], &progress);
+        assert_eq!(messages, vec!["curl: (28) Operation timed out".to_owned()]);
+        assert_eq!(progress.snapshot(), (512, Some(1024)));
+    }
+
+    #[test]
+    fn stale_leftovers_are_cleaned_and_fresh_ones_kept() {
+        let folder = scratch("stale");
+        for name in ["a.zip.1.download", "a.zip.1.part", "a.zip"] {
+            std::fs::write(folder.join(name), b"x").unwrap();
+        }
+        assert_eq!(clean_stale_files(&folder, Duration::from_secs(3600)), 0, "fresh files may belong to a running download");
+        assert_eq!(clean_stale_files(&folder, Duration::ZERO), 2);
+        assert!(folder.join("a.zip").exists());
+        assert!(!folder.join("a.zip.1.download").exists() && !folder.join("a.zip.1.part").exists());
+    }
+
+    #[test]
+    fn the_end_of_a_download_wakes_the_window_and_is_seen_at_once() {
+        let downloads = Arc::new(Downloads::default());
+        let woken = Arc::new(AtomicU64::new(0));
+        let counter = woken.clone();
+        downloads.set_waker(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        downloads.begin(MatteModel::Fast).unwrap();
+        downloads.end(MatteModel::Fast, Ok(PathBuf::from("f.zip")));
+        assert_eq!(woken.load(Ordering::Relaxed), 1);
+        assert!(!downloads.any_running());
+        assert_eq!(downloads.take_finished().len(), 1);
     }
 
     #[test]
