@@ -1,5 +1,6 @@
 # Initialises the FFmpegGpuFilter submodule and its packages and the GpufxVideoEditor-Assets submodule, downloads the LGPL and GPL FFmpeg builds
-# into third_party/ffmpeg and third_party/ffmpeg-gpl, and generates the POC test clips.
+# into third_party/ffmpeg and third_party/ffmpeg-gpl, adds dxcompiler.dll (DXC) to third_party/ffmpeg/bin,
+# and generates the POC test clips.
 # The clips are encoded by the ffmpeg on PATH (libx264 required). They are local test data
 # and are never distributed, so a GPL build is fine for this step only.
 [CmdletBinding()]
@@ -99,6 +100,49 @@ function Expand-FFmpeg {
     Write-Host "FFmpeg extracted to $Destination"
 }
 
+# DirectX Shader Compiler from NuGet, the same version and hash as FFmpegGpuFilter's scripts/fetch-dxc.sh.
+# wgpu needs it on D3D12 for the gpufx-nn shaders of AI background removal, which FXC cannot compile.
+# The build scripts copy every runtime DLL of third_party/ffmpeg/bin next to the executables.
+function Install-Dxc {
+    $bin = Join-Path $ffmpegRoot 'bin'
+    if ((Test-Path (Join-Path $bin 'dxcompiler.dll')) -and -not $Force) {
+        Write-Host "dxcompiler.dll already present in $bin"
+        return
+    }
+
+    $version = '1.9.2609.5'
+    $sha256 = '73cfa082245918c2cc1ec6740250eb7377e83a757b3b3a3e16e0d71535bfbfc3'
+    New-Item -ItemType Directory -Force $toolsDir | Out-Null
+    $package = Join-Path $toolsDir "microsoft.direct3d.dxc.$version.nupkg"
+    if (-not (Test-Path $package) -or (Get-FileHash -Algorithm SHA256 $package).Hash.ToLowerInvariant() -ne $sha256) {
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.dxc/$version/microsoft.direct3d.dxc.$version.nupkg" -OutFile $package
+    }
+    $actual = (Get-FileHash -Algorithm SHA256 $package).Hash.ToLowerInvariant()
+    if ($actual -ne $sha256) { throw "SHA-256 mismatch for DXC: expected $sha256, got $actual" }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($package)
+    try {
+        # The package is LLVM (University of Illinois/NCSA) licensed, with MIT parts and Microsoft terms
+        # for the binaries; all three texts go next to the DLL.
+        $members = [ordered]@{
+            'build/native/bin/x64/dxcompiler.dll' = 'dxcompiler.dll'
+            'LICENSE-LLVM.txt' = 'LICENSE-dxcompiler-LLVM.txt'
+            'LICENCE-MIT.txt' = 'LICENSE-dxcompiler-MIT.txt'
+            'LICENSE-MS.txt' = 'LICENSE-dxcompiler-MS.txt'
+        }
+        foreach ($member in $members.Keys) {
+            $entry = $zip.GetEntry($member)
+            if (-not $entry) { throw "DXC package has no $member" }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $bin $members[$member]), $true)
+        }
+    } finally {
+        $zip.Dispose()
+    }
+    Write-Host "DXC $version extracted to $bin"
+}
+
 function New-TestClip {
     param(
         [string]$Name,
@@ -133,6 +177,7 @@ function New-TestClip {
 Initialize-Submodules
 Install-FFmpeg
 Install-GplFFmpeg
+Install-Dxc
 
 New-Item -ItemType Directory -Force $clipsDir | Out-Null
 New-TestClip -Name 'clip-a.mp4' -Source 'testsrc2=size=1920x1080:rate=30'
