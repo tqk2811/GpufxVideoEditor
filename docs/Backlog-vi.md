@@ -16,6 +16,18 @@ Clip H.264 GOP 250 có B-frame tua p95 502 ms so với ngưỡng đề xuất 20
 
 `D3d12Decoder::wait_until_idle` ở `crates/poc/src/decoder.rs` và `SequentialDecoder::wait_idle` ở `crates/d3d12-backend/src/decoder.rs:389-401` chờ CPU trước mỗi `mix` để khung không còn bị decode khác tham chiếu. Phát p99 có lần lên 31,4 ms, sát ngưỡng 33 ms, chưa rõ nguyên nhân. Bản editor cần đồng bộ trên GPU hoặc tách luồng. Ghi ngày 2026-11-09.
 
+### [Vừa] Âm thanh clip phát ngược seek một lần mỗi chunk
+
+`crates/engine/src/stretch.rs` (`ReverseReader`, `REVERSE_CHUNK` 16384 khung) đọc file theo chiều lùi nên mỗi chunk là một lần seek của decoder audio. Với nguồn 48 kHz kết quả vẫn trùng bit giữa preview và export; với nguồn tần số khác, decoder khởi động lại resampler sau seek (xem đầu `stretch.rs`) nên mẫu ở biên chunk có thể lệch nhẹ so với lần đọc tuần tự, và chi phí seek tăng theo độ dài clip. Nên cân nhắc chunk lớn hơn, hoặc giải mã cả đoạn nguồn của clip ngược một lần vào bộ nhớ khi nó ngắn. Ghi ngày 2026-11-17.
+
+### [Thấp] Decoder phát ngược: VRAM của ring và biên khung khi pts làm tròn lên
+
+`crates/d3d12-backend/src/decoder/reverse.rs`: mỗi clip phát ngược mở decoder với thêm `RING + 1` = 33 surface trong pool (4K P010 khoảng 800 MB), chưa co giãn theo độ phân giải. GOP dài hơn ring thì mỗi 32 khung giải mã lại từ keyframe (chi phí khoảng GOP/32 lần mỗi khung). `floor_pts` lấy pts sàn để khung "1 tick trước biên" không bị làm tròn sang khung sau; với stream ghi pts trễ lên một đơn vị, khung cuối/đoạn giữ cuối của clip ngược có thể rơi xuống khung ngay dưới `source_in`. Chưa có test với nguồn HDR/P010 phát ngược và chưa đo tua clip ngược trong editor. Ghi ngày 2026-11-17.
+
+### [Thấp] Kéo đầu clip phát ngược không bị chặn ở cuối nguồn
+
+`crates/gpufx-editor/src/timeline/drag.rs` (`clamp_trim`, nhánh `TrimStart`) và `crates/engine/src/edit.rs` (`trim_start`): clip phát ngược kéo đầu ra trước là đọc lên phía cuối nguồn, nhưng project không biết độ dài nguồn nên không chặn (giống `trim_end` của clip xuôi). Có thể dùng `EditorState::source_remaining` để chặn ở cuối nguồn như ô thời lượng. Ghi ngày 2026-11-17.
+
 ### [Thấp] `still_dimensions` bỏ qua hướng EXIF
 
 `crates/d3d12-backend/src/still.rs:54` (`still_dimensions`) đọc kích thước từ header mà không xoay theo EXIF, còn `read_still` xoay rồi; `crates/gpufx-editor/src/visuals/backend.rs:42` và tỉ lệ sticker trong thư viện dùng con số đó, nên ảnh chụp dọc có EXIF cho tỉ lệ ngược so với lúc render. Nên đọc orientation khi lấy kích thước. Ghi ngày 2026-11-10.
