@@ -6,6 +6,7 @@ use serde_json::{json, Map, Value};
 
 use crate::i18n::Language;
 use crate::layout::PanelSizes;
+use crate::proxy::ProxyMode;
 use crate::ui::theme::ThemeChoice;
 
 const FOLDER: &str = "gpufx-editor";
@@ -15,6 +16,7 @@ const PANELS_KEY: &str = "panels";
 const THEME_KEY: &str = "theme";
 const AGENT_ACCESS_KEY: &str = "agent_access";
 const AUTOSAVE_KEY: &str = "autosave_seconds";
+const PROXY_KEY: &str = "proxy_preview";
 
 /// `%APPDATA%\gpufx-editor\settings.json`, when the variable is set.
 pub fn settings_file() -> Option<PathBuf> {
@@ -201,6 +203,20 @@ pub fn save_autosave_seconds(seconds: u64) -> Result<(), String> {
     write_setting(&file, AUTOSAVE_KEY, json!(seconds))
 }
 
+/// Which sources the preview decodes from a proxy; Off until chosen.
+fn saved_proxy_mode(file: &Path) -> ProxyMode {
+    read_settings(file).get(PROXY_KEY).and_then(Value::as_str).and_then(ProxyMode::from_code).unwrap_or_default()
+}
+
+pub fn startup_proxy_mode() -> ProxyMode {
+    settings_file().map_or_else(ProxyMode::default, |file| saved_proxy_mode(&file))
+}
+
+pub fn save_proxy_mode(mode: ProxyMode) -> Result<(), String> {
+    let file = settings_file().ok_or("APPDATA is not set")?;
+    write_setting(&file, PROXY_KEY, json!(mode.code()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +231,16 @@ mod tests {
         assert_eq!(saved_autosave_seconds(&file), 300);
         write_setting(&file, AUTOSAVE_KEY, json!("soon")).unwrap();
         assert_eq!(saved_autosave_seconds(&file), 60, "unusable counts as not chosen");
+    }
+
+    #[test]
+    fn proxy_preview_is_off_until_chosen_and_a_choice_is_read_back() {
+        let file = temp_file("proxy");
+        assert_eq!(saved_proxy_mode(&file), ProxyMode::Off);
+        write_setting(&file, PROXY_KEY, json!(ProxyMode::Auto.code())).unwrap();
+        assert_eq!(saved_proxy_mode(&file), ProxyMode::Auto);
+        write_setting(&file, PROXY_KEY, json!("always")).unwrap();
+        assert_eq!(saved_proxy_mode(&file), ProxyMode::Off, "unknown counts as not chosen");
     }
 
     #[test]
