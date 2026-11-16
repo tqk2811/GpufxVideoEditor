@@ -72,9 +72,14 @@ fn every_available_encoder_writes_a_readable_file() {
             tried += 1;
         }
     }
-    if tried == 0 {
-        eprintln!("encoders: skipped: no encoder opens on this machine");
-    }
+    // Every build has a software H.264 encoder, so an all-skipped run is a failure, not a pass.
+    assert!(
+        ["libx264", "libopenh264"].into_iter().any(|name| probe_encoder(name).is_ok()),
+        "neither libx264 nor libopenh264 opens: {:?} / {:?}",
+        probe_encoder("libx264"),
+        probe_encoder("libopenh264")
+    );
+    assert!(tried > 0, "no encoder opened on this machine");
 }
 
 #[test]

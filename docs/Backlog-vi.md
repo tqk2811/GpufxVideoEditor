@@ -566,3 +566,11 @@ Editor chỉ đọc lại các gói clip-animation (và tìm lại gói effect g
 ### [Thấp] Preset `type` của AVS chưa có con trỏ nhấp nháy
 
 Preset dựng sẵn `typewriter` (`crates/engine/src/clip_animation.rs`, `typewriter_in`) chỉ hiện từng ký tự; bản `type` của AI video studio còn vẽ con trỏ sau ký tự cuối. Cần một lớp vẽ thêm (một vạch theo vị trí ký tự cuối đã hiện) trong `draw_units`. Ghi ngày 2026-11-14.
+
+### [Thấp] build.rs chép DLL FFmpeg vào target/<profile> dùng chung, build lẫn có/không `ffmpeg-gpl` thì DLL bị đổi ngầm
+
+`crates/d3d12-backend/build.rs:31-37` chép DLL FFmpeg vào `target/<profile>`. Build có rồi không có feature `ffmpeg-gpl` vào cùng thư mục `target` thì bộ DLL bị đổi mà không báo gì: đã gặp DLL GPL còn nằm trong `target/debug` làm test CLI `the_lgpl_build_has_no_libx264` (`crates/gpufx-render/tests/cli.rs:128`) hỏng. Nên ghi một file đánh dấu biến thể (lgpl/gpl) cạnh DLL và báo lỗi hoặc chép đè khi lệch, hoặc tách thư mục đích theo biến thể. Ghi ngày 2026-11-16.
+
+### [Thấp] Editor dò encoder trong tiến trình của nó, export chạy ở tiến trình con gpufx-render dò lại nên kết quả có thể lệch
+
+Editor gọi `encoder_available` (`crates/d3d12-backend/src/encoder.rs`) trong tiến trình riêng, còn export chạy ở tiến trình con `gpufx-render` với cache trống và mở encoder lại. Hai lần dò có thể khác nhau (vd phiên NVENC đang bận khi export), nên giao diện có thể báo một encoder dùng được trong khi tiến trình con rơi sang encoder sau hoặc lỗi. Cân nhắc cho tiến trình con báo encoder thực sự đã mở về editor, hoặc truyền kết quả dò cho nó. Ghi ngày 2026-11-16.

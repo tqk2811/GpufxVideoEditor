@@ -138,18 +138,22 @@ pub fn encoder_exists(name: &str) -> bool {
 const PROBE_SIZE: (i32, i32) = (256, 144);
 
 /// Whether the encoder `name` opens on this machine: `avcodec_open2` succeeds on a small context
-/// with the pixel format and options an export gives it. The answer is kept for the process, so a
-/// hardware encoder is probed once. The first probe of a hardware encoder can take a few hundred
+/// with the pixel format and options an export gives it. A success is kept for the process, so a
+/// hardware encoder that opens is probed once; a failure is not kept, as it can be transient (an
+/// NVENC session limit, a driver not ready yet) and the next question probes again. The first probe of a hardware encoder can take a few hundred
 /// milliseconds while its driver loads.
 pub fn encoder_available(name: &str) -> bool {
     static PROBES: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
     let probes = PROBES.get_or_init(Mutex::default);
-    if let Some(&known) = probes.lock().unwrap_or_else(|p| p.into_inner()).get(name) {
-        return known;
+    if probes.lock().unwrap_or_else(|p| p.into_inner()).get(name).copied().unwrap_or(false) {
+        return true;
     }
     // Probed outside the lock, so a slow driver does not hold up questions about other encoders.
     let available = probe_encoder(name).is_ok();
-    *probes.lock().unwrap_or_else(|p| p.into_inner()).entry(name.to_owned()).or_insert(available)
+    if available {
+        probes.lock().unwrap_or_else(|p| p.into_inner()).insert(name.to_owned(), true);
+    }
+    available
 }
 
 /// Opens `name` on a [`PROBE_SIZE`] context and frees it again.
@@ -246,9 +250,12 @@ unsafe fn configure_video(context: &mut ffi::AVCodecContext, name: &str, width: 
         context.flags |= ffi::AV_CODEC_FLAG_GLOBAL_HEADER;
     }
     for (key, value) in quality_options(name) {
-        let (Ok(key), Ok(value)) = (CString::new(key), CString::new(value)) else { continue };
-        // An option this FFmpeg's encoder lacks is skipped: the defaults still encode.
-        ffi::av_opt_set(context.priv_data, key.as_ptr(), value.as_ptr(), 0);
+        let (Ok(c_key), Ok(c_value)) = (CString::new(key), CString::new(value.as_str())) else { continue };
+        // An option this FFmpeg's encoder lacks is skipped, as the defaults still encode; it is logged.
+        let status = ffi::av_opt_set(context.priv_data, c_key.as_ptr(), c_value.as_ptr(), 0);
+        if status < 0 {
+            eprintln!("encoder: {name}: option {key}={value} was not set ({}), the default applies", describe_error(status));
+        }
     }
 }
 
@@ -313,29 +320,34 @@ fn gcd(a: i64, b: i64) -> i64 {
 }
 
 impl Mp4Encoder {
-    /// Creates `path` for frames of `output`. With [`EncoderChoice::Auto`] each available encoder
-    /// is tried in order until one opens; that happens before the first frame, so a file is always
-    /// written by one encoder.
+    /// Creates `path` for frames of `output`. With [`EncoderChoice::Auto`] the encoders this FFmpeg
+    /// has are opened in order until one opens, without a separate probe; that happens before the
+    /// first frame, so a file is always written by one encoder.
     pub fn create(path: &Path, output: &Output, choice: &EncoderChoice) -> Result<Self, String> {
         if output.width % 2 != 0 || output.height % 2 != 0 {
             return Err(format!("output size {}x{} must be even for 4:2:0 video", output.width, output.height));
         }
         let (names, codec): (Vec<&str>, &str) = match choice {
-            EncoderChoice::Auto(codec) => (codec.auto_order().iter().copied().filter(|name| encoder_available(name)).collect(), codec.id()),
+            // Encoders this FFmpeg lacks are not candidates: that is no failure worth a line.
+            EncoderChoice::Auto(codec) => (codec.auto_order().iter().copied().filter(|name| encoder_exists(name)).collect(), codec.id()),
             EncoderChoice::Named(name) => (vec![name.as_str()], "video"),
         };
-        if names.is_empty() {
-            return Err(format!("no {codec} encoder opens on this machine (tried {})", match choice {
-                EncoderChoice::Auto(codec) => codec.auto_order().join(", "),
-                EncoderChoice::Named(name) => name.clone(),
-            }));
-        }
         let mut problems = Vec::new();
         for name in names {
+            if name == "libkvazaar" && (output.width % 8 != 0 || output.height % 8 != 0) {
+                problems.push(format!("{name}: it needs a width and height that are multiples of 8, not {}x{}", output.width, output.height));
+                continue;
+            }
             match Self::open_encoder(path, output, name) {
                 Ok(encoder) => return Ok(encoder),
                 Err(reason) => problems.push(format!("{name}: {reason}")),
             }
+        }
+        if problems.is_empty() {
+            return Err(format!("no {codec} encoder opens on this machine (tried {})", match choice {
+                EncoderChoice::Auto(codec) => codec.auto_order().join(", "),
+                EncoderChoice::Named(name) => name.clone(),
+            }));
         }
         Err(format!("no {codec} encoder could be opened ({})", problems.join("; ")))
     }
