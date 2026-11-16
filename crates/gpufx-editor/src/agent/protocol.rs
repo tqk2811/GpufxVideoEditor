@@ -188,6 +188,9 @@ pub enum AgentRequest {
     /// The styles of the installed text (`text`) or subtitle (`subtitle`) style packs; both when
     /// `kind` is `None`.
     TextStyleList { kind: Option<String> },
+    /// The items of the installed music, sfx and sticker packs, each with the `asset:` source
+    /// `clip_add` takes; only `kind` when given, and only items matching every word of `filter`.
+    AssetList { kind: Option<String>, filter: Option<String> },
     /// The text clips of subtitle track `track` as an SRT file, also written to `path` when given.
     SubtitleExport { track: usize, path: Option<PathBuf>, overwrite: bool },
     Edit { expected_revision: u64, edit: AgentEdit },

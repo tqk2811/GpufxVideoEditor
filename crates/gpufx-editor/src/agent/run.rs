@@ -537,6 +537,33 @@ fn project_save<H: AgentHost>(host: &mut H, path: Option<&Path>, overwrite: bool
 
 /// The text clips of subtitle track `track` as SRT, also written to `path` when given. A file that
 /// is there is refused unless `overwrite`, and a file the project reads always is.
+/// The installed music, sfx and sticker items matching `filter`, as `asset_list` answers.
+fn asset_list(state: &EditorState, kind: Option<&str>, filter: &str) -> Result<Value, AgentError> {
+    if let Some(name) = kind {
+        if !matches!(name, "music" | "sfx" | "sticker") {
+            return Err(AgentError::new("invalid_params", format!("type must be music, sfx or sticker, not '{name}'")));
+        }
+    }
+    let wanted = |name: &str| kind.is_none_or(|kind| kind == name);
+    let mut items = Vec::new();
+    for (pack, sounds) in state.audio_library.matching(filter) {
+        if !wanted(pack.kind.name()) {
+            continue;
+        }
+        for sound in sounds {
+            items.push(json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped}));
+        }
+    }
+    if wanted("sticker") {
+        for sticker in state.sticker_library.matching(filter, None) {
+            items.push(json!({"type": "sticker", "source": sticker.source, "name": sticker.name, "category": sticker.category, "tags": sticker.tags, "size": sticker.size}));
+        }
+    }
+    let loaded = state.audio_library.loaded && state.sticker_library.loaded;
+    let problems: Vec<Value> = state.audio_library.problems.iter().chain(&state.sticker_library.problems).map(|problem| json!({"pack": problem.pack, "message": problem.message})).collect();
+    Ok(json!({"state": if loaded { "ready" } else { "loading" }, "items": items, "problems": problems}))
+}
+
 fn subtitle_export<H: AgentHost>(host: &mut H, track: usize, path: Option<&Path>, overwrite: bool) -> Result<Value, AgentError> {
     let paths = host.paths();
     let state = host.state();
@@ -687,6 +714,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::FontList => Ok(font_list()),
         AgentRequest::ClipAnimationList => Ok(animation_list(&host.state().clip_animation_library)),
         AgentRequest::TextStyleList { kind } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref()),
+        AgentRequest::AssetList { kind, filter } => asset_list(host.state(), kind.as_deref(), filter.as_deref().unwrap_or("")),
         AgentRequest::SubtitleExport { track, path, overwrite } => subtitle_export(host, track, path.as_deref(), overwrite),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
@@ -861,6 +889,25 @@ mod tests {
         let (clips, _) = host.state.subtitle_clips("1\n00:00:01,000 --> 00:00:02,000\nOne\n", None);
         host.state.apply_agent_command(|project| engine::add_subtitle_track(project, engine::SubtitleTrack { style: None }, clips)).unwrap();
         assert_eq!(code(host.run(AgentRequest::SubtitleExport { track: 0, path: Some(PathBuf::from("out.srt")), overwrite: false })), "invalid_params");
+    }
+
+    #[test]
+    fn asset_list_names_sounds_and_stickers_by_type_and_filter() {
+        use crate::asset_install::AudioPackKind;
+        use crate::audio_library::{LibraryPack, LibrarySound};
+        use crate::sticker_library::{LibrarySticker, StickerPack};
+        let mut host = FakeHost::new("live");
+        let sound = |name: &str| LibrarySound { source: format!("asset:music/m/{name}.mp3"), name: name.to_owned(), duration: None, tags: vec!["happy".to_owned()], category: String::new(), looped: false };
+        host.state.audio_library.packs.push(LibraryPack { kind: AudioPackKind::Music, id: "m".to_owned(), name: "M".to_owned(), version: "1".to_owned(), sounds: vec![sound("Kids Fun"), sound("Calm")] });
+        host.state.audio_library.loaded = true;
+        host.state.sticker_library.packs.push(StickerPack { id: "s".to_owned(), name: "S".to_owned(), stickers: vec![LibrarySticker { source: "asset:sticker/s/star.png".to_owned(), name: "Star".to_owned(), tags: vec!["happy".to_owned()], category: String::new(), size: Some((64, 64)) }] });
+        host.state.sticker_library.loaded = true;
+        let sources = |result: AgentResult| result.expect("list")["items"].as_array().unwrap().iter().map(|item| item["source"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: None, filter: Some("happy".to_owned()) })).len(), 3);
+        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("sticker".to_owned()), filter: None })), ["asset:sticker/s/star.png"]);
+        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("music".to_owned()), filter: Some("kids".to_owned()) })), ["asset:music/m/Kids Fun.mp3"]);
+        assert!(sources(host.run(AgentRequest::AssetList { kind: Some("sfx".to_owned()), filter: None })).is_empty());
+        assert_eq!(code(host.run(AgentRequest::AssetList { kind: Some("video".to_owned()), filter: None })), "invalid_params");
     }
 
     #[test]
