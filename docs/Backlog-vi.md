@@ -1,8 +1,8 @@
 # Backlog
 
-### [Cao] Bản phát hành phải kèm `dxcompiler.dll` và release model xoá nền
+### [Cao] Gói phát hành editor phải kèm `dxcompiler.dll` và giấy phép của nó
 
-Shader nn của xoá nền (`gpufx-core` nn) chỉ biên dịch được bằng DXC; thiếu `dxcompiler.dll` thì model nạp lỗi và clip hiện chưa xoá nền (`D3d12Compositor::matte_problems`). `crates/d3d12-backend/build.rs` đã chép `dxcompiler*.dll` từ `third_party/ffmpeg/bin`, nhưng `scripts/setup-poc.ps1` chưa tải nó (bản FFmpeg release không có): phải tự chép từ bản FFmpegGpuFilter (`build/dxc`) vào `third_party/ffmpeg/bin`, và gói phát hành editor phải kèm DLL cùng giấy phép. Ngoài ra release `models-matting-v1` của `tqk2811/FFmpegGpuFilter` chưa tạo: tải model trong editor (`crates/gpufx-editor/src/matting_models.rs`) sẽ lỗi 404 tới khi có, và phải upload đúng các zip có SHA-256 bằng `sha256_zip` trong `source.json` của gói (editor nhúng giá trị này lúc build; dựng lại zip thì cập nhật `sha256_zip` và release). Ghi ngày 2026-11-17.
+Shader nn của xoá nền chỉ biên dịch được bằng DXC; thiếu `dxcompiler.dll` thì clip hiện chưa xoá nền (`D3d12Compositor::matte_problems`). `scripts/setup-poc.ps1` tải DLL và 3 file `LICENSE-dxcompiler-*.txt` vào `third_party/ffmpeg/bin`, `crates/d3d12-backend/build.rs` chép DLL cạnh exe; khi có script đóng gói phát hành thì phải kèm DLL và cả 3 file giấy phép. Model nằm ở release `models-matting-v1` của `tqk2811/FFmpegGpuFilter`; dựng lại zip thì cập nhật `sha256_zip` trong `source.json` của gói và upload lại. Ghi ngày 2026-11-17.
 
 ### [Vừa] Xoá nền: tải model chạy đồng bộ một luồng, không có tiến độ hay huỷ
 
