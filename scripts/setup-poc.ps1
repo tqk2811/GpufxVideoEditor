@@ -102,7 +102,9 @@ function Expand-FFmpeg {
 function New-TestClip {
     param(
         [string]$Name,
-        [string]$Source
+        [string]$Source,
+        # Frames between keyframes; scene cuts never add one.
+        [int]$Gop = 30
     )
 
     $output = Join-Path $clipsDir $Name
@@ -123,7 +125,7 @@ function New-TestClip {
 
     & ffmpeg -hide_banner -loglevel warning -y -f lavfi -i $Source -t 20 -vf $filter `
         -an -c:v libx264 -preset veryfast -profile:v high -pix_fmt yuv420p `
-        -g 30 -keyint_min 30 -sc_threshold 0 -bf 2 -crf 18 -movflags +faststart $output
+        -g $Gop -keyint_min $Gop -sc_threshold 0 -bf 2 -crf 18 -movflags +faststart $output
     if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for $Name ($LASTEXITCODE)" }
     Write-Host "Generated $output"
 }
@@ -136,3 +138,7 @@ New-Item -ItemType Directory -Force $clipsDir | Out-Null
 New-TestClip -Name 'clip-a.mp4' -Source 'testsrc2=size=1920x1080:rate=30'
 New-TestClip -Name 'clip-b.mp4' -Source 'smptehdbars=size=1920x1080:rate=30,hue=H=2*PI*t/10'
 New-TestClip -Name 'clip-c.mp4' -Source 'mandelbrot=size=1920x1080:rate=30'
+# Long-GOP copies (keyframes 8.3 s apart) for the seek tests, e.g. crates/gpufx-editor/tests/preview_gpu.rs.
+New-TestClip -Name 'gop250-a.mp4' -Source 'testsrc2=size=1920x1080:rate=30' -Gop 250
+New-TestClip -Name 'gop250-b.mp4' -Source 'smptehdbars=size=1920x1080:rate=30,hue=H=2*PI*t/10' -Gop 250
+New-TestClip -Name 'gop250-c.mp4' -Source 'mandelbrot=size=1920x1080:rate=30' -Gop 250
