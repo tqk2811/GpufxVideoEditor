@@ -404,7 +404,7 @@ impl SharedImage {
 
 fn decoded_input(frame: &DecodedFrame) -> Result<D3d12Frame, String> {
     Ok(D3d12Frame {
-        format: PixelFormat::Nv12,
+        format: frame.pixel_format(),
         width: frame.width(),
         height: frame.height(),
         resource: frame.texture_ptr(),
@@ -485,6 +485,14 @@ impl SourceFrame {
             Self::Video(frame) => frame.display_aspect(),
             Self::Still(still) => still.aspect,
             Self::Step { .. } | Self::Units(_) => 1.0,
+        }
+    }
+
+    /// Clockwise quarter turns that show the picture upright (a phone video's rotation).
+    fn turns(&self) -> u8 {
+        match self {
+            Self::Video(frame) => frame.turns(),
+            _ => 0,
         }
     }
 
@@ -1236,13 +1244,22 @@ fn open_effect(context: &Arc<GpuContext>, path: &Path, package: &str) -> Result<
 /// `scale` to the project size, then the clip's effects, as one graph, and which clock parameters
 /// each effect declares.
 /// With `restore_alpha`, the scaled source also goes around the effects, and their result takes its alpha.
-fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32, height: u32, effects: &[ProjectEffect], restore_alpha: bool) -> Result<(EffectGraph, Vec<ClockParams>), String> {
+/// `turns`: clockwise quarter turns of the source, done right after the scale (see
+/// [`crate::orientation::turn_effect`]).
+fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32, height: u32, effects: &[ProjectEffect], restore_alpha: bool, turns: u8) -> Result<(EffectGraph, Vec<ClockParams>), String> {
     let scale_package = package_path(paths, "packages/gpufx/ffmpeg/scale")?;
-    let mut pending = Vec::with_capacity(effects.len() + 1);
+    let mut pending = Vec::with_capacity(effects.len() + 2);
+    // Scaled to the turned size, so the turn after it lands exactly on `width` x `height`.
+    let (scaled_width, scaled_height) = crate::orientation::turned_size(width, height, turns);
     let mut scale = open_effect(context, &scale_package, "scale")?;
-    scale.params_mut().set("w", &[f64::from(width)]).map_err(|e| format!("scale.w: {e}"))?;
-    scale.params_mut().set("h", &[f64::from(height)]).map_err(|e| format!("scale.h: {e}"))?;
+    scale.params_mut().set("w", &[f64::from(scaled_width)]).map_err(|e| format!("scale.w: {e}"))?;
+    scale.params_mut().set("h", &[f64::from(scaled_height)]).map_err(|e| format!("scale.h: {e}"))?;
     pending.push(("scale".to_owned(), scale));
+    if turns % 4 != 0 {
+        pending.push(("turn".to_owned(), crate::orientation::turn_effect(context, turns)?));
+    }
+    // The items that bring the source to the frame: the scale, and the turn when there is one.
+    let lead = pending.len();
     let mut clocks = Vec::with_capacity(effects.len());
     for (index, project_effect) in effects.iter().enumerate() {
         let path = package_path(paths, &project_effect.package)?;
@@ -1255,7 +1272,7 @@ fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32,
     let chain = |range: std::ops::Range<usize>| range.map(|i| format!("e{i}")).collect::<Vec<_>>().join("|");
     let text = if restore_alpha {
         let last = pending.len();
-        let graph = format!("[0]e0[scaled]; [scaled]split[picture][matte]; [picture]{}[done]; [done][matte]e{last}", chain(1..last));
+        let graph = format!("[0]{}[scaled]; [scaled]split[picture][matte]; [picture]{}[done]; [done][matte]e{last}", chain(0..lead), chain(lead..last));
         pending.push(("alpha".to_owned(), restore_alpha_effect(context)?));
         graph
     } else {
@@ -1382,6 +1399,7 @@ impl Compositor for D3d12Compositor {
         let source_aspect = frame.display_aspect();
         let margin = frame.margin();
         let has_alpha = frame.has_alpha();
+        let turns = frame.turns();
         let mut inputs = [input];
         let (gpu, paths) = (&self.gpu, &self.paths);
         // The input format is part of what a graph was built for.
@@ -1392,18 +1410,21 @@ impl Compositor for D3d12Compositor {
         if has_alpha {
             shape.push("\0alpha".to_owned());
         }
+        if turns != 0 {
+            shape.push(format!("\0turn{turns}"));
+        }
         let build = || {
             // A clip graph is built once, so this is one trial for one clip, and none for a source without alpha.
             let restore_alpha = has_alpha
                 && !effects.is_empty()
-                && match build_clip_graph(&gpu.context, paths, ALPHA_PROBE_SIDE, ALPHA_PROBE_SIDE, effects, false) {
+                && match build_clip_graph(&gpu.context, paths, ALPHA_PROBE_SIDE, ALPHA_PROBE_SIDE, effects, false, turns) {
                     Ok((mut graph, clocks)) => {
                         let _ = set_clip_clock(&mut graph, &clocks, effects, clock);
                         writes_alpha(gpu, &mut graph, 1, &info)
                     }
                     Err(_) => true,
                 };
-            build_clip_graph(&gpu.context, paths, width, height, effects, restore_alpha).map(|(graph, clocks)| {
+            build_clip_graph(&gpu.context, paths, width, height, effects, restore_alpha, turns).map(|(graph, clocks)| {
                 let applied = clocks.iter().zip(effects).map(|(clock, effect)| clock.user_params(&effect.params).into_owned()).collect();
                 ClipGraph { graph, applied, clocks }
             })
@@ -1725,7 +1746,7 @@ mod tests {
         let (context, paths) = (compositor.gpu.context.clone(), compositor.paths.clone());
         compositor
             .clip_graphs
-            .get_or_build(key, &["invert".to_owned()][..], || build_clip_graph(&context, &paths, 64, 36, &effects, false).map(|(graph, clocks)| ClipGraph { graph, applied: vec![Map::new()], clocks }))
+            .get_or_build(key, &["invert".to_owned()][..], || build_clip_graph(&context, &paths, 64, 36, &effects, false, 0).map(|(graph, clocks)| ClipGraph { graph, applied: vec![Map::new()], clocks }))
             .expect("a clip graph");
         let (from, to) = (compositor.acquire().unwrap(), compositor.acquire().unwrap());
         let progress = Progress { elapsed: Time::from_ticks(1), total: Time::from_ticks(2) };

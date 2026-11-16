@@ -64,9 +64,11 @@ enum Search {
     OutOfTime,
 }
 
-/// The display size of a thumbnail `height` tall for a stored `width`x`height` picture.
-fn scaled_width(width: i32, height: i32, sample_aspect: ffi::AVRational, target_height: u32) -> u32 {
-    let shown = ffi::display_aspect(width, height, sample_aspect);
+/// The display width of a thumbnail `target_height` tall for a stored `width`x`height` picture
+/// shown after `turns` clockwise quarter turns.
+fn scaled_width(width: i32, height: i32, sample_aspect: ffi::AVRational, target_height: u32, turns: u8) -> u32 {
+    let stored = ffi::display_aspect(width, height, sample_aspect);
+    let shown = if turns % 2 == 1 { 1.0 / stored } else { stored };
     ((shown * f64::from(target_height)).round() as u32).clamp(1, target_height.saturating_mul(4).max(1))
 }
 
@@ -86,7 +88,10 @@ pub struct FrameSampler {
     /// The newest decoded frame, the answer when the stream ends first.
     kept: *mut ffi::AVFrame,
     scaler: *mut ffi::SwsContext,
-    scaler_source: (i32, i32, i32),
+    /// Width, height, pixel format, swscale matrix, full range and tone mapping the scaler was made for.
+    scaler_source: (i32, i32, i32, i32, i32, i32),
+    /// Clockwise quarter turns of the stream's display matrix.
+    turns: u8,
     stream_index: i32,
     time_base: ffi::AVRational,
     start_pts: i64,
@@ -113,7 +118,8 @@ impl FrameSampler {
             frame: ptr::null_mut(),
             kept: ptr::null_mut(),
             scaler: ptr::null_mut(),
-            scaler_source: (0, 0, -1),
+            scaler_source: (0, 0, -1, 0, 0, 0),
+            turns: 0,
             stream_index: -1,
             time_base: ffi::AVRational { num: 1, den: 1 },
             start_pts: 0,
@@ -168,7 +174,8 @@ impl FrameSampler {
         if parameters.width <= 0 || parameters.height <= 0 {
             return Err("the video stream states no picture size".to_owned());
         }
-        self.shown_width = scaled_width(parameters.width, parameters.height, parameters.sample_aspect_ratio, self.target_height);
+        self.turns = crate::orientation::stream_turns(stream);
+        self.shown_width = scaled_width(parameters.width, parameters.height, parameters.sample_aspect_ratio, self.target_height, self.turns);
         Ok(())
     }
 
@@ -297,35 +304,61 @@ impl FrameSampler {
         }
     }
 
+    /// The kept frame as the thumbnail: scaled with the frame's own YUV matrix and range, turned
+    /// upright, and for HDR or BT.2020 sources tone mapped to SDR BT.709 with the same maths as the
+    /// GPU input pass of the preview ([`gpufx_core::hdr`]).
     unsafe fn convert_kept(&mut self) -> Result<ThumbnailImage, String> {
         let kept = &*self.kept;
         if kept.width <= 0 || kept.height <= 0 || kept.format < 0 {
             return Err(format!("{}: the frame has no picture", self.path));
         }
-        let source = (kept.width, kept.height, kept.format);
-        let width = self.shown_width as i32;
-        let height = self.target_height as i32;
+        // The same colour description as the preview, defaults included.
+        let color = crate::decoder::frame_color_info(self.kept).map_err(|e| format!("{}: {e}", self.path))?;
+        let to_sdr = color.needs_sdr_conversion();
+        let output_format = if to_sdr { ffi::AV_PIX_FMT_RGBA64LE } else { ffi::AV_PIX_FMT_RGBA };
+        let full_range = i32::from(color.range == gpufx_core::Range::Full);
+        let matrix = match color.matrix {
+            gpufx_core::Matrix::Bt709 => ffi::SWS_CS_ITU709,
+            gpufx_core::Matrix::Bt2020 => ffi::SWS_CS_BT2020,
+            _ => ffi::SWS_CS_ITU601,
+        };
+        let source = (kept.width, kept.height, kept.format, matrix, full_range, i32::from(to_sdr));
+        // Scaled unturned, so the turn below ends at the thumbnail's size.
+        let (width, height) = crate::orientation::turned_size(self.shown_width, self.target_height, self.turns);
         if self.scaler.is_null() || self.scaler_source != source {
             ffi::sws_freeContext(self.scaler);
-            self.scaler = ffi::sws_getContext(kept.width, kept.height, kept.format, width, height, ffi::AV_PIX_FMT_RGBA, SWS_BILINEAR, ptr::null_mut(), ptr::null_mut(), ptr::null());
+            self.scaler = ffi::sws_getContext(kept.width, kept.height, kept.format, width as i32, height as i32, output_format, SWS_BILINEAR, ptr::null_mut(), ptr::null_mut(), ptr::null());
             if self.scaler.is_null() {
                 return Err(format!("{}: sws_getContext failed", self.path));
             }
+            // RGB output is full range; brightness, contrast and saturation are swscale's neutral values.
+            let _ = ffi::sws_setColorspaceDetails(self.scaler, ffi::sws_getCoefficients(matrix), full_range, ffi::sws_getCoefficients(ffi::SWS_CS_ITU709), 1, 0, 1 << 16, 1 << 16);
             self.scaler_source = source;
         }
+        let bytes_per_pixel = if to_sdr { 8 } else { 4 };
         // The scaler may read and write whole aligned blocks at the end of a line.
-        let stride = (self.shown_width as usize * 4 + 63) & !63;
-        let mut buffer = vec![0_u8; stride * (self.target_height as usize + 1)];
+        let stride = (width as usize * bytes_per_pixel + 63) & !63;
+        let mut buffer = vec![0_u8; stride * (height as usize + 1)];
         let destination = [buffer.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()];
         let strides = [stride as i32, 0, 0, 0];
         let lines = ffi::sws_scale(self.scaler, kept.data.as_ptr().cast(), kept.linesize.as_ptr(), 0, kept.height, destination.as_ptr(), strides.as_ptr());
         check(lines, "sws_scale")?;
-        let row = self.shown_width as usize * 4;
-        let mut rgba = Vec::with_capacity(row * self.target_height as usize);
-        for line in buffer.chunks_exact(stride).take(self.target_height as usize) {
-            rgba.extend_from_slice(&line[..row]);
+        let row = width as usize * bytes_per_pixel;
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for line in buffer.chunks_exact(stride).take(height as usize) {
+            if to_sdr {
+                for pixel in line[..row].chunks_exact(8) {
+                    let channel = |i: usize| f64::from(u16::from_le_bytes([pixel[2 * i], pixel[2 * i + 1]])) / 65535.0;
+                    let sdr = gpufx_core::hdr::to_sdr([channel(0), channel(1), channel(2)], color.transfer, color.primaries, color.peak_nits);
+                    rgba.extend(sdr.map(|c| (c * 255.0).round() as u8));
+                    rgba.push(255);
+                }
+            } else {
+                rgba.extend_from_slice(&line[..row]);
+            }
         }
-        Ok(ThumbnailImage { width: self.shown_width, height: self.target_height, rgba })
+        let (rgba, width, height) = crate::orientation::turn_rgba(&rgba, width, height, self.turns);
+        Ok(ThumbnailImage { width, height, rgba })
     }
 }
 
@@ -364,10 +397,12 @@ mod tests {
     #[test]
     fn widths_follow_the_shape_of_the_picture() {
         let square = ffi::AVRational { num: 1, den: 1 };
-        assert_eq!(scaled_width(1920, 1080, square, 72), 128);
-        assert_eq!(scaled_width(1080, 1920, square, 72), 41);
-        assert_eq!(scaled_width(720, 576, ffi::AVRational { num: 16, den: 15 }, 72), 96);
-        assert_eq!(scaled_width(100, 1, square, 72), 288, "a sliver is bounded");
+        assert_eq!(scaled_width(1920, 1080, square, 72, 0), 128);
+        assert_eq!(scaled_width(1080, 1920, square, 72, 0), 41);
+        assert_eq!(scaled_width(720, 576, ffi::AVRational { num: 16, den: 15 }, 72, 0), 96);
+        assert_eq!(scaled_width(100, 1, square, 72, 0), 288, "a sliver is bounded");
+        assert_eq!(scaled_width(1920, 1080, square, 72, 1), 41, "a phone video turned upright is tall");
+        assert_eq!(scaled_width(1920, 1080, square, 72, 2), 128);
     }
 
     #[test]

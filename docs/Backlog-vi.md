@@ -68,9 +68,9 @@ Blend của `crates/poc/src/mix_bench.rs` chỉ kiểm ở 3 vị trí tua, ma t
 
 `crates/d3d12-backend/src/encoder.rs` đã dùng các encoder phần cứng nhận khung NV12 từ CPU (`*_nvenc`, `*_qsv`, `*_amf`, `*_mf`) cho cả H.264 và HEVC, nhưng `h264_d3d12va`/`hevc_d3d12va` vẫn chưa dùng được: chúng đòi `AV_PIX_FMT_D3D12` (hw frames context). Muốn dùng cần đưa khung đã ghép trên GPU thẳng vào hw frames context của FFmpeg (zero-copy), bỏ bước đọc RGBA về CPU và đổi sang NV12 trên CPU. Ghi ngày 2026-11-09, thu hẹp ngày 2026-11-16.
 
-### [Vừa] Bộ giải mã chưa xử lý nguồn đổi kích thước giữa chừng và nguồn 10-bit
+### [Vừa] Bộ giải mã chưa xử lý nguồn đổi kích thước giữa chừng và nguồn 4:2:2 / 4:4:4
 
-`crates/d3d12-backend/src/decoder.rs` từ chối mọi nguồn không phải NV12 8-bit (P010/10-bit). Kích thước khung coi như không đổi suốt một clip; nguồn đổi độ phân giải giữa file chưa có bài test và chưa xử lý. Ghi ngày 2026-11-09.
+`crates/d3d12-backend/src/decoder.rs` (`next_frame`) nhận NV12 (8-bit) và P010 (10-bit 4:2:0), từ chối mọi định dạng khác, kể cả 10-bit 4:2:2 của một số máy quay. Kích thước khung coi như không đổi suốt một clip; nguồn đổi độ phân giải giữa file chưa có bài test và chưa xử lý. Ghi ngày 2026-11-09, cập nhật 2026-11-16 sau khi thêm P010.
 
 ### [Thấp] Đưa clip về kích thước project đang kéo giãn, downscale chỉ bilinear
 
@@ -241,13 +241,17 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/gpufx-editor/src/visuals/mod.rs:1-8`: cache mức âm chỉ nằm trong bộ nhớ, nên mỗi lần mở lại project phải đọc lại toàn bộ tiếng của từng file. Nên làm vì file dài tốn nhiều phút mỗi phiên. Ghi ngày 2026-11-09.
 
-### [Thấp] Thumbnail bỏ qua thông tin màu và alpha của nguồn
+### [Thấp] Thumbnail bỏ qua alpha của nguồn
 
-`crates/d3d12-backend/src/thumbnail.rs:265` (`convert_kept`): `sws_getContext` dùng hệ màu mặc định, chưa gọi `sws_setColorspaceDetails` theo colorspace/range của khung, và nguồn có alpha chưa được xử lý riêng. Nên làm vì nguồn BT.709 hoặc full range có thumbnail lệch màu so với preview. Ghi ngày 2026-11-09.
+`crates/d3d12-backend/src/thumbnail.rs` (`convert_kept`): ma trận màu, range, HDR và xoay đã theo khung, nhưng nguồn video có alpha chưa được xử lý riêng (ra RGBA của swscale, ô trong suốt không có nền ô cờ như preview). Nên làm khi editor nhận video có alpha. Ghi ngày 2026-11-09, cập nhật 2026-11-16.
 
-### [Thấp] Metadata xoay video chưa được áp dụng ở thumbnail và preview
+### [Thấp] Display matrix có lật hoặc góc lẻ chỉ được xoay gần đúng
 
-`crates/d3d12-backend/src/thumbnail.rs:102` (`initialize`) và đường decode preview: display matrix của luồng video không được đọc. Nên làm vì video quay dọc từ điện thoại hiện sai chiều. Ghi ngày 2026-11-09.
+`crates/d3d12-backend/src/orientation.rs` (`stream_turns`) chỉ lấy góc xoay của display matrix, làm tròn về bội 90 độ và bỏ phần lật gương (chỉ in cảnh báo ra stderr). Video điện thoại thường chỉ có 0/90/180/270 nên đủ dùng; file đã lật (camera trước của vài app) sẽ hiện không lật. Xoay làm ngay sau scale: scale đưa ảnh về kích thước đã xoay rồi `turn_effect` chỉ đổi chỗ texel, không lấy mẫu lại lần hai. Ghi ngày 2026-11-16.
+
+### [Thấp] Tone map HDR cố định, chưa có tuỳ chọn và chưa có xuất HDR
+
+Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đường cong chạy trên 0,75 max(R,G,B) + 0,25 độ sáng (`external/FFmpegGpuFilter/crates/gpufx-core/src/hdr.rs`), đỉnh lấy từ MaxCLL hoặc mastering display của từng khung (`crates/d3d12-backend/src/decoder.rs`, `frame_peak_nits`), kẹp trong 400..10000, mặc định 1000 cd/m2. Chưa có tuỳ chọn cho người dùng (đỉnh, độ sáng trắng), Dolby Vision profile 5 (IPT) không được nhận ra và sẽ ra màu sai, và chưa xuất được HDR. Màu sau tone map mới được kiểm bằng số; cần người dùng xem bằng mắt với video HDR thật của điện thoại. Ghi ngày 2026-11-16.
 
 ### [Thấp] Worker thumbnail có thể kẹt trên ổ mạng chết
 

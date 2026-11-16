@@ -151,7 +151,8 @@ impl DecodedFrame {
             _ if range == Range::Full => ChromaLocation::Center,
             _ => ChromaLocation::Left,
         };
-        Ok(ColorInfo { matrix, range, chroma_location, premultiplied: false })
+        // The POC decodes 8-bit SDR only: the HDR fields keep their SDR defaults.
+        Ok(ColorInfo { matrix, range, chroma_location, premultiplied: false, ..Default::default() })
     }
 
     pub fn width(&self) -> u32 {
