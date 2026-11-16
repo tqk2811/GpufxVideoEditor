@@ -97,6 +97,47 @@ unsafe extern "C" {
     pub fn av_channel_layout_uninit(layout: *mut AVChannelLayout);
 }
 
+/// `AVContentLightMetadata` of libavutil/mastering_display_metadata.h.
+#[repr(C)]
+pub struct AVContentLightMetadata {
+    pub max_cll: core::ffi::c_uint,
+    pub max_fall: core::ffi::c_uint,
+}
+
+/// `AVMasteringDisplayMetadata` of libavutil/mastering_display_metadata.h.
+#[repr(C)]
+pub struct AVMasteringDisplayMetadata {
+    pub display_primaries: [[AVRational; 2]; 3],
+    pub white_point: [AVRational; 2],
+    pub min_luminance: AVRational,
+    pub max_luminance: AVRational,
+    pub has_primaries: core::ffi::c_int,
+    pub has_luminance: core::ffi::c_int,
+}
+
+/// `SWS_CS_ITU709`, `SWS_CS_ITU601` and `SWS_CS_BT2020` of libswscale/swscale.h.
+pub const SWS_CS_ITU709: core::ffi::c_int = 1;
+pub const SWS_CS_ITU601: core::ffi::c_int = 5;
+pub const SWS_CS_BT2020: core::ffi::c_int = 9;
+
+unsafe extern "C" {
+    pub fn av_frame_get_side_data(frame: *const AVFrame, kind: AVFrameSideDataType) -> *mut AVFrameSideData;
+    pub fn av_packet_side_data_get(side_data: *const AVPacketSideData, count: core::ffi::c_int, kind: AVPacketSideDataType) -> *const AVPacketSideData;
+    pub fn av_display_rotation_get(matrix: *const i32) -> f64;
+    pub fn avcodec_find_decoder_by_name(name: *const core::ffi::c_char) -> *const AVCodec;
+    pub fn sws_getCoefficients(colorspace: core::ffi::c_int) -> *const core::ffi::c_int;
+    pub fn sws_setColorspaceDetails(
+        context: *mut SwsContext,
+        inverse_table: *const core::ffi::c_int,
+        source_range: core::ffi::c_int,
+        table: *const core::ffi::c_int,
+        destination_range: core::ffi::c_int,
+        brightness: core::ffi::c_int,
+        contrast: core::ffi::c_int,
+        saturation: core::ffi::c_int,
+    ) -> core::ffi::c_int;
+}
+
 unsafe extern "C" {
     pub fn avcodec_find_encoder_by_name(name: *const core::ffi::c_char) -> *const AVCodec;
     pub fn avcodec_send_frame(context: *mut AVCodecContext, frame: *const AVFrame) -> core::ffi::c_int;

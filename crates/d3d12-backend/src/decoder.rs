@@ -1,4 +1,4 @@
-//! Sequential H.264 decoding with D3D12VA through libav*. Same approach as the POC's decoder,
+//! Sequential video decoding (H.264, HEVC, AV1..., 8 or 10 bits 4:2:0) with D3D12VA through libav*. Same approach as the POC's decoder,
 //! reduced to what the renderer needs; there is deliberately no software path.
 //!
 //! [`SequentialDecoder::frame_at`] walks forward, and seeks when the time asked for cannot be reached
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use engine::render::{Decoder, RenderError};
 use engine::Time;
-use gpufx_core::{ChromaLocation, ColorInfo, Matrix, Range};
+use gpufx_core::{ChromaLocation, ColorInfo, Matrix, PixelFormat, Primaries, Range, Transfer};
 use windows::core::Interface;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Graphics::Direct3D12::{ID3D12Device, ID3D12Fence};
@@ -153,6 +153,10 @@ pub struct DecodedFrame {
     frame: *mut ffi::AVFrame,
     /// Presentation timestamp in the stream's time base.
     pub pts: i64,
+    /// NV12 or P010: how the texture stores the picture.
+    format: PixelFormat,
+    /// Clockwise quarter turns that show the picture upright (see [`crate::orientation`]).
+    turns: u8,
 }
 
 impl DecodedFrame {
@@ -169,7 +173,7 @@ impl DecodedFrame {
         if frame.is_null() {
             return Err("av_frame_clone failed".to_owned());
         }
-        Ok(Self { frame, pts: self.pts })
+        Ok(Self { frame, pts: self.pts, format: self.format, turns: self.turns })
     }
 
     /// `ID3D12Resource *` of the frame, borrowed.
@@ -213,17 +217,36 @@ impl DecodedFrame {
     }
 
     /// Width over height of the picture as it is shown: the sample aspect ratio of the frame
-    /// applied, the same rule as the thumbnails.
+    /// applied and the turn of the stream, the same rule as the thumbnails.
     pub fn display_aspect(&self) -> f64 {
         // SAFETY: self.frame is valid for the lifetime of self.
         let sample_aspect = unsafe { (*self.frame).sample_aspect_ratio };
-        ffi::display_aspect(self.width() as i32, self.height() as i32, sample_aspect)
+        let stored = ffi::display_aspect(self.width() as i32, self.height() as i32, sample_aspect);
+        if self.turns % 2 == 1 {
+            1.0 / stored
+        } else {
+            stored
+        }
+    }
+
+    /// The pixel format of the texture, NV12 or P010.
+    pub fn pixel_format(&self) -> PixelFormat {
+        self.format
+    }
+
+    /// Clockwise quarter turns that show the picture upright; the texture is stored unturned.
+    pub fn turns(&self) -> u8 {
+        self.turns
     }
 
     /// The colour description for gpufx, with the same defaults as FFmpeg's vf_gpufx.
     pub fn color_info(&self) -> Result<ColorInfo, String> {
         // SAFETY: self.frame is valid for the lifetime of self.
         let (colorspace, color_range, chroma_location) = unsafe { ((*self.frame).colorspace, (*self.frame).color_range, (*self.frame).chroma_location) };
+        // SAFETY: as above.
+        let (trc, primaries) = unsafe { ((*self.frame).color_trc, (*self.frame).color_primaries) };
+        // SAFETY: as above.
+        let peak_nits = unsafe { frame_peak_nits(self.frame) };
         let matrix = match colorspace {
             ffi::AVCOL_SPC_BT709 => Matrix::Bt709,
             ffi::AVCOL_SPC_BT2020_NCL => Matrix::Bt2020,
@@ -243,8 +266,51 @@ impl DecodedFrame {
             _ if range == Range::Full => ChromaLocation::Center,
             _ => ChromaLocation::Left,
         };
-        Ok(ColorInfo { matrix, range, chroma_location, premultiplied: false })
+        Ok(ColorInfo { matrix, range, chroma_location, premultiplied: false, transfer: transfer_of(trc), primaries: primaries_of(primaries), peak_nits })
     }
+}
+
+/// The transfer of an FFmpeg `color_trc`: everything that is neither PQ nor HLG is treated as SDR.
+pub(crate) fn transfer_of(trc: ffi::AVColorTransferCharacteristic) -> Transfer {
+    match trc {
+        ffi::AVCOL_TRC_SMPTE2084 => Transfer::Pq,
+        ffi::AVCOL_TRC_ARIB_STD_B67 => Transfer::Hlg,
+        _ => Transfer::Sdr,
+    }
+}
+
+/// The primaries of an FFmpeg `color_primaries`: BT.2020, or BT.709 for everything else (BT.601
+/// primaries are close enough to BT.709 that nothing converts them, as before).
+pub(crate) fn primaries_of(primaries: ffi::AVColorPrimaries) -> Primaries {
+    if primaries == ffi::AVCOL_PRI_BT2020 {
+        Primaries::Bt2020
+    } else {
+        Primaries::Bt709
+    }
+}
+
+/// The content peak of `frame` in cd/m2: MaxCLL of its content light level, else the peak of its
+/// mastering display, else 0 (unknown).
+///
+/// # Safety
+/// `frame` must be a valid frame.
+pub(crate) unsafe fn frame_peak_nits(frame: *const ffi::AVFrame) -> u32 {
+    let light = ffi::av_frame_get_side_data(frame, ffi::AV_FRAME_DATA_CONTENT_LIGHT_LEVEL);
+    if !light.is_null() && (*light).size >= std::mem::size_of::<ffi::AVContentLightMetadata>() {
+        let max_cll = (*((*light).data as *const ffi::AVContentLightMetadata)).max_cll;
+        if max_cll > 0 {
+            return max_cll;
+        }
+    }
+    let mastering = ffi::av_frame_get_side_data(frame, ffi::AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+    if !mastering.is_null() && (*mastering).size >= std::mem::size_of::<ffi::AVMasteringDisplayMetadata>() {
+        let metadata = &*((*mastering).data as *const ffi::AVMasteringDisplayMetadata);
+        let peak = metadata.max_luminance;
+        if metadata.has_luminance != 0 && peak.num > 0 && peak.den > 0 {
+            return (f64::from(peak.num) / f64::from(peak.den)).round() as u32;
+        }
+    }
+    0
 }
 
 impl Drop for DecodedFrame {
@@ -287,6 +353,8 @@ pub struct SequentialDecoder {
     abort_grace: Duration,
     request_started: Instant,
     path: String,
+    /// Clockwise quarter turns of the stream's display matrix.
+    turns: u8,
 }
 
 impl SequentialDecoder {
@@ -315,6 +383,7 @@ impl SequentialDecoder {
             abort_grace: Duration::ZERO,
             request_started: Instant::now(),
             path: path_text.to_owned(),
+            turns: 0,
         };
         // SAFETY: on error, Drop releases whatever has been created so far.
         unsafe { decoder.initialize(&c_path, device) }.map_err(|e| format!("{path_text}: {e}"))?;
@@ -328,8 +397,17 @@ impl SequentialDecoder {
         let mut codec: *const ffi::AVCodec = ptr::null();
         self.stream_index = check(ffi::av_find_best_stream(self.format_context, ffi::AVMEDIA_TYPE_VIDEO, -1, -1, &mut codec, 0), "av_find_best_stream")?;
         let stream = *(*self.format_context).streams.add(self.stream_index as usize);
+        if (*(*stream).codecpar).codec_id == ffi::AV_CODEC_ID_AV1 {
+            // The preferred AV1 decoder, libdav1d, decodes in software only: the native one hands
+            // the stream to D3D12VA.
+            let native = ffi::avcodec_find_decoder_by_name(c"av1".as_ptr());
+            if !native.is_null() {
+                codec = native;
+            }
+        }
         self.time_base = (*stream).time_base;
         self.start_pts = if (*stream).start_time == ffi::NO_PTS { 0 } else { (*stream).start_time };
+        self.turns = crate::orientation::stream_turns(stream);
 
         self.codec_context = ffi::avcodec_alloc_context3(codec);
         if self.codec_context.is_null() {
@@ -420,17 +498,20 @@ impl SequentialDecoder {
                         return Err(format!("the stream has a crop offset (top {crop_top}, left {crop_left}); only frames whose picture starts at the top-left corner are supported"));
                     }
                     let frames_context = (*(*frame).hw_frames_ctx).data as *const ffi::AVHWFramesContext;
-                    if (*frames_context).sw_format != ffi::AV_PIX_FMT_NV12 {
-                        let format = (*frames_context).sw_format;
-                        ffi::av_frame_free(&mut frame);
-                        return Err(format!("the stream decodes to pixel format {format}; only 8-bit 4:2:0 (NV12) is supported"));
-                    }
+                    let format = match (*frames_context).sw_format {
+                        ffi::AV_PIX_FMT_NV12 => PixelFormat::Nv12,
+                        ffi::AV_PIX_FMT_P010LE => PixelFormat::P010,
+                        other => {
+                            ffi::av_frame_free(&mut frame);
+                            return Err(format!("the stream decodes to pixel format {other}; only 4:2:0 in 8 bits (NV12) or 10 bits (P010) is supported"));
+                        }
+                    };
                     let pts = if (*frame).best_effort_timestamp != ffi::NO_PTS { (*frame).best_effort_timestamp } else { (*frame).pts };
                     if pts == ffi::NO_PTS {
                         ffi::av_frame_free(&mut frame);
                         return Err("the decoded frame has neither a best-effort timestamp nor a pts; frames cannot be placed on the timeline".to_owned());
                     }
-                    Ok(Some(DecodedFrame { frame, pts }))
+                    Ok(Some(DecodedFrame { frame, pts, format, turns: self.turns }))
                 }
                 Ok(false) => {
                     ffi::av_frame_free(&mut frame);

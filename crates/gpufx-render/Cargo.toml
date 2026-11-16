@@ -19,6 +19,7 @@ serde_json = "1"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
+gpufx-core = { path = "../../external/FFmpegGpuFilter/crates/gpufx-core" }
 gpufx-editor = { path = "../gpufx-editor" }
 gpufx-text = { path = "../gpufx-text" }
 png = "0.18"

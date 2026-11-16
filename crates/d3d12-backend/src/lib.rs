@@ -23,6 +23,7 @@ mod ffi;
 mod gpu;
 mod pack_presets;
 mod packages;
+mod orientation;
 mod paths;
 mod probe;
 mod progress;
