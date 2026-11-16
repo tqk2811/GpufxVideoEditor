@@ -632,6 +632,7 @@ fn clip_set_voice(p: VoiceParams) -> Result<AgentRequest, AgentError> {
 }
 
 params!(MutedParams { expected_revision: u64, clip: ClipParam, muted: bool });
+params!(ReverseParams { expected_revision: u64, clip: ClipParam, reverse: bool });
 params!(MarkerAddParams { expected_revision: u64, time: i64, label: Option<String>, color: Option<[u8; 4]> });
 params!(MarkerParams { expected_revision: u64, marker: usize });
 params!(MarkerMoveParams { expected_revision: u64, marker: usize, time: i64 });
@@ -755,6 +756,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("clip_set_speed", "Sets the playback speed of a clip, 0.1 to 10; 2 plays twice as fast. Keeps the source range, so the timeline length becomes source length / speed. Audio keeps its pitch. Refused with speed_overlap when the clip would run into the next one, and with transition_on_edge when its end holds a transition.", SpeedParams, |p| edit(p.expected_revision, AgentEdit::ClipSetSpeed { clip: p.clip.into(), speed: p.speed })),
         tool!("clip_set_gain", "Sets the gain of a clip in decibels.", GainParams, |p| edit(p.expected_revision, AgentEdit::ClipSetGain { clip: p.clip.into(), gain_db: p.gain_db })),
         tool!("clip_set_muted", "Mutes or unmutes a clip.", MutedParams, |p| edit(p.expected_revision, AgentEdit::ClipSetMuted { clip: p.clip.into(), muted: p.muted })),
+        tool!("clip_set_reverse", "Plays a clip backwards (reverse true) or forwards again. The clip keeps its place, length, source range and keyframes; its frames and its sound play from the end of that range to its start. Refused on an image or text clip (reverse_of_still).", ReverseParams, |p| edit(p.expected_revision, AgentEdit::ClipSetReverse { clip: p.clip.into(), reverse: p.reverse })),
         tool!("clip_set_fades", "Sets the audio fades of a clip, in ticks.", FadesParams, |p| edit(p.expected_revision, AgentEdit::ClipSetFades { clip: p.clip.into(), fade_in: ticks(p.fade_in), fade_out: ticks(p.fade_out) })),
         tool!("clip_set_denoise", "Sets the noise reduction of a clip's sound: mode off, voice (RNNoise, keeps speech and removes everything else) or general (removes steady broadband noise such as hiss or fans from any material), and strength from 0 to 1. Either may be left out, which keeps the clip's current value (a clip never set has mode off and strength 1). It works on the source audio before speed, pitch, gain and fades. Refused with out_of_range for a strength outside 0 to 1.", DenoiseParams, clip_set_denoise),
         tool!("clip_set_voice", "Sets the voice change of a clip: a pitch shift in semitones (-12 to 12, the speed stays) and an effect (none or robot). preset (normal: 0, chipmunk: +9, deep: -6, robot: 0 with the robot effect) gives both first; semitones or effect, when given, override it, and what neither gives keeps the clip's current value. Refused with out_of_range for semitones beyond 12 either way.", VoiceParams, clip_set_voice),

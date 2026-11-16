@@ -70,7 +70,10 @@ pub fn bar_span(clip: &Clip, pixels_per_second: f64, index: usize) -> Range<i64>
     let begin = width_ticks(index as f64 * pitch, pixels_per_second);
     let end = width_ticks((index + 1) as f64 * pitch, pixels_per_second).min(clip.duration.ticks());
     let at = |ticks: i64| clip.source_time_at(Time::from_ticks(ticks)).ticks();
-    at(begin)..at(end.max(begin + 1)).max(at(begin) + 1)
+    // A reversed clip runs down its source, so the bar spans from its end to its start.
+    let (first, last) = (at(begin), at(end.max(begin + 1)));
+    let (low, high) = if clip.plays_reversed() { (last + 1, first + 1) } else { (first, last) };
+    low..high.max(low + 1)
 }
 
 /// Heights of the picture strip and of the level bars in a clip body `height` tall.
@@ -185,5 +188,22 @@ mod tests {
         let (film, bars) = split_body(50.0, true, true);
         assert!(bars >= 15.0 && film + bars == 50.0, "{film} {bars}");
         assert_eq!(split_body(50.0, false, false), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_reversed_clip_shows_its_pictures_and_bars_from_the_end_of_its_source() {
+        let (pixels_per_second, tile) = (10.0, 16.0);
+        let mut reversed = clip(2, 10);
+        reversed.reverse = true;
+        let times: Vec<i64> = (0..6).map(|i| tile_source_ticks(&reversed, tile, pixels_per_second, i)).collect();
+        assert!(times.windows(2).all(|pair| pair[0] > pair[1]), "{times:?}");
+        let forward = clip(2, 10);
+        let (first, last) = (Time::from_seconds(2).unwrap().ticks(), Time::from_seconds(12).unwrap().ticks());
+        for i in 0..5 {
+            let bar = bar_span(&reversed, pixels_per_second, i);
+            let mirror = bar_span(&forward, pixels_per_second, i);
+            assert!(bar.start < bar.end, "{bar:?}");
+            assert_eq!((bar.start - first, bar.end - first), (last - mirror.end, last - mirror.start), "bar {i} is the mirror of the forward one");
+        }
     }
 }

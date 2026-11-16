@@ -73,6 +73,10 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         step(&mut session, "clip_set_muted", json!({"clip": clip0, "muted": true}), next)
     };
     expected = {
+        let next = engine::set_reverse(&expected, key(0, 0), true).unwrap();
+        step(&mut session, "clip_set_reverse", json!({"clip": clip0, "reverse": true}), next)
+    };
+    expected = {
         let next = engine::set_fades(&expected, key(0, 1), t(0.1), Time::ZERO).unwrap();
         step(&mut session, "clip_set_fades", json!({"clip": {"track": 0, "clip": 1}, "fade_in": 9000, "fade_out": 0}), next)
     };

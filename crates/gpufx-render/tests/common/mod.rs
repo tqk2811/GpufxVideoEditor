@@ -55,8 +55,17 @@ fn bar_filter() -> String {
 }
 
 fn generate_clip(path: &Path, grey: i32) {
-    let (tool, codec, options) = encoder_tool();
-    let color = format!("color=c=0x{grey:02x}{grey:02x}{grey:02x}:s={CLIP_WIDTH}x{CLIP_HEIGHT}:r=30:d=6");
+    generate_clip_with_gop(path, grey, 30, 6);
+}
+
+fn generate_clip_with_gop(path: &Path, grey: i32, gop: u32, seconds: u32) {
+    let (tool, codec, mut options) = encoder_tool();
+    for pair in options.chunks_exact_mut(2) {
+        if pair[0] == "-g" {
+            pair[1] = gop.to_string();
+        }
+    }
+    let color = format!("color=c=0x{grey:02x}{grey:02x}{grey:02x}:s={CLIP_WIDTH}x{CLIP_HEIGHT}:r=30:d={seconds}");
     let status = Command::new(tool)
         .args(["-hide_banner", "-y", "-v", "error", "-f", "lavfi", "-i", &color, "-vf", &bar_filter(), "-c:v", codec, "-pix_fmt", "yuv420p"])
         .args(options)
@@ -101,6 +110,38 @@ pub fn test_clips() -> (PathBuf, PathBuf) {
             (a, b)
         })
         .clone()
+}
+
+/// Clip A with a single keyframe, so its GOP (180 frames) is longer than any decoder cache.
+pub fn long_gop_clip() -> PathBuf {
+    static CLIP: OnceLock<PathBuf> = OnceLock::new();
+    CLIP.get_or_init(|| {
+        let dir = clips_dir();
+        std::fs::create_dir_all(&dir).expect("create the clips directory");
+        let (_, codec, _) = encoder_tool();
+        let path = dir.join(format!("clip-long-gop-{codec}.mp4"));
+        if !path.is_file() {
+            generate_clip_with_gop(&path, GREY_A, 1000, 6);
+        }
+        path
+    })
+    .clone()
+}
+
+/// A clip like A of 600 frames (20 s) with a single keyframe.
+pub fn longer_gop_clip() -> PathBuf {
+    static CLIP: OnceLock<PathBuf> = OnceLock::new();
+    CLIP.get_or_init(|| {
+        let dir = clips_dir();
+        std::fs::create_dir_all(&dir).expect("create the clips directory");
+        let (_, codec, _) = encoder_tool();
+        let path = dir.join(format!("clip-long-gop-20s-{codec}.mp4"));
+        if !path.is_file() {
+            generate_clip_with_gop(&path, GREY_A, 1000, 20);
+        }
+        path
+    })
+    .clone()
 }
 
 /// A copy of clip A whose H.264 headers carry a non-zero left crop.

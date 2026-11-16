@@ -282,6 +282,13 @@ impl AudioFileDecoder {
         Ok(self.deliver(target, frames, out))
     }
 
+    /// Like [`AudioFileDecoder::read`], always from a seek: the samples depend on `position` only,
+    /// not on whether the decoder and its resampler already stood there.
+    pub fn read_fresh(&mut self, position: i64, out: &mut [f32]) -> Result<(), String> {
+        self.positioned = false;
+        self.read(position, out)
+    }
+
     /// Whether a read from here on would only be silence: the stream ended and everything decoded
     /// was consumed. A file without an audio stream is finished from the start.
     pub fn finished(&self) -> bool {
@@ -563,6 +570,19 @@ impl AudioSource for AudioFiles {
     }
 
     fn read_counted(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<usize, RenderError> {
+        let decoder = self.decoder(key, source)?;
+        decoder.read_counted(position, out).map_err(|e| RenderError(format!("{}: {e}", decoder.path)))
+    }
+
+    fn read_fresh(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        let decoder = self.decoder(key, source)?;
+        decoder.read_fresh(position, out).map_err(|e| RenderError(format!("{}: {e}", decoder.path)))
+    }
+}
+
+impl AudioFiles {
+    /// The decoder of clip `key`, opened on `source` when it is not open yet.
+    fn decoder(&mut self, key: ClipKey, source: &str) -> Result<&mut AudioFileDecoder, RenderError> {
         self.uses += 1;
         // Edits renumber clips, so a key can come back naming another file.
         if self.open.get(&key).is_some_and(|(_, _, opened)| opened != source) {
@@ -579,7 +599,7 @@ impl AudioSource for AudioFiles {
         }
         let (decoder, used, _) = self.open.get_mut(&key).expect("inserted above");
         *used = self.uses;
-        decoder.read_counted(position, out).map_err(|e| RenderError(format!("{}: {e}", decoder.path)))
+        Ok(decoder)
     }
 }
 

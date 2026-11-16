@@ -149,6 +149,7 @@ pub enum AgentEdit {
     ClipSetGain { clip: ClipRef, gain_db: f64 },
     ClipSetSpeed { clip: ClipRef, speed: f64 },
     ClipSetMuted { clip: ClipRef, muted: bool },
+    ClipSetReverse { clip: ClipRef, reverse: bool },
     ClipSetFades { clip: ClipRef, fade_in: Time, fade_out: Time },
     /// Sets the noise reduction of a clip; `None` keeps the clip's current value.
     ClipSetDenoise { clip: ClipRef, mode: Option<engine::DenoiseMode>, strength: Option<f64> },
@@ -272,6 +273,7 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::TrackLocked { .. } => "track_locked",
         EditError::SpeedOverlap { .. } => "speed_overlap",
         EditError::SpeedOfImage { .. } => "speed_of_image",
+        EditError::ReverseOfStill { .. } => "reverse_of_still",
         EditError::KeyframeOutsideClip { .. } => "keyframe_outside_clip",
         EditError::KeyframeNotFound { .. } => "keyframe_not_found",
         EditError::NoPlacement { .. } => "no_placement",

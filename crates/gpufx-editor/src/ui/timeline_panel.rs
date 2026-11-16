@@ -466,6 +466,8 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
         let mut delete = false;
         let mut detect = false;
         let mut clear = false;
+        let reversed = state.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map(|clip| clip.reverse);
+        let mut reverse = None;
         response.context_menu(|ui| {
             let enabled = |ui: &mut egui::Ui, message: Message, flag: &mut bool| {
                 let button = ui.add_enabled(!locked, egui::Button::new(language.t(message)));
@@ -476,6 +478,13 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
                 }
             };
             enabled(ui, Message::DeleteShortcut, &mut delete);
+            // A still has no frames to play backwards.
+            if let Some(mut on) = reversed.filter(|_| has_sound) {
+                if ui.add_enabled(!locked, egui::Checkbox::new(&mut on, language.t(Message::Reverse))).clicked() {
+                    reverse = Some(on);
+                    ui.close();
+                }
+            }
             if has_sound {
                 ui.separator();
                 enabled(ui, Message::DetectBeats, &mut detect);
@@ -484,11 +493,13 @@ fn handle_tracks(ui: &egui::Ui, state: &mut EditorState, response: &egui::Respon
                 }
             }
         });
-        if delete || detect || clear {
+        if delete || detect || clear || reverse.is_some() {
             state.ui.clip_menu = None;
             state.select(Some(key));
         }
-        if delete {
+        if let Some(on) = reverse {
+            state.set_reverse(on);
+        } else if delete {
             state.delete_selected();
         } else if detect {
             state.detect_beats(key);

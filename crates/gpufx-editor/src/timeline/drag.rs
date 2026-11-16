@@ -71,8 +71,9 @@ pub fn clamp_trim(project: &Project, command: EditCommand) -> EditCommand {
     match command {
         EditCommand::TrimStart { new_start, .. } => {
             let previous_end = key.clip.checked_sub(1).and_then(|index| track.clips.get(index)).and_then(|previous| previous.end()).unwrap_or(Time::ZERO);
-            // The source cannot be read before its first frame.
-            let source_limit = clip.start.saturating_sub(clip.timeline_ticks(clip.source_in)).max(Time::ZERO);
+            // The source cannot be read before its first frame. A reversed clip reads further up
+            // its source there, whose length the project does not know, as an end trim does.
+            let source_limit = if clip.plays_reversed() { Time::ZERO } else { clip.start.saturating_sub(clip.timeline_ticks(clip.source_in)).max(Time::ZERO) };
             let lower = previous_end.max(source_limit);
             // A clip already shorter than the minimum is not shrunk further. The engine rounds a
             // start up to the grid of the speed, so the limit is the last grid position before it.
@@ -83,6 +84,10 @@ pub fn clamp_trim(project: &Project, command: EditCommand) -> EditCommand {
         EditCommand::TrimEnd { new_end, .. } => {
             let lower = clip.start.saturating_add(minimum).min(end);
             let mut clamped = new_end.max(lower);
+            // A reversed clip reads further down its source at the end, not before its first frame.
+            if clip.plays_reversed() {
+                clamped = clamped.min(end.saturating_add(clip.timeline_ticks(clip.source_in)));
+            }
             if let Some(next) = track.clips.get(key.clip + 1) {
                 clamped = clamped.min(next.start);
             }
@@ -240,6 +245,23 @@ mod tests {
         let command = clamp_trim(&project, EditCommand::TrimStart { key: key(1), new_start: seconds(5) });
         assert_eq!(command, EditCommand::TrimStart { key: key(1), new_start: Time::from_ticks(9 * 90_000 + 45_000) });
         assert!(command.apply(&project).is_ok(), "the limit is a position the engine accepts");
+    }
+
+    #[test]
+    fn a_reversed_clip_trims_its_end_down_to_the_source_start_and_its_start_freely() {
+        let mut project = project();
+        // Clip b at 10 to 12 with one source second before its in point, played backwards: its end
+        // reads further down the source, its start further up.
+        let clip = &mut project.tracks[0].clips[1];
+        clip.source_in = seconds(1);
+        clip.reverse = true;
+        let end = clamp_trim(&project, EditCommand::TrimEnd { key: key(1), new_end: seconds(20) });
+        let next_start = project.tracks[0].clips.get(2).map_or(seconds(20), |next| next.start);
+        assert_eq!(end, EditCommand::TrimEnd { key: key(1), new_end: seconds(13).min(next_start) });
+        assert!(end.apply(&project).is_ok());
+        let start = clamp_trim(&project, EditCommand::TrimStart { key: key(1), new_start: seconds(9) });
+        assert_eq!(start, EditCommand::TrimStart { key: key(1), new_start: seconds(9) }, "not stopped by the source start");
+        assert!(start.apply(&project).is_ok());
     }
 
     #[test]

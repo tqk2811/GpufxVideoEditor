@@ -44,6 +44,29 @@ Khi có proxy, preview dùng `ProjectPaths` riêng còn capture của agent dùn
 
 Chưa có tool MCP `proxy_status`/`proxy_create` (`crates/gpufx-editor/src/window.rs`, `impl AgentHost for Session`). Capture của agent luôn đọc file gốc; nên thêm tool nếu agent cần biết hoặc yêu cầu tạo proxy. Ghi ngày 2026-11-17.
 
+### [Thấp] Âm thanh clip phát ngược seek một lần mỗi chunk
+
+`crates/engine/src/stretch.rs` (`ReverseReader`, `REVERSE_CHUNK` 16384 khung) đọc file theo chiều lùi, và mỗi chunk đọc bằng `AudioSource::read_fresh` (seek mới, preroll 200 ms ở `crates/d3d12-backend/src/audio.rs`) để mẫu chỉ phụ thuộc vị trí, preview trùng bit với export. Giá phải trả: mỗi chunk khoảng 1/3 giây lại giải mã thêm 200 ms preroll, và chi phí seek tăng theo độ dài clip. Nên cân nhắc chunk lớn hơn, hoặc giải mã cả đoạn nguồn của clip ngược một lần vào bộ nhớ khi nó ngắn. Ghi ngày 2026-11-17.
+
+### [Thấp] Decoder phát ngược: báo GOP dài lên giao diện, trần bộ nhớ chung, biên khung khi pts làm tròn lên
+
+`crates/d3d12-backend/src/decoder/reverse.rs`:
+
+- `ReverseDecoder::slow_gop` báo khi GOP dài hơn nhiều lần ring + cache (lúc đó mỗi khung bị giải mã lại nhiều lần), nhưng chưa có đường đưa lên thanh trạng thái: decoder nằm trong `FrameRenderer` của engine, compositor và editor chưa đọc được. Nên nối lên và gợi ý bật proxy (tính năng proxy ở nhánh `feat/proxy`).
+- Trần VRAM của ring (`RING_BUDGET` 256 MB) và RAM của cache (`CACHE_BUDGET` 768 MB) tính riêng từng clip phát ngược, chưa có trần chung khi nhiều clip ngược cùng mở.
+- `floor_pts` lấy pts sàn để khung "1 tick trước biên" không bị làm tròn sang khung sau; với stream ghi pts trễ lên một đơn vị, khung cuối/đoạn giữ cuối của clip ngược có thể rơi xuống khung ngay dưới `source_in`.
+- Chưa có test với nguồn HDR/P010 phát ngược (đường tải khung từ cache RAM lên pool) và chưa đo tua clip ngược trong editor.
+
+Ghi ngày 2026-11-17.
+
+### [Thấp] Clip phát ngược đọc quá cuối nguồn khi kéo đầu hoặc có transition vào
+
+`crates/gpufx-editor/src/timeline/drag.rs:88` (`clamp_trim`, nhánh `TrimStart`) và `crates/engine/src/edit.rs` (`trim_start`): clip phát ngược kéo đầu ra trước là đọc lên phía cuối nguồn, nhưng project không biết độ dài nguồn nên không chặn (giống `trim_end` của clip xuôi). Transition vào clip phát ngược cũng đọc phía trên `source_end`, có thể vượt cuối file. Cần độ dài nguồn đã probe; có thể dùng `EditorState::source_remaining` để chặn như ô thời lượng. Ghi ngày 2026-11-17.
+
+### [Thấp] Ý tưởng: clip phát ngược ưu tiên proxy toàn khung I
+
+Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đọc từ proxy toàn khung I (hoặc GOP rất ngắn): mỗi khung giải mã đúng một lần, không cần ring lớn hay cache RAM của `crates/d3d12-backend/src/decoder/reverse.rs`. Ghi ngày 2026-11-17.
+
 ### [Thấp] `still_dimensions` bỏ qua hướng EXIF
 
 `crates/d3d12-backend/src/still.rs:54` (`still_dimensions`) đọc kích thước từ header mà không xoay theo EXIF, còn `read_still` xoay rồi; `crates/gpufx-editor/src/visuals/backend.rs:42` và tỉ lệ sticker trong thư viện dùng con số đó, nên ảnh chụp dọc có EXIF cho tỉ lệ ngược so với lúc render. Nên đọc orientation khi lấy kích thước. Ghi ngày 2026-11-10.
@@ -638,3 +661,15 @@ RNNoise trong `crates/engine/src/denoise.rs` (`DenoiseCache::run`) khởi độn
 ### [Thấp] Project.beats khoá theo chuỗi source: nhịp cũ khi file đổi nội dung, trùng mục, mục mồ côi không gỡ được
 
 `Project.beats` (`crates/engine/src/project.rs`) khoá bằng chuỗi `source`: ghi đè file cùng tên vẫn giữ nhịp cũ; cùng file ghi bằng hai chuỗi (tương đối/tuyệt đối, khác hoa thường) thành hai mục; mục của nguồn hết clip không có đường gỡ (`clip_beats_clear` cần một clip). Nên lưu stamp/hash file trong `ClipBeats` và cân nhắc bỏ giữ mục mồ côi (snapshot undo đã giữ `Arc`). Ngoài ra `clear_beats` huỷ lần dò trước khi biết lệnh gỡ có bị từ chối vì khoá track. Ghi ngày 2026-11-16.
+
+### [Thấp] Cache RAM của decoder phát ngược bỏ khung nằm trên ring khi tua lùi vào cache
+
+`crates/d3d12-backend/src/decoder/reverse.rs` (`take_from_below`, `self.below.drain(first..)`) xoá khỏi `below` mọi khung từ `first` trở lên, kể cả các khung nằm trên khung đích mà ring mới không chứa hết. Tua ngược rồi tua xuôi lại vào đoạn đó thì không còn khung trong cache và phải refill (giải mã lại từ keyframe). Nên chỉ rút phần đưa vào ring, giữ các khung phía trên nếu còn ngân sách. Ghi ngày 2026-11-17.
+
+### [Thấp] Ước lượng byte mỗi khung của decoder phát ngược giả định 4:2:0
+
+`frame_bytes` (`crates/d3d12-backend/src/decoder/reverse.rs`) tính `rộng * cao * 3 / 2`, đúng cho NV12/P010. Nguồn 4:2:2 hoặc 4:4:4 (nếu decoder xuất định dạng đó) tốn gấp 1,33 đến 2 lần, nên ngân sách `RING_BUDGET` và `CACHE_BUDGET` bị ước lượng thấp hơn thực tế cùng mức. Nên lấy hệ số theo định dạng pixel thật của pool. Ghi ngày 2026-11-17.
+
+### [Thấp] Âm thanh clip phát ngược preroll 200 ms cho mọi nguồn
+
+`read_fresh` (`crates/d3d12-backend/src/audio.rs`, quanh dòng 287) seek và preroll 200 ms cho mọi chunk lùi của mọi nguồn, khoảng 1,6 lần giải mã. Preroll chỉ cần để bộ lấy mẫu lại ổn định, nên có thể giới hạn cho nguồn không phải 48 kHz (nguồn 48 kHz không qua resampler). Liên quan mục "Âm thanh clip phát ngược seek một lần mỗi chunk" ở trên. Ghi ngày 2026-11-17.

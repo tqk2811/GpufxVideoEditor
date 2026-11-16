@@ -34,7 +34,7 @@ mod thumbnail;
 
 pub use audio::{AudioFileDecoder, AudioFiles};
 pub use compositor::{D3d12Compositor, SharedImage, SourceDecoder, SourceFrame};
-pub use decoder::{is_cancelled, DecodedFrame, PublishClock, SequentialDecoder};
+pub use decoder::{is_cancelled, DecodedFrame, PublishClock, ReverseDecoder, SequentialDecoder};
 pub use effect_preview::{preview_image_files, PreviewError, PreviewLoop, PreviewRenderer, PREVIEW_FPS, PREVIEW_FRAMES, PREVIEW_SIZE};
 pub use effect_preview_protocol::{InvalidJob, PreviewBlame, PreviewEvent, PreviewJob, PreviewJobKind, PREVIEW_PROTOCOL};
 pub use encoder::{auto_select, encoder_available, encoder_exists, needs_gpl, probe_encoder, EncoderChoice, Mp4Encoder, VideoCodec};

@@ -98,6 +98,8 @@ pub enum EditError {
     SpeedOverlap { key: ClipKey, end: Time, next_start: Time },
     /// A still image or a text clip has no playback speed to change.
     SpeedOfImage { key: ClipKey },
+    /// A still image or a text clip has no source to play backwards.
+    ReverseOfStill { key: ClipKey },
     /// A keyframe time is not inside the clip.
     KeyframeOutsideClip { key: ClipKey, at: Time },
     /// There is no keyframe at this time.
@@ -163,6 +165,7 @@ impl fmt::Display for EditError {
                 key.track, key.clip
             ),
             SpeedOfImage { key } => write!(f, "track {}, clip {}: an image has no speed", key.track, key.clip),
+            ReverseOfStill { key } => write!(f, "track {}, clip {}: a still cannot play backwards", key.track, key.clip),
             KeyframeOutsideClip { key, at } => write!(f, "track {}, clip {}: {at} is outside the clip", key.track, key.clip),
             KeyframeNotFound { key, at } => write!(f, "track {}, clip {}: no keyframe at {at}", key.track, key.clip),
             NoPlacement { key } => write!(f, "track {}, clip {}: the clip has no placement yet", key.track, key.clip),
@@ -443,6 +446,7 @@ pub fn text_clip(start: Time, duration: Time, text: TextContent) -> Clip {
         animation: ClipAnimation::default(),
         denoise: Default::default(),
         voice: Default::default(),
+        reverse: false,
     }
 }
 
@@ -588,7 +592,15 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     // A still has the same picture at every time, so its edge can go anywhere and it keeps no offset.
     // A karaoke text keeps one, since its word times count in it (see keeps_karaoke_time).
     let karaoke = keeps_karaoke_time(clip);
-    let mut source_in = if clip.is_still() && !karaoke { Time::ZERO } else { clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())? };
+    // A reversed clip plays its source range from the top down: its start edge shows the end of
+    // the range, so trimming it moves that end and source_in stays.
+    let mut source_in = if clip.is_still() && !karaoke {
+        Time::ZERO
+    } else if clip.plays_reversed() {
+        clip.source_in
+    } else {
+        clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())?
+    };
     // Before source 0 the karaoke words move later instead, so they stay where they were on the timeline.
     let words_shift = if karaoke && source_in < Time::ZERO { std::mem::replace(&mut source_in, Time::ZERO).ticks().checked_neg().ok_or(overflow.clone())? } else { 0 };
     if source_in < Time::ZERO {
@@ -658,7 +670,11 @@ pub fn trim_source_in(project: &Project, key: ClipKey, new_source_in: Time) -> R
     let changed = &mut next.tracks[key.track].clips[key.clip];
     changed.source_in = source_in;
     changed.duration = duration;
-    changed.shift_keyframes(Time::from_ticks(-delta.ticks()));
+    // A reversed clip shows source_in at its end: what moves is the end, and the frames under the
+    // start, with their keyframes, stay.
+    if !clip.plays_reversed() {
+        changed.shift_keyframes(Time::from_ticks(-delta.ticks()));
+    }
     finish(next)
 }
 
@@ -685,7 +701,18 @@ pub fn trim_end(project: &Project, key: ClipKey, new_end: Time) -> Result<Projec
         .checked_sub(clip.start)
         .ok_or(EditError::TimeOverflow { key })?;
     let mut next = project.clone();
-    next.tracks[key.track].clips[key.clip].duration = duration;
+    let changed = &mut next.tracks[key.track].clips[key.clip];
+    changed.duration = duration;
+    // A reversed clip shows source_in at its end edge: the top of its source range, under the start
+    // edge, stays, and source_in moves by the source the trim adds or removes.
+    if clip.plays_reversed() {
+        let top = clip.source_end();
+        let source_in = top.checked_sub(changed.source_span()).ok_or(EditError::TimeOverflow { key })?;
+        if source_in < Time::ZERO {
+            return Err(EditError::BeforeSourceStart { key, source_in });
+        }
+        changed.source_in = source_in;
+    }
     finish(next)
 }
 
@@ -767,8 +794,17 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     let mut second = whole.clone();
     second.start = clip.start.saturating_add(offset);
     // A still keeps no offset, as in trim_start, but a karaoke text does.
-    second.source_in = if clip.is_still() && !karaoke { Time::ZERO } else { clip.source_in.saturating_add(clip.source_offset(offset.saturating_sub(hold_start))) };
+    let first_span = clip.source_offset(offset.saturating_sub(hold_start));
+    second.source_in = if clip.is_still() && !karaoke { Time::ZERO } else { clip.source_in.saturating_add(first_span) };
     second.duration = rest;
+    // A reversed clip plays the top of its range first: the first half keeps the top, from
+    // `source_end - first_span`, and the second half goes on below it.
+    let reversed_first_in = clip.plays_reversed().then(|| clip.source_end().saturating_sub(first_span));
+    if let Some(first_in) = reversed_first_in {
+        // The second half ends the clip, on the frame at source_in, and reaches up to the first.
+        second.source_in = clip.source_in;
+        debug_assert_eq!(clip.source_in.saturating_add(clip.source_offset(rest.saturating_sub(hold_end))), first_in, "the halves of a reversed clip cover its source range");
+    }
     second.fade_in = Time::ZERO;
     // The start hold stays with the first half and the end hold with the second, each one's other
     // edge keeping its preset as a plain animation of the same length.
@@ -782,6 +818,9 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     target.clips[key.clip] = whole;
     let first = &mut target.clips[key.clip];
     first.duration = offset;
+    if let Some(first_in) = reversed_first_in {
+        first.source_in = first_in;
+    }
     first.fade_out = Time::ZERO;
     if let Some(exit) = first.animation.exit.as_mut().filter(|exit| exit.is_hold()) {
         exit.duration = exit.length();
@@ -900,6 +939,20 @@ pub fn set_voice(project: &Project, key: ClipKey, voice: ClipVoice) -> Result<Pr
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.voice = voice;
+    finish(next)
+}
+
+/// Sets whether a clip plays its source backwards. The clip keeps its place, length, source range
+/// and keyframes (which count in timeline time); only the order of the frames and of the sound
+/// flips. Refused on a still, which has nothing to reverse.
+pub fn set_reverse(project: &Project, key: ClipKey, reverse: bool) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let clip = clip_of(project, key)?;
+    if clip.is_still() {
+        return Err(EditError::ReverseOfStill { key });
+    }
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.reverse = reverse;
     finish(next)
 }
 

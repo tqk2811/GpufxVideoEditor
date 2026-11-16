@@ -29,7 +29,7 @@ use windows::Win32::Graphics::Direct3D12::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
 
 use crate::alpha_merge::{larger_alpha_effect, restore_alpha_effect};
-use crate::decoder::{DecodedFrame, PublishClock, SequentialDecoder};
+use crate::decoder::{DecodedFrame, PublishClock, ReverseDecoder, SequentialDecoder};
 use crate::gpu::Gpu;
 use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
@@ -527,6 +527,8 @@ impl SourceFrame {
 /// What a clip reads its pictures from.
 pub enum SourceDecoder {
     Video(SequentialDecoder),
+    /// A clip that plays backwards.
+    Reversed(ReverseDecoder),
     Still(Arc<StillImage>),
     /// A karaoke text, a picture per step.
     Steps(Arc<KaraokeSteps>),
@@ -540,6 +542,7 @@ impl Decoder for SourceDecoder {
     fn frame_at(&mut self, time: Time) -> Result<SourceFrame, RenderError> {
         match self {
             Self::Video(decoder) => decoder.frame_at(time).map(SourceFrame::Video),
+            Self::Reversed(decoder) => decoder.frame_at(time).map(SourceFrame::Video),
             Self::Still(still) => Ok(SourceFrame::Still(still.clone())),
             Self::Steps(steps) => {
                 let step = engine::karaoke::step_at(&steps.times, time);
@@ -553,6 +556,7 @@ impl Decoder for SourceDecoder {
     fn wait_idle(&mut self) -> Result<(), RenderError> {
         match self {
             Self::Video(decoder) => decoder.wait_idle(),
+            Self::Reversed(decoder) => decoder.wait_idle(),
             Self::Still(_) | Self::Steps(_) | Self::Units(_) => Ok(()),
         }
     }
@@ -795,6 +799,19 @@ pub struct D3d12Compositor {
 }
 
 impl D3d12Compositor {
+    /// A decoder for a clip of `source` that plays backwards, with the same abort policy as the
+    /// forward one of `open_decoder`.
+    fn open_reverse_decoder(&self, source: &str) -> Result<ReverseDecoder, RenderError> {
+        let mut decoder = ReverseDecoder::open(&self.paths.source_path(source), self.gpu.raw_device()).map_err(RenderError)?;
+        if let Some((flag, grace)) = &self.abort {
+            decoder.set_abort(flag.clone(), *grace);
+            decoder.set_abort_policy(self.closing.clone(), Some(self.publish_clock.clone()));
+        } else {
+            decoder.set_abort_policy(self.closing.clone(), None);
+        }
+        Ok(decoder)
+    }
+
     /// A compositor writing images of `width` x `height`.
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
@@ -1380,6 +1397,9 @@ impl Compositor for D3d12Compositor {
         if is_image_source(source) {
             let path = self.paths.source_path(source);
             return self.load_still(&path).map(SourceDecoder::Still).map_err(RenderError);
+        }
+        if clip.plays_reversed() {
+            return self.open_reverse_decoder(source).map(SourceDecoder::Reversed);
         }
         let proxy = self.paths.video_decode_source(source);
         let mut decoder = SequentialDecoder::open(&proxy.as_ref().map_or_else(|| self.paths.source_path(source), |proxy| proxy.path.clone()), self.gpu.raw_device())?;

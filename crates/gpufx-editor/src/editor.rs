@@ -241,6 +241,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::SpeedOverlap { key, end, next_start } => Message::EditSpeedOverlap { track: label(key.track), end: seconds_text(*end), next: seconds_text(*next_start) },
         EditError::SpeedOfImage { key } if is_text_clip(project, *key) => Message::EditSpeedOfText(label(key.track)),
         EditError::SpeedOfImage { key } => Message::EditSpeedOfImage(label(key.track)),
+        EditError::ReverseOfStill { key } => Message::EditReverseOfStill(label(key.track)),
         EditError::KeyframeOutsideClip { key, .. } => Message::EditKeyframeOutsideClip(label(key.track)),
         EditError::KeyframeNotFound { key, .. } => Message::EditKeyframeNotFound(label(key.track)),
         EditError::NoPlacement { key } => Message::EditNoPlacement(label(key.track)),
@@ -479,6 +480,7 @@ pub fn new_clip(source: &str, start: Time, duration: Time) -> Clip {
         animation: Default::default(),
         denoise: Default::default(),
         voice: Default::default(),
+        reverse: false,
     }
 }
 
@@ -1625,6 +1627,12 @@ impl EditorState {
     pub fn set_muted(&mut self, muted: bool) {
         let Some(key) = self.selected_for(ClipAction::Mute) else { return };
         self.run(|project| set_muted(project, key, muted));
+    }
+
+    /// Plays the selected clip backwards, or forwards again: one undo step.
+    pub fn set_reverse(&mut self, reverse: bool) {
+        let Some(key) = self.selected_for(ClipAction::Change) else { return };
+        self.run(|project| engine::set_reverse(project, key, reverse));
     }
 
     pub fn live_gain(&mut self, gain_db: f64) {
@@ -2856,6 +2864,24 @@ mod tests {
         state.select(Some(key(0)));
         state.toggle_track_locked(0);
         state
+    }
+
+    #[test]
+    fn reversing_a_clip_is_one_undo_step_and_a_still_says_why_it_cannot() {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        let before = state.project().clone();
+        state.set_reverse(true);
+        assert!(state.project().tracks[0].clips[0].reverse);
+        state.undo();
+        assert_eq!(state.project(), &before, "one step back undoes it");
+        let mut project = before.clone();
+        project.tracks[0].clips[0].source = "logo.png".into();
+        let mut image = EditorState::default();
+        image.replace_project(project, None);
+        image.select(Some(key(0)));
+        image.set_reverse(true);
+        assert_eq!(image.status(), &Status::Refused(Message::EditReverseOfStill(TrackLabel::Video(1))));
     }
 
     #[test]

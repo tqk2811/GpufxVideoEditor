@@ -134,6 +134,7 @@ struct ClipStretch {
 pub struct StretchStates {
     clips: HashMap<ClipKey, ClipStretch>,
     denoise: HashMap<ClipKey, DenoiseCache>,
+    reversed: HashMap<ClipKey, ReverseReader>,
 }
 
 impl StretchStates {
@@ -141,23 +142,110 @@ impl StretchStates {
     pub(crate) fn retain(&mut self, segments: &[AudioSegment<'_>]) {
         self.clips.retain(|key, _| segments.iter().any(|segment| segment.key == *key && segment.stretch.is_some()));
         self.denoise.retain(|key, _| segments.iter().any(|segment| segment.key == *key && segment.denoise.is_some()));
+        self.reversed.retain(|key, _| segments.iter().any(|segment| segment.key == *key && segment.reverse.is_some()));
     }
 
     /// Writes the `segment.len` frames of `segment` to `out`, interleaved and zeroed: its source
-    /// audio, denoised and then stretched when the segment asks for it.
+    /// audio, reversed, denoised and then stretched when the segment asks for it.
     pub(crate) fn read<S: AudioSource + ?Sized>(&mut self, source: &mut S, segment: &AudioSegment<'_>, out: &mut [f32]) -> Result<(), RenderError> {
-        match segment.denoise {
-            Some(spec) => {
-                let cache = self.denoise.entry(segment.key).or_insert_with(|| DenoiseCache::new(spec, segment.source));
-                if !cache.matches(spec, segment.source) {
-                    *cache = DenoiseCache::new(spec, segment.source);
-                }
-                // Only the mode and the file are in the runs; a new strength keeps them.
-                cache.set_strength(spec.strength);
-                read_plain_or_stretched(&mut self.clips, &mut Denoised { inner: source, cache }, segment, out)
-            }
-            None => read_plain_or_stretched(&mut self.clips, source, segment, out),
+        let Some(mirror) = segment.reverse else {
+            return read_forward(&mut self.clips, &mut self.denoise, source, segment, out);
+        };
+        let reader = self.reversed.entry(segment.key).or_insert_with(|| ReverseReader::new(segment.source, mirror));
+        if reader.source != segment.source || reader.mirror != mirror {
+            *reader = ReverseReader::new(segment.source, mirror);
         }
+        // The caches below know a source by its name: the mirrored one gets its own, so a clip
+        // switched between directions never reuses audio of the other one.
+        let identity = format!("{}\u{0}reverse {mirror}", segment.source);
+        let mirrored = AudioSegment { source: &identity, ..*segment };
+        read_forward(&mut self.clips, &mut self.denoise, &mut Reversed { inner: source, reader }, &mirrored, out)
+    }
+}
+
+fn read_forward<S: AudioSource + ?Sized>(clips: &mut HashMap<ClipKey, ClipStretch>, denoise: &mut HashMap<ClipKey, DenoiseCache>, source: &mut S, segment: &AudioSegment<'_>, out: &mut [f32]) -> Result<(), RenderError> {
+    match segment.denoise {
+        Some(spec) => {
+            let cache = denoise.entry(segment.key).or_insert_with(|| DenoiseCache::new(spec, segment.source));
+            if !cache.matches(spec, segment.source) {
+                *cache = DenoiseCache::new(spec, segment.source);
+            }
+            // Only the mode and the file are in the runs; a new strength keeps them.
+            cache.set_strength(spec.strength);
+            read_plain_or_stretched(clips, &mut Denoised { inner: source, cache }, segment, out)
+        }
+        None => read_plain_or_stretched(clips, source, segment, out),
+    }
+}
+
+/// Frames of a reversed clip's file read per chunk: about a third of a second. The chunks sit on a
+/// grid of absolute file positions, so the audio of a position does not depend on the order of
+/// the reads, and a reversed clip, read backwards through the file, seeks once per chunk.
+const REVERSE_CHUNK: i64 = 16_384;
+/// Chunks kept: the one being read and the next one down, with room for a read across both.
+const REVERSE_CHUNKS_KEPT: usize = 3;
+
+/// The file audio a reversed clip has read, by chunk.
+struct ReverseReader {
+    source: String,
+    mirror: i64,
+    /// `(first file frame, interleaved frames)`, the latest used first.
+    chunks: VecDeque<(i64, Vec<f32>)>,
+}
+
+impl ReverseReader {
+    fn new(source: &str, mirror: i64) -> Self {
+        Self { source: source.to_owned(), mirror, chunks: VecDeque::new() }
+    }
+
+    /// The chunk that starts at file frame `start`, read when it is not kept.
+    fn chunk<S: AudioSource + ?Sized>(&mut self, inner: &mut S, key: ClipKey, start: i64) -> Result<&[f32], RenderError> {
+        if let Some(index) = self.chunks.iter().position(|(at, _)| *at == start) {
+            let chunk = self.chunks.remove(index).expect("the index was just found");
+            self.chunks.push_front(chunk);
+        } else {
+            let mut frames = vec![0.0; REVERSE_CHUNK as usize * MIX_CHANNELS];
+            // Fresh: a chunk read right after the one below it would otherwise continue the
+            // decoder, and differ from the same chunk read after a seek, as an export reads it.
+            inner.read_fresh(key, &self.source, start, &mut frames)?;
+            self.chunks.push_front((start, frames));
+            self.chunks.truncate(REVERSE_CHUNKS_KEPT);
+        }
+        Ok(&self.chunks[0].1)
+    }
+}
+
+/// A source that plays the file of a reversed clip backwards: mirrored position `v` is file
+/// frame `mirror - v`. It ends where the file begins; past the end of the file it is silent.
+struct Reversed<'a, S: AudioSource + ?Sized> {
+    inner: &'a mut S,
+    reader: &'a mut ReverseReader,
+}
+
+impl<S: AudioSource + ?Sized> AudioSource for Reversed<'_, S> {
+    fn read(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
+        self.read_counted(key, source, position, out).map(|_| ())
+    }
+
+    fn read_counted(&mut self, key: ClipKey, _source: &str, position: i64, out: &mut [f32]) -> Result<usize, RenderError> {
+        let frames = (out.len() / MIX_CHANNELS) as i64;
+        // Frames from the first one down to the start of the file.
+        let covered = (self.reader.mirror - position + 1).clamp(0, frames);
+        let mut i = 0;
+        while i < covered {
+            let file = self.reader.mirror - position - i;
+            let start = file.div_euclid(REVERSE_CHUNK) * REVERSE_CHUNK;
+            let chunk = self.reader.chunk(self.inner, key, start)?;
+            // From `file` down to the start of the chunk, or as far as this read goes.
+            let run = (file - start + 1).min(covered - i);
+            for k in 0..run {
+                let from = (file - start - k) as usize * MIX_CHANNELS;
+                let to = (i + k) as usize * MIX_CHANNELS;
+                out[to..to + MIX_CHANNELS].copy_from_slice(&chunk[from..from + MIX_CHANNELS]);
+            }
+            i += run;
+        }
+        Ok(covered as usize)
     }
 }
 

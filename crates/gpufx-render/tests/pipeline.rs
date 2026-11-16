@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common::*;
-use d3d12_backend::{AudioFiles, D3d12Compositor, Gpu, ProjectPaths, SequentialDecoder};
+use d3d12_backend::{AudioFiles, D3d12Compositor, Gpu, ProjectPaths, ReverseDecoder, SequentialDecoder};
 use engine::render::{render, render_with_audio, Decoder, FrameSink, RenderError};
 use engine::{validate, Project, Time};
 use sha2::{Digest, Sha256};
@@ -192,6 +192,187 @@ fn half_speed_repeats_source_frames() {
         assert_eq!(read_frame_number(capture.frame(frame), W), expected, "output frame {frame}");
     }
     assert_eq!(capture.hashes[0], capture.hashes[1], "a repeated frame is the same picture");
+}
+
+/// A reversed clip, in frames of the output, at `speed`.
+fn reversed_clip_json(source: &Path, start: i64, source_in: i64, duration: i64, speed: f64) -> String {
+    format!(r#"{{"source":"{}","start":{},"source_in":{},"duration":{},"speed":{speed},"reverse":true}}"#, json_path(source), start * FRAME, source_in * FRAME, duration * FRAME)
+}
+
+#[test]
+fn a_reversed_clip_shows_its_source_frames_from_the_last_to_the_first() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}}"#, reversed_clip_json(&a, 0, 10, 40, 1.0));
+    let wanted: Vec<i64> = (0..40).collect();
+    let mut capture = Capture::new(&wanted);
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
+    for frame in wanted {
+        assert_eq!(read_frame_number(capture.frame(frame), W), 49 - frame, "output frame {frame}");
+    }
+}
+
+#[test]
+fn a_reversed_clip_at_double_speed_shows_every_second_frame_backwards() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let tracks = format!(r#"{{"clips":[{}]}}"#, reversed_clip_json(&a, 0, 10, 40, 2.0));
+    let wanted = [0, 1, 39];
+    let mut capture = Capture::new(&wanted);
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
+    for frame in wanted {
+        assert_eq!(read_frame_number(capture.frame(frame), W), 89 - 2 * frame, "output frame {frame}");
+    }
+}
+
+#[test]
+fn a_reversed_clip_with_one_keyframe_decodes_every_frame_backwards() {
+    let _lock = gpu_lock();
+    let clip = long_gop_clip();
+    let Some(gpu) = gpu() else { return };
+    // 150 frames back from source frame 169, several times the decoder ring, inside one GOP.
+    let tracks = format!(r#"{{"clips":[{}]}}"#, reversed_clip_json(&clip, 0, 20, 150, 1.0));
+    let wanted: Vec<i64> = (0..150).collect();
+    let mut capture = Capture::new(&wanted);
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render");
+    for frame in wanted {
+        assert_eq!(read_frame_number(capture.frame(frame), W), 169 - frame, "output frame {frame}");
+    }
+}
+
+#[test]
+fn a_reversed_decoder_seeks_to_a_far_later_frame_instead_of_decoding_up_to_it() {
+    let _lock = gpu_lock();
+    let (a, _) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let mut decoder = ReverseDecoder::open(&a, gpu.raw_device()).expect("open the clip");
+    let at = |n: i64| Time::from_ticks(n * FRAME);
+    decoder.frame_at(at(30)).expect("frame 30");
+    let before = decoder.decoded_frames();
+    // 120 frames later, four GOPs on: decoding on would decode them all, a seek only its own GOP.
+    let later = decoder.frame_at(at(150)).expect("frame 150").pts;
+    let decoded = decoder.decoded_frames() - before;
+    assert!(decoded <= 40, "{decoded} frames decoded to go 120 frames forward");
+    let mut forward = SequentialDecoder::open(&a, gpu.raw_device()).expect("open the clip");
+    assert_eq!(later, forward.frame_at(at(150)).expect("frame 150").pts, "the same frame");
+}
+
+/// Asks a reversed decoder for the first `frames` frames of `clip` from the last to the first,
+/// checks each one against a forward decoder, and returns how many frames it decoded.
+fn decodes_to_play_backwards(gpu: &Gpu, clip: &Path, frames: i64) -> u64 {
+    decodes_to_play_backwards_with(gpu, clip, frames, None).0
+}
+
+/// [`decodes_to_play_backwards`] with `cache` bytes of system memory for the decoder instead of
+/// its default, and whether it found the GOP slow.
+fn decodes_to_play_backwards_with(gpu: &Gpu, clip: &Path, frames: i64, cache: Option<u64>) -> (u64, bool) {
+    let at = |n: i64| Time::from_ticks(n * FRAME);
+    let mut forward = SequentialDecoder::open(clip, gpu.raw_device()).expect("open the clip");
+    let zero = forward.frame_at(at(0)).expect("frame 0").pts;
+    let step = forward.frame_at(at(1)).expect("frame 1").pts - zero;
+    let mut decoder = match cache {
+        Some(bytes) => ReverseDecoder::open_with_cache(clip, gpu.raw_device(), bytes),
+        None => ReverseDecoder::open(clip, gpu.raw_device()),
+    }
+    .expect("open the clip");
+    for n in (0..frames).rev() {
+        assert_eq!(decoder.frame_at(at(n)).expect("a frame").pts, zero + n * step, "frame {n}");
+    }
+    (decoder.decoded_frames(), decoder.slow_gop())
+}
+
+#[test]
+fn a_reversed_decoder_decodes_a_long_gop_about_once() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    // One keyframe each: 180 and 600 frames, many rings long.
+    let short = decodes_to_play_backwards(&gpu, &long_gop_clip(), CLIP_FRAMES);
+    let long = decodes_to_play_backwards(&gpu, &longer_gop_clip(), 600);
+    eprintln!("decoded to play backwards: {short} for 180 frames, {long} for 600 frames");
+    assert!(short <= 180 * 3 / 2, "{short} frames decoded for a GOP of 180");
+    assert!(long <= 600 * 3 / 2, "{long} frames decoded for a GOP of 600");
+    // Without the cache every ring of frames decodes the GOP up to it again, and that is reported.
+    let (uncached, slow) = decodes_to_play_backwards_with(&gpu, &longer_gop_clip(), 600, Some(0));
+    // A cache of about 50 frames of 640x360: refills and uploads take turns.
+    let (small, _) = decodes_to_play_backwards_with(&gpu, &longer_gop_clip(), 600, Some(50 * 640 * 384 * 3 / 2));
+    eprintln!("600 frames backwards: {uncached} decoded without the cache, {small} with room for 50 frames");
+    assert!(slow, "a GOP of 600 frames is slow for a ring alone");
+    assert!(small < uncached && long < small);
+}
+
+#[test]
+fn the_first_refill_of_a_long_gop_downloads_only_the_frames_it_keeps() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    let at = |n: i64| Time::from_ticks(n * FRAME);
+    // A cache of about 50 frames of 640x360 and a GOP of 600 frames asked for at its last frame:
+    // only the frames just below the ring are worth copying, not the whole head of the GOP.
+    let mut decoder = ReverseDecoder::open_with_cache(&longer_gop_clip(), gpu.raw_device(), 50 * 640 * 384 * 3 / 2).expect("open the clip");
+    decoder.frame_at(at(599)).expect("the last frame");
+    let downloaded = decoder.downloaded_frames();
+    eprintln!("downloaded {downloaded} frames on the first refill of a 600 frame GOP");
+    assert!(downloaded <= 60, "{downloaded} frames downloaded for a cache of 50");
+}
+
+/// Plays the first 600 frames of the long GOP clip backwards from the last, checking each one
+/// against a forward decoder; `hook` runs before the request for frame `at_frame` of the 600.
+fn plays_backwards_through_a_transfer_failure(gpu: &Gpu, at_frame: i64) -> ReverseDecoder {
+    let clip = longer_gop_clip();
+    let at = |n: i64| Time::from_ticks(n * FRAME);
+    let mut forward = SequentialDecoder::open(&clip, gpu.raw_device()).expect("open the clip");
+    let zero = forward.frame_at(at(0)).expect("frame 0").pts;
+    let step = forward.frame_at(at(1)).expect("frame 1").pts - zero;
+    // A cache of about 50 frames of 640x360, so refills and uploads both happen.
+    let mut decoder = ReverseDecoder::open_with_cache(&clip, gpu.raw_device(), 50 * 640 * 384 * 3 / 2).expect("open the clip");
+    for n in (0..600).rev() {
+        if n == at_frame {
+            assert!(decoder.cache_enabled(), "the cache is still on before the failure");
+            decoder.fail_next_transfer();
+        }
+        assert_eq!(decoder.frame_at(at(n)).expect("a frame despite the failed transfer").pts, zero + n * step, "frame {n}");
+    }
+    decoder
+}
+
+#[test]
+fn a_failed_download_turns_the_cache_off_and_the_clip_still_plays_backwards() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    // The very first copy of the first refill fails.
+    let decoder = plays_backwards_through_a_transfer_failure(&gpu, 599);
+    assert!(!decoder.cache_enabled(), "the cache is off after a failed copy");
+}
+
+#[test]
+fn a_failed_upload_turns_the_cache_off_and_the_clip_still_plays_backwards() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    // Frame 540 is below the ring after the first refill, so the cache is read for it.
+    let decoder = plays_backwards_through_a_transfer_failure(&gpu, 540);
+    assert!(!decoder.cache_enabled(), "the cache is off after a failed copy");
+}
+
+#[test]
+fn a_split_reversed_clip_renders_the_same_frames_and_a_transition_reads_on_backwards() {
+    let _lock = gpu_lock();
+    let (a, b) = test_clips();
+    let Some(gpu) = gpu() else { return };
+    let whole = format!(r#"{{"clips":[{}]}}"#, reversed_clip_json(&a, 0, 10, 40, 1.0));
+    let split = format!(r#"{{"clips":[{},{}]}}"#, reversed_clip_json(&a, 0, 35, 15, 1.0), reversed_clip_json(&a, 15, 10, 25, 1.0));
+    let mut first = Capture::new(&[]);
+    render_project(&gpu, &project_json(W, H, &whole), &mut first).expect("render whole");
+    let mut second = Capture::new(&[]);
+    render_project(&gpu, &project_json(W, H, &split), &mut second).expect("render split");
+    assert_eq!(first.hashes, second.hashes, "the halves show what the whole clip showed");
+    // A cut to clip b with a transition: inside the window the reversed clip goes on below its source_in.
+    let transition = r#""transitions":[{"after_clip":0,"package":"xfade","duration":30000}]"#;
+    let tracks = format!(r#"{{"clips":[{},{}],{transition}}}"#, reversed_clip_json(&a, 0, 30, 30, 1.0), clip_json(&b, 30, 100, 30));
+    let mut capture = Capture::new(&[0, 59]);
+    render_project(&gpu, &project_json(W, H, &tracks), &mut capture).expect("render with a transition");
+    assert_eq!(read_frame_number(capture.frame(0), W), 59);
+    assert_eq!(read_frame_number(capture.frame(59), W), 129);
 }
 
 #[test]

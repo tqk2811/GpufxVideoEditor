@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use common::*;
 use d3d12_backend::{AudioFileDecoder, AudioFiles, ProjectPaths};
-use engine::{mix_audio, Project, Resolver};
+use engine::{mix_audio, mix_audio_with, Project, Resolver, StretchStates};
 
 const RATE: i64 = 48_000;
 
@@ -342,4 +342,39 @@ fn an_audio_stream_without_a_decoder_is_reported_by_name_and_still_counts() {
     let error = AudioFileDecoder::open(&path).err().expect("no decoder");
     assert!(error.contains("unknown-codec.wav"), "{error}");
     assert!(error.contains("no decoder for its audio codec"), "{error}");
+}
+
+/// Mixes 1024 frames of `project` at each timeline sample of `starts` in turn, with one set of
+/// decoders and stretch states, and returns the last block.
+fn mix_in_turn(dir: &Path, project: &Project, starts: &[i64]) -> Vec<f32> {
+    let mut files = AudioFiles::new(Arc::new(ProjectPaths::new(&dir.join("project.json"), Vec::new())));
+    let mut states = StretchStates::default();
+    let mut out = Vec::new();
+    for start in starts {
+        out = vec![0.0f32; 1024 * 2];
+        mix_audio_with(project, &mut files, &mut states, *start, &mut out).expect("mix");
+    }
+    out
+}
+
+#[test]
+fn a_reversed_chunk_reads_the_same_samples_whatever_was_read_before() {
+    // A reversed clip reads its file in chunks of 16384 frames on an absolute grid. Read right after
+    // the chunk below it, a chunk once continued the decoder and its resampler; read alone it came
+    // from a seek: at 44.1 kHz the two differed, and preview would not match export.
+    for (name, path) in sources() {
+        let dir = path.parent().expect("clips directory").to_path_buf();
+        let source = path.file_name().and_then(|n| n.to_str()).expect("name").to_owned();
+        // From source 1 s for 3 s: timeline sample v plays file frame 191999 - v.
+        let json = format!(
+            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+                {{"kind":"audio","clips":[{{"source":"{source}","start":0,"source_in":90000,"duration":270000,"reverse":true}}]}}]}}"#
+        );
+        let project = Project::from_json(&json).expect("project parses");
+        // Timeline 51000 reads file chunk 8 (frames 131072..147456), timeline 41000 chunk 9.
+        let after_lower = mix_in_turn(&dir, &project, &[51_000, 41_000]);
+        let alone = mix_in_turn(&dir, &project, &[41_000]);
+        assert!(alone.iter().any(|s| s.abs() > 0.01), "{name}: the clip sounds");
+        assert!(after_lower == alone, "{name}: the chunk depends on the read before it");
+    }
 }
