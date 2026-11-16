@@ -1249,9 +1249,11 @@ fn open_effect(context: &Arc<GpuContext>, path: &Path, package: &str) -> Result<
 fn build_clip_graph(context: &Arc<GpuContext>, paths: &ProjectPaths, width: u32, height: u32, effects: &[ProjectEffect], restore_alpha: bool, turns: u8) -> Result<(EffectGraph, Vec<ClockParams>), String> {
     let scale_package = package_path(paths, "packages/gpufx/ffmpeg/scale")?;
     let mut pending = Vec::with_capacity(effects.len() + 2);
+    // Scaled to the turned size, so the turn after it lands exactly on `width` x `height`.
+    let (scaled_width, scaled_height) = crate::orientation::turned_size(width, height, turns);
     let mut scale = open_effect(context, &scale_package, "scale")?;
-    scale.params_mut().set("w", &[f64::from(width)]).map_err(|e| format!("scale.w: {e}"))?;
-    scale.params_mut().set("h", &[f64::from(height)]).map_err(|e| format!("scale.h: {e}"))?;
+    scale.params_mut().set("w", &[f64::from(scaled_width)]).map_err(|e| format!("scale.w: {e}"))?;
+    scale.params_mut().set("h", &[f64::from(scaled_height)]).map_err(|e| format!("scale.h: {e}"))?;
     pending.push(("scale".to_owned(), scale));
     if turns % 4 != 0 {
         pending.push(("turn".to_owned(), crate::orientation::turn_effect(context, turns)?));

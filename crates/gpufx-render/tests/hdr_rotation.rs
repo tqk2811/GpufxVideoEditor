@@ -242,3 +242,53 @@ fn a_rotated_phone_clip_is_shown_upright_like_ffmpeg_shows_it() {
         }
     }
 }
+
+/// A 320x180 NV12 clip of vertical stripes two pixels wide, remuxed with a display matrix of -90
+/// degrees: upright it is 180x320 with horizontal stripes.
+fn rotated_stripe_clip() -> PathBuf {
+    let dir = clips_dir();
+    std::fs::create_dir_all(&dir).expect("create the clips directory");
+    let stored = dir.join("stripes.mp4");
+    if !stored.is_file() {
+        let source = "nullsrc=s=320x180:r=30:d=0.5,format=yuv420p,geq=lum='if(lt(mod(X,4),2),220,30)':cb=128:cr=128";
+        assert!(run_ffmpeg(&["-f", "lavfi", "-i", source, "-pix_fmt", "yuv420p", "-c:v", "libopenh264", "-b:v", "20M"], &stored), "making the stripe clip failed");
+    }
+    let path = dir.join("stripes-rotated--90.mp4");
+    if !path.is_file() {
+        let stored = stored.to_string_lossy().into_owned();
+        assert!(run_ffmpeg(&["-display_rotation", "-90", "-i", &stored, "-c", "copy"], &path), "remuxing the stripes with a rotation failed");
+    }
+    path
+}
+
+/// PSNR in dB of the RGB channels of two RGBA pictures of the same size.
+fn psnr(a: &[u8], b: &[u8]) -> f64 {
+    let (mut sum, mut count) = (0.0, 0.0);
+    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        for i in 0..3 {
+            let d = f64::from(pa[i]) - f64::from(pb[i]);
+            sum += d * d;
+            count += 1.0;
+        }
+    }
+    let mse = sum / count;
+    if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0 * 255.0 / mse).log10() }
+}
+
+#[test]
+fn a_rotated_clip_keeps_its_full_detail() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    let clip = rotated_stripe_clip();
+    // A portrait project of the upright size: the turn must not resample the picture, so the
+    // two-pixel stripes come out as sharp as ffmpeg's own autorotate shows them.
+    let (width, height) = (180, 320);
+    let rendered = render_first(&gpu, &clip, width, height);
+    let reference = ffmpeg_upright(&clip, width, height);
+    let quality = psnr(&rendered, &reference);
+    // Rows of one stripe: the contrast between neighbouring stripes survives.
+    let column = width / 2;
+    let contrast = (0..height - 2).map(|y| (pixel(&rendered, width, column, y)[0] - pixel(&rendered, width, column, y + 2)[0]).abs()).max().unwrap_or(0);
+    assert!(contrast > 120, "the stripes were blurred: the largest contrast two rows apart is {contrast}");
+    assert!(quality > 30.0, "the rotated clip differs from ffmpeg's autorotate: PSNR {quality:.1} dB");
+}

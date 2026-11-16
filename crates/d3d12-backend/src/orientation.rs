@@ -14,42 +14,43 @@ const TURN_MANIFEST: &str = r#"{
   "name": "Turn",
   "used_for": ["gpufx"],
   "version": "1.0.0",
-  "description": "Turns the picture clockwise by quarter turns, stretched to the same size.",
+  "description": "Turns the picture clockwise by quarter turns; odd turns swap its width and height.",
   "inputs": [{ "name": "picture" }],
   "params": [{ "name": "turns", "type": "int", "default": 0, "min": 0, "max": 3 }],
   "groups": [{ "passes": [{ "shader": "shaders/main.wgsl" }] }]
 }"#;
 
-// The output has the input's size: the clip graph scales the stored picture to the frame first,
-// and places the result with the turned aspect, so the stretch here undoes itself.
+// For an odd number of turns the output swaps the input's width and height: the clip graph
+// scales the stored picture to the turned frame size first, so this is an exact texel remap,
+// with no second resampling.
 const TURN_SHADER: &str = r#"@compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u) {
     if (!gpufx_in_bounds(id)) { return; }
-    let uv = (vec2f(id.xy) + 0.5) / globals.size;
-    // The point of the unturned picture each output pixel shows (turn_rgba does the same).
-    var st = uv;
+    let size = vec2i(textureDimensions(picture));
+    let p = vec2i(id.xy);
+    // The texel of the unturned picture each output pixel shows (turn_rgba does the same).
+    var source = p;
     if (params.turns == 1) {
-        st = vec2f(uv.y, 1.0 - uv.x);
+        source = vec2i(p.y, size.y - 1 - p.x);
     } else if (params.turns == 2) {
-        st = vec2f(1.0 - uv.x, 1.0 - uv.y);
+        source = vec2i(size.x - 1 - p.x, size.y - 1 - p.y);
     } else if (params.turns == 3) {
-        st = vec2f(1.0 - uv.y, uv.x);
+        source = vec2i(size.x - 1 - p.y, p.x);
     }
-    let dimensions = vec2f(textureDimensions(picture));
-    let limit = vec2i(dimensions) - vec2i(1);
-    let position = st * dimensions - 0.5;
-    let cell = floor(position);
-    let blend = position - cell;
-    let origin = vec2i(cell);
-    let a = textureLoad(picture, clamp(origin, vec2i(0), limit), 0);
-    let b = textureLoad(picture, clamp(origin + vec2i(1, 0), vec2i(0), limit), 0);
-    let c = textureLoad(picture, clamp(origin + vec2i(0, 1), vec2i(0), limit), 0);
-    let d = textureLoad(picture, clamp(origin + vec2i(1, 1), vec2i(0), limit), 0);
-    gpufx_write(id, mix(mix(a, b, blend.x), mix(c, d, blend.x), blend.y));
+    gpufx_write(id, textureLoad(picture, clamp(source, vec2i(0), size - vec2i(1)), 0));
+}
+
+fn gpufx_output_size(out_index: u32) -> vec2u {
+    let s = gpufx_input_size(0u);
+    if (params.turns == 1 || params.turns == 3) {
+        return vec2u(s.y, s.x);
+    }
+    return s;
 }
 "#;
 
-/// The built-in effect that turns a picture by `turns` clockwise quarter turns, keeping its size.
+/// The built-in effect that turns a picture by `turns` clockwise quarter turns; an odd number of
+/// turns swaps its width and height.
 pub(crate) fn turn_effect(context: &Arc<GpuContext>, turns: u8) -> Result<Effect, String> {
     let mut effect = effect_of(context, TURN_MANIFEST, TURN_SHADER)?;
     effect.params_mut().set("turns", &[f64::from(turns % 4)]).map_err(|e| format!("turn.turns: {e}"))?;
