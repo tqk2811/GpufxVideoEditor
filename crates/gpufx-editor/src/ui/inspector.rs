@@ -136,6 +136,10 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
 
         time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start, None);
         speed_row(ui, state, key, &language.t(Message::FieldSpeed), clip.speed);
+        let mut reverse = clip.reverse;
+        if ui.checkbox(&mut reverse, language.t(Message::Reverse)).changed() {
+            state.set_reverse(reverse);
+        }
         ui.separator();
 
         let mut gain = clip.gain_db;

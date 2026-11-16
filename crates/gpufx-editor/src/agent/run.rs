@@ -473,6 +473,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         }
         AgentEdit::ClipSetGain { clip, gain_db } => state.apply_agent_command(|project| engine::set_gain(project, clip.into(), gain_db)).map_err(refused)?,
         AgentEdit::ClipSetMuted { clip, muted } => state.apply_agent_command(|project| engine::set_muted(project, clip.into(), muted)).map_err(refused)?,
+        AgentEdit::ClipSetReverse { clip, reverse } => state.apply_agent_command(|project| engine::set_reverse(project, clip.into(), reverse)).map_err(refused)?,
         AgentEdit::ClipSetFades { clip, fade_in, fade_out } => state.apply_agent_command(|project| engine::set_fades(project, clip.into(), fade_in, fade_out)).map_err(refused)?,
         AgentEdit::ClipSetDenoise { clip, mode, strength } => {
             if let Some(strength) = strength.filter(|strength| !(0.0..=1.0).contains(strength)) {

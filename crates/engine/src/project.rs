@@ -258,6 +258,11 @@ pub struct Clip {
     /// Pitch shift and voice effect of the sound. Left out of the file when neutral.
     #[serde(default, skip_serializing_if = "ClipVoice::is_neutral")]
     pub voice: ClipVoice,
+    /// Whether the moving part plays backwards: the same source range, `source_in` to
+    /// [`Clip::source_end`], from its last frame to its first. The start hold then shows the last
+    /// source frame and the end hold the first. Ignored on a still. Left out of the file when off.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reverse: bool,
 }
 
 /// The `source` of every text clip. It names no file and has no extension, so
@@ -990,18 +995,36 @@ impl Clip {
     /// into the clip): `source_in` plus the scaled time since the moving part began. Inside a hold
     /// it stays on the first frame of the moving part, or on its last one (one tick before
     /// [`Clip::source_end`]).
+    ///
+    /// A reversed clip (see [`Clip::plays_reversed`]) mirrors that inside its source range: it
+    /// shows `source_end - 1 tick - played`, so its first moving frame is the last source frame and
+    /// its last one is the frame at `source_in`. Past its end, inside a transition, it goes on
+    /// backwards before `source_in`.
     pub fn source_time_at(&self, offset: Time) -> Time {
         let hold_start = self.hold_start();
         let mut into = offset.saturating_sub(hold_start);
         if hold_start > Time::ZERO {
             into = into.max(Time::ZERO);
         }
-        let played = self.source_offset(into);
+        let mut played = self.source_offset(into);
+        let last = self.source_span().saturating_sub(Time::from_ticks(1)).max(Time::ZERO);
         if self.hold_end() > Time::ZERO {
-            let last = self.source_offset(self.media_duration()).saturating_sub(Time::from_ticks(1)).max(Time::ZERO);
-            return self.source_in.saturating_add(played.min(last));
+            played = played.min(last);
+        }
+        if self.plays_reversed() {
+            return self.source_in.saturating_add(last.saturating_sub(played));
         }
         self.source_in.saturating_add(played)
+    }
+
+    /// Whether the clip plays its source backwards: [`Clip::reverse`] on a clip that is not a still.
+    pub fn plays_reversed(&self) -> bool {
+        self.reverse && !self.is_still()
+    }
+
+    /// The source ticks the moving part plays: `source_end - source_in`.
+    pub fn source_span(&self) -> Time {
+        self.source_offset(self.media_duration())
     }
 
     /// Timeline end (exclusive), or `None` on overflow.
@@ -1055,8 +1078,11 @@ impl Clip {
     /// The timeline time at which the moving part of the clip plays source position `source`, by
     /// the clip's speed: the inverse of [`Clip::source_time_at`] outside the holds, rounded down.
     /// It does not check that the clip plays that position; see [`Clip::plays_source`].
+    /// On a reversed clip the time falls as `source` grows.
     pub fn timeline_time_of(&self, source: Time) -> Time {
-        self.start.saturating_add(self.hold_start()).saturating_add(self.timeline_ticks(source.saturating_sub(self.source_in)))
+        let into = source.saturating_sub(self.source_in);
+        let played = if self.plays_reversed() { self.source_span().saturating_sub(Time::from_ticks(1)).saturating_sub(into) } else { into };
+        self.start.saturating_add(self.hold_start()).saturating_add(self.timeline_ticks(played))
     }
 
     /// Whether the moving part of the clip plays source position `source`.
@@ -1065,19 +1091,40 @@ impl Clip {
     }
 
     /// The beats of `beats` (the list of the clip's source) that the clip plays, each with its
-    /// timeline time, in order. A beat outside the part of the source the clip plays (trimmed away,
-    /// or in the other half of a split) is left out. Finds the first one by binary search.
+    /// timeline time, in timeline order. A beat outside the part of the source the clip plays
+    /// (trimmed away, or in the other half of a split) is left out. Finds the range by binary
+    /// search. A reversed clip plays its beats from the last to the first, so they come out in
+    /// the opposite order of `beats`.
     pub fn beat_times<'a>(&'a self, beats: &'a [Beat]) -> impl Iterator<Item = (Time, Beat)> + 'a {
-        let first = beats.partition_point(|beat| beat.at < self.source_in);
-        beats[first..].iter().take_while(|beat| self.plays_source(beat.at)).map(|beat| (self.timeline_time_of(beat.at), *beat))
+        self.beats_in_order(self.played_beats(beats))
     }
 
     /// [`Clip::beat_times`] from timeline time `from` to `to`, both included, found by binary
-    /// search: the timeline time of a beat grows with its source time, so a clip on screen costs
-    /// the beats it shows, not all those of its source.
+    /// search: the timeline time of a beat grows with its source time (falls, on a reversed
+    /// clip), so a clip on screen costs the beats it shows, not all those of its source.
     pub fn beat_times_between<'a>(&'a self, beats: &'a [Beat], from: Time, to: Time) -> impl Iterator<Item = (Time, Beat)> + 'a {
-        let first = beats.partition_point(|beat| beat.at < self.source_in || self.timeline_time_of(beat.at) < from);
-        beats[first..].iter().take_while(move |beat| self.plays_source(beat.at) && self.timeline_time_of(beat.at) <= to).map(|beat| (self.timeline_time_of(beat.at), *beat))
+        let played = self.played_beats(beats);
+        let at = |beat: &Beat| self.timeline_time_of(beat.at);
+        let (low, high) = if self.plays_reversed() {
+            (played.partition_point(|beat| at(beat) > to), played.partition_point(|beat| at(beat) >= from))
+        } else {
+            (played.partition_point(|beat| at(beat) < from), played.partition_point(|beat| at(beat) <= to))
+        };
+        self.beats_in_order(&played[low..high.max(low)])
+    }
+
+    /// The beats of `beats` inside the source range the clip plays, in source order.
+    fn played_beats<'a>(&self, beats: &'a [Beat]) -> &'a [Beat] {
+        let first = beats.partition_point(|beat| beat.at < self.source_in);
+        let end = beats.partition_point(|beat| beat.at < self.source_end());
+        &beats[first..end.max(first)]
+    }
+
+    /// `played` (in source order) with timeline times, in timeline order.
+    fn beats_in_order<'a>(&'a self, played: &'a [Beat]) -> impl Iterator<Item = (Time, Beat)> + 'a {
+        let reversed = self.plays_reversed();
+        let count = played.len();
+        (0..count).map(move |i| played[if reversed { count - 1 - i } else { i }]).map(|beat| (self.timeline_time_of(beat.at), beat))
     }
 }
 
@@ -1087,7 +1134,7 @@ pub(crate) mod tests_support {
 
     /// A plain clip of one second at the start of the timeline.
     pub(crate) fn clip() -> Clip {
-        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default() }
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default(), reverse: false }
     }
 }
 
