@@ -394,15 +394,12 @@ impl Clip {
         }
     }
 
-    /// Stretches clip time by `numerator / denominator`, rounded to the nearest tick. Keyframes that
-    /// land on one tick become one, the later keeping its value.
-    pub(crate) fn scale_keyframes(&mut self, numerator: i64, denominator: i64) {
+    /// Moves every keyframe to `map(at)`, which must keep their order. Keyframes that land on one
+    /// tick become one, the later keeping its value.
+    pub(crate) fn map_keyframe_times(&mut self, map: impl Fn(Time) -> Time) {
         for keys in self.all_keyframes_mut() {
             for key in keys.iter_mut() {
-                let scaled = i128::from(key.at.ticks()) * i128::from(numerator);
-                let half = i128::from(denominator) / 2;
-                let rounded = if scaled < 0 { (scaled - half) / i128::from(denominator) } else { (scaled + half) / i128::from(denominator) };
-                key.at = Time::from_ticks(i64::try_from(rounded).unwrap_or(if rounded < 0 { i64::MIN } else { i64::MAX }));
+                key.at = map(key.at);
             }
             let mut kept: Vec<Keyframe> = Vec::with_capacity(keys.len());
             for key in keys.drain(..) {
@@ -607,4 +604,12 @@ mod tests {
         assert_eq!(resolved[0].params.get("amount"), Some(&Value::from(2.0)));
         assert!(resolved[0].keyframes.is_empty());
     }
+}
+
+/// `at * numerator / denominator`, rounded to the nearest tick.
+pub(crate) fn scale_time(at: Time, numerator: i64, denominator: i64) -> Time {
+    let scaled = i128::from(at.ticks()) * i128::from(numerator);
+    let half = i128::from(denominator) / 2;
+    let rounded = if scaled < 0 { (scaled - half) / i128::from(denominator) } else { (scaled + half) / i128::from(denominator) };
+    Time::from_ticks(i64::try_from(rounded).unwrap_or(if rounded < 0 { i64::MIN } else { i64::MAX }))
 }

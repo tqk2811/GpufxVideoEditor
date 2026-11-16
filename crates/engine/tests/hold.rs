@@ -185,6 +185,20 @@ fn a_speed_change_rescales_only_the_video() {
 }
 
 #[test]
+fn a_speed_change_keeps_the_keyframes_on_their_frame_beside_the_holds() {
+    let mut alone = start();
+    alone.tracks[0].clips.truncate(1);
+    let held = set_animation(&alone, key(0), ClipAnimation { enter: fade(-HALF), exit: fade(-HALF), ..ClipAnimation::default() }).unwrap();
+    // One keyframe a quarter second into the video, one a frame into the end hold.
+    let opacity = |at: i64| engine::Keyframe { at: t(at), value: 0.5, easing: Default::default() };
+    let mut keyed = held.clone();
+    keyed.tracks[0].clips[0].motion.keyframes.insert(engine::ClipProperty::Opacity, vec![opacity(HALF + SECOND / 4), opacity(HALF + SECOND + FRAME)]);
+    let fast = set_speed(&keyed, key(0), 2.0).unwrap();
+    let times: Vec<i64> = fast.tracks[0].clips[0].motion.keyframes[&engine::ClipProperty::Opacity].iter().map(|key| key.at.ticks()).collect();
+    assert_eq!(times, vec![HALF + SECOND / 8, HALF + HALF + FRAME], "the video keyframe scales after the start hold, the hold keyframe moves with the end");
+}
+
+#[test]
 fn an_image_hold_just_lasts_longer() {
     let mut before = start();
     before.tracks[0].clips[0] = clip("a.png", 0, 0, SECOND);

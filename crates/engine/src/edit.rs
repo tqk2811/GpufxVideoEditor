@@ -932,8 +932,19 @@ pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project,
     let changed = clip_mut(&mut next, key)?;
     changed.speed = milli as f64 / SPEED_SCALE as f64;
     changed.duration = duration;
-    // A keyframe stays on its source frame: that frame now plays at another time of the clip.
-    changed.scale_keyframes(old_milli, milli);
+    // A keyframe of the video stays on its source frame, which now plays at another time of the
+    // clip; the start hold does not move, and a keyframe in the end hold moves with the video end.
+    let hold_start = changed.hold_start();
+    let (old_end, new_end) = (hold_start.saturating_add(clip.media_duration()), hold_start.saturating_add(changed.media_duration()));
+    changed.map_keyframe_times(|at| {
+        if at <= hold_start {
+            at
+        } else if at >= old_end {
+            new_end.saturating_add(at.saturating_sub(old_end))
+        } else {
+            hold_start.saturating_add(crate::keyframe::scale_time(at.saturating_sub(hold_start), old_milli, milli))
+        }
+    });
     sort_track(&mut next.tracks[key.track]);
     finish(next)
 }
