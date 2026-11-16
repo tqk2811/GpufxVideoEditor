@@ -163,7 +163,7 @@ fn undo_and_redo_refuse_a_stale_revision() {
 }
 
 #[test]
-fn denoise_and_voice_tools_check_their_ranges_and_default_what_is_absent() {
+fn denoise_and_voice_tools_check_their_ranges_and_keep_what_is_absent() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
     let mut now = two_clips(&mut session);
     let clip0 = json!({"track": 0, "clip": 0});
@@ -171,13 +171,22 @@ fn denoise_and_voice_tools_check_their_ranges_and_default_what_is_absent() {
     assert_eq!(call_err(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "semitones": -12.5})).code, "out_of_range");
     assert_eq!(call_err(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "loud"})).code, "invalid_params");
     now = revision(&call_ok(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "general"})));
-    call_ok(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "preset": "chipmunk"}));
+    now = revision(&call_ok(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "preset": "chipmunk"})));
     let value = call_ok(&mut session, "project_get", json!({}));
     let clip = &value["project"]["tracks"][0]["clips"][0];
     // The project description shows the settings as the file stores them, defaults left out.
     assert_eq!(clip["denoise"], json!({"mode": "general"}));
     assert_eq!(clip["voice"], json!({"semitones": 9.0}));
     assert!(value["project"]["tracks"][0]["clips"][1].get("voice").is_none());
+    // A value left out keeps the clip's current one; a preset gives its values before the others.
+    now = revision(&call_ok(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "effect": "robot"})));
+    now = revision(&call_ok(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "strength": 0.4})));
+    let clip = call_ok(&mut session, "project_get", json!({}))["project"]["tracks"][0]["clips"][0].clone();
+    assert_eq!(clip["voice"], json!({"semitones": 9.0, "effect": "robot"}));
+    assert_eq!(clip["denoise"], json!({"mode": "general", "strength": 0.4}));
+    call_ok(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "preset": "deep", "effect": "none"}));
+    let clip = call_ok(&mut session, "project_get", json!({}))["project"]["tracks"][0]["clips"][0].clone();
+    assert_eq!(clip["voice"], json!({"semitones": -6.0}));
 }
 
 #[test]

@@ -231,6 +231,12 @@ fn check_speed(speed: f64) -> Result<(), AgentError> {
     }
 }
 
+/// The clip `clip` refers to, refused like the engine commands refuse a missing one.
+fn current_clip(project: &Project, clip: ClipRef) -> Result<&Clip, engine::EditError> {
+    let key: ClipKey = clip.into();
+    project.tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).ok_or(engine::EditError::ClipNotFound { key })
+}
+
 /// Only a float parameter that a package declares, and not one a clock drives, can have keyframes.
 /// A package that is not in the catalog is left to the render to judge.
 /// Refuses a keyframe of a parameter the effect has no float of, and, when `value` is given, one
@@ -467,17 +473,29 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         AgentEdit::ClipSetGain { clip, gain_db } => state.apply_agent_command(|project| engine::set_gain(project, clip.into(), gain_db)).map_err(refused)?,
         AgentEdit::ClipSetMuted { clip, muted } => state.apply_agent_command(|project| engine::set_muted(project, clip.into(), muted)).map_err(refused)?,
         AgentEdit::ClipSetFades { clip, fade_in, fade_out } => state.apply_agent_command(|project| engine::set_fades(project, clip.into(), fade_in, fade_out)).map_err(refused)?,
-        AgentEdit::ClipSetDenoise { clip, denoise } => {
-            if !(0.0..=1.0).contains(&denoise.strength) {
-                return Err(AgentError::new("out_of_range", format!("denoise strength {} is outside 0 to 1", denoise.strength)));
+        AgentEdit::ClipSetDenoise { clip, mode, strength } => {
+            if let Some(strength) = strength.filter(|strength| !(0.0..=1.0).contains(strength)) {
+                return Err(AgentError::new("out_of_range", format!("denoise strength {strength} is outside 0 to 1")));
             }
-            state.apply_agent_command(|project| engine::set_denoise(project, clip.into(), denoise)).map_err(refused)?;
+            state
+                .apply_agent_command(|project| {
+                    let current = current_clip(project, clip)?.denoise;
+                    let denoise = engine::ClipDenoise { mode: mode.unwrap_or(current.mode), strength: strength.unwrap_or(current.strength) };
+                    engine::set_denoise(project, clip.into(), denoise)
+                })
+                .map_err(refused)?;
         }
-        AgentEdit::ClipSetVoice { clip, voice } => {
-            if !(-engine::MAX_PITCH_SEMITONES..=engine::MAX_PITCH_SEMITONES).contains(&voice.semitones) {
-                return Err(AgentError::new("out_of_range", format!("semitones {} is outside -{max} to {max}", voice.semitones, max = engine::MAX_PITCH_SEMITONES)));
+        AgentEdit::ClipSetVoice { clip, semitones, effect } => {
+            if let Some(semitones) = semitones.filter(|semitones| !(-engine::MAX_PITCH_SEMITONES..=engine::MAX_PITCH_SEMITONES).contains(semitones)) {
+                return Err(AgentError::new("out_of_range", format!("semitones {semitones} is outside -{max} to {max}", max = engine::MAX_PITCH_SEMITONES)));
             }
-            state.apply_agent_command(|project| engine::set_voice(project, clip.into(), voice)).map_err(refused)?;
+            state
+                .apply_agent_command(|project| {
+                    let current = current_clip(project, clip)?.voice;
+                    let voice = engine::ClipVoice { semitones: semitones.unwrap_or(current.semitones), effect: effect.unwrap_or(current.effect) };
+                    engine::set_voice(project, clip.into(), voice)
+                })
+                .map_err(refused)?;
         }
         AgentEdit::ClipSetTransform { clip, placement, opacity, rotation } => state
             .apply_agent_command(|project| {
@@ -992,31 +1010,39 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_sets_the_denoise_and_voice_of_a_clip_and_the_ranges_are_checked() {
+    fn an_agent_sets_the_denoise_and_voice_of_a_clip_keeping_what_it_leaves_out() {
         let mut host = FakeHost::new("live");
         host.state.add_track(TrackKind::Video);
         host.state.add_clip_from_file(0, Path::new("a.mp4"));
         let clip = ClipRef { track: 0, clip: 0 };
+        let now = |host: &FakeHost| host.state.project().tracks[0].clips[0].clone();
+        let set = |host: &mut FakeHost, edit: AgentEdit| {
+            let revision = host.state.revision();
+            host.run(AgentRequest::Edit { expected_revision: revision, edit })
+        };
+        set(&mut host, AgentEdit::ClipSetDenoise { clip, mode: Some(engine::DenoiseMode::General), strength: Some(0.6) }).expect("denoise");
         let denoise = engine::ClipDenoise { mode: engine::DenoiseMode::General, strength: 0.6 };
-        let revision = host.state.revision();
-        host.run(AgentRequest::Edit { expected_revision: revision, edit: AgentEdit::ClipSetDenoise { clip, denoise } }).expect("denoise");
-        assert_eq!(host.state.project().tracks[0].clips[0].denoise, denoise);
-        let voice = engine::VoicePreset::Chipmunk.voice();
-        let revision = host.state.revision();
-        host.run(AgentRequest::Edit { expected_revision: revision, edit: AgentEdit::ClipSetVoice { clip, voice } }).expect("voice");
-        assert_eq!(host.state.project().tracks[0].clips[0].voice, voice);
+        assert_eq!(now(&host).denoise, denoise);
+        // What is left out keeps the clip's value.
+        set(&mut host, AgentEdit::ClipSetDenoise { clip, mode: Some(engine::DenoiseMode::Voice), strength: None }).expect("mode only");
+        assert_eq!(now(&host).denoise, engine::ClipDenoise { mode: engine::DenoiseMode::Voice, strength: 0.6 });
+        set(&mut host, AgentEdit::ClipSetDenoise { clip, mode: None, strength: Some(0.3) }).expect("strength only");
+        assert_eq!(now(&host).denoise, engine::ClipDenoise { mode: engine::DenoiseMode::Voice, strength: 0.3 });
+        set(&mut host, AgentEdit::ClipSetVoice { clip, semitones: None, effect: Some(engine::VoiceEffect::Robot) }).expect("effect");
+        set(&mut host, AgentEdit::ClipSetVoice { clip, semitones: Some(9.0), effect: None }).expect("semitones");
+        assert_eq!(now(&host).voice, engine::ClipVoice { semitones: 9.0, effect: engine::VoiceEffect::Robot });
         // Each is one undo step.
         host.state.undo();
-        assert_eq!(host.state.project().tracks[0].clips[0].voice, engine::ClipVoice::default());
-        assert_eq!(host.state.project().tracks[0].clips[0].denoise, denoise);
-        let revision = host.state.revision();
-        let loud = AgentEdit::ClipSetDenoise { clip, denoise: engine::ClipDenoise { strength: 1.5, ..denoise } };
-        assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: revision, edit: loud })), "out_of_range");
-        let high = AgentEdit::ClipSetVoice { clip, voice: engine::ClipVoice { semitones: 13.0, effect: engine::VoiceEffect::None } };
-        assert_eq!(code(host.run(AgentRequest::Edit { expected_revision: revision, edit: high })), "out_of_range");
-        // The wire form names the fields as the project file does.
-        let wire = serde_json::to_value(AgentEdit::ClipSetVoice { clip, voice: engine::VoicePreset::Robot.voice() }).unwrap();
-        assert_eq!(wire, json!({"edit": "clip_set_voice", "clip": {"track": 0, "clip": 0}, "voice": {"effect": "robot"}}));
+        assert_eq!(now(&host).voice, engine::ClipVoice { semitones: 0.0, effect: engine::VoiceEffect::Robot });
+        let loud = AgentEdit::ClipSetDenoise { clip, mode: None, strength: Some(1.5) };
+        assert_eq!(code(set(&mut host, loud)), "out_of_range");
+        let high = AgentEdit::ClipSetVoice { clip, semitones: Some(13.0), effect: None };
+        assert_eq!(code(set(&mut host, high)), "out_of_range");
+        let missing = AgentEdit::ClipSetVoice { clip: ClipRef { track: 0, clip: 5 }, semitones: Some(1.0), effect: None };
+        assert!(set(&mut host, missing).is_err());
+        // The wire form names the values as the project file does.
+        let wire = serde_json::to_value(AgentEdit::ClipSetVoice { clip, semitones: None, effect: Some(engine::VoiceEffect::Robot) }).unwrap();
+        assert_eq!(wire, json!({"edit": "clip_set_voice", "clip": {"track": 0, "clip": 0}, "semitones": null, "effect": "robot"}));
     }
 
     #[test]

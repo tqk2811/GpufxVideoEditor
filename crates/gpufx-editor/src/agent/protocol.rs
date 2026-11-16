@@ -150,10 +150,10 @@ pub enum AgentEdit {
     ClipSetSpeed { clip: ClipRef, speed: f64 },
     ClipSetMuted { clip: ClipRef, muted: bool },
     ClipSetFades { clip: ClipRef, fade_in: Time, fade_out: Time },
-    /// Replaces the noise reduction of a clip.
-    ClipSetDenoise { clip: ClipRef, denoise: engine::ClipDenoise },
-    /// Replaces the pitch shift and voice effect of a clip.
-    ClipSetVoice { clip: ClipRef, voice: engine::ClipVoice },
+    /// Sets the noise reduction of a clip; `None` keeps the clip's current value.
+    ClipSetDenoise { clip: ClipRef, mode: Option<engine::DenoiseMode>, strength: Option<f64> },
+    /// Sets the pitch shift and voice effect of a clip; `None` keeps the clip's current value.
+    ClipSetVoice { clip: ClipRef, semitones: Option<f64>, effect: Option<engine::VoiceEffect> },
     /// Sets the static place, opacity and rotation of a clip; `None` leaves that one alone.
     ClipSetTransform { clip: ClipRef, placement: Option<ClipPlacement>, opacity: Option<f64>, rotation: Option<f64> },
     /// `at` is in ticks from the start of the clip. `easing` of `None` keeps the one replaced.
