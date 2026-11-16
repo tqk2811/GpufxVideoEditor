@@ -259,6 +259,49 @@ fn a_reversed_decoder_seeks_to_a_far_later_frame_instead_of_decoding_up_to_it() 
     assert_eq!(later, forward.frame_at(at(150)).expect("frame 150").pts, "the same frame");
 }
 
+/// Asks a reversed decoder for the first `frames` frames of `clip` from the last to the first,
+/// checks each one against a forward decoder, and returns how many frames it decoded.
+fn decodes_to_play_backwards(gpu: &Gpu, clip: &Path, frames: i64) -> u64 {
+    decodes_to_play_backwards_with(gpu, clip, frames, None).0
+}
+
+/// [`decodes_to_play_backwards`] with `cache` bytes of system memory for the decoder instead of
+/// its default, and whether it found the GOP slow.
+fn decodes_to_play_backwards_with(gpu: &Gpu, clip: &Path, frames: i64, cache: Option<u64>) -> (u64, bool) {
+    let at = |n: i64| Time::from_ticks(n * FRAME);
+    let mut forward = SequentialDecoder::open(clip, gpu.raw_device()).expect("open the clip");
+    let zero = forward.frame_at(at(0)).expect("frame 0").pts;
+    let step = forward.frame_at(at(1)).expect("frame 1").pts - zero;
+    let mut decoder = match cache {
+        Some(bytes) => ReverseDecoder::open_with_cache(clip, gpu.raw_device(), bytes),
+        None => ReverseDecoder::open(clip, gpu.raw_device()),
+    }
+    .expect("open the clip");
+    for n in (0..frames).rev() {
+        assert_eq!(decoder.frame_at(at(n)).expect("a frame").pts, zero + n * step, "frame {n}");
+    }
+    (decoder.decoded_frames(), decoder.slow_gop())
+}
+
+#[test]
+fn a_reversed_decoder_decodes_a_long_gop_about_once() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    // One keyframe each: 180 and 600 frames, many rings long.
+    let short = decodes_to_play_backwards(&gpu, &long_gop_clip(), CLIP_FRAMES);
+    let long = decodes_to_play_backwards(&gpu, &longer_gop_clip(), 600);
+    eprintln!("decoded to play backwards: {short} for 180 frames, {long} for 600 frames");
+    assert!(short <= 180 * 3 / 2, "{short} frames decoded for a GOP of 180");
+    assert!(long <= 600 * 3 / 2, "{long} frames decoded for a GOP of 600");
+    // Without the cache every ring of frames decodes the GOP up to it again, and that is reported.
+    let (uncached, slow) = decodes_to_play_backwards_with(&gpu, &longer_gop_clip(), 600, Some(0));
+    // A cache of about 50 frames of 640x360: refills and uploads take turns.
+    let (small, _) = decodes_to_play_backwards_with(&gpu, &longer_gop_clip(), 600, Some(50 * 640 * 384 * 3 / 2));
+    eprintln!("600 frames backwards: {uncached} decoded without the cache, {small} with room for 50 frames");
+    assert!(slow, "a GOP of 600 frames is slow for a ring alone");
+    assert!(small < uncached && long < small);
+}
+
 #[test]
 fn a_split_reversed_clip_renders_the_same_frames_and_a_transition_reads_on_backwards() {
     let _lock = gpu_lock();

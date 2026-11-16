@@ -180,6 +180,8 @@ unsafe extern "C" {
     pub fn avio_closep(context: *mut *mut AVIOContext) -> core::ffi::c_int;
     pub fn av_frame_get_buffer(frame: *mut AVFrame, align: core::ffi::c_int) -> core::ffi::c_int;
     pub fn av_pix_fmt_desc_get(format: AVPixelFormat) -> *const AVPixFmtDescriptor;
+    pub fn av_hwframe_get_buffer(frames: *mut AVBufferRef, frame: *mut AVFrame, flags: core::ffi::c_int) -> core::ffi::c_int;
+    pub fn av_frame_copy_props(destination: *mut AVFrame, source: *const AVFrame) -> core::ffi::c_int;
     pub fn av_frame_make_writable(frame: *mut AVFrame) -> core::ffi::c_int;
     pub fn av_packet_rescale_ts(packet: *mut AVPacket, source: AVRational, destination: AVRational);
     pub fn av_opt_set(object: *mut core::ffi::c_void, name: *const core::ffi::c_char, value: *const core::ffi::c_char, flags: core::ffi::c_int) -> core::ffi::c_int;
