@@ -446,3 +446,31 @@ fn a_split_robot_clip_keeps_its_phase_across_the_cut() {
     let worst = before.iter().zip(&after).fold(0.0f32, |worst, (a, b)| worst.max((a - b).abs()));
     assert!(worst < 1e-6, "the split clip differs by {worst}");
 }
+
+/// The residual noise of steady white noise must stay level over time: a noise floor tracked
+/// afresh in every chunk lets it rise and fall once per second, which sounds like breathing.
+#[test]
+fn steady_noise_stays_level_after_general_denoise() {
+    for mode in [DenoiseMode::General, DenoiseMode::Voice] {
+        let seconds = 10;
+        let project = project_of(vec![clip_with(seconds, 3, denoise(mode, 1.0), ClipVoice::default(), 1.0)]);
+        let out = mix(&project, &mut source(Clean::Tone(1000.0), 0.0).with_noise_only(), 0, seconds as usize * RATE);
+        // The level of each tenth of a second from the second second on, averaged over the
+        // seconds by its place in the second: the chunks are one second long.
+        let slot = RATE / 10;
+        let mut by_phase = [0.0f64; 10];
+        let mut counts = [0usize; 10];
+        for (n, block) in out[2 * RATE..].chunks_exact(2 * slot).enumerate() {
+            by_phase[n % 10] += rms(block).powi(2);
+            counts[n % 10] += 1;
+        }
+        let levels: Vec<f64> = by_phase.iter().zip(&counts).map(|(power, count)| 10.0 * (power / *count as f64).log10()).collect();
+        let highest = levels.iter().cloned().fold(f64::MIN, f64::max);
+        let lowest = levels.iter().cloned().fold(f64::MAX, f64::min);
+        let swing = highest - lowest;
+        println!("{mode:?}: residual noise swings {swing:.2} dB within a second: {levels:.1?}");
+        if mode == DenoiseMode::General {
+            assert!(swing < 1.0, "{mode:?}: the residual noise swings {swing:.2} dB within each second");
+        }
+    }
+}
