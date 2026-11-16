@@ -101,7 +101,8 @@ impl ReverseDecoder {
         self.continues = false;
         let second = stream_pts(engine::TICKS_PER_SECOND, self.inner.time_base.num, self.inner.time_base.den, 0).max(1);
         let mut point = target;
-        for retry in 0..=SEEK_RETRIES {
+        let mut retry = 0;
+        loop {
             self.inner.seek(point)?;
             self.inner.check_abort()?;
             let Some(first) = self.inner.next_frame()? else {
@@ -109,13 +110,15 @@ impl ReverseDecoder {
                 self.ends_stream = true;
                 return Ok(());
             };
-            if first.pts <= target || retry == SEEK_RETRIES || point <= self.inner.start_pts {
-                // A landing still after the target is the start of what can be decoded.
-                self.starts_stream = first.pts > target || point <= self.inner.start_pts;
-                self.push(first);
-                break;
+            match after_landing(first.pts, target, point, retry, self.inner.start_pts, second) {
+                Landing::Take { starts_stream } => {
+                    self.starts_stream = starts_stream;
+                    self.push(first);
+                    break;
+                }
+                Landing::Retry(earlier) => point = earlier,
             }
-            point = point.saturating_sub(second.saturating_mul(1 << (2 * retry)));
+            retry += 1;
         }
         self.continues = true;
         if self.ring.back().is_some_and(|frame| frame.pts > target) {
@@ -143,6 +146,29 @@ impl ReverseDecoder {
     }
 }
 
+/// What a refill does with the first frame decoded after seeking to `point` for `target`.
+#[derive(Debug, PartialEq, Eq)]
+enum Landing {
+    /// Keep it as the first frame of the ring; `starts_stream` says no earlier frame exists.
+    Take { starts_stream: bool },
+    /// It came after the target: seek again to this earlier point.
+    Retry(i64),
+}
+
+/// Decides [`Landing`] for a landing at `first`, the `retry`-th seek so far, in a stream that starts
+/// at `start`. Each retry goes back four times further than the one before, starting at `second`;
+/// the last one goes to the start of the stream, so a landing after the target is only ever taken
+/// for the first frame of the stream, never served in place of the frames before it.
+fn after_landing(first: i64, target: i64, point: i64, retry: u32, start: i64, second: i64) -> Landing {
+    if first <= target || point <= start {
+        return Landing::Take { starts_stream: point <= start };
+    }
+    if retry + 1 >= SEEK_RETRIES {
+        return Landing::Retry(start);
+    }
+    Landing::Retry(point.saturating_sub(second.saturating_mul(1 << (2 * retry))).max(start))
+}
+
 /// The latest stream timestamp not after `ticks`. A reversed clip asks for the tick before the end
 /// of a frame (see `engine::Clip::source_time_at`), which the rounding of the forward decoder would
 /// carry over to the next frame, as ticks are finer than most stream time bases.
@@ -167,7 +193,29 @@ impl Decoder for ReverseDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::floor_pts;
+    use super::{after_landing, floor_pts, Landing, SEEK_RETRIES};
+
+    #[test]
+    fn a_landing_after_the_target_is_never_taken_before_the_stream_start() {
+        let (target, second) = (100_000, 1_000);
+        // A landing at or before the target is kept; from the start of the stream it starts it.
+        assert_eq!(after_landing(90_000, target, target, 0, 0, second), Landing::Take { starts_stream: false });
+        assert_eq!(after_landing(90_000, target, 0, 2, 0, second), Landing::Take { starts_stream: true });
+        // Later than the target: back further each time, and at last to the start.
+        let mut point = target;
+        for retry in 0..SEEK_RETRIES {
+            match after_landing(target + 1, target, point, retry, 0, second) {
+                Landing::Retry(earlier) => {
+                    assert!(earlier < point, "retry {retry} goes back");
+                    point = earlier;
+                }
+                taken => panic!("retry {retry}: a frame after the target was taken as {taken:?}"),
+            }
+        }
+        assert_eq!(point, 0, "the last retry seeks to the start of the stream");
+        // Only there is a landing after the target the first frame of the stream.
+        assert_eq!(after_landing(target + 1, target, point, SEEK_RETRIES, 0, second), Landing::Take { starts_stream: true });
+    }
 
     #[test]
     fn the_tick_before_a_frame_boundary_stays_on_the_frame_before() {
