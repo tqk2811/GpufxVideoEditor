@@ -303,6 +303,20 @@ fn a_reversed_decoder_decodes_a_long_gop_about_once() {
 }
 
 #[test]
+fn the_first_refill_of_a_long_gop_downloads_only_the_frames_it_keeps() {
+    let _lock = gpu_lock();
+    let Some(gpu) = gpu() else { return };
+    let at = |n: i64| Time::from_ticks(n * FRAME);
+    // A cache of about 50 frames of 640x360 and a GOP of 600 frames asked for at its last frame:
+    // only the frames just below the ring are worth copying, not the whole head of the GOP.
+    let mut decoder = ReverseDecoder::open_with_cache(&longer_gop_clip(), gpu.raw_device(), 50 * 640 * 384 * 3 / 2).expect("open the clip");
+    decoder.frame_at(at(599)).expect("the last frame");
+    let downloaded = decoder.downloaded_frames();
+    eprintln!("downloaded {downloaded} frames on the first refill of a 600 frame GOP");
+    assert!(downloaded <= 60, "{downloaded} frames downloaded for a cache of 50");
+}
+
+#[test]
 fn a_split_reversed_clip_renders_the_same_frames_and_a_transition_reads_on_backwards() {
     let _lock = gpu_lock();
     let (a, b) = test_clips();

@@ -362,6 +362,8 @@ pub struct SequentialDecoder {
     stream_index: i32,
     time_base: ffi::AVRational,
     start_pts: i64,
+    /// The step between two frames in `time_base` units from the stream's frame rate; 0 if unknown.
+    frame_step: i64,
     draining: bool,
     /// The frame shown at the last time asked for: the latest frame not after that time.
     held: Option<DecodedFrame>,
@@ -391,6 +393,21 @@ pub struct SequentialDecoder {
     native_av1: bool,
 }
 
+/// The step between two frames in `time_base` units for the first of the frame rates that is valid; 0 if none.
+fn frame_step_of(time_base: ffi::AVRational, average: ffi::AVRational, real: ffi::AVRational) -> i64 {
+    for rate in [average, real] {
+        if rate.num > 0 && rate.den > 0 && time_base.num > 0 && time_base.den > 0 {
+            let numerator = i128::from(time_base.den) * i128::from(rate.den);
+            let denominator = i128::from(time_base.num) * i128::from(rate.num);
+            let step = (numerator + denominator / 2) / denominator;
+            if step > 0 {
+                return i64::try_from(step).unwrap_or(0);
+            }
+        }
+    }
+    0
+}
+
 impl SequentialDecoder {
     /// Opens `path` for hardware decoding on `device`.
     pub fn open(path: &Path, device: &ID3D12Device) -> Result<Self, String> {
@@ -410,6 +427,7 @@ impl SequentialDecoder {
             stream_index: -1,
             time_base: ffi::AVRational { num: 0, den: 1 },
             start_pts: 0,
+            frame_step: 0,
             draining: false,
             held: None,
             lookahead: None,
@@ -450,6 +468,7 @@ impl SequentialDecoder {
         self.time_base = (*stream).time_base;
         self.start_pts = if (*stream).start_time == ffi::NO_PTS { 0 } else { (*stream).start_time };
         self.turns = crate::orientation::stream_turns(stream);
+        self.frame_step = frame_step_of(self.time_base, (*stream).avg_frame_rate, (*stream).r_frame_rate);
 
         self.codec_context = ffi::avcodec_alloc_context3(codec);
         if self.codec_context.is_null() {

@@ -89,10 +89,13 @@ pub struct ReverseDecoder {
     /// The timestamp of the frame right after the last one of the ring, when it is known without
     /// the ring holding it: the ring then ends there, as the ring uploaded from `below` does.
     next_pts: Option<i64>,
-    /// The smallest step between consecutive frames seen, to tell which frames a refill keeps.
+    /// The step between consecutive frames, from the stream's frame rate and then the smallest
+    /// gap seen, to tell which frames a refill keeps. While unknown nothing is copied.
     step: Option<i64>,
     /// Whether a refill decoded several times the frames the ring and the cache keep.
     slow_gop: bool,
+    /// Frames copied to system memory so far.
+    downloaded: u64,
 }
 
 /// A decoded frame copied to system memory, with the properties of the frame it came from.
@@ -125,6 +128,7 @@ impl ReverseDecoder {
             below_capacity = usize::try_from(cache_budget / bytes.max(1)).unwrap_or(usize::MAX);
             capacity as i32 + 1
         })?;
+        let step = Some(inner.frame_step).filter(|step| *step > 0);
         Ok(Self {
             inner,
             capacity,
@@ -137,8 +141,9 @@ impl ReverseDecoder {
             below_capacity,
             below_starts_stream: false,
             next_pts: None,
-            step: None,
+            step,
             slow_gop: false,
+            downloaded: 0,
         })
     }
 
@@ -152,6 +157,11 @@ impl ReverseDecoder {
     /// How many frames this decoder has decoded, to measure what a way of playing costs.
     pub fn decoded_frames(&self) -> u64 {
         self.decoded
+    }
+
+    /// How many frames this decoder has copied to system memory for the cache.
+    pub fn downloaded_frames(&self) -> u64 {
+        self.downloaded
     }
 
     /// The next frame from the decoder, counted.
@@ -196,13 +206,16 @@ impl ReverseDecoder {
         }
         let out = self.ring.pop_front().expect("the ring is over its capacity");
         let starts_stream = std::mem::take(&mut self.starts_stream);
-        if self.below_capacity == 0 || keep_from.is_some_and(|from| out.pts < from) {
+        // keep_from is unknown until the step is: copying then would download frames far from the
+        // target that the cache pushes out again.
+        if self.below_capacity == 0 || keep_from.is_none() && self.step.is_none() || keep_from.is_some_and(|from| out.pts < from) {
             // Not kept: what is below would no longer be right before the ring.
             self.below.clear();
             self.below_starts_stream = false;
             return Ok(());
         }
         let copy = download(&out)?;
+        self.downloaded += 1;
         if self.below.is_empty() {
             self.below_starts_stream = starts_stream;
         }
