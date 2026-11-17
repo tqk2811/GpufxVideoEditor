@@ -12,6 +12,7 @@ use std::path::Path;
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits, RgbaImage};
 
+use crate::animated_webp::AnimatedWebp;
 use crate::thumbnail::ThumbnailImage;
 
 /// The longest side a still keeps; larger ones are shrunk when decoded, keeping their shape.
@@ -208,42 +209,34 @@ impl AnimatedPicture {
 }
 
 /// The frames of `path` when it is an animated WebP, or `None` for any other picture, which is a
-/// still. Each frame is the whole canvas with the frames before it laid under it.
+/// still. Each frame is the whole canvas with the frames before it laid under it, as libwebp lays
+/// them (see [`crate::animated_webp`]).
 pub fn read_animation(path: &Path) -> Result<Option<AnimatedPicture>, String> {
-    use image::codecs::webp::WebPDecoder;
-    use image::AnimationDecoder;
     let shown = path.display();
     if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("webp")) {
         return Ok(None);
     }
-    let file = BufReader::new(File::open(path).map_err(|e| format!("{shown}: {e}"))?);
-    let mut decoder = WebPDecoder::new(file).map_err(|e| format!("{shown}: {e}"))?;
-    if !decoder.has_animation() {
-        return Ok(None);
-    }
-    check_pixels(path, decoder.dimensions())?;
+    let data = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
+    let Some(animation) = AnimatedWebp::parse(&data).map_err(|e| format!("{shown}: {e}"))? else { return Ok(None) };
+    check_pixels(path, (animation.width, animation.height))?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(DECODER_SIDE_LIMIT);
     limits.max_image_height = Some(DECODER_SIDE_LIMIT);
     limits.max_alloc = Some(DECODER_ALLOCATION);
-    decoder.set_limits(limits).map_err(|e| format!("{shown}: {e}"))?;
     let mut picture = AnimatedPicture { frames: Vec::new(), ends_ms: Vec::new() };
     let (mut bytes, mut end) = (0u64, 0u64);
-    for frame in decoder.into_frames() {
+    for frame in animation.frames(limits) {
         let frame = frame.map_err(|e| format!("{shown}: {e}"))?;
-        let (numerator, denominator) = frame.delay().numer_denom_ms();
-        let delay = u64::from(numerator) / u64::from(denominator.max(1));
+        let delay = u64::from(frame.duration_ms);
         end += if delay <= SHORTEST_FRAME_MS { DEFAULT_FRAME_MS } else { delay };
-        let still = finished_picture(frame.into_buffer());
+        let canvas = RgbaImage::from_raw(animation.width, animation.height, frame.rgba).ok_or_else(|| format!("{shown}: a frame of the wrong size"))?;
+        let still = finished_picture(canvas);
         bytes += still.rgba.len() as u64;
         if bytes > MAX_ANIMATION_BYTES {
             return Err(format!("{shown}: its frames take more than the {MAX_ANIMATION_BYTES} bytes an animated picture may have"));
         }
         picture.frames.push(still);
         picture.ends_ms.push(end);
-    }
-    if picture.frames.is_empty() {
-        return Err(format!("{shown}: an animated picture with no frame"));
     }
     // Whether a picture has alpha picks how it is drawn, so every frame says the same.
     let has_alpha = picture.frames.iter().any(|frame| frame.has_alpha);
@@ -395,6 +388,33 @@ mod tests {
         }
         assert_eq!(picture.frames[0].rgba[3], 0, "the hole of the first frame stays transparent");
         assert_eq!(picture.frames[0].rgba[..3], [255, 0, 0], "and takes the colour next to it");
+    }
+
+    #[test]
+    fn frames_over_part_of_the_canvas_blend_and_dispose_as_libwebp_does() {
+        // What Pillow (libwebp) shows for the fixture; see make_animated_webp_subframes.py. A frame
+        // disposed to the background leaves its square transparent, not the white the file names.
+        let points = [(0, 0), (1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (7, 7), (6, 1)];
+        let (red, purple, green, clear, yellow) = ([255, 0, 0, 255], [126, 0, 127, 255], [0, 255, 0, 255], [0, 0, 0, 0], [255, 255, 0, 128]);
+        let expected = [
+            [red; 8],
+            [red, red, purple, purple, purple, purple, red, red],
+            [red, red, clear, clear, clear, green, green, red],
+            [yellow, yellow, clear, clear, clear, green, green, red],
+        ];
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/animated_subframes.webp");
+        let picture = read_animation(&path).unwrap().expect("animated");
+        assert_eq!(picture.frames.len(), 4);
+        for (index, (frame, expected)) in picture.frames.iter().zip(expected).enumerate() {
+            for ((x, y), want) in points.into_iter().zip(expected) {
+                let at = (y * frame.width as usize + x) * 4;
+                let got = &frame.rgba[at..at + 4];
+                // A transparent pixel takes the colour next to it, so only its alpha counts.
+                let channels = if want[3] == 0 { 3..4 } else { 0..4 };
+                let close = channels.clone().all(|c| got[c].abs_diff(want[c]) <= 2);
+                assert!(close, "frame {index} at ({x}, {y}): {got:?} is not {want:?}");
+            }
+        }
     }
 
     #[test]
