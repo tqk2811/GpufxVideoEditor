@@ -20,9 +20,13 @@ Preview dùng file proxy (độ phân giải thấp) thì model chạy trên ả
 
 `crates/d3d12-backend/src/compositor.rs` `load_still` (khối gọi `read_still` và `Image::upload`) và `open_decoder` chạy đồng bộ, bỏ qua cờ abort/closing; `Image::upload` chờ `PollType::Wait` không có timeout. Ảnh lớn hoặc GPU kẹt làm preview và lệnh đóng phải chờ hết. Ảnh hỏng không có negative cache nên mỗi lần render lại đọc và giải mã file từ đầu. Nên kiểm cờ trước khi giải mã, thêm timeout chờ, và nhớ lỗi theo dấu (cỡ + mtime) của file. Ghi ngày 2026-11-10.
 
-### [Vừa] Project lưu đường dẫn gói người dùng cố định, đổi máy là mất gói và không biết bản cũ hay mới
+### [Vừa] Project không biết phiên bản gói nó dùng
 
-`crates/gpufx-editor/src/package_import.rs:338` (`install_zip`) trả về `packages/gpufx/user/<id>.zip`, và project lưu đúng chuỗi đó. Mang project sang máy khác thì báo không tìm thấy gói mà không có cách lấy lại gói đó, và vì gói không có phiên bản nên không phân biệt được bản cũ với bản mới khi hai máy cài khác nhau. Nên cân nhắc lưu id kèm phiên bản trong project, hoặc nhúng gói vào project. Ghi ngày 2026-11-10.
+`crates/gpufx-editor/src/package_import.rs` (`install_zip`) trả về `packages/gpufx/user/<id>.zip`, và project lưu đúng chuỗi đó, không kèm phiên bản. Việc lấy lại gói khi đổi máy đã có tuỳ chọn "Lưu kèm bản sao các gói project dùng" (`crates/gpufx-editor/src/package_manager.rs`, xem `docs/plans/spec-package-manager-vi.md`), nhưng khi hai máy cài hai bản khác nhau của cùng một gói thì vẫn không phân biệt được bản cũ với bản mới. Nên cân nhắc lưu phiên bản trong project và cảnh báo khi lệch. Ghi ngày 2026-11-10, cập nhật 2026-11-17.
+
+### [Thấp] Quản lý gói: phụ thuộc gián tiếp và tên gói trần không được tính
+
+`pack_uses` (`crates/gpufx-editor/src/package_manager.rs`) chỉ thấy gói mà project nêu trực tiếp. Gói hiệu ứng mà một item animation clip gọi theo id manifest (vd `io.github.tqk2811.circle-grow`) không được liệt kê khi gỡ, không được chép kèm project và không được đề nghị cài lại. Tên gói trần (`mix`, không có `packages/gpufx/<nhóm>/`) cũng không khôi phục được từ bản sao vì không biết nhóm. Việc chép bản sao chạy đồng bộ trên luồng UI khi lưu, gói lớn (font) làm cửa sổ khựng. Ghi ngày 2026-11-17.
 
 ### [Vừa] Tua clip GOP dài vượt ngưỡng đề xuất
 
