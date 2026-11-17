@@ -396,7 +396,7 @@ fn two_whole_files_joined_by_a_transition_keep_their_level() {
         let dir = path.parent().expect("clips directory").to_path_buf();
         let source = path.file_name().and_then(|n| n.to_str()).expect("name").to_owned();
         let json = format!(
-            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_rate":{{"num":30,"den":1}},"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
                 {{"kind":"audio","clips":[
                   {{"source":"{source}","start":0,"source_in":0,"duration":540000}},
                   {{"source":"{source}","start":540000,"source_in":0,"duration":540000}}],

@@ -56,7 +56,7 @@ impl FrameSink for Capture {
 
 /// Renders one track of `clips` (JSON objects) at `width` x `height`, keeping the frames `wanted`.
 fn render_clips(gpu: &Arc<Gpu>, clips: &str, width: u32, height: u32, wanted: &[i64]) -> Capture {
-    let json = format!(r#"{{"version":1,"output":{{"width":{width},"height":{height},"frame_duration":{FRAME}}},"tracks":[{{"clips":[{clips}]}}]}}"#);
+    let json = format!(r#"{{"version":1,"output":{{"width":{width},"height":{height},"frame_rate":{{"num":30,"den":1}}}},"tracks":[{{"clips":[{clips}]}}]}}"#);
     let project = Project::from_json(&json).expect("project parses");
     let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
     let errors = validate(&project, paths.as_ref());
