@@ -10,7 +10,7 @@ use super::theme;
 use crate::i18n::{Language, Message};
 use crate::text_clip::{add_gradient_stop, apply_layer_action, convert_paint, default_bloom, default_inner_shadow, default_outline, default_shadow, LayerAction, PaintKind, PaintSlot};
 use crate::text_style_library::TextStyleLibrary;
-use engine::{GradientStop, TextContent, TextImageRef, TextOutline, TextPaint, TextTexture, TextureFit, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINES, MAX_TEXT_SHADOWS};
+use engine::{GradientStop, TextContent, TextImageRef, TextOutline, TextPaint, TextTexture, TextureFit, MAX_GRADIENT_STOPS, MAX_TEXTURE_CELLS, MAX_TEXT_OUTLINES, MAX_TEXT_SHADOWS};
 use std::cell::OnceCell;
 use std::ops::RangeInclusive;
 
@@ -215,21 +215,54 @@ fn paint_editor(ui: &mut egui::Ui, id: egui::Id, paint: &mut TextPaint, slot: Pa
         }
     });
     if kind != current {
-        match convert_paint(paint, kind, layers.images().first().cloned()) {
-            Some(next) => *paint = next,
+        // The paint of each kind this one was last turned from, kept while the editor runs, so
+        // switching to a solid colour and back gives the gradient or texture back whole.
+        let memory_id = id.with("remembered");
+        let mut remembered: RememberedPaints = ui.ctx().data_mut(|data| data.get_temp(memory_id)).unwrap_or_default();
+        match convert_paint(paint, kind, layers.images().first().cloned(), remembered.get(kind)) {
+            Some(next) => {
+                remembered.keep(std::mem::replace(paint, next));
+                ui.ctx().data_mut(|data| data.insert_temp(memory_id, remembered));
+            }
             // No picture installed to start a texture with: the file dialog gives one.
             None => layers.file_request = Some(slot),
         }
     }
     match paint {
         TextPaint::Solid { color } => color_row(ui, &language.t(Message::FieldColor), color),
-        TextPaint::Gradient { stops, angle, .. } => gradient_rows(ui, stops, angle, language),
+        TextPaint::Gradient { stops, angle, per_glyph } => gradient_rows(ui, stops, angle, per_glyph, language),
         TextPaint::Texture(texture) => texture_rows(ui, id, texture, slot, layers),
     }
 }
 
-fn gradient_rows(ui: &mut egui::Ui, stops: &mut Vec<GradientStop>, angle: &mut f32, language: Language) {
+/// The gradient and texture a paint editor last turned away from.
+#[derive(Clone, Default)]
+struct RememberedPaints {
+    gradient: Option<TextPaint>,
+    texture: Option<TextPaint>,
+}
+
+impl RememberedPaints {
+    fn get(&self, kind: PaintKind) -> Option<&TextPaint> {
+        match kind {
+            PaintKind::Solid => None,
+            PaintKind::Gradient => self.gradient.as_ref(),
+            PaintKind::Texture => self.texture.as_ref(),
+        }
+    }
+
+    fn keep(&mut self, paint: TextPaint) {
+        match PaintKind::of(&paint) {
+            PaintKind::Solid => {}
+            PaintKind::Gradient => self.gradient = Some(paint),
+            PaintKind::Texture => self.texture = Some(paint),
+        }
+    }
+}
+
+fn gradient_rows(ui: &mut egui::Ui, stops: &mut Vec<GradientStop>, angle: &mut f32, per_glyph: &mut bool, language: Language) {
     degree_row(ui, &language.t(Message::FieldAngle), angle, GRADIENT_ANGLE_RANGE);
+    ui.checkbox(per_glyph, language.t(Message::GradientPerGlyph));
     let mut remove = None;
     let can_remove = stops.len() > 2;
     let positions: Vec<f32> = stops.iter().map(|stop| stop.position).collect();
@@ -287,14 +320,55 @@ fn texture_rows(ui: &mut egui::Ui, id: egui::Id, texture: &mut TextTexture, slot
             }
         });
     });
-    ui.horizontal(|ui| {
-        for (value, label) in [(TextureFit::Stretch, Message::FitStretch), (TextureFit::Tile, Message::FitTile), (TextureFit::Mirror, Message::FitMirror)] {
+    ui.horizontal_wrapped(|ui| {
+        for (value, label) in [(TextureFit::Stretch, Message::FitStretch), (TextureFit::Tile, Message::FitTile), (TextureFit::Mirror, Message::FitMirror), (TextureFit::Glyph, Message::FitGlyph)] {
             ui.selectable_value(&mut texture.fit, value, language.t(label));
         }
     });
+    if texture.fit == TextureFit::Glyph {
+        // The picture is cut into this many cells side by side; the glyphs take them in turn.
+        if let Some(cells) = slider_row(ui, &language.t(Message::FieldCells), f64::from(texture.cells), 1.0..=f64::from(MAX_TEXTURE_CELLS), 0, "") {
+            texture.cells = (cells.round() as u32).clamp(1, MAX_TEXTURE_CELLS);
+        }
+    }
     percent_row(ui, &language.t(Message::FieldScale), &mut texture.scale, TEXTURE_SCALE_RANGE);
     degree_row(ui, &language.t(Message::FieldAngle), &mut texture.angle, SHADOW_ANGLE_RANGE);
     percent_row(ui, &language.t(Message::FieldOpacity), &mut texture.opacity, UNIT_PERCENT_RANGE);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut texture.flip_x, language.t(Message::FlipX));
+        ui.checkbox(&mut texture.flip_y, language.t(Message::FlipY));
+    });
+    base_rows(ui, id.with("base"), texture, language);
+}
+
+/// The paint under a texture's picture, shown where the picture is see-through: none, a colour or
+/// a gradient (a texture under a texture is not allowed).
+fn base_rows(ui: &mut egui::Ui, id: egui::Id, texture: &mut TextTexture, language: Language) {
+    let current = texture.base.as_deref().map(PaintKind::of);
+    let mut kind = current;
+    ui.colored_label(theme::text_dim(), language.t(Message::TextureBase));
+    ui.horizontal(|ui| {
+        for (value, label) in [(None, Message::BaseNone), (Some(PaintKind::Solid), Message::BaseSolid), (Some(PaintKind::Gradient), Message::BaseGradient)] {
+            ui.selectable_value(&mut kind, value, language.t(label));
+        }
+    });
+    if kind != current {
+        let memory_id = id.with("remembered");
+        let mut remembered: RememberedPaints = ui.ctx().data_mut(|data| data.get_temp(memory_id)).unwrap_or_default();
+        let from = texture.base.take().map(|base| *base);
+        // A new base starts from the main colour of the base it replaces, else white.
+        let start = from.clone().unwrap_or_else(|| TextPaint::solid([255, 255, 255, 255]));
+        texture.base = kind.and_then(|kind| convert_paint(&start, kind, None, remembered.get(kind))).map(Box::new);
+        if let Some(from) = from {
+            remembered.keep(from);
+            ui.ctx().data_mut(|data| data.insert_temp(memory_id, remembered));
+        }
+    }
+    ui.push_id(id, |ui| match texture.base.as_deref_mut() {
+        Some(TextPaint::Solid { color }) => color_row(ui, &language.t(Message::FieldColor), color),
+        Some(TextPaint::Gradient { stops, angle, per_glyph }) => gradient_rows(ui, stops, angle, per_glyph, language),
+        _ => {}
+    });
 }
 
 #[cfg(test)]
@@ -374,6 +448,54 @@ mod tests {
         let text = full_text();
         let panel = Panel::new(text.clone());
         assert_eq!((panel.text, panel.request), (text, None));
+    }
+
+    #[test]
+    fn a_texture_is_cut_per_glyph_flipped_and_given_a_base() {
+        let mut text = TextContent::new("Hi", 0.1);
+        text.fill = crate::text_clip::texture_paint(TextImageRef::File { path: "C:/a.png".to_owned() });
+        let mut panel = Panel::new(text);
+        assert!(panel.find("Cells").is_none(), "cells show only when cut per glyph");
+        panel.click("Per glyph");
+        assert!(panel.find("Cells").is_some());
+        panel.click("Flip horizontally");
+        panel.click("Flip vertically");
+        panel.click("Gradient base");
+        panel.click("Across each glyph");
+        let TextPaint::Texture(texture) = &panel.text.fill else { panic!("{:?}", panel.text.fill) };
+        assert_eq!((texture.fit, texture.flip_x, texture.flip_y), (TextureFit::Glyph, true, true));
+        let Some(TextPaint::Gradient { per_glyph: true, .. }) = texture.base.as_deref() else { panic!("{:?}", texture.base) };
+        panel.click("Colour base");
+        let TextPaint::Texture(texture) = &panel.text.fill else { panic!() };
+        assert!(matches!(texture.base.as_deref(), Some(TextPaint::Solid { .. })), "{:?}", texture.base);
+        // The gradient base comes back whole.
+        panel.click("Gradient base");
+        let TextPaint::Texture(texture) = &panel.text.fill else { panic!() };
+        assert!(matches!(texture.base.as_deref(), Some(TextPaint::Gradient { per_glyph: true, .. })), "{:?}", texture.base);
+        panel.click("No base");
+        let TextPaint::Texture(texture) = &panel.text.fill else { panic!() };
+        assert_eq!(texture.base, None);
+        assert!(engine::text_style_problems(&panel.text).is_empty());
+    }
+
+    #[test]
+    fn switching_the_paint_kind_and_back_keeps_the_gradient_and_the_texture() {
+        let mut text = TextContent::new("Hi", 0.1);
+        let gradient = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [255, 0, 0, 255] }, GradientStop { position: 1.0, color: [0, 0, 255, 255] }], angle: 30.0, per_glyph: true };
+        text.fill = gradient.clone();
+        let mut panel = Panel::new(text);
+        panel.click("Solid");
+        assert!(matches!(panel.text.fill, TextPaint::Solid { .. }));
+        panel.click("Gradient");
+        assert_eq!(panel.text.fill, gradient);
+        let texture = TextPaint::Texture(TextTexture { fit: TextureFit::Glyph, cells: 3, flip_x: true, base: Some(Box::new(TextPaint::solid([0, 255, 0, 255]))), ..TextTexture::new(TextImageRef::File { path: "C:/a.png".to_owned() }) });
+        panel.text.fill = texture.clone();
+        panel.frame(Vec::new());
+        panel.click("Solid");
+        assert_eq!(panel.text.fill, TextPaint::solid([0, 255, 0, 255]), "a texture's solid base becomes the colour");
+        // No picture is installed, yet the texture comes back without asking for a file.
+        panel.click("Texture");
+        assert_eq!((&panel.text.fill, panel.request), (&texture, None));
     }
 
     #[test]

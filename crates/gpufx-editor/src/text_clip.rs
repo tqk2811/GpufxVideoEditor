@@ -155,12 +155,23 @@ pub fn texture_paint(image: TextImageRef) -> TextPaint {
     TextPaint::Texture(TextTexture { image, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None })
 }
 
-/// `paint` turned into a paint of `kind`, keeping its main colour: a gradient runs from that colour
-/// to black, top to bottom. A texture needs a picture, so it takes `image`; `None` when there is
-/// none to take (the caller asks for a file). The same kind gives `paint` back.
-pub fn convert_paint(paint: &TextPaint, kind: PaintKind, image: Option<TextImageRef>) -> Option<TextPaint> {
+/// `paint` turned into a paint of `kind`. `remembered` is the paint of that kind this one was last
+/// turned from, if known: it comes back whole (the stops, the per-glyph switch, the picture, its
+/// cells, flips and base), so switching kinds and back loses nothing. Else a texture over a base of
+/// `kind` gives that base back, and otherwise the main colour is kept: a gradient runs from it to
+/// black, top to bottom. A texture needs a picture, so it takes `image`; `None` when there is none to
+/// take (the caller asks for a file). The same kind gives `paint` back.
+pub fn convert_paint(paint: &TextPaint, kind: PaintKind, image: Option<TextImageRef>, remembered: Option<&TextPaint>) -> Option<TextPaint> {
     if PaintKind::of(paint) == kind {
         return Some(paint.clone());
+    }
+    if let Some(remembered) = remembered.filter(|remembered| PaintKind::of(remembered) == kind) {
+        return Some(remembered.clone());
+    }
+    if let TextPaint::Texture(TextTexture { base: Some(base), .. }) = paint {
+        if PaintKind::of(base) == kind {
+            return Some((**base).clone());
+        }
     }
     let color = paint.main_color();
     match kind {
@@ -221,12 +232,12 @@ mod tests {
     #[test]
     fn a_paint_changes_kind_keeping_its_colour_and_a_texture_needs_a_picture() {
         let red = TextPaint::solid([255, 0, 0, 200]);
-        let TextPaint::Gradient { stops, .. } = convert_paint(&red, PaintKind::Gradient, None).unwrap() else { panic!() };
+        let TextPaint::Gradient { stops, .. } = convert_paint(&red, PaintKind::Gradient, None, None).unwrap() else { panic!() };
         assert_eq!((stops[0].color, stops[1].color), ([255, 0, 0, 200], [0, 0, 0, 200]));
-        assert_eq!(convert_paint(&red, PaintKind::Texture, None), None);
+        assert_eq!(convert_paint(&red, PaintKind::Texture, None, None), None);
         let image = TextImageRef::text_style_pack("p", "gold.png");
-        assert_eq!(convert_paint(&red, PaintKind::Texture, Some(image.clone())).unwrap().texture_image(), Some(&image));
-        assert_eq!(convert_paint(&red, PaintKind::Solid, None), Some(red));
+        assert_eq!(convert_paint(&red, PaintKind::Texture, Some(image.clone()), None).unwrap().texture_image(), Some(&image));
+        assert_eq!(convert_paint(&red, PaintKind::Solid, None, None), Some(red));
     }
 
     #[test]
