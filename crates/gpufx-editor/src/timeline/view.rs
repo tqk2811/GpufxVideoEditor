@@ -191,6 +191,11 @@ impl TimelineView {
         if wheel.delta_x.abs() > wheel.delta_y.abs() {
             return self.scroll_x_by(-wheel.delta_x, area);
         }
+        // With every track in sight there is nothing to scroll up or down, so the wheel scrolls
+        // along the time axis instead.
+        if self.max_scroll_y(area) <= 0.0 {
+            return self.scroll_x_by(-wheel.delta_y, area);
+        }
         self.scroll_y_by(-wheel.delta_y, area)
     }
 
@@ -367,9 +372,19 @@ mod tests {
         let mut view = view(80.0, 0.0);
         assert!(view.apply_wheel(wheel(false, false, -30.0), &tall));
         assert_eq!(view.scroll_y(), 30.0);
-        let fits = ViewArea { content_height: TRACK_HEIGHT, ..tall };
-        let mut other = TimelineView::default();
-        assert!(!other.apply_wheel(wheel(false, false, -30.0), &fits));
+        assert_eq!(view.scroll_x(), 0.0);
+    }
+
+    #[test]
+    fn a_plain_wheel_scrolls_horizontally_when_the_tracks_fit() {
+        let fits = ViewArea { content_height: TRACK_HEIGHT, ..area() };
+        let mut view = view(1.0, 0.0);
+        assert!(view.apply_wheel(wheel(false, false, -30.0), &fits));
+        assert_eq!(view.scroll_x(), 30.0);
+        assert_eq!(view.scroll_y(), 0.0);
+        assert!(view.apply_wheel(wheel(false, false, 30.0), &fits));
+        assert_eq!(view.scroll_x(), 0.0);
+        assert!(!view.apply_wheel(wheel(false, false, 30.0), &fits), "already at the start");
     }
 
     #[test]
