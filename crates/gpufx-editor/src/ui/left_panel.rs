@@ -1,10 +1,11 @@
-//! The panel on the left: imported media, audio and the effect picker.
+//! The panel on the left: imported media, audio and the transition picker. The effect picker
+//! shares its grid but lives on the Effects tab of the clip inspector.
 
 use super::icons::{self, Icon};
 use super::{theme, UiRequest};
 use crate::audio_library::LibrarySound;
 use crate::editor::{EditorState, LeftTab, LibraryTarget, SoundPreviewWish};
-use crate::effect_previews::play::{loop_step, static_step, Hover, Shown, Step};
+use crate::effect_previews::play::{loop_step, static_step, Hover, Shown, Step, TileHover};
 use crate::effect_previews::{AnimationState, LoopFrames, PreviewManager, TileState};
 use crate::i18n::{Language, Message};
 use crate::layout::grid_columns;
@@ -12,7 +13,7 @@ use crate::media::{MediaItem, MediaKind};
 use crate::proxy::ProxyStatus;
 use crate::sticker_library::LibrarySticker;
 use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStylePack};
-use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageEntry, PackageKind};
+use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageEntry, PackageKind, PickerState};
 use crate::timecode::format_duration;
 use std::cell::RefCell;
 use std::ops::Range;
@@ -62,7 +63,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
             state.ui.tile_hover.clear();
             audio_tab(ui, state, requests);
         }
-        LeftTab::Effects | LeftTab::Transitions => picker(ui, state, requests),
+        LeftTab::Transitions => picker(ui, state, requests, PickerFor::Transitions),
         LeftTab::Stickers => {
             state.ui.tile_hover.clear();
             sticker_tab(ui, state, requests);
@@ -96,7 +97,6 @@ fn rail_tabs(ui: &mut egui::Ui, state: &mut EditorState, rail: Rect) {
     let entries = [
         (LeftTab::Media, Icon::Film, Message::TabMedia),
         (LeftTab::Audio, Icon::Music, Message::TabAudio),
-        (LeftTab::Effects, Icon::Sparkle, Message::TabEffects),
         (LeftTab::Transitions, Icon::Transition, Message::Transitions),
         (LeftTab::Stickers, Icon::Sticker, Message::TabStickers),
         (LeftTab::Text, Icon::Text, Message::TabText),
@@ -121,11 +121,6 @@ fn rail_tabs(ui: &mut egui::Ui, state: &mut EditorState, rail: Rect) {
         painter.text(egui::pos2(cell.center().x, cell.center().y + 12.0), Align2::CENTER_CENTER, label, FontId::proportional(tab_font_size(natural, cell.width())), color);
         if response.clicked() {
             state.ui.left_tab = tab;
-            match tab {
-                LeftTab::Effects => state.picker.set_kind(PackageKind::Effect),
-                LeftTab::Transitions => state.picker.set_kind(PackageKind::Transition),
-                LeftTab::Media | LeftTab::Audio | LeftTab::Stickers | LeftTab::Text => {}
-            }
         }
     }
 }
@@ -584,30 +579,52 @@ fn fit_size(room: Vec2, aspect: f32) -> Vec2 {
     Vec2::new(width, width / aspect.max(0.01))
 }
 
-/// The effect and transition lists with their filter.
-fn picker(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
+/// Which package list a picker shows: each has its own filter, selection and hovered tile, as
+/// both may be on screen at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PickerFor {
+    /// The left panel's Transitions tab.
+    Transitions,
+    /// The clip inspector's Effects tab.
+    Effects,
+}
+
+impl PickerFor {
+    fn parts(self, state: &mut EditorState) -> (&mut PickerState, &mut TileHover) {
+        match self {
+            Self::Transitions => (&mut state.picker, &mut state.ui.tile_hover),
+            Self::Effects => (&mut state.effect_picker, &mut state.ui.effect_tile_hover),
+        }
+    }
+}
+
+/// A package list with its filter, the import button and the button that adds the selection.
+pub(super) fn picker(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, which: PickerFor) {
     let language: Language = state.language();
     if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportPackage), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
         requests.push(UiRequest::ImportPackage);
     }
-    search_box(ui, &mut state.picker.filter, &language.t(Message::SearchEffects));
+    search_box(ui, &mut which.parts(state).0.filter, &language.t(Message::SearchEffects));
     if !state.catalog.loaded {
         ui.colored_label(theme::text_dim(), language.t(Message::ReadingPackages));
     } else if state.catalog.effects.is_empty() && state.catalog.transitions.is_empty() {
         ui.colored_label(theme::refused(), language.t(Message::NoPackages(crate::project_file::PACKAGE_ROOT_VARIABLE.to_owned())));
     }
-    picker_list(ui, state);
-    let selected = state.picker.addable(&state.catalog);
+    picker_list(ui, state, which);
+    let selected = match which {
+        PickerFor::Transitions => state.picker.addable(&state.catalog),
+        PickerFor::Effects => state.effect_picker.addable(&state.catalog),
+    };
     if ui.add_enabled(selected.is_some(), egui::Button::new(language.t(Message::AddToClip)).min_size(Vec2::new(ui.available_width(), 28.0))).clicked() {
         if let Some(package) = &selected {
-            add_package(state, package);
+            add_package(state, which, package);
         }
     }
     picker_problems(ui, state);
 }
 
-fn add_package(state: &mut EditorState, package: &str) {
-    if state.picker.kind == PackageKind::Effect {
+fn add_package(state: &mut EditorState, which: PickerFor, package: &str) {
+    if which == PickerFor::Effects {
         state.add_effect_package(package);
     } else {
         state.add_transition_package(package);
@@ -785,19 +802,22 @@ fn tile_view(ctx: &egui::Context, now: f64, kind: PackageKind, package: &str, ti
     TileView { image, busy: None }
 }
 
-fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
+fn picker_list(ui: &mut egui::Ui, state: &mut EditorState, which: PickerFor) {
     let language = state.language();
-    let duplicates = duplicated_names(state.catalog.entries(state.picker.kind));
-    let entries: Vec<_> = filter_entries(state.catalog.entries(state.picker.kind), &state.picker.filter).into_iter().cloned().collect();
+    // Taken out for the drawing, which borrows the rest of the state, and put back below.
+    let (picker, hover) = which.parts(state);
+    let (mut picker, mut tile_hover) = (std::mem::take(picker), std::mem::take(hover));
+    let duplicates = duplicated_names(state.catalog.entries(picker.kind));
+    let entries: Vec<_> = filter_entries(state.catalog.entries(picker.kind), &picker.filter).into_iter().cloned().collect();
     let width = (ui.available_width() - ui.spacing().scroll.allocated_width()).max(1.0);
     let (columns, side) = picker_grid(width);
     let list_height = (ui.available_height() - PICKER_FOOTER_HEIGHT).max(TILE_MIN);
     let mut double_clicked = None;
     let mut visible: Vec<&str> = Vec::new();
-    let kind = state.picker.kind;
+    let kind = picker.kind;
     let ctx = ui.ctx().clone();
     let now = ctx.input(|input| input.time);
-    state.ui.tile_hover.begin_frame();
+    tile_hover.begin_frame();
     egui::ScrollArea::vertical().id_salt("package-list").max_height(list_height).auto_shrink([false, false]).show_rows(ui, side + TILE_CAPTION, entries.len().div_ceil(columns), |ui, rows| {
         let shown = visible_tiles(rows.clone(), columns, entries.len());
         visible.extend(entries[shown].iter().map(|entry| entry.package.as_str()));
@@ -805,15 +825,15 @@ fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = TILE_GAP;
                 for entry in &entries[row_tiles(row, columns, entries.len())] {
-                    let selected = state.picker.selected.as_deref() == Some(&entry.package);
+                    let selected = picker.selected.as_deref() == Some(&entry.package);
                     // The borrow ends here: nothing below holds it across the drawing.
                     let tile = state.previews.borrow_mut().tile(&entry.package);
                     let label = list_label(entry, &duplicates);
-                    let (previews, tile_hover) = (&state.previews, &mut state.ui.tile_hover);
+                    let (previews, tile_hover) = (&state.previews, &mut tile_hover);
                     let view = |hovered: bool| tile_view(&ctx, now, kind, &entry.package, &tile, tile_hover.observe(&entry.package, hovered, now), previews);
                     let response = package_tile(ui, side, &label, selected, &tile, view).on_hover_text(tile_tooltip(&label, entry, language, &tile));
                     if response.clicked() {
-                        state.picker.selected = Some(entry.package.clone());
+                        picker.selected = Some(entry.package.clone());
                     }
                     if response.double_clicked() {
                         double_clicked = Some(entry.package.clone());
@@ -822,12 +842,14 @@ fn picker_list(ui: &mut egui::Ui, state: &mut EditorState) {
             });
         }
     });
-    state.ui.tile_hover.end_frame();
+    tile_hover.end_frame();
     // Only a tile that has been hovered long enough asks for its loop.
-    let playing = state.ui.tile_hover.playing().map(str::to_owned);
-    state.previews.borrow_mut().set_wanted(playing.as_deref(), visible.iter().copied());
+    let playing = tile_hover.playing().map(str::to_owned);
+    state.previews.borrow_mut().add_wanted(playing.as_deref(), visible.iter().copied());
+    let (picker_slot, hover_slot) = which.parts(state);
+    (*picker_slot, *hover_slot) = (picker, tile_hover);
     if let Some(package) = double_clicked {
-        add_package(state, &package);
+        add_package(state, which, &package);
     }
 }
 

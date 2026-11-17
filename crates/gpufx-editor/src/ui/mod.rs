@@ -112,7 +112,7 @@ fn editing_panels(root: &mut egui::Ui, state: &mut EditorState, requests: &mut V
     });
     panel(root, "player-panel", center, |ui| player::show(ui, state, requests, preview));
     panel(root, "right-panel", right, |ui| {
-        ui.add_enabled_ui(enabled, |ui| inspector::show(ui, state));
+        ui.add_enabled_ui(enabled, |ui| inspector::show(ui, state, requests));
     });
     panel(root, "timeline-panel", timeline, |ui| {
         ui.add_enabled_ui(enabled, |ui| timeline_panel::show(ui, state, requests));
@@ -707,12 +707,9 @@ mod tests {
         let left = panels(egui::vec2(1280.0, 720.0)).left;
         let ctx = egui::Context::default();
         click(&ctx, &mut state, left_panel::rail_cell_center(left, 2));
-        assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Effects);
-        assert_eq!(state.picker.kind, crate::packages::PackageKind::Effect);
-        click(&ctx, &mut state, left_panel::rail_cell_center(left, 3));
         assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Transitions);
         assert_eq!(state.picker.kind, crate::packages::PackageKind::Transition);
-        click(&ctx, &mut state, left_panel::rail_cell_center(left, 4));
+        click(&ctx, &mut state, left_panel::rail_cell_center(left, 3));
         assert_eq!(state.ui.left_tab, crate::editor::LeftTab::Stickers);
     }
 

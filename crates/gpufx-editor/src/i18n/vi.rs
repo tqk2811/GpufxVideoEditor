@@ -328,6 +328,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldLetterSpacing => "Giãn chữ".to_owned(),
         Message::TabAnimation => "Hoạt ảnh".to_owned(),
         Message::ClipTabProperties => "Thuộc tính".to_owned(),
+        Message::ClipTabPicture => "Hình".to_owned(),
+        Message::ClipTabGeneral => "Chung".to_owned(),
         Message::HoldRemovedTransition => "Đã gỡ chuyển cảnh ở điểm cắt đó: đoạn hình tĩnh và chuyển cảnh không dùng chung một điểm cắt".to_owned(),
         Message::TransitionReleasedHold => "Đoạn hình tĩnh ở điểm cắt đó đã thành hoạt ảnh thường: chuyển cảnh và đoạn hình tĩnh không dùng chung một điểm cắt".to_owned(),
         Message::AnimationHoldNote(seconds) => format!("Hình tĩnh {seconds} giây: clip dài thêm chừng đó"),

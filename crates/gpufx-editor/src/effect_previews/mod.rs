@@ -396,6 +396,19 @@ impl PreviewManager {
         self.wanted = wanted_items(hovered, visible);
     }
 
+    /// Adds to what this frame wants, for a second picker drawn in the same frame: the effect
+    /// grid of the inspector and the transition grid of the left panel may both be on screen.
+    pub fn add_wanted<'a>(&mut self, hovered: Option<&str>, visible: impl IntoIterator<Item = &'a str>) {
+        for item in wanted_items(hovered, visible) {
+            if self.wanted.len() >= MAX_WANTED {
+                break;
+            }
+            if !self.wanted.contains(&item) {
+                self.wanted.push(item);
+            }
+        }
+    }
+
     /// Hands what this frame wants to the threads. Call once after everything is drawn.
     pub fn end_frame(&mut self) {
         let wanted = std::mem::take(&mut self.wanted);

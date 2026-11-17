@@ -101,7 +101,10 @@ pub struct EditorState {
     pub clip_animation_library: ClipAnimationLibrary,
     /// The text and subtitle style packs installed on this machine.
     pub text_style_library: TextStyleLibrary,
+    /// The transition list of the left panel.
     pub picker: PickerState,
+    /// The effect list of the clip inspector's Effects tab.
+    pub effect_picker: PickerState,
     pub encoders: Vec<EncoderOption>,
     pub encoder: usize,
     /// The running export, which turns editing, playback and scrubbing off.
@@ -272,7 +275,6 @@ pub enum LeftTab {
     #[default]
     Media,
     Audio,
-    Effects,
     Transitions,
     Stickers,
     Text,
@@ -306,6 +308,7 @@ pub struct UiState {
     pub inspector_clip: Option<(ClipKey, String, i64)>,
     /// The tab of the clip card; it stays when another clip is selected.
     pub clip_tab: ClipTab,
+    pub picture_tab: PictureTab,
     pub panel_sizes: PanelSizes,
     pub theme: crate::ui::theme::ThemeChoice,
     /// The splitter in the user's hand. Not a hold: edits go on while it moves.
@@ -328,6 +331,8 @@ pub struct UiState {
     pub previewing: Option<String>,
     /// The effect picker tile the pointer stays on; cleared when the picker is not drawn.
     pub tile_hover: crate::effect_previews::play::TileHover,
+    /// The same for the effect grid of the inspector's Effects tab.
+    pub effect_tile_hover: crate::effect_previews::play::TileHover,
     /// How often a changed project is autosaved, in seconds; zero is off.
     pub autosave_seconds: u64,
     /// Autosaves of editors that did not close cleanly, offered for recovery at start.
@@ -381,14 +386,29 @@ impl UiState {
     }
 }
 
-/// The tabs of the clip card of the inspector, for a clip with a picture.
+/// The tabs of the clip card of the inspector. The one chosen last is kept when another clip is
+/// selected; a clip without it shows [`ClipTab::General`] until it is chosen again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClipTab {
-    /// Times, sound, text, place, motion and effects.
+    /// The times and the speed, named after what the clip is.
+    #[default]
+    General,
+    /// Place, motion, text, animations and effects, for a clip with a picture.
+    Picture,
+    /// Volume, fades, noise, voice and beats, for a clip with a sound.
+    Sound,
+}
+
+/// The tabs inside [`ClipTab::Picture`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PictureTab {
+    /// Place, motion, background removal and, for a text clip, its text and font.
     #[default]
     Properties,
     /// The in, out and loop presets.
     Animation,
+    /// The effects on the clip and the list to add more from.
+    Effects,
 }
 
 /// What may be chosen in the inspector's time fields. Waits for the release of a drag, as a clip
@@ -541,7 +561,8 @@ impl EditorState {
             sticker_library: StickerLibrary::default(),
             clip_animation_library: ClipAnimationLibrary::default(),
             text_style_library: TextStyleLibrary::default(),
-            picker: PickerState::default(),
+            picker: PickerState { kind: PackageKind::Transition, ..PickerState::default() },
+            effect_picker: PickerState::default(),
             encoders: Vec::new(),
             encoder: 0,
             export: None,
@@ -617,10 +638,16 @@ impl EditorState {
     pub fn show_installed_package(&mut self, installed: &InstalledPackage) {
         let transition = installed.kind == PackageKind::Transition;
         self.report_info(Message::PackageInstalled { name: installed.name.clone(), transition, replaced: installed.replaced });
-        self.ui.left_tab = if transition { LeftTab::Transitions } else { LeftTab::Effects };
-        self.picker.set_kind(installed.kind);
-        self.picker.filter.clear();
-        self.picker.selected = Some(installed.package.clone());
+        // An effect is listed on the Effects tab of the clip inspector, a transition on the left.
+        let picker = if transition {
+            self.ui.left_tab = LeftTab::Transitions;
+            &mut self.picker
+        } else {
+            (self.ui.clip_tab, self.ui.picture_tab) = (ClipTab::Picture, PictureTab::Effects);
+            &mut self.effect_picker
+        };
+        picker.filter.clear();
+        picker.selected = Some(installed.package.clone());
     }
 
     pub fn report_error(&mut self, message: Message) {
