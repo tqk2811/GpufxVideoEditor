@@ -544,6 +544,8 @@ pub const MAX_TEXT_SHADOW_DISTANCE: f32 = 4.0;
 pub const MAX_TEXT_SHADOW_BLUR: f32 = 2.0;
 /// The least and most a texture may be scaled.
 pub const TEXT_TEXTURE_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.01..=100.0;
+/// The most cells a [`TextureFit::Glyph`] picture may be cut into.
+pub const MAX_TEXTURE_CELLS: u32 = 64;
 
 /// What a text layer (the fill, an outline, a shadow) is painted with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -561,6 +563,10 @@ pub enum TextPaint {
         /// text effect, where 90 puts the first colour at the top; not compared with CapCut.)
         #[serde(default)]
         angle: f32,
+        /// Whether the gradient runs across each glyph's own box instead of the whole text's
+        /// (CapCut gradient `mode: character`).
+        #[serde(default, skip_serializing_if = "is_false")]
+        per_glyph: bool,
     },
     /// A picture laid over the text.
     Texture(TextTexture),
@@ -591,7 +597,7 @@ impl TextPaint {
         match self {
             TextPaint::Solid { color } => *color,
             TextPaint::Gradient { stops, .. } => stops.first().map_or(white(), |stop| stop.color),
-            TextPaint::Texture(_) => white(),
+            TextPaint::Texture(texture) => texture.base.as_deref().map_or(white(), TextPaint::main_color),
         }
     }
 
@@ -631,6 +637,36 @@ pub struct TextTexture {
     /// Opacity of the picture, 0 to 1.
     #[serde(default = "unit_f32")]
     pub opacity: f32,
+    /// With [`TextureFit::Glyph`], how many cells side by side the picture is cut into, 1 to
+    /// [`MAX_TEXTURE_CELLS`]; the glyphs take them in turn (CapCut texture `range`).
+    #[serde(default = "unit_u32", skip_serializing_if = "is_one_u32")]
+    pub cells: u32,
+    /// Mirrors the picture left to right (within its cell).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flip_x: bool,
+    /// Mirrors the picture top to bottom.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub flip_y: bool,
+    /// A solid or gradient paint under the picture, showing where the picture is transparent
+    /// (CapCut texture `blend: solid` / `gradient`). `None` leaves those parts bare. Never a
+    /// texture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Box<TextPaint>>,
+}
+
+impl TextTexture {
+    /// A picture stretched over the text, unturned, opaque, with no cells, flip or base.
+    pub fn new(image: TextImageRef) -> TextTexture {
+        TextTexture { image, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None }
+    }
+}
+
+fn unit_u32() -> u32 {
+    1
+}
+
+fn is_one_u32(value: &u32) -> bool {
+    *value == 1
 }
 
 /// How a texture covers the text.
@@ -645,6 +681,10 @@ pub enum TextureFit {
     Tile,
     /// Like `Tile`, every other copy mirrored so the copies join without a seam.
     Mirror,
+    /// Each glyph covered by one cell of the picture (see [`TextTexture::cells`]), keeping its
+    /// shape, `scale` zooming in, repeated past the cell's edges (CapCut texture with `range`).
+    Glyph,
+
 }
 
 /// The picture file of a [`TextTexture`]: PNG or JPEG.

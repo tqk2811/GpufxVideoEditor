@@ -292,6 +292,10 @@ pub enum FitParam {
     Tile,
     /// Like tile, every other copy mirrored.
     Mirror,
+    /// The picture cut into `cells` side by side; each glyph (counting only glyphs that draw ink,
+    /// so spaces take none) is covered by the next cell in turn, centred on the glyph and grown with
+    /// the outline being painted. scale multiplies the size that covers the glyph.
+    Glyph,
 }
 
 /// A colour stop of a gradient.
@@ -305,6 +309,30 @@ pub struct StopParam {
     pub color: [u8; 4],
 }
 
+/// The paint under a texture's picture, shown where the picture is see-through.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum BaseParam {
+    /// One colour, [r, g, b, a], each 0 to 255.
+    Solid { color: [u8; 4] },
+    /// As the gradient paint: 2 to 16 stops, angle (0), per_glyph (false).
+    Gradient { stops: Vec<StopParam>, angle: Option<f32>, per_glyph: Option<bool> },
+}
+
+fn gradient_paint(stops: Vec<StopParam>, angle: Option<f32>, per_glyph: Option<bool>) -> engine::TextPaint {
+    engine::TextPaint::Gradient { stops: stops.into_iter().map(|stop| engine::GradientStop { position: stop.position, color: stop.color }).collect(), angle: angle.unwrap_or(0.0), per_glyph: per_glyph.unwrap_or(false) }
+}
+
+impl From<BaseParam> for engine::TextPaint {
+    fn from(base: BaseParam) -> Self {
+        match base {
+            BaseParam::Solid { color } => Self::Solid { color },
+            BaseParam::Gradient { stops, angle, per_glyph } => gradient_paint(stops, angle, per_glyph),
+        }
+    }
+}
+
 /// What a layer of a text (the fill, an outline, a shadow) is painted with.
 #[derive(Deserialize, JsonSchema, Clone)]
 #[schemars(inline)]
@@ -313,20 +341,34 @@ pub enum PaintParam {
     /// One colour, [r, g, b, a], each 0 to 255.
     Solid { color: [u8; 4] },
     /// Colours blending across the box of the whole text: 2 to 16 stops; angle in degrees
-    /// clockwise on screen, 0 left to right and 90 top to bottom (0 by default).
-    Gradient { stops: Vec<StopParam>, angle: Option<f32> },
+    /// clockwise on screen, 0 left to right and 90 top to bottom (0 by default). per_glyph true
+    /// runs the gradient across each glyph on its own instead (false by default).
+    Gradient { stops: Vec<StopParam>, angle: Option<f32>, per_glyph: Option<bool> },
     /// A picture laid over the text. scale (0.01 to 100, 1 by default): with tile, one copy is
-    /// scale font sizes tall; with stretch it multiplies the size that covers the text. angle turns
-    /// the picture, degrees clockwise (0). opacity 0 to 1 (1). fit is stretch by default.
-    Texture { image: ImageParam, fit: Option<FitParam>, scale: Option<f32>, angle: Option<f32>, opacity: Option<f32> },
+    /// scale font sizes tall; with stretch or glyph it multiplies the size that covers the text or
+    /// the glyph. angle turns the picture, degrees clockwise (0). opacity 0 to 1 (1). fit is
+    /// stretch by default. cells (1 to 64, 1 by default) is how many cells the picture is cut into
+    /// with fit glyph. flip_x and flip_y mirror the picture left to right and top to bottom (false).
+    /// base is a solid or gradient paint under the picture, shown where it is see-through (none).
+    Texture {
+        image: ImageParam,
+        fit: Option<FitParam>,
+        scale: Option<f32>,
+        angle: Option<f32>,
+        opacity: Option<f32>,
+        cells: Option<u32>,
+        flip_x: Option<bool>,
+        flip_y: Option<bool>,
+        base: Option<BaseParam>,
+    },
 }
 
 impl From<PaintParam> for engine::TextPaint {
     fn from(paint: PaintParam) -> Self {
         match paint {
             PaintParam::Solid { color } => Self::Solid { color },
-            PaintParam::Gradient { stops, angle } => Self::Gradient { stops: stops.into_iter().map(|stop| engine::GradientStop { position: stop.position, color: stop.color }).collect(), angle: angle.unwrap_or(0.0) },
-            PaintParam::Texture { image, fit, scale, angle, opacity } => {
+            PaintParam::Gradient { stops, angle, per_glyph } => gradient_paint(stops, angle, per_glyph),
+            PaintParam::Texture { image, fit, scale, angle, opacity, cells, flip_x, flip_y, base } => {
                 let image = match image {
                     ImageParam::File { path } => engine::TextImageRef::File { path },
                     ImageParam::Pack { pack, file, pack_type } => engine::TextImageRef::Pack {
@@ -341,9 +383,20 @@ impl From<PaintParam> for engine::TextPaint {
                 let fit = match fit {
                     Some(FitParam::Tile) => engine::TextureFit::Tile,
                     Some(FitParam::Mirror) => engine::TextureFit::Mirror,
+                    Some(FitParam::Glyph) => engine::TextureFit::Glyph,
                     _ => engine::TextureFit::Stretch,
                 };
-                Self::Texture(engine::TextTexture { image, fit, scale: scale.unwrap_or(1.0), angle: angle.unwrap_or(0.0), opacity: opacity.unwrap_or(1.0) })
+                Self::Texture(engine::TextTexture {
+                    image,
+                    fit,
+                    scale: scale.unwrap_or(1.0),
+                    angle: angle.unwrap_or(0.0),
+                    opacity: opacity.unwrap_or(1.0),
+                    cells: cells.unwrap_or(1),
+                    flip_x: flip_x.unwrap_or(false),
+                    flip_y: flip_y.unwrap_or(false),
+                    base: base.map(|base| Box::new(base.into())),
+                })
             }
         }
     }

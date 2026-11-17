@@ -20,7 +20,7 @@ mod units;
 
 pub use paint::{is_network_or_device_path, is_readable_texture_path, text_images, text_texture_stamps, MAX_TEXTURE_CACHE_BYTES, MAX_TEXTURE_DIMENSION, MAX_TEXTURE_FILE_BYTES};
 pub use units::{UnitsPlan, MAX_UNIT_PLANS, UNIT_PLAN_BYTES};
-use paint::{outline_px, Painter, ShadowPx, TextureCache, Textures};
+use paint::{outline_px, wants_glyph_map, GlyphEntry, GlyphMap, GlyphMapBuilder, Painter, ShadowPx, TextureCache, Textures};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -493,6 +493,7 @@ impl TextRasterizer {
                     y0 = y0.min(gy0);
                     y1 = y1.max(gy1);
                 }
+                layout.glyph_boxes.extend(ink);
                 layout.glyph_ink.push(ink);
                 layout.glyphs.push(physical);
             }
@@ -647,6 +648,9 @@ impl TextRasterizer {
         // The glyphs of the words whose colour is not the text's, one mask per colour.
         let mut tinted: Vec<(Rgba, Mask)> = Vec::new();
         let (ox, oy) = (left as i32, top as i32);
+        // Which glyph each pixel belongs to, when a paint lies over each glyph on its own.
+        let mut owners = wants_glyph_map(text).then(|| GlyphMapBuilder::new(width, height, layout.glyph_entries()));
+        let ink_numbers = layout.ink_numbers();
         for (number, glyph) in layout.glyphs.iter().enumerate() {
             let color = layout.glyph_words.get(number).copied().flatten().and_then(|word| styles.get(word)).map(|style| style.color).filter(|color| *color != text.fill.main_color());
             let group = color.map(|color| match tinted.iter().position(|(known, _)| *known == color) {
@@ -670,6 +674,9 @@ impl TextRasterizer {
                     // Colour glyphs (emoji) are drawn in the text colour for now.
                     let a = picture.data[index + stride - 1] as f32 / 255.0;
                     fill.add(x0 + i, y0 + j, a);
+                    if let (Some(owners), Some(ink)) = (owners.as_mut(), ink_numbers[number]) {
+                        owners.claim(x0 + i, y0 + j, a, ink);
+                    }
                     if let Some(group) = group {
                         tinted[group].1.add(x0 + i, y0 + j, a);
                     }
@@ -697,7 +704,8 @@ impl TextRasterizer {
         }
         let (textures, missing_texture) = self.textures.textures_for(text);
         image.missing_texture = missing_texture;
-        let painter = layout.painter(&textures);
+        let glyph_map = owners.map(GlyphMapBuilder::finish);
+        let painter = layout.painter(&textures, glyph_map.as_ref());
         draw_under(text, layout, &fill, &mut canvas, &painter);
         if tinted.is_empty() {
             painter.draw(&mut canvas, &fill, &text.fill);
@@ -767,6 +775,10 @@ struct Layout {
     /// The ink box of each glyph of `glyphs` (x0, y0, x1, y1) around the origin of the line boxes,
     /// one pixel larger on each side; `None` for a glyph with no ink.
     glyph_ink: Vec<Option<(f32, f32, f32, f32)>>,
+    /// The ink boxes of `glyph_ink` that are there, in order: what per-glyph paints lie over. A
+    /// glyph with no ink (a space) has none, so the glyphs per-glyph paints count are those with
+    /// ink (see [`GlyphMap`]).
+    glyph_boxes: Vec<(f32, f32, f32, f32)>,
     /// The word of each glyph of `glyphs` when the text has karaoke on.
     glyph_words: Vec<Option<usize>>,
     /// The box of each word on each line (word, line top, (x0, y0, x1, y1)), in line box
@@ -793,10 +805,30 @@ struct Layout {
 
 impl Layout {
     /// The paints laid over the line boxes of this layout's picture.
-    fn painter<'a>(&self, textures: &'a Textures) -> Painter<'a> {
+    fn painter<'a>(&'a self, textures: &'a Textures, glyph_map: Option<&'a GlyphMap>) -> Painter<'a> {
         let (left, top) = self.origin;
         let (text_w, text_h) = self.text_size;
-        Painter { textures, rect: (left, top, left + text_w, top + text_h), font_px: self.font_px }
+        Painter { textures, rect: (left, top, left + text_w, top + text_h), glyph_map, map_offset: (0.0, 0.0), grow: 0.0, font_px: self.font_px }
+    }
+
+    /// The glyphs with ink at rest, in the pixels of this layout's picture, for a [`GlyphMap`].
+    fn glyph_entries(&self) -> Vec<GlyphEntry> {
+        let (left, top) = self.origin;
+        self.glyph_boxes.iter().map(|&(x0, y0, x1, y1)| GlyphEntry::at_rest((left + x0, top + y0, left + x1, top + y1))).collect()
+    }
+
+    /// The number of each glyph of `glyphs` among those with ink; `None` for one with no ink.
+    fn ink_numbers(&self) -> Vec<Option<u32>> {
+        let mut next = 0u32;
+        self.glyph_ink
+            .iter()
+            .map(|ink| {
+                ink.map(|_| {
+                    next += 1;
+                    next - 1
+                })
+            })
+            .collect()
     }
 }
 

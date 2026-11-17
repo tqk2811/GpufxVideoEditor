@@ -305,7 +305,7 @@ mod tests {
     fn a_texture_file_is_relative_inside_the_folder_when_saved_and_absolute_when_opened() {
         let file = Path::new(r"D:\Work\p.json");
         let image = |path: &str| engine::TextImageRef::File { path: path.to_owned() };
-        let paint = |path: &str| engine::TextPaint::Texture(engine::TextTexture { image: image(path), fit: engine::TextureFit::Tile, scale: 1.0, angle: 0.0, opacity: 1.0 });
+        let paint = |path: &str| engine::TextPaint::Texture(engine::TextTexture { image: image(path), fit: engine::TextureFit::Tile, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
         let with_textures = |fill: &str, outline: &str| {
             let mut project = project(vec!["text:".to_owned()]);
             let mut text = engine::TextContent::new("Hi", 0.1);

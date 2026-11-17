@@ -550,8 +550,8 @@ fn text_set_sets_every_layer_of_the_look_and_the_old_fields_still_change_the_fir
         "bloom": {"color": [255, 0, 255, 255], "strength": 0.8}
     }));
     let text = text_of(&mut session, 0, 0);
-    let engine::TextPaint::Gradient { stops, angle } = &text.fill else { panic!("{:?}", text.fill) };
-    assert_eq!((stops.len(), *angle), (2, 90.0));
+    let engine::TextPaint::Gradient { stops, angle, per_glyph } = &text.fill else { panic!("{:?}", text.fill) };
+    assert_eq!((stops.len(), *angle, *per_glyph), (2, 90.0, false), "a gradient runs across the whole text by default");
     assert_eq!(text.outlines.len(), 2);
     let engine::TextPaint::Texture(texture) = &text.outlines[1].paint else { panic!("{:?}", text.outlines[1].paint) };
     assert_eq!((texture.fit, texture.scale, texture.opacity), (engine::TextureFit::Tile, 0.5, 1.0));
@@ -573,6 +573,25 @@ fn text_set_sets_every_layer_of_the_look_and_the_old_fields_still_change_the_fir
 }
 
 #[test]
+fn text_set_cuts_a_texture_per_glyph_flips_it_and_puts_a_base_under_it() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let current = with_text(&mut session);
+    let stops = json!([{"position": 0.0, "color": [255, 0, 0, 255]}, {"position": 1.0, "color": [0, 0, 255, 255]}]);
+    call_ok(&mut session, "text_set", json!({
+        "expected_revision": current, "clip": {"track": 0, "clip": 0},
+        "fill": {"kind": "texture", "image": {"kind": "pack", "pack": "neon", "file": "glow.png"}, "fit": "glyph", "cells": 4, "flip_x": true, "flip_y": true,
+                 "base": {"kind": "gradient", "stops": stops, "angle": 90, "per_glyph": true}},
+        "outlines": [{"width": 0.05, "paint": {"kind": "gradient", "stops": stops, "per_glyph": true}}]
+    }));
+    let text = text_of(&mut session, 0, 0);
+    let engine::TextPaint::Texture(texture) = &text.fill else { panic!("{:?}", text.fill) };
+    assert_eq!((texture.fit, texture.cells, texture.flip_x, texture.flip_y), (engine::TextureFit::Glyph, 4, true, true));
+    let Some(engine::TextPaint::Gradient { angle, per_glyph, .. }) = texture.base.as_deref() else { panic!("{:?}", texture.base) };
+    assert_eq!((*angle, *per_glyph), (90.0, true));
+    assert!(matches!(text.outlines[0].paint, engine::TextPaint::Gradient { per_glyph: true, .. }), "{:?}", text.outlines[0].paint);
+}
+
+#[test]
 fn layers_no_text_can_have_are_refused_and_change_nothing() {
     let mut session = FileSession::with_roots(vec![packages_root()]);
     let current = with_text(&mut session);
@@ -589,6 +608,8 @@ fn layers_no_text_can_have_are_refused_and_change_nothing() {
         (json!({"fill": {"kind": "texture", "image": {"kind": "file", "path": "pictures/a.png"}}}), "a relative texture file"),
         (json!({"fill": {"kind": "texture", "image": {"kind": "file", "path": "//server/share/a.png"}}}), "a texture file on a network share"),
         (json!({"fill": {"kind": "texture", "image": {"kind": "pack", "pack": "p", "file": "a.png"}, "scale": 0}}), "a texture of scale 0"),
+        (json!({"fill": {"kind": "texture", "image": {"kind": "pack", "pack": "p", "file": "a.png"}, "fit": "glyph", "cells": 0}}), "a texture of no cells"),
+        (json!({"fill": {"kind": "texture", "image": {"kind": "pack", "pack": "p", "file": "a.png"}, "base": {"kind": "texture", "image": {"kind": "pack", "pack": "p", "file": "a.png"}}}}), "a texture as base"),
         (json!({"shadows": [{"offset": [0.1, 0.1], "distance": 0.1, "paint": solid}]}), "offset with distance"),
         (json!({"shadows": [{"distance": 5.0, "paint": solid}]}), "a shadow too far"),
         (json!({"inner_shadows": [{"blur": -1.0, "paint": solid}]}), "a negative blur"),

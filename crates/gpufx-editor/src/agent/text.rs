@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn outline_and_shadow_change_only_the_first_layer() {
         let mut text = crate::text_clip::default_text("Hi");
-        let gold = engine::TextPaint::Gradient { stops: vec![engine::GradientStop { position: 0.0, color: [255, 200, 0, 255] }, engine::GradientStop { position: 1.0, color: [120, 60, 0, 255] }], angle: 90.0 };
+        let gold = engine::TextPaint::Gradient { stops: vec![engine::GradientStop { position: 0.0, color: [255, 200, 0, 255] }, engine::GradientStop { position: 1.0, color: [120, 60, 0, 255] }], angle: 90.0, per_glyph: false };
         text.outlines = vec![engine::TextOutline::solid([0, 0, 0, 255], 0.05), engine::TextOutline { width: 0.1, paint: gold.clone() }];
         text.shadows = vec![engine::TextShadow::solid([0, 0, 0, 128], [0.05, 0.05], 0.0), engine::TextShadow::solid([0, 0, 0, 64], [0.1, 0.1], 0.0)];
         let outline = engine::TextOutline::solid([255, 0, 0, 255], 0.08);
@@ -589,7 +589,7 @@ mod tests {
         let text = crate::text_clip::default_text("Hi");
         let with = |path: &str| {
             let mut next = text.clone();
-            next.fill = engine::TextPaint::Texture(engine::TextTexture { image: engine::TextImageRef::File { path: path.to_owned() }, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 });
+            next.fill = engine::TextPaint::Texture(engine::TextTexture { image: engine::TextImageRef::File { path: path.to_owned() }, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
             next
         };
         for path in [r"\\server\share\a.png", "//server/share/a.png", r"\\?\UNC\server\share\a.png"] {

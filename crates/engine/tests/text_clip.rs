@@ -132,8 +132,8 @@ fn validate_rejects_bad_weight_letter_spacing_and_glow() {
 
 fn layered_text() -> TextContent {
     let mut text = TextContent::new("Hi", 0.1);
-    text.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [255, 0, 0, 255] }, GradientStop { position: 1.0, color: [0, 0, 255, 255] }], angle: 90.0 };
-    let texture = TextTexture { image: TextImageRef::text_style_pack("gold", "textures/gold.png"), fit: TextureFit::Tile, scale: 0.5, angle: 30.0, opacity: 0.8 };
+    text.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [255, 0, 0, 255] }, GradientStop { position: 1.0, color: [0, 0, 255, 255] }], angle: 90.0, per_glyph: true };
+    let texture = TextTexture { image: TextImageRef::text_style_pack("gold", "textures/gold.png"), fit: TextureFit::Glyph, scale: 0.5, angle: 30.0, opacity: 0.8, cells: 3, flip_x: true, flip_y: false, base: Some(Box::new(text.fill.clone())) };
     text.outlines = vec![TextOutline::solid([0, 0, 0, 255], 0.05), TextOutline { width: 0.1, paint: TextPaint::Texture(texture.clone()) }];
     let mut shadow = TextShadow::solid([20, 20, 20, 255], [0.03, 0.03], 0.0);
     shadow.outlines = vec![TextOutline::solid([255, 255, 255, 255], 0.04)];
@@ -149,7 +149,8 @@ fn a_layered_text_round_trips_through_json_with_tagged_paints() {
     let p = project_with(vec![c]);
     let json = serde_json::to_string(&p).unwrap();
     assert!(json.contains(r#""fill":{"kind":"gradient","stops":[{"position":0.0,"color":[255,0,0,255]}"#), "{json}");
-    assert!(json.contains(r#""image":{"kind":"pack","pack":"gold","file":"textures/gold.png"},"fit":"tile""#), "{json}");
+    assert!(json.contains(r#""image":{"kind":"pack","pack":"gold","file":"textures/gold.png"},"fit":"glyph""#), "{json}");
+    assert!(json.contains(r#""cells":3,"flip_x":true,"base":{"kind":"gradient""#) && json.contains(r#""per_glyph":true"#), "{json}");
     assert_eq!(Project::from_json(&json).unwrap(), p);
     // Absent layers are left out and read back as none; a missing fill is white.
     let plain = serde_json::to_string(&TextContent::new("Hi", 0.1)).unwrap();
@@ -193,14 +194,17 @@ fn validate_checks_every_text_layer_and_their_limits() {
     assert_eq!(fields(&|t| t.shadows[2].distance = f32::NAN), vec!["shadows[2].distance"]);
     assert_eq!(fields(&|t| t.shadows[0].blur = engine::MAX_TEXT_SHADOW_BLUR * 2.0), vec!["shadows[0].blur"]);
     assert_eq!(fields(&|t| t.inner_shadows[0].angle = f32::INFINITY), vec!["inner_shadows[0].angle"]);
-    assert_eq!(fields(&|t| t.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [0; 4] }], angle: 0.0 }), vec!["fill.stops"]);
+    assert_eq!(fields(&|t| t.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [0; 4] }], angle: 0.0, per_glyph: false }), vec!["fill.stops"]);
     assert_eq!(
-        fields(&|t| t.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.6, color: [0; 4] }, GradientStop { position: 0.4, color: [0; 4] }], angle: 0.0 }),
+        fields(&|t| t.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.6, color: [0; 4] }, GradientStop { position: 0.4, color: [0; 4] }], angle: 0.0, per_glyph: false }),
         vec!["fill.stops[1].position"],
         "stops go up"
     );
     assert_eq!(fields(&|t| if let TextPaint::Texture(texture) = &mut t.outlines[1].paint { texture.scale = 0.0 }), vec!["outlines[1].paint.scale"]);
     assert_eq!(fields(&|t| if let TextPaint::Texture(texture) = &mut t.inner_shadows[0].paint { texture.opacity = 1.5 }), vec!["inner_shadows[0].paint.opacity"]);
+    assert_eq!(fields(&|t| if let TextPaint::Texture(texture) = &mut t.outlines[1].paint { texture.cells = 0 }), vec!["outlines[1].paint.cells"]);
+    assert_eq!(fields(&|t| if let TextPaint::Texture(texture) = &mut t.outlines[1].paint { texture.cells = engine::MAX_TEXTURE_CELLS + 1 }), vec!["outlines[1].paint.cells"]);
+    assert_eq!(fields(&|t| if let TextPaint::Texture(texture) = &mut t.outlines[1].paint { texture.base = Some(Box::new(TextPaint::Texture(texture.clone()))) }), vec!["outlines[1].paint.base"], "a texture is no base");
 }
 
 #[test]

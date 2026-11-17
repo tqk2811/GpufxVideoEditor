@@ -2,7 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::frame_rate::FrameRate;
-use crate::project::{speed_in_range, Clip, Project, TextContent, TextOutline, TextPaint, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINES, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOWS, MAX_TEXT_SHADOW_BLUR, MAX_TEXT_SHADOW_DISTANCE, TEXT_TEXTURE_SCALE_RANGE, GLOW_FALLOFF_RANGE, MAX_BLOOM_DIR, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
+use crate::project::{speed_in_range, Clip, Project, TextContent, TextOutline, TextPaint, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINES, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOWS, MAX_TEXT_SHADOW_BLUR, MAX_TEXT_SHADOW_DISTANCE, TEXT_TEXTURE_SCALE_RANGE, MAX_TEXTURE_CELLS, GLOW_FALLOFF_RANGE, MAX_BLOOM_DIR, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -53,10 +53,10 @@ fn layer_problems(text: &TextContent, style: &mut dyn FnMut(&str, f32, bool, Str
     fn finite(style: &mut dyn FnMut(&str, f32, bool, String), field: &str, value: f32) {
         style(field, value, value.is_finite(), "a number".to_owned());
     }
-    fn paint(style: &mut dyn FnMut(&str, f32, bool, String), field: &str, paint: &TextPaint) {
-        match paint {
+    fn paint(style: &mut dyn FnMut(&str, f32, bool, String), field: &str, layer: &TextPaint) {
+        match layer {
             TextPaint::Solid { .. } => {}
-            TextPaint::Gradient { stops, angle } => {
+            TextPaint::Gradient { stops, angle, .. } => {
                 let count = stops.len();
                 style(&format!("{field}.stops"), count as f32, (2..=MAX_GRADIENT_STOPS).contains(&count), format!("from 2 to {MAX_GRADIENT_STOPS} stops"));
                 let mut last = 0.0f32;
@@ -74,6 +74,16 @@ fn layer_problems(text: &TextContent, style: &mut dyn FnMut(&str, f32, bool, Str
                 style(&format!("{field}.scale"), scale, scale.is_finite() && TEXT_TEXTURE_SCALE_RANGE.contains(&scale), format!("from {} to {}", TEXT_TEXTURE_SCALE_RANGE.start(), TEXT_TEXTURE_SCALE_RANGE.end()));
                 finite(style, &format!("{field}.angle"), texture.angle);
                 range(style, &format!("{field}.opacity"), texture.opacity, 1.0);
+                let cells = texture.cells;
+                style(&format!("{field}.cells"), cells as f32, (1..=MAX_TEXTURE_CELLS).contains(&cells), format!("from 1 to {MAX_TEXTURE_CELLS}"));
+                if let Some(base) = texture.base.as_deref() {
+                    let nested = matches!(base, TextPaint::Texture(_));
+                    style(&format!("{field}.base"), 0.0, !nested, "a solid colour or a gradient, not a texture".to_owned());
+                    if !nested {
+                        paint(style, &format!("{field}.base"), base);
+                    }
+                }
+
             }
         }
     }
