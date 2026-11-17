@@ -325,7 +325,7 @@ impl From<PaintParam> for engine::TextPaint {
     fn from(paint: PaintParam) -> Self {
         match paint {
             PaintParam::Solid { color } => Self::Solid { color },
-            PaintParam::Gradient { stops, angle } => Self::Gradient { stops: stops.into_iter().map(|stop| engine::GradientStop { position: stop.position, color: stop.color }).collect(), angle: angle.unwrap_or(0.0) },
+            PaintParam::Gradient { stops, angle } => Self::Gradient { stops: stops.into_iter().map(|stop| engine::GradientStop { position: stop.position, color: stop.color }).collect(), angle: angle.unwrap_or(0.0), per_glyph: false },
             PaintParam::Texture { image, fit, scale, angle, opacity } => {
                 let image = match image {
                     ImageParam::File { path } => engine::TextImageRef::File { path },
@@ -343,7 +343,7 @@ impl From<PaintParam> for engine::TextPaint {
                     Some(FitParam::Mirror) => engine::TextureFit::Mirror,
                     _ => engine::TextureFit::Stretch,
                 };
-                Self::Texture(engine::TextTexture { image, fit, scale: scale.unwrap_or(1.0), angle: angle.unwrap_or(0.0), opacity: opacity.unwrap_or(1.0) })
+                Self::Texture(engine::TextTexture { image, fit, scale: scale.unwrap_or(1.0), angle: angle.unwrap_or(0.0), opacity: opacity.unwrap_or(1.0), cells: 1, flip_x: false, flip_y: false, base: None })
             }
         }
     }

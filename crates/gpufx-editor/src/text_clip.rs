@@ -152,7 +152,7 @@ impl PaintKind {
 
 /// A texture painting with `image`, at its natural size, straight and opaque.
 pub fn texture_paint(image: TextImageRef) -> TextPaint {
-    TextPaint::Texture(TextTexture { image, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 })
+    TextPaint::Texture(TextTexture { image, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None })
 }
 
 /// `paint` turned into a paint of `kind`, keeping its main colour: a gradient runs from that colour
@@ -165,7 +165,7 @@ pub fn convert_paint(paint: &TextPaint, kind: PaintKind, image: Option<TextImage
     let color = paint.main_color();
     match kind {
         PaintKind::Solid => Some(TextPaint::solid(color)),
-        PaintKind::Gradient => Some(TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color }, GradientStop { position: 1.0, color: [0, 0, 0, color[3]] }], angle: 90.0 }),
+        PaintKind::Gradient => Some(TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color }, GradientStop { position: 1.0, color: [0, 0, 0, color[3]] }], angle: 90.0, per_glyph: false }),
         PaintKind::Texture => image.map(texture_paint),
     }
 }

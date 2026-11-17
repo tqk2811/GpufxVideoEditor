@@ -56,6 +56,12 @@ impl Picture {
     /// The colour at `(u, v)` in picture pixels, bilinear, with the picture repeated (mirrored
     /// every other copy when `mirror`) past its edges.
     fn sample(&self, u: f32, v: f32, mirror: bool) -> [f32; 4] {
+        self.sample_cell(0, self.width, u, v, mirror)
+    }
+
+    /// Like [`Self::sample`] within the columns `cell_x..cell_x + cell_width` of the picture, repeated past
+    /// their edges: `u` counts from `cell_x`.
+    fn sample_cell(&self, cell_x: usize, cell_width: usize, u: f32, v: f32, mirror: bool) -> [f32; 4] {
         let wrap = |i: i64, n: usize| -> usize {
             let n = n as i64;
             if mirror {
@@ -70,7 +76,7 @@ impl Picture {
         let (x0, y0) = (x.floor(), y.floor());
         let (fx, fy) = (x - x0, y - y0);
         let (x0, y0) = (x0 as i64, y0 as i64);
-        let at = |i: i64, j: i64| premultiplied(self.pixels[wrap(j, self.height) * self.width + wrap(i, self.width)]);
+        let at = |i: i64, j: i64| premultiplied(self.pixels[wrap(j, self.height) * self.width + cell_x + wrap(i, cell_width)]);
         let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
         std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
     }
@@ -210,13 +216,19 @@ impl TextureCache {
     }
 }
 
-/// Where the paints are laid: the box of the whole text in the picture being drawn, the font size
-/// and the pictures of the textures.
+/// Where the paints are laid: the box of the whole text in the picture being drawn, the boxes of
+/// its glyphs, the font size and the pictures of the textures.
 #[derive(Clone, Copy)]
 pub(crate) struct Painter<'a> {
     pub textures: &'a Textures,
     /// The line boxes of the text (x0, y0, x1, y1), in the pixels of the picture drawn into.
     pub rect: (f32, f32, f32, f32),
+    /// The ink box of each glyph with ink (x0, y0, x1, y1), around the top left of `rect`, in
+    /// the order of the text: what per-glyph gradients and [`TextureFit::Glyph`] lie over.
+    pub glyphs: &'a [(f32, f32, f32, f32)],
+    /// How far the glyph boxes are grown on each side, in pixels: the width of the outline being
+    /// painted, so a per-glyph paint covers the outline around its glyph as CapCut lays it.
+    pub grow: f32,
     pub font_px: f32,
 }
 
@@ -227,52 +239,121 @@ impl<'a> Painter<'a> {
         Painter { rect: (x0 - dx, y0 - dy, x1 - dx, y1 - dy), ..*self }
     }
 
+    /// The same paints with the glyph boxes grown by `grow` pixels on each side.
+    pub fn grown(&self, grow: f32) -> Painter<'a> {
+        Painter { grow, ..*self }
+    }
+
     /// The premultiplied colour of `paint` at the centre of pixel `(x, y)`.
     pub fn color_at(&self, paint: &TextPaint, x: usize, y: usize) -> [f32; 4] {
-        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+        self.paint_at(paint, x as f32 + 0.5, y as f32 + 0.5)
+    }
+
+    fn paint_at(&self, paint: &TextPaint, px: f32, py: f32) -> [f32; 4] {
         match paint {
             TextPaint::Solid { color } => premultiplied(*color),
-            TextPaint::Gradient { stops, angle } => gradient_color(stops, self.gradient_t(*angle, px, py)),
-            TextPaint::Texture(texture) => self.texture_color(texture, px, py),
+            TextPaint::Gradient { stops, angle, per_glyph } => {
+                let rect = if *per_glyph { self.glyph_at(px, py).1 } else { self.rect };
+                gradient_color(stops, gradient_t(rect, *angle, px, py))
+            }
+            TextPaint::Texture(texture) => {
+                let color = self.texture_color(texture, px, py);
+                match texture.base.as_deref() {
+                    // A texture under a texture is refused by validation; drawn as none.
+                    Some(base) if !matches!(base, TextPaint::Texture(_)) => {
+                        let under = self.paint_at(base, px, py);
+                        std::array::from_fn(|c| color[c] + under[c] * (1.0 - color[3]))
+                    }
+                    _ => color,
+                }
+            }
         }
     }
 
-    /// Where `(px, py)` lies along a gradient running `angle` degrees clockwise from left to right
-    /// across the text box: 0 at the box corner it starts from, 1 at the one it ends at.
-    fn gradient_t(&self, angle: f32, px: f32, py: f32) -> f32 {
-        let (x0, y0, x1, y1) = self.rect;
-        let radians = if angle.is_finite() { angle.to_radians() } else { 0.0 };
-        let (dx, dy) = (radians.cos(), radians.sin());
-        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-        let half = ((x1 - x0) * dx.abs() + (y1 - y0) * dy.abs()) / 2.0;
-        if half <= 0.0 {
-            return 0.0;
+    /// The glyph whose ink box holds `(px, py)`, else the nearest one: its number among the glyphs
+    /// with ink and its box in the picture. The whole text box when there is no glyph.
+    fn glyph_at(&self, px: f32, py: f32) -> (usize, (f32, f32, f32, f32)) {
+        let (ox, oy, _, _) = self.rect;
+        let mut best = (f32::INFINITY, 0, self.rect);
+        for (number, &(x0, y0, x1, y1)) in self.glyphs.iter().enumerate() {
+            let g = self.grow;
+            let rect = (ox + x0 - g, oy + y0 - g, ox + x1 + g, oy + y1 + g);
+            let dx = (rect.0 - px).max(px - rect.2).max(0.0);
+            let dy = (rect.1 - py).max(py - rect.3).max(0.0);
+            let far = dx * dx + dy * dy;
+            if far < best.0 {
+                best = (far, number, rect);
+                if far == 0.0 {
+                    break;
+                }
+            }
         }
-        (((px - cx) * dx + (py - cy) * dy) / (2.0 * half) + 0.5).clamp(0.0, 1.0)
+        (best.1, best.2)
     }
+}
 
+/// Where `(px, py)` lies along a gradient running `angle` degrees clockwise from left to right
+/// across `rect`: 0 at the box corner it starts from, 1 at the one it ends at.
+fn gradient_t(rect: (f32, f32, f32, f32), angle: f32, px: f32, py: f32) -> f32 {
+    let (x0, y0, x1, y1) = rect;
+    let radians = if angle.is_finite() { angle.to_radians() } else { 0.0 };
+    let (dx, dy) = (radians.cos(), radians.sin());
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let half = ((x1 - x0) * dx.abs() + (y1 - y0) * dy.abs()) / 2.0;
+    if half <= 0.0 {
+        return 0.0;
+    }
+    (((px - cx) * dx + (py - cy) * dy) / (2.0 * half) + 0.5).clamp(0.0, 1.0)
+}
+
+impl<'a> Painter<'a> {
     fn texture_color(&self, texture: &TextTexture, px: f32, py: f32) -> [f32; 4] {
         let TextImageRef::File { path } = &texture.image else { return [0.0; 4] };
         let Some(picture) = self.textures.get(path) else { return [0.0; 4] };
+        let scale = if texture.scale.is_finite() { texture.scale.clamp(*engine::TEXT_TEXTURE_SCALE_RANGE.start(), *engine::TEXT_TEXTURE_SCALE_RANGE.end()) } else { 1.0 };
+        let opacity = if texture.opacity.is_finite() { texture.opacity.clamp(0.0, 1.0) } else { 1.0 };
+        if texture.fit == TextureFit::Glyph {
+            // One cell per glyph, in turn, covering the glyph's box and centred on it.
+            let (number, (x0, y0, x1, y1)) = self.glyph_at(px, py);
+            let cells = texture.cells.clamp(1, engine::MAX_TEXTURE_CELLS) as usize;
+            let cell_width = (picture.width / cells).max(1);
+            let cell = number % cells;
+            let (cw, ih) = (cell_width as f32, picture.height as f32);
+            let zoom = ((x1 - x0) / cw).max((y1 - y0) / ih).max(1e-3) * scale;
+            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            let (qx, qy) = turned(texture.angle, (cx, cy), px, py);
+            let mut u = (qx - cx) / zoom + cw / 2.0;
+            let mut v = (qy - cy) / zoom + ih / 2.0;
+            if texture.flip_x {
+                u = cw - u;
+            }
+            if texture.flip_y {
+                v = ih - v;
+            }
+            let x0 = (cell * cell_width).min(picture.width - cell_width);
+            return picture.sample_cell(x0, cell_width, u, v, false).map(|c| c * opacity);
+        }
         let (x0, y0, x1, y1) = self.rect;
         let (iw, ih) = (picture.width as f32, picture.height as f32);
-        let scale = if texture.scale.is_finite() { texture.scale.clamp(*engine::TEXT_TEXTURE_SCALE_RANGE.start(), *engine::TEXT_TEXTURE_SCALE_RANGE.end()) } else { 1.0 };
         // Screen pixels per picture pixel, and the screen point picture pixel (0, 0) lands on.
         let (zoom, anchor) = match texture.fit {
             TextureFit::Stretch => {
                 let zoom = ((x1 - x0) / iw).max((y1 - y0) / ih).max(1e-3) * scale;
                 (zoom, ((x0 + x1) / 2.0 - iw * zoom / 2.0, (y0 + y1) / 2.0 - ih * zoom / 2.0))
             }
-            TextureFit::Tile | TextureFit::Mirror => ((scale * self.font_px / ih).max(1e-3), (x0, y0)),
+            TextureFit::Tile | TextureFit::Mirror | TextureFit::Glyph => ((scale * self.font_px / ih).max(1e-3), (x0, y0)),
         };
         // Turn the point back around the text centre by the picture's turn.
-        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-        let radians = if texture.angle.is_finite() { -texture.angle.to_radians() } else { 0.0 };
-        let (s, c) = radians.sin_cos();
-        let (rx, ry) = (px - cx, py - cy);
-        let (qx, qy) = (cx + rx * c - ry * s, cy + rx * s + ry * c);
-        let color = picture.sample((qx - anchor.0) / zoom, (qy - anchor.1) / zoom, texture.fit == TextureFit::Mirror);
-        let opacity = if texture.opacity.is_finite() { texture.opacity.clamp(0.0, 1.0) } else { 1.0 };
+        let (qx, qy) = turned(texture.angle, ((x0 + x1) / 2.0, (y0 + y1) / 2.0), px, py);
+        let mut u = (qx - anchor.0) / zoom;
+        let mut v = (qy - anchor.1) / zoom;
+        if texture.flip_x {
+            u = iw - u;
+        }
+        if texture.flip_y {
+            v = ih - v;
+        }
+        let color = picture.sample(u, v, texture.fit == TextureFit::Mirror);
         color.map(|v| v * opacity)
     }
 
@@ -294,7 +375,16 @@ impl<'a> Painter<'a> {
     }
 }
 
+/// `(px, py)` turned back around `centre` by a picture turned `angle` degrees clockwise.
+fn turned(angle: f32, centre: (f32, f32), px: f32, py: f32) -> (f32, f32) {
+    let radians = if angle.is_finite() { -angle.to_radians() } else { 0.0 };
+    let (s, c) = radians.sin_cos();
+    let (rx, ry) = (px - centre.0, py - centre.1);
+    (centre.0 + rx * c - ry * s, centre.1 + rx * s + ry * c)
+}
+
 /// The colour of a gradient at `t`, 0 to 1, premultiplied. Stops are mixed as straight colours.
+
 fn gradient_color(stops: &[GradientStop], t: f32) -> [f32; 4] {
     let Some(first) = stops.first() else { return [0.0; 4] };
     if t <= first.position || stops.len() == 1 {
@@ -345,7 +435,7 @@ pub(crate) fn draw_outlines(canvas: &mut [[f32; 4]], fill: &Mask, squared: &[f64
         for (r, &f) in ring.data.iter_mut().zip(&fill.data) {
             *r = if f >= 1.0 { 0.0 } else { ((*r - f) / (1.0 - f)).clamp(0.0, 1.0) };
         }
-        painter.draw(canvas, &ring, paint);
+        painter.grown(width).draw(canvas, &ring, paint);
     }
 }
 
@@ -455,7 +545,7 @@ mod tests {
         let dir = temp_dir("paths");
         let local = write_png(&dir, "a.png", 4, 4);
         let mut text = TextContent::new("Hi", 0.1);
-        let texture = |path: &str| TextPaint::Texture(TextTexture { image: TextImageRef::File { path: path.to_owned() }, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 });
+        let texture = |path: &str| TextPaint::Texture(TextTexture::new(TextImageRef::File { path: path.to_owned() }));
         let mut cache = TextureCache::default();
         text.fill = texture(&local.to_string_lossy());
         assert_eq!(cache.textures_for(&text).1, None);

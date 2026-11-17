@@ -223,7 +223,7 @@ fn paint_editor(ui: &mut egui::Ui, id: egui::Id, paint: &mut TextPaint, slot: Pa
     }
     match paint {
         TextPaint::Solid { color } => color_row(ui, &language.t(Message::FieldColor), color),
-        TextPaint::Gradient { stops, angle } => gradient_rows(ui, stops, angle, language),
+        TextPaint::Gradient { stops, angle, .. } => gradient_rows(ui, stops, angle, language),
         TextPaint::Texture(texture) => texture_rows(ui, id, texture, slot, layers),
     }
 }
@@ -359,7 +359,7 @@ mod tests {
 
     fn full_text() -> TextContent {
         let mut text = TextContent::new("Hi", 0.1);
-        text.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [255, 0, 0, 255] }, GradientStop { position: 1.0, color: [0, 0, 255, 255] }], angle: 90.0 };
+        text.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [255, 0, 0, 255] }, GradientStop { position: 1.0, color: [0, 0, 255, 255] }], angle: 90.0, per_glyph: false };
         text.outlines = vec![TextOutline { width: 0.05, paint: crate::text_clip::texture_paint(TextImageRef::File { path: "C:/a.png".to_owned() }) }; MAX_TEXT_OUTLINES];
         let mut shadow = default_shadow();
         shadow.outlines = vec![default_outline()];

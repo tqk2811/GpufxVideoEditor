@@ -493,6 +493,7 @@ impl TextRasterizer {
                     y0 = y0.min(gy0);
                     y1 = y1.max(gy1);
                 }
+                layout.glyph_boxes.extend(ink);
                 layout.glyph_ink.push(ink);
                 layout.glyphs.push(physical);
             }
@@ -767,6 +768,8 @@ struct Layout {
     /// The ink box of each glyph of `glyphs` (x0, y0, x1, y1) around the origin of the line boxes,
     /// one pixel larger on each side; `None` for a glyph with no ink.
     glyph_ink: Vec<Option<(f32, f32, f32, f32)>>,
+    /// The ink boxes of `glyph_ink` that are there, in order: what per-glyph paints lie over.
+    glyph_boxes: Vec<(f32, f32, f32, f32)>,
     /// The word of each glyph of `glyphs` when the text has karaoke on.
     glyph_words: Vec<Option<usize>>,
     /// The box of each word on each line (word, line top, (x0, y0, x1, y1)), in line box
@@ -793,10 +796,10 @@ struct Layout {
 
 impl Layout {
     /// The paints laid over the line boxes of this layout's picture.
-    fn painter<'a>(&self, textures: &'a Textures) -> Painter<'a> {
+    fn painter<'a>(&'a self, textures: &'a Textures) -> Painter<'a> {
         let (left, top) = self.origin;
         let (text_w, text_h) = self.text_size;
-        Painter { textures, rect: (left, top, left + text_w, top + text_h), font_px: self.font_px }
+        Painter { textures, rect: (left, top, left + text_w, top + text_h), glyphs: &self.glyph_boxes, grow: 0.0, font_px: self.font_px }
     }
 }
 

@@ -550,7 +550,7 @@ fn text_set_sets_every_layer_of_the_look_and_the_old_fields_still_change_the_fir
         "bloom": {"color": [255, 0, 255, 255], "strength": 0.8}
     }));
     let text = text_of(&mut session, 0, 0);
-    let engine::TextPaint::Gradient { stops, angle } = &text.fill else { panic!("{:?}", text.fill) };
+    let engine::TextPaint::Gradient { stops, angle, .. } = &text.fill else { panic!("{:?}", text.fill) };
     assert_eq!((stops.len(), *angle), (2, 90.0));
     assert_eq!(text.outlines.len(), 2);
     let engine::TextPaint::Texture(texture) = &text.outlines[1].paint else { panic!("{:?}", text.outlines[1].paint) };
