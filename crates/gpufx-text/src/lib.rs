@@ -1,10 +1,10 @@
 //! Rasterizes the text of a text clip into a premultiplied RGBA picture on the CPU.
 //!
 //! Shaping, bidi and font fallback come from `cosmic-text`, glyph pictures from its swash cache.
-//! Outlines, background box, glow, shadows and inner shadows are drawn here on alpha masks, each
+//! Outlines, background box, bloom, glow, shadows and inner shadows are drawn here on alpha masks, each
 //! painted with a colour, a gradient or a texture picture (see the `paint` module).
 //!
-//! Layers, bottom to top: background box, glow, shadows (the last at the bottom, each with its own
+//! Layers, bottom to top: background box, bloom (the glyph coverage blurred), glow, shadows (the last at the bottom, each with its own
 //! outlines), outlines (widest first), fill, inner shadows. The outlines and the glow all come from
 //! one squared distance field of the glyph coverage, computed once per picture into one buffer; the
 //! glow is blended straight into the picture from it, so it costs no mask of its own and the
@@ -518,6 +518,7 @@ impl TextRasterizer {
             })
             .collect();
         let mut glow_px = glow_reach(text, font_px);
+        let bloom = bloom_px(text, font_px);
         let (x0, y0, x1, y1) = (x0.floor(), y0.floor(), x1.ceil(), y1.ceil());
         let base = outline_px.max(pad_px).ceil() + 1.0;
         // How far the shadows reach past the ink on each side (left, right, top, bottom): their
@@ -527,6 +528,13 @@ impl TextRasterizer {
             let grown = s.outline_px.ceil() + 1.0 + s.blur.ceil() * 2.0;
             for (room, offset) in shadow_room.iter_mut().zip([-s.dx, s.dx, -s.dy, s.dy]) {
                 *room = room.max(grown + offset.max(0.0).ceil());
+            }
+        }
+        // The bloom spreads past the ink by its blur, more on the side it is moved to.
+        if let Some(bloom) = bloom {
+            let spread = bloom.spread().ceil() + 1.0;
+            for (room, offset) in shadow_room.iter_mut().zip([-bloom.dx, bloom.dx, -bloom.dy, bloom.dy]) {
+                *room = room.max(spread + offset.max(0.0).ceil());
             }
         }
         // The picture's margins for a glow reaching `glow` pixels. The glow spreads evenly past the
@@ -566,6 +574,7 @@ impl TextRasterizer {
         layout.pad_px = pad_px;
         layout.shadows = shadows;
         layout.glow_px = glow_px;
+        layout.bloom = bloom;
         layout
     }
 
@@ -729,12 +738,15 @@ fn draw_background(text: &TextContent, layout: &Layout, canvas: &mut [[f32; 4]])
 }
 
 /// Draws what lies under the fill of the glyph coverage `fill` into `canvas` of the same size: the
-/// glow, the shadows and the outlines, in that order, painted as `painter` lays the paints.
+/// bloom, the glow, the shadows and the outlines, in that order, painted as `painter` lays the paints.
 fn draw_under(text: &TextContent, layout: &Layout, fill: &Mask, canvas: &mut [[f32; 4]], painter: &Painter) {
     let outline_px = layout.outline_px;
     // One squared distance field serves the outlines, the shadows' outlines and the glow.
     let glow = text.glow.filter(|_| layout.glow_px > 0.0);
     let wants_outline = outline_px > 0.0 || layout.shadows.iter().any(|s| s.outline_px > 0.0);
+    if let (Some(px), Some(bloom)) = (layout.bloom, text.bloom) {
+        draw_bloom(canvas, fill, bloom.color, px);
+    }
     let squared = (wants_outline || glow.is_some()).then(|| fill.squared_distances());
     if let (Some(glow), Some(squared)) = (glow, squared.as_deref()) {
         draw_glow(canvas, squared, &glow, outline_px, layout.glow_px);
@@ -772,6 +784,8 @@ struct Layout {
     shadows: Vec<ShadowPx>,
     /// How far the glow reaches past the outline, in pixels; 0 for no glow.
     glow_px: f32,
+    /// The bloom in pixels; `None` for none.
+    bloom: Option<BloomPx>,
     missing_family: Option<String>,
     no_font: bool,
     missing_glyphs: usize,
@@ -860,6 +874,67 @@ fn draw_glow(canvas: &mut [[f32; 4]], squared: &[f64], glow: &engine::project::T
             None => core,
         };
         over(dst, color, alpha);
+    }
+}
+
+/// A bloom in pixels: its blur radius, its brightness and how far it is moved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BloomPx {
+    radius: f32,
+    strength: f32,
+    dx: f32,
+    dy: f32,
+}
+
+impl BloomPx {
+    /// How far the blur spreads the ink: three box blurs of half width `blur_half` each.
+    fn spread(&self) -> f32 {
+        (blur_half(self.radius) * 3) as f32
+    }
+
+    /// How far it reaches past the ink, moved, the farthest way.
+    fn reach(&self) -> f32 {
+        self.spread() + self.dx.abs().max(self.dy.abs())
+    }
+}
+
+/// The bloom of `text` at `font_px`: `None` when there is none or it would not show (no strength,
+/// or a blur too small to move a pixel).
+fn bloom_px(text: &TextContent, font_px: f32) -> Option<BloomPx> {
+    let bloom = text.bloom?;
+    let clamp = |value: f32, max: f32| if value.is_finite() { value.clamp(-max, max) } else { 0.0 };
+    let strength = clamp(bloom.strength, 1.0).max(0.0);
+    let radius = clamp(bloom.range, 1.0).max(0.0) * engine::MAX_BLOOM_RADIUS * font_px;
+    if strength <= 0.0 || blur_half(radius) == 0 {
+        return None;
+    }
+    let dir = engine::MAX_BLOOM_DIR;
+    Some(BloomPx { radius, strength, dx: (clamp(bloom.dir_x, dir) * radius).round(), dy: (clamp(bloom.dir_y, dir) * radius).round() })
+}
+
+/// Lays a bloom of `color` into `canvas`: the glyph coverage `fill` blurred, moved and brightened.
+/// Twice the strength makes a strength of 0.5 give the blurred coverage as it is, so the light is
+/// as strong as the ink where letters crowd and fades away from them.
+fn draw_bloom(canvas: &mut [[f32; 4]], fill: &Mask, color: engine::Rgba, bloom: BloomPx) {
+    let mut light = fill.clone();
+    light.blur(bloom.radius);
+    let color = premultiplied(color);
+    let gain = bloom.strength * 2.0;
+    let (width, height) = (fill.width as i64, fill.height as i64);
+    let (dx, dy) = (bloom.dx as i64, bloom.dy as i64);
+    for y in 0..height {
+        let sy = y - dy;
+        if !(0..height).contains(&sy) {
+            continue;
+        }
+        for x in 0..width {
+            let sx = x - dx;
+            if !(0..width).contains(&sx) {
+                continue;
+            }
+            let a = (light.data[(sy * width + sx) as usize] * gain).min(1.0);
+            over(&mut canvas[(y * width + x) as usize], color, a);
+        }
     }
 }
 

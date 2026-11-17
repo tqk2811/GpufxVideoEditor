@@ -2,7 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::frame_rate::FrameRate;
-use crate::project::{speed_in_range, Clip, Project, TextContent, TextOutline, TextPaint, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINES, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOWS, MAX_TEXT_SHADOW_BLUR, MAX_TEXT_SHADOW_DISTANCE, TEXT_TEXTURE_SCALE_RANGE, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
+use crate::project::{speed_in_range, Clip, Project, TextContent, TextOutline, TextPaint, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINES, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOWS, MAX_TEXT_SHADOW_BLUR, MAX_TEXT_SHADOW_DISTANCE, TEXT_TEXTURE_SCALE_RANGE, GLOW_FALLOFF_RANGE, MAX_BLOOM_DIR, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -33,6 +33,13 @@ pub fn text_style_problems(text: &TextContent) -> Vec<TextStyleProblem> {
         style("glow.radius", glow.radius, glow.radius.is_finite() && (0.0..=MAX_GLOW_RADIUS).contains(&glow.radius), format!("from 0 to {MAX_GLOW_RADIUS}"));
         style("glow.intensity", glow.intensity, glow.intensity.is_finite() && (0.0..=MAX_GLOW_INTENSITY).contains(&glow.intensity), format!("from 0 to {MAX_GLOW_INTENSITY}"));
         style("glow.falloff", glow.falloff, glow.falloff.is_finite() && GLOW_FALLOFF_RANGE.contains(&glow.falloff), format!("from {} to {}", GLOW_FALLOFF_RANGE.start(), GLOW_FALLOFF_RANGE.end()));
+    }
+    if let Some(bloom) = &text.bloom {
+        style("bloom.strength", bloom.strength, bloom.strength.is_finite() && (0.0..=1.0).contains(&bloom.strength), "from 0 to 1".to_owned());
+        style("bloom.range", bloom.range, bloom.range.is_finite() && (0.0..=1.0).contains(&bloom.range), "from 0 to 1".to_owned());
+        for (field, value) in [("bloom.dir_x", bloom.dir_x), ("bloom.dir_y", bloom.dir_y)] {
+            style(field, value, value.is_finite() && value.abs() <= MAX_BLOOM_DIR, format!("from -{MAX_BLOOM_DIR} to {MAX_BLOOM_DIR}"));
+        }
     }
     problems
 }

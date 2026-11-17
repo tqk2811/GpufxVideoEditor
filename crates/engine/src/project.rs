@@ -307,6 +307,9 @@ pub struct TextContent {
     /// Glow around the glyphs, under the shadows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glow: Option<TextGlow>,
+    /// Soft light spread from the whole text, under everything else of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloom: Option<TextBloom>,
     /// Horizontal alignment of the lines.
     #[serde(default)]
     pub align: TextAlign,
@@ -347,6 +350,7 @@ impl TextContent {
             shadows: Vec::new(),
             inner_shadows: Vec::new(),
             glow: None,
+            bloom: None,
             align: TextAlign::Center,
             line_spacing: 1.0,
             weight: NORMAL_WEIGHT,
@@ -800,6 +804,40 @@ pub const GLOW_FALLOFF_RANGE: std::ops::RangeInclusive<f32> = 0.1..=8.0;
 
 fn default_glow_falloff() -> f32 {
     2.0
+}
+
+/// A bloom: the glyph coverage blurred into a soft light of `color` under the text, as a lit sign
+/// spreads light around it. Unlike [`TextGlow`], which follows the distance to the ink, it is a
+/// blur of the whole text, so letters close together light each other and add up.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TextBloom {
+    /// Colour of the light.
+    pub color: Rgba,
+    /// How bright the light is, 0 to 1.
+    #[serde(default = "default_bloom_strength")]
+    pub strength: f32,
+    /// How far the light spreads, 0 to 1; 1 blurs it by [`MAX_BLOOM_RADIUS`] font sizes.
+    #[serde(default = "default_bloom_range")]
+    pub range: f32,
+    /// Moves the light across, -1 to 1, in parts of its spread; positive to the right.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub dir_x: f32,
+    /// Moves the light down, -1 to 1, in parts of its spread; positive downwards.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub dir_y: f32,
+}
+
+/// The blur radius of a bloom at range 1, as a part of the font size.
+pub const MAX_BLOOM_RADIUS: f32 = 1.0;
+/// The most a bloom may be moved either way along each axis, in parts of its spread.
+pub const MAX_BLOOM_DIR: f32 = 1.0;
+
+fn default_bloom_strength() -> f32 {
+    0.5
+}
+
+fn default_bloom_range() -> f32 {
+    0.4
 }
 
 /// The preset animations of a clip: one to enter, one to leave and one that repeats.

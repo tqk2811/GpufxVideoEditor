@@ -217,3 +217,37 @@ fn characters_drawn_one_by_one_keep_the_paints_of_the_still_text() {
     let worst = still.pixels.iter().zip(&drawn.pixels).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
     assert!(worst <= 3, "{worst}");
 }
+
+#[test]
+fn a_bloom_lights_around_the_text_under_it_and_moves_with_its_direction() {
+    let Some(mut r) = rasterizer() else { return };
+    let font_px = SIZE * HEIGHT as f32;
+    let mut text = TextContent::new("I", SIZE);
+    text.fill = TextPaint::solid([255, 0, 0, 255]);
+    let plain = r.rasterize(&text, HEIGHT, 1.0);
+    text.bloom = Some(engine::TextBloom { color: [0, 0, 255, 255], strength: 1.0, range: 0.2, dir_x: 0.0, dir_y: 0.0 });
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    assert!(image.width > plain.width && image.height > plain.height, "the picture grows by the spread");
+    let y = image.height as i32 / 2;
+    let (left, right) = stem(&image, y, red);
+    let center = (left + right) / 2;
+    assert_eq!(pixel(&image, center, y), [255, 0, 0, 255], "the fill stays on top");
+    let step = |parts: f32| (parts * font_px).round() as i32;
+    let near = pixel(&image, right + step(0.02), y);
+    let far = pixel(&image, right + step(0.15), y);
+    assert!(near[2] > 100 && near[0] < 10 && near[2] == near[3], "blue light next to the ink: {near:?}");
+    assert!(far[3] < near[3], "fading away: {far:?} after {near:?}");
+    assert_eq!(pixel(&image, 0, y)[3], 0, "nothing at the edge of the picture: the margin holds it");
+    assert_eq!(pixel(&image, image.width as i32 - 1, y)[3], 0);
+    // Moved right by its whole spread: more light on the right than on the left.
+    text.bloom = Some(engine::TextBloom { dir_x: 1.0, ..text.bloom.unwrap() });
+    let moved = r.rasterize(&text, HEIGHT, 1.0);
+    let (left, right) = stem(&moved, y, red);
+    let (l, rr) = (pixel(&moved, left - step(0.04), y), pixel(&moved, right + step(0.04), y));
+    assert!(rr[3] > l[3], "right {rr:?} over left {l:?}");
+    assert_eq!(pixel(&moved, moved.width as i32 - 1, y)[3], 0, "the margin follows the move");
+    // No strength: no bloom and the picture as without one.
+    text.bloom = Some(engine::TextBloom { strength: 0.0, ..text.bloom.unwrap() });
+    let none = r.rasterize(&text, HEIGHT, 1.0);
+    assert_eq!((none.width, none.height, &none.pixels), (plain.width, plain.height, &plain.pixels));
+}

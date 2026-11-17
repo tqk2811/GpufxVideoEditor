@@ -420,7 +420,7 @@ impl TextRasterizer {
 
     fn prepared(&mut self, text: &TextContent, layout: &Layout, downscaled: bool) -> Prepared {
         let blank = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, missing_texture: None, downscaled, margin: (0, 0) };
-        let layers = Layout { font_px: layout.font_px, outline_px: layout.outline_px, shadows: layout.shadows.clone(), glow_px: layout.glow_px, origin: layout.origin, text_size: layout.text_size, ..Layout::default() };
+        let layers = Layout { font_px: layout.font_px, outline_px: layout.outline_px, shadows: layout.shadows.clone(), glow_px: layout.glow_px, bloom: layout.bloom, origin: layout.origin, text_size: layout.text_size, ..Layout::default() };
         let (textures, missing_texture) = self.textures.textures_for(text);
         let blank = TextImage { missing_texture, ..blank };
         let bytes = textures.bytes();
@@ -455,7 +455,8 @@ impl TextRasterizer {
         // Room around the ink for the glow, the outline and the shadow of a fading character.
         // A shadow is the coverage grown by its own outlines (not the text's), moved and blurred.
         let shadow_reach = layout.shadows.iter().map(|s| s.outline_px + s.dx.abs().max(s.dy.abs()) + s.blur * 2.0).fold(0.0, f32::max);
-        let room = (layout.outline_px + layout.glow_px).max(shadow_reach).ceil() as i32 + 3;
+        let bloom_reach = layout.bloom.map_or(0.0, |bloom| bloom.reach());
+        let room = (layout.outline_px + layout.glow_px).max(shadow_reach).max(bloom_reach).ceil() as i32 + 3;
         prepared.room = room;
         let (ox, oy) = (left as i32, top as i32);
         for ((glyphs, ink), range) in members.into_iter().zip(&graphemes) {

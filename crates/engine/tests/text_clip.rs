@@ -204,6 +204,32 @@ fn validate_checks_every_text_layer_and_their_limits() {
 }
 
 #[test]
+fn a_bloom_round_trips_with_its_defaults_and_is_validated() {
+    let mut text = TextContent::new("Hi", 0.1);
+    text.bloom = serde_json::from_str(r#"{"color":[255,200,0,255]}"#).unwrap();
+    assert_eq!(text.bloom, Some(engine::TextBloom { color: [255, 200, 0, 255], strength: 0.5, range: 0.4, dir_x: 0.0, dir_y: 0.0 }), "strength and range default as in CapCut");
+    let json = serde_json::to_string(&text).unwrap();
+    assert!(json.contains(r#""bloom":{"color":[255,200,0,255],"strength":0.5,"range":0.4}"#), "no direction written when there is none: {json}");
+    let moved = engine::TextBloom { dir_x: -0.5, dir_y: 1.0, ..text.bloom.unwrap() };
+    text.bloom = Some(moved);
+    assert_eq!(serde_json::from_str::<TextContent>(&serde_json::to_string(&text).unwrap()).unwrap(), text);
+    assert!(engine::text_style_problems(&text).is_empty());
+    let fields = |bloom: engine::TextBloom| {
+        let mut t = text.clone();
+        t.bloom = Some(bloom);
+        engine::text_style_problems(&t).into_iter().map(|p| p.field).collect::<Vec<_>>()
+    };
+    assert_eq!(fields(engine::TextBloom { strength: 1.5, ..moved }), vec!["bloom.strength"]);
+    assert_eq!(fields(engine::TextBloom { strength: -0.1, ..moved }), vec!["bloom.strength"]);
+    assert_eq!(fields(engine::TextBloom { range: f32::NAN, ..moved }), vec!["bloom.range"]);
+    assert_eq!(fields(engine::TextBloom { dir_x: 1.5, ..moved }), vec!["bloom.dir_x"]);
+    assert_eq!(fields(engine::TextBloom { dir_y: f32::INFINITY, ..moved }), vec!["bloom.dir_y"]);
+    let mut clip = text_clip("Hi", 0, 9000);
+    clip.text.as_mut().unwrap().bloom = Some(engine::TextBloom { range: 2.0, ..moved });
+    assert!(matches!(&validate(&project_with(vec![clip]), &AcceptAll)[..], [ValidationError::InvalidTextStyle { field, .. }] if field == "bloom.range"));
+}
+
+#[test]
 fn validate_rejects_text_on_an_audio_track() {
     let mut p = project_with(vec![text_clip("Hi", 0, 9000)]);
     p.tracks[0].kind = TrackKind::Audio;

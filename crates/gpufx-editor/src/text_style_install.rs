@@ -9,7 +9,8 @@
 //!
 //! Format 1 has one fill colour, one outline and one shadow. Format 2 adds the layers of a text
 //! ([`TextContent::fill`], `outlines`, `shadows`, `inner_shadows`, in the project's own JSON), in
-//! place of those three, and the pictures.
+//! place of those three, the bloom ([`TextContent::bloom`]) and the pictures. A pack of format 1
+//! that uses one of these fields is refused.
 //!
 //! A shared text-pack module for text and subtitle styles was considered; the user chose one module
 //! per pack type. The subtitle style pack ([`crate::subtitle_style_install`]) reuses the style
@@ -20,7 +21,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use d3d12_backend::is_safe_id;
-use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextContent, TextGlow, TextImageRef, TextInnerShadow, TextOutline, TextPaint, TextShadow, TextTransform};
+use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextBloom, TextContent, TextGlow, TextImageRef, TextInnerShadow, TextOutline, TextPaint, TextShadow, TextTransform};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
@@ -127,6 +128,9 @@ pub struct PackTextStyle {
     /// Format 2: the inner shadows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inner_shadows: Option<Vec<TextInnerShadow>>,
+    /// Format 2: the bloom, a light spread from the whole text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloom: Option<TextBloom>,
 }
 
 /// [`TextOutline`], with no other field allowed.
@@ -200,7 +204,7 @@ pub struct PackAnimationRef {
 impl PackTextStyle {
     /// Whether the style uses a field of format 2.
     pub fn has_layers(&self) -> bool {
-        self.fill.is_some() || self.outlines.is_some() || self.shadows.is_some() || self.inner_shadows.is_some()
+        self.fill.is_some() || self.outlines.is_some() || self.shadows.is_some() || self.inner_shadows.is_some() || self.bloom.is_some()
     }
 
     /// The style on a new text of `content` and `size`, before a font hint is looked up.
@@ -222,6 +226,7 @@ impl PackTextStyle {
             None => self.shadow.map(|v| TextShadow::solid(v.color, v.offset, v.blur)).into_iter().collect(),
         };
         text.inner_shadows = self.inner_shadows.clone().unwrap_or_default();
+        text.bloom = self.bloom;
         text.glow = self.glow.map(|v| {
             let mut glow = TextGlow { color: v.color, outer_color: v.outer_color, radius: v.radius, intensity: 1.0, falloff: 2.0 };
             glow.intensity = v.intensity.unwrap_or(glow.intensity);
@@ -369,7 +374,7 @@ pub fn check_text_style_fields(manifest: &TextStyleManifest) -> Result<(), Impor
     let layered = manifest.format == LAYERED_STYLE_FORMAT;
     check_pack_header(if layered { SUPPORTED_FORMAT } else { manifest.format }, &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "styles")?;
     if let Some(item) = manifest.items.iter().find(|item| !layered && item.style.has_layers()) {
-        return Err(ImportProblem::BadManifest(format!("the item \"{}\": fill, outlines, shadows and inner_shadows need format {LAYERED_STYLE_FORMAT}", item.id)));
+        return Err(ImportProblem::BadManifest(format!("the item \"{}\": fill, outlines, shadows, inner_shadows and bloom need format {LAYERED_STYLE_FORMAT}", item.id)));
     }
     check_item_ids(manifest.items.iter().map(|item| (item.id.as_str(), item.name.as_str())))?;
     manifest.items.iter().try_for_each(|item| check_style_item_parts(&item.id, &item.name, item.category.as_deref(), item.preview_text.as_deref(), &item.style, item.animation.as_ref()))
@@ -523,6 +528,7 @@ pub(crate) mod tests {
             ("an unknown item field", full.replace(r#""category":"glow""#, r#""category":"glow","speed":2"#), "BadManifest"),
             ("an unknown style field", full.replace(r#""italic":true"#, r#""italic":true,"bloom":[]"#), "BadManifest"),
             ("a layer field in format 1", full.replace(r#""italic":true"#, r#""italic":true,"shadows":[]"#), "BadManifest"),
+            ("a bloom in format 1", full.replace(r#""italic":true"#, r#""italic":true,"bloom":{"color":[255,255,255,255]}"#), "BadManifest"),
             ("an unknown outline field", full.replace(r#""width":0.05"#, r#""width":0.05,"join":"round""#), "BadManifest"),
             ("an unknown animation group", full.replace(r#""loop":{"#, r#""middle":{"#), "BadManifest"),
             ("an unknown align", full.replace(r#""align":"left""#, r#""align":"justify""#), "BadManifest"),
@@ -560,7 +566,7 @@ pub(crate) mod tests {
         manifest_json().replacen(r#""format":1"#, r#""format":2"#, 1).replace(r#""color":[255,255,255,255],"outline":{"color":[0,0,0,255],"width":0.05},"#, style)
     }
 
-    const LAYERED_STYLE: &str = r#""fill":{"kind":"texture","image":{"kind":"pack","pack":"Avs-Text","file":"textures/gold.png"},"fit":"tile","scale":0.5},"outlines":[{"width":0.05,"paint":{"kind":"gradient","stops":[{"position":0,"color":[255,0,0,255]},{"position":1,"color":[0,0,255,255]}],"angle":90}}],"shadows":[{"distance":0.02,"angle":-45,"paint":{"kind":"solid","color":[0,0,0,255]}},{"distance":0.04,"angle":-45,"paint":{"kind":"solid","color":[0,0,0,255]},"outlines":[{"width":0.02,"paint":{"kind":"solid","color":[255,255,255,255]}}]}],"inner_shadows":[{"distance":0.01,"angle":90,"blur":0.01,"paint":{"kind":"solid","color":[0,0,0,128]}}],"#;
+    const LAYERED_STYLE: &str = r#""fill":{"kind":"texture","image":{"kind":"pack","pack":"Avs-Text","file":"textures/gold.png"},"fit":"tile","scale":0.5},"outlines":[{"width":0.05,"paint":{"kind":"gradient","stops":[{"position":0,"color":[255,0,0,255]},{"position":1,"color":[0,0,255,255]}],"angle":90}}],"shadows":[{"distance":0.02,"angle":-45,"paint":{"kind":"solid","color":[0,0,0,255]}},{"distance":0.04,"angle":-45,"paint":{"kind":"solid","color":[0,0,0,255]},"outlines":[{"width":0.02,"paint":{"kind":"solid","color":[255,255,255,255]}}]}],"inner_shadows":[{"distance":0.01,"angle":90,"blur":0.01,"paint":{"kind":"solid","color":[0,0,0,128]}}],"bloom":{"color":[255,255,0,255],"strength":0.8,"dir_y":0.5},"#;
 
     fn layered_pack(manifest: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut all: Vec<(&str, &[u8])> = vec![("manifest.json", manifest.as_bytes()), ("LICENSE.txt", b"license")];
@@ -581,6 +587,7 @@ pub(crate) mod tests {
         assert_eq!(text.fill.texture_image(), Some(&TextImageRef::Pack { pack: "Avs-Text".to_owned(), file: "textures/gold.png".to_owned() }));
         assert_eq!((text.outlines.len(), text.shadows.len(), text.shadows[1].outlines.len(), text.inner_shadows.len()), (1, 2, 1, 1));
         assert!(matches!(text.outlines[0].paint, TextPaint::Gradient { .. }));
+        assert_eq!(text.bloom, Some(TextBloom { color: [255, 255, 0, 255], strength: 0.8, range: 0.4, dir_x: 0.0, dir_y: 0.5 }));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -596,6 +603,7 @@ pub(crate) mod tests {
             ("a texture that is a file", layered_manifest(&file_texture), png, "BadManifest"),
             ("too many shadows", layered_manifest(&many_shadows), &[][..], "BadManifest"),
             ("a fill and a colour", layered_manifest(&both), png, "BadManifest"),
+            ("a bloom too strong", layered_manifest(&LAYERED_STYLE.replace(r#""strength":0.8"#, r#""strength":2"#)), png, "BadManifest"),
             ("a picture in a format 1 pack", manifest_json(), png, "Entry"),
         ] {
             let dir = scratch("layered-bad");
