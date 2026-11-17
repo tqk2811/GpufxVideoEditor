@@ -371,6 +371,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldCornerRadius => "Bo góc".to_owned(),
         Message::FieldShadowOffset => "Độ lệch".to_owned(),
         Message::FieldBlur => "Độ nhoè".to_owned(),
+        Message::FieldTextureMix => "Ảnh phủ lên nền".to_owned(),
         Message::LayerLimit(count) => format!("Tối đa {count}"),
         Message::TextLayers => "Lớp chữ".to_owned(),
         Message::TextFill => "Tô chữ".to_owned(),

@@ -183,7 +183,7 @@ fn a_texture_covers_the_text_and_a_missing_one_is_named() {
     let path = dir.join("two.png");
     image::RgbaImage::from_fn(1, 2, |_, y| if y == 0 { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) }).save(&path).unwrap();
     let mut text = TextContent::new("I", SIZE);
-    let texture = TextTexture { image: TextImageRef::File { path: path.to_string_lossy().into_owned() }, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None };
+    let texture = TextTexture { image: TextImageRef::File { path: path.to_string_lossy().into_owned() }, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, mix: 1.0, cells: 1, flip_x: false, flip_y: false, base: None };
     text.fill = TextPaint::Texture(texture.clone());
     let image = r.rasterize(&text, HEIGHT, 1.0);
     assert_eq!(image.missing_texture, None);
@@ -211,7 +211,7 @@ fn a_texture_covers_the_text_and_a_missing_one_is_named() {
     assert_eq!(image.missing_texture.as_deref(), Some(gone.as_str()));
     assert!(image.pixels.chunks(4).all(|p| p[3] == 0));
     // A pack picture the caller did not resolve is named as `<pack>/<file>`.
-    text.fill = TextPaint::Texture(TextTexture { image: TextImageRef::text_style_pack("gold", "a.png"), fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
+    text.fill = TextPaint::Texture(TextTexture { image: TextImageRef::text_style_pack("gold", "a.png"), fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, mix: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
     assert_eq!(r.rasterize(&text, HEIGHT, 1.0).missing_texture.as_deref(), Some("gold/a.png"));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -224,7 +224,7 @@ fn a_changed_texture_file_is_read_again() {
     let write = |color: [u8; 4], size: u32| image::RgbaImage::from_pixel(size, size, image::Rgba(color)).save(&path).unwrap();
     write([255, 0, 0, 255], 1);
     let mut text = TextContent::new("I", SIZE);
-    text.fill = TextPaint::Texture(TextTexture { image: TextImageRef::File { path: path.to_string_lossy().into_owned() }, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
+    text.fill = TextPaint::Texture(TextTexture { image: TextImageRef::File { path: path.to_string_lossy().into_owned() }, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, mix: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
     let stamps = gpufx_text::text_texture_stamps(&text);
     let image = r.rasterize(&text, HEIGHT, 1.0);
     let y = image.height as i32 / 2;
@@ -461,5 +461,98 @@ fn per_glyph_paints_follow_glyphs_that_move() {
     let step = (0.015 * font_px).round() as i32;
     let (left, right) = (pixel(&image, stems[1].0 - step, y), pixel(&image, stems[1].1 + step, y));
     assert!(left[2] > left[0] && right[0] > right[2], "a half turn puts the blue end on the left: {left:?} {right:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A picture `size` pixels square, red in the middle third (each way) and transparent around.
+fn red_middle(dir: &std::path::Path, size: u32) -> TextImageRef {
+    let path = dir.join("middle.png");
+    image::RgbaImage::from_fn(size, size, |x, y| if (size / 3..2 * size / 3).contains(&x) && (size / 3..2 * size / 3).contains(&y) { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 0, 0]) }).save(&path).unwrap();
+    TextImageRef::File { path: path.to_string_lossy().into_owned() }
+}
+
+#[test]
+fn a_glyph_cell_is_as_tall_as_its_glyph_whatever_the_glyph_width() {
+    // CapCut card styles: a wide letter's card used to come out taller than a narrow one's,
+    // leaving notches between the cards.
+    let Some(mut r) = rasterizer() else { return };
+    let dir = scratch("cell-height");
+    let mut text = TextContent::new("WI", SIZE);
+    text.fill = TextPaint::solid([0, 0, 0, 0]);
+    // The ring around each glyph shows the swatch, so its height can be measured outside the ink.
+    text.outlines = vec![TextOutline { width: 0.3, paint: TextPaint::Texture(TextTexture { fit: TextureFit::Glyph, ..TextTexture::new(red_middle(&dir, 30)) }) }];
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let y = image.height as i32 / 2;
+    let swatches = runs(&image, y, red);
+    assert!(swatches.len() >= 2, "{swatches:?}");
+    // The rows with red anywhere in the run's columns: the height of the swatch.
+    let height = |(a, b): (i32, i32)| (0..image.height as i32).filter(|&y| (a..=b).any(|x| red(pixel(&image, x, y)))).count() as i32;
+    let (w, i) = (height(swatches[0]), height(*swatches.last().unwrap()));
+    assert!((w - i).abs() <= 2, "the W's swatch {w} px tall, the I's {i} px");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_spread_keeps_a_soft_shadow_strong_at_the_glyph_edge() {
+    let Some(mut r) = rasterizer() else { return };
+    let font_px = SIZE * HEIGHT as f32;
+    let mut text = TextContent::new("I", SIZE);
+    text.fill = TextPaint::solid([255, 0, 0, 255]);
+    let alpha_near_edge = |r: &mut TextRasterizer, text: &TextContent| {
+        let image = r.rasterize(text, HEIGHT, 1.0);
+        let y = image.height as i32 / 2;
+        let (_, right) = stem(&image, y, red);
+        // A twentieth of the font size past the glyph edge.
+        pixel(&image, right + (font_px * 0.05) as i32, y)[3]
+    };
+    text.shadows = vec![TextShadow::solid([0, 0, 255, 255], [0.0, 0.0], 0.1)];
+    let blurred = alpha_near_edge(&mut r, &text);
+    text.shadows[0].spread = 0.1;
+    let spread = alpha_near_edge(&mut r, &text);
+    assert!(spread >= 200 && spread > blurred, "with spread {spread}, blur alone {blurred}");
+}
+
+#[test]
+fn a_shadow_blur_softens_its_glyphs_but_not_its_outlines() {
+    // CapCut card styles: a shadow with a transparent paint, a textured outline and a blur drew no
+    // halo around the card in the covers.
+    let Some(mut r) = rasterizer() else { return };
+    let mut text = TextContent::new("I", SIZE);
+    text.fill = TextPaint::solid([255, 0, 0, 255]);
+    let mut shadow = TextShadow::solid([0, 0, 0, 0], [0.0, 0.0], 0.2);
+    shadow.outlines = vec![TextOutline::solid([0, 255, 0, 255], 0.1)];
+    text.shadows = vec![shadow];
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let y = image.height as i32 / 2;
+    let (left, right) = stem(&image, y, red);
+    let font_px = SIZE * HEIGHT as f32;
+    let ring = pixel(&image, right + (font_px * 0.05) as i32, y);
+    assert_eq!(ring, [0, 255, 0, 255], "the middle of the ring stays sharp");
+    let outside = pixel(&image, right + (font_px * 0.1) as i32 + 3, y);
+    assert_eq!(outside[3], 0, "nothing past the ring {outside:?}");
+    let _ = left;
+}
+
+#[test]
+fn a_texture_opacity_fades_the_picture_and_its_base_as_one() {
+    let Some(mut r) = rasterizer() else { return };
+    let dir = scratch("mix");
+    let mut text = TextContent::new("I", SIZE);
+    let base = Some(Box::new(TextPaint::solid([0, 255, 0, 255])));
+    let red_picture = picture(&dir, "red.png", &[[255, 0, 0, 255]]);
+    let middle = |r: &mut TextRasterizer, text: &TextContent| {
+        let image = r.rasterize(text, HEIGHT, 1.0);
+        let y = image.height as i32 / 2;
+        let (left, right) = stem(&image, y, |p| p[3] > 100);
+        pixel(&image, (left + right) / 2, y)
+    };
+    // Half the picture over the base, all of it at half strength: no more green than red.
+    text.fill = TextPaint::Texture(TextTexture { opacity: 0.5, mix: 0.5, base: base.clone(), ..TextTexture::new(red_picture.clone()) });
+    let p = middle(&mut r, &text);
+    assert!((p[3] as i32 - 128).abs() <= 2 && (p[0] as i32 - p[1] as i32).abs() <= 3, "{p:?}");
+    // An opaque picture at full mix hides its base whatever the opacity.
+    text.fill = TextPaint::Texture(TextTexture { opacity: 0.5, base, ..TextTexture::new(red_picture) });
+    let p = middle(&mut r, &text);
+    assert!(p[1] < 5 && (p[3] as i32 - 128).abs() <= 2, "{p:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

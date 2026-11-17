@@ -80,6 +80,7 @@ pub(super) fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, laye
                 percent_row(ui, &language.t(Message::FieldDistance), &mut shadow.distance, SHADOW_DISTANCE_RANGE);
                 degree_row(ui, &language.t(Message::FieldAngle), &mut shadow.angle, SHADOW_ANGLE_RANGE);
                 percent_row(ui, &language.t(Message::FieldBlur), &mut shadow.blur, SHADOW_BLUR_RANGE);
+                percent_row(ui, &language.t(Message::FieldSpread), &mut shadow.spread, OUTLINE_WIDTH_RANGE);
                 paint_editor(ui, ui.scope_id().with("paint"), &mut shadow.paint, PaintSlot::Shadow(index), layers);
                 egui::CollapsingHeader::new(counted(&language.t(Message::ShadowOutlines), shadow.outlines.len())).id_salt(ui.scope_id().with("outlines")).show(ui, |ui| {
                     outline_list(ui, ui.scope_id().with("outline-list"), &mut shadow.outlines, |outline| PaintSlot::ShadowOutline(index, outline), layers);
@@ -334,6 +335,10 @@ fn texture_rows(ui: &mut egui::Ui, id: egui::Id, texture: &mut TextTexture, slot
     percent_row(ui, &language.t(Message::FieldScale), &mut texture.scale, TEXTURE_SCALE_RANGE);
     degree_row(ui, &language.t(Message::FieldAngle), &mut texture.angle, SHADOW_ANGLE_RANGE);
     percent_row(ui, &language.t(Message::FieldOpacity), &mut texture.opacity, UNIT_PERCENT_RANGE);
+    if texture.base.is_some() {
+        // How much of the picture covers its base; without a base it is no more than the opacity.
+        percent_row(ui, &language.t(Message::FieldTextureMix), &mut texture.mix, UNIT_PERCENT_RANGE);
+    }
     ui.horizontal(|ui| {
         ui.checkbox(&mut texture.flip_x, language.t(Message::FlipX));
         ui.checkbox(&mut texture.flip_y, language.t(Message::FlipY));

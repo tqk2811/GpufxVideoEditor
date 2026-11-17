@@ -398,6 +398,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldCornerRadius => "Corner radius".to_owned(),
         Message::FieldShadowOffset => "Offset".to_owned(),
         Message::FieldBlur => "Blur".to_owned(),
+        Message::FieldTextureMix => "Picture over base".to_owned(),
         Message::LayerLimit(count) => format!("At most {count}"),
         Message::TextLayers => "Text layers".to_owned(),
         Message::TextFill => "Fill".to_owned(),

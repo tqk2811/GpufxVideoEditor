@@ -399,15 +399,18 @@ impl<'a> Painter<'a> {
                 gradient_color(stops, gradient_t(rect, *angle, qx, qy))
             }
             TextPaint::Texture(texture) => {
+                // The picture laid over its base by `mix`, the whole faded by `opacity`.
                 let color = self.texture_color(texture, px, py);
-                match texture.base.as_deref() {
+                let opacity = if texture.opacity.is_finite() { texture.opacity.clamp(0.0, 1.0) } else { 1.0 };
+                let laid = match texture.base.as_deref() {
                     // A texture under a texture is refused by validation; drawn as none.
                     Some(base) if !matches!(base, TextPaint::Texture(_)) => {
                         let under = self.paint_at(base, px, py);
                         std::array::from_fn(|c| color[c] + under[c] * (1.0 - color[3]))
                     }
                     _ => color,
-                }
+                };
+                laid.map(|c| c * opacity)
             }
         }
     }
@@ -446,15 +449,21 @@ impl<'a> Painter<'a> {
         let TextImageRef::File { path } = &texture.image else { return [0.0; 4] };
         let Some(picture) = self.textures.get(path) else { return [0.0; 4] };
         let scale = if texture.scale.is_finite() { texture.scale.clamp(*engine::TEXT_TEXTURE_SCALE_RANGE.start(), *engine::TEXT_TEXTURE_SCALE_RANGE.end()) } else { 1.0 };
-        let opacity = if texture.opacity.is_finite() { texture.opacity.clamp(0.0, 1.0) } else { 1.0 };
+        let opacity = if texture.mix.is_finite() { texture.mix.clamp(0.0, 1.0) } else { 1.0 };
         if texture.fit == TextureFit::Glyph {
-            // One cell per glyph, in turn, covering the glyph's box and centred on it.
+            // One cell per glyph, in turn, centred on the glyph's box. The cell is taken as a square
+            // as wide as the cell, from the middle of the picture, whose side spans the height of the
+            // glyph's box: so every glyph of a line gets a swatch of the same size, whatever its
+            // width, and swatches of neighbouring glyphs meet as one band. Measured on the CapCut
+            // covers of the card styles (rows of square swatches, one per letter, drawn on an outline
+            // 0.4 font sizes wide): fitting the cell to the box width instead made a wide letter's
+            // card taller than its neighbours' and left notches and gaps between the cards.
             let (number, (x0, y0, x1, y1), (px, py)) = self.glyph_at(px, py).unwrap_or((0, self.rect, (px, py)));
             let cells = texture.cells.clamp(1, engine::MAX_TEXTURE_CELLS) as usize;
             let cell_width = (picture.width / cells).max(1);
             let cell = number % cells;
             let (cw, ih) = (cell_width as f32, picture.height as f32);
-            let zoom = ((x1 - x0) / cw).max((y1 - y0) / ih).max(1e-3) * scale;
+            let zoom = ((y1 - y0) / cw).max(1e-3) * scale;
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
             let (qx, qy) = turned(texture.angle, (cx, cy), px, py);
             let mut u = (qx - cx) / zoom + cw / 2.0;
@@ -537,13 +546,14 @@ fn gradient_color(stops: &[GradientStop], t: f32) -> [f32; 4] {
     premultiplied(stops[stops.len() - 1].color)
 }
 
-/// A shadow in pixels: offset, blur and the widest of its outlines.
+/// A shadow in pixels: offset, blur, the widest of its outlines and how far its glyphs are grown.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ShadowPx {
     pub dx: f32,
     pub dy: f32,
     pub blur: f32,
     pub outline_px: f32,
+    pub spread: f32,
 }
 
 /// The width in pixels an outline `width` font sizes wide draws at.
@@ -575,32 +585,46 @@ pub(crate) fn draw_outlines(canvas: &mut [[f32; 4]], fill: &Mask, squared: &[f64
 }
 
 /// Draws the shadows of `text` over `canvas`, the last first, each the coverage `fill` grown by
-/// its outlines, painted, blurred and moved. `shadows` holds the pixels of each.
+/// its spread, painted and blurred, over the rings of its outlines (not blurred), all moved.
+/// `shadows` holds the pixels of each; `squared` the squared distances of `fill`, there whenever
+/// a shadow has outlines or a spread.
 pub(crate) fn draw_shadows(canvas: &mut [[f32; 4]], text: &TextContent, shadows: &[ShadowPx], fill: &Mask, squared: Option<&[f64]>, painter: &Painter) {
     let (width, height) = (fill.width, fill.height);
     // The picture of the shadow last drawn, unmoved, with the index of the shadow it was drawn for.
     let mut kept: Option<(usize, Vec<[f32; 4]>)> = None;
     for (index, (shadow, px)) in text.shadows.iter().zip(shadows).enumerate().rev() {
         let (dx, dy) = (px.dx.round() as i32, px.dy.round() as i32);
+        // The glyphs the shadow's paint covers: grown by its spread.
+        let grown = match squared.filter(|_| px.spread > 0.0) {
+            Some(squared) => std::borrow::Cow::Owned(fill.dilated(squared, px.spread)),
+            None => std::borrow::Cow::Borrowed(fill),
+        };
         let solid = shadow.paint.solid_color().filter(|_| shadow.outlines.iter().all(|outline| outline_px(outline.width, painter.font_px) <= 0.0));
         if let Some(color) = solid {
             // A plain shadow needs only its coverage.
-            let mut mask = fill.shifted(dx, dy);
+            let mut mask = grown.shifted(dx, dy);
             mask.blur(px.blur);
             painter.draw(canvas, &mask, &TextPaint::solid(color));
             continue;
         }
         let same = kept.as_ref().is_some_and(|(at, _)| {
             let other = &text.shadows[*at];
-            other.paint == shadow.paint && other.outlines == shadow.outlines && shadows[*at].blur == px.blur
+            other.paint == shadow.paint && other.outlines == shadow.outlines && shadows[*at].blur == px.blur && shadows[*at].spread == px.spread
         });
         if !same {
             let mut layer = vec![[0f32; 4]; width * height];
             if let Some(squared) = squared {
                 draw_outlines(&mut layer, fill, squared, &shadow.outlines, painter);
             }
-            painter.draw(&mut layer, fill, &shadow.paint);
-            blur_colors(&mut layer, width, height, px.blur);
+            // The glyphs are blurred on their own and laid over the rings, which stay sharp.
+            let mut body = vec![[0f32; 4]; width * height];
+            painter.grown(px.spread).draw(&mut body, &grown, &shadow.paint);
+            blur_colors(&mut body, width, height, px.blur);
+            for (dst, color) in layer.iter_mut().zip(&body) {
+                if color[3] > 0.0 {
+                    over(dst, *color, 1.0);
+                }
+            }
             kept = Some((index, layer));
         }
         let Some((_, layer)) = &kept else { continue };

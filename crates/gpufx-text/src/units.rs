@@ -514,7 +514,7 @@ impl TextRasterizer {
         }
         // Room around the ink for the glow, the outline and the shadow of a fading character.
         // A shadow is the coverage grown by its own outlines (not the text's), moved and blurred.
-        let shadow_reach = layout.shadows.iter().map(|s| s.outline_px + s.dx.abs().max(s.dy.abs()) + s.blur * 2.0).fold(0.0, f32::max);
+        let shadow_reach = layout.shadows.iter().map(|s| s.outline_px.max(s.spread) + s.dx.abs().max(s.dy.abs()) + s.blur * 2.0).fold(0.0, f32::max);
         let bloom_reach = layout.bloom.map_or(0.0, |bloom| bloom.reach());
         let room = (layout.outline_px + layout.glow_px).max(shadow_reach).max(bloom_reach).ceil() as i32 + 3;
         prepared.room = room;

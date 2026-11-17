@@ -74,6 +74,7 @@ fn layer_problems(text: &TextContent, style: &mut dyn FnMut(&str, f32, bool, Str
                 style(&format!("{field}.scale"), scale, scale.is_finite() && TEXT_TEXTURE_SCALE_RANGE.contains(&scale), format!("from {} to {}", TEXT_TEXTURE_SCALE_RANGE.start(), TEXT_TEXTURE_SCALE_RANGE.end()));
                 finite(style, &format!("{field}.angle"), texture.angle);
                 range(style, &format!("{field}.opacity"), texture.opacity, 1.0);
+                range(style, &format!("{field}.mix"), texture.mix, 1.0);
                 let cells = texture.cells;
                 style(&format!("{field}.cells"), cells as f32, (1..=MAX_TEXTURE_CELLS).contains(&cells), format!("from 1 to {MAX_TEXTURE_CELLS}"));
                 if let Some(base) = texture.base.as_deref() {
@@ -101,6 +102,7 @@ fn layer_problems(text: &TextContent, style: &mut dyn FnMut(&str, f32, bool, Str
         range(style, &format!("shadows[{i}].distance"), shadow.distance, MAX_TEXT_SHADOW_DISTANCE);
         finite(style, &format!("shadows[{i}].angle"), shadow.angle);
         range(style, &format!("shadows[{i}].blur"), shadow.blur, MAX_TEXT_SHADOW_BLUR);
+        range(style, &format!("shadows[{i}].spread"), shadow.spread, MAX_TEXT_OUTLINE_WIDTH);
         paint(style, &format!("shadows[{i}].paint"), &shadow.paint);
         outlines(style, &format!("shadows[{i}].outlines"), &shadow.outlines);
     }

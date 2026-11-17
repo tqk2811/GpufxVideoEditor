@@ -634,9 +634,16 @@ pub struct TextTexture {
     /// Turn of the picture, in degrees clockwise.
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub angle: f32,
-    /// Opacity of the picture, 0 to 1.
+    /// Opacity of the whole paint, 0 to 1: the picture and, under it, the [`Self::base`] (CapCut
+    /// layer `alpha`).
     #[serde(default = "unit_f32")]
     pub opacity: f32,
+    /// How much of the picture is laid over the [`Self::base`], 0 to 1 (CapCut texture `alpha`):
+    /// the base shows through by the rest. Without a base it only fades the picture, as
+    /// `opacity` does. Taken apart from `opacity` because CapCut fades a layer with its base as one
+    /// (a layer `alpha` below 1 must not let more of the base through the picture).
+    #[serde(default = "unit_f32", skip_serializing_if = "is_one_f32")]
+    pub mix: f32,
     /// With [`TextureFit::Glyph`], how many cells side by side the picture is cut into, 1 to
     /// [`MAX_TEXTURE_CELLS`]; the glyphs take them in turn (CapCut texture `range`).
     #[serde(default = "unit_u32", skip_serializing_if = "is_one_u32")]
@@ -657,12 +664,16 @@ pub struct TextTexture {
 impl TextTexture {
     /// A picture stretched over the text, unturned, opaque, with no cells, flip or base.
     pub fn new(image: TextImageRef) -> TextTexture {
-        TextTexture { image, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None }
+        TextTexture { image, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, mix: 1.0, cells: 1, flip_x: false, flip_y: false, base: None }
     }
 }
 
 fn unit_u32() -> u32 {
     1
+}
+
+fn is_one_f32(value: &f32) -> bool {
+    *value == 1.0
 }
 
 fn is_one_u32(value: &u32) -> bool {
@@ -777,8 +788,11 @@ pub struct TextBackground {
 ///
 /// Units, assumed for CapCut text effects and not yet compared with CapCut: its `distance` is
 /// taken as hundredths of the font size (divide by 100 for [`Self::distance`]), its `angle` as
-/// degrees counter-clockwise from the right (so -45 lies down and to the right, as here), and its
-/// `diffuse` as the blur in parts of the font size.
+/// degrees counter-clockwise from the right (so -45 lies down and to the right, as here). Its
+/// `diffuse` (parts of the font size) is drawn as a [`Self::spread`] and a [`Self::blur`] of twice
+/// it each: fitted to the halo of the CapCut neon covers, whose colour stays near full strength at
+/// the glyph edge and fades over about four `diffuse` (a blur alone of any size stayed at half or
+/// less). The covers also show that `diffuse` does not soften a shadow's outlines.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextShadow {
     /// How far the shadow lies from the text, in parts of the font size, 0 to
@@ -789,9 +803,15 @@ pub struct TextShadow {
     /// and to the right.
     #[serde(default)]
     pub angle: f32,
-    /// Blur radius, in parts of the font size, 0 to [`MAX_TEXT_SHADOW_BLUR`].
+    /// Blur radius, in parts of the font size, 0 to [`MAX_TEXT_SHADOW_BLUR`]. It softens the
+    /// shadow's glyphs (grown by [`Self::spread`]), not its outlines.
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub blur: f32,
+    /// How far the shadow's glyphs are grown before the blur, in parts of the font size, 0 to
+    /// [`MAX_TEXT_OUTLINE_WIDTH`]. A glow made of shadows keeps its full colour near the glyphs
+    /// this way, where a blur alone would halve it at their edge.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub spread: f32,
     /// What the shadow's glyphs (inside its outline rings) are painted with. Transparent leaves
     /// only the rings, so a shadow at distance 0 with outlines adds strokes around the text.
     pub paint: TextPaint,
@@ -807,7 +827,7 @@ impl TextShadow {
     /// size).
     pub fn solid(color: Rgba, offset: [f32; 2], blur: f32) -> TextShadow {
         let (distance, angle) = offset_to_polar(offset);
-        TextShadow { distance, angle, blur, paint: TextPaint::solid(color), outlines: Vec::new() }
+        TextShadow { distance, angle, blur, spread: 0.0, paint: TextPaint::solid(color), outlines: Vec::new() }
     }
 
     /// The offset `[x, y]`, y down, in parts of the font size.

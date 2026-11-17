@@ -346,7 +346,8 @@ pub enum PaintParam {
     Gradient { stops: Vec<StopParam>, angle: Option<f32>, per_glyph: Option<bool> },
     /// A picture laid over the text. scale (0.01 to 100, 1 by default): with tile, one copy is
     /// scale font sizes tall; with stretch or glyph it multiplies the size that covers the text or
-    /// the glyph. angle turns the picture, degrees clockwise (0). opacity 0 to 1 (1). fit is
+    /// the glyph. angle turns the picture, degrees clockwise (0). opacity 0 to 1 (1) fades the
+    /// picture with its base; mix 0 to 1 (1) is how much of the picture covers the base. fit is
     /// stretch by default. cells (1 to 64, 1 by default) is how many cells the picture is cut into
     /// with fit glyph. flip_x and flip_y mirror the picture left to right and top to bottom (false).
     /// base is a solid or gradient paint under the picture, shown where it is see-through (none).
@@ -356,6 +357,7 @@ pub enum PaintParam {
         scale: Option<f32>,
         angle: Option<f32>,
         opacity: Option<f32>,
+        mix: Option<f32>,
         cells: Option<u32>,
         flip_x: Option<bool>,
         flip_y: Option<bool>,
@@ -368,7 +370,7 @@ impl From<PaintParam> for engine::TextPaint {
         match paint {
             PaintParam::Solid { color } => Self::Solid { color },
             PaintParam::Gradient { stops, angle, per_glyph } => gradient_paint(stops, angle, per_glyph),
-            PaintParam::Texture { image, fit, scale, angle, opacity, cells, flip_x, flip_y, base } => {
+            PaintParam::Texture { image, fit, scale, angle, opacity, mix, cells, flip_x, flip_y, base } => {
                 let image = match image {
                     ImageParam::File { path } => engine::TextImageRef::File { path },
                     ImageParam::Pack { pack, file, pack_type } => engine::TextImageRef::Pack {
@@ -392,6 +394,7 @@ impl From<PaintParam> for engine::TextPaint {
                     scale: scale.unwrap_or(1.0),
                     angle: angle.unwrap_or(0.0),
                     opacity: opacity.unwrap_or(1.0),
+                    mix: mix.unwrap_or(1.0),
                     cells: cells.unwrap_or(1),
                     flip_x: flip_x.unwrap_or(false),
                     flip_y: flip_y.unwrap_or(false),
@@ -432,8 +435,12 @@ pub struct LayerShadowParam {
     pub angle: Option<f32>,
     /// [x, y] in parts of the font size, y down, in place of distance and angle.
     pub offset: Option<[f32; 2]>,
-    /// Blur radius, in parts of the font size, 0 to 2 (0 by default).
+    /// Blur radius, in parts of the font size, 0 to 2 (0 by default); it softens the shadow's
+    /// glyphs, not its outlines.
     pub blur: Option<f32>,
+    /// How far the shadow's glyphs are grown before the blur, in parts of the font size, 0 to 0.5
+    /// (0 by default).
+    pub spread: Option<f32>,
     pub paint: PaintParam,
     /// Outlines of the shadow itself, at most 4, as the text's outlines.
     pub outlines: Option<Vec<LayerOutlineParam>>,
@@ -494,7 +501,7 @@ fn layers_patch(shadows: Option<Vec<LayerShadowParam>>, inner_shadows: Option<Ve
                 .map(|(index, shadow)| {
                     let (distance, angle) = shadow_polar(&format!("shadows[{index}]"), shadow.distance, shadow.angle, shadow.offset)?;
                     let outlines = shadow.outlines.unwrap_or_default().into_iter().map(Into::into).collect();
-                    Ok(engine::TextShadow { distance, angle, blur: shadow.blur.unwrap_or(0.0), paint: shadow.paint.into(), outlines })
+                    Ok(engine::TextShadow { distance, angle, blur: shadow.blur.unwrap_or(0.0), spread: shadow.spread.unwrap_or(0.0), paint: shadow.paint.into(), outlines })
                 })
                 .collect::<Result<Vec<_>, AgentError>>()
         })
