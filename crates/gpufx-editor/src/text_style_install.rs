@@ -1,10 +1,15 @@
 //! Installing a text style pack from a `.zip`. No window here.
 //!
 //! A zip with `"type": "text-style"` is unpacked once to
-//! `<user root>/packages/text-style/<id lower-cased>/`. It holds no media and no font: only the
-//! manifest, whose items are text styles, and its licence files. Applying a style copies its values
-//! into the clip (see [`crate::text_style_library`]); only its animations name presets of a clip
-//! animation pack.
+//! `<user root>/packages/text-style/<id lower-cased>/`. It holds no font: only the manifest, whose
+//! items are text styles, its licence files and, from format 2 on, the PNG and JPEG pictures its
+//! layers are painted with. Applying a style copies its values into the clip (see
+//! [`crate::text_style_library`]); its animations name presets of a clip animation pack, and its
+//! texture pictures stay in the pack, named by [`TextImageRef::Pack`].
+//!
+//! Format 1 has one fill colour, one outline and one shadow. Format 2 adds the layers of a text
+//! ([`TextContent::fill`], `outlines`, `shadows`, `inner_shadows`, in the project's own JSON), in
+//! place of those three, and the pictures.
 //!
 //! A shared text-pack module for text and subtitle styles was considered; the user chose one module
 //! per pack type. The subtitle style pack ([`crate::subtitle_style_install`]) reuses the style
@@ -15,18 +20,22 @@ use std::io::BufReader;
 use std::path::Path;
 
 use d3d12_backend::is_safe_id;
-use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextContent, TextGlow, TextOutline, TextPaint, TextShadow, TextTransform};
+use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextContent, TextGlow, TextImageRef, TextInnerShadow, TextOutline, TextPaint, TextShadow, TextTransform};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
+use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO, SUPPORTED_FORMAT};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem, Limits, MIB};
 use crate::text_clip::TEXT_SIZE_RANGE;
 
 /// What the `type` of a text style pack says, and the folder it goes to.
 pub const TEXT_STYLE_TYPE: &str = "text-style";
-/// A pack is a manifest and a few licence files.
-pub const STYLE_PACK_LIMITS: Limits = Limits { files: 64, total_bytes: 16 * MIB, file_bytes: 8 * MIB };
+/// A pack is a manifest, a few licence files and, for a text style pack of format 2, the texture
+/// pictures of its styles. A picture stays below what the rasterizer reads
+/// ([`gpufx_text::MAX_TEXTURE_FILE_BYTES`]).
+pub const STYLE_PACK_LIMITS: Limits = Limits { files: 256, total_bytes: 128 * MIB, file_bytes: 16 * MIB };
+/// The format of a text style pack whose styles may have layers and pictures.
+pub const LAYERED_STYLE_FORMAT: u32 = 2;
 pub(crate) const STYLE_PACK_EXTRACT: ExtractLimits = ExtractLimits { limits: STYLE_PACK_LIMITS, max_ratio: MAX_COMPRESSION_RATIO };
 /// The longest an animation of a style may last, in seconds.
 pub const MAX_STYLE_ANIMATION_SECONDS: f64 = 60.0;
@@ -106,6 +115,18 @@ pub struct PackTextStyle {
     pub letter_spacing: Option<f32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub font_hint: Vec<String>,
+    /// Format 2: what fills the glyphs, in place of `color`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<TextPaint>,
+    /// Format 2: the outlines, in place of `outline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outlines: Option<Vec<TextOutline>>,
+    /// Format 2: the shadows, in place of `shadow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadows: Option<Vec<TextShadow>>,
+    /// Format 2: the inner shadows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner_shadows: Option<Vec<TextInnerShadow>>,
 }
 
 /// [`TextOutline`], with no other field allowed.
@@ -177,15 +198,30 @@ pub struct PackAnimationRef {
 }
 
 impl PackTextStyle {
+    /// Whether the style uses a field of format 2.
+    pub fn has_layers(&self) -> bool {
+        self.fill.is_some() || self.outlines.is_some() || self.shadows.is_some() || self.inner_shadows.is_some()
+    }
+
     /// The style on a new text of `content` and `size`, before a font hint is looked up.
     pub fn text(&self, content: &str, size: f32) -> TextContent {
         let mut text = TextContent::new(content, self.size.unwrap_or(size));
         if let Some(color) = self.color {
             text.fill = TextPaint::solid(color);
         }
-        text.outlines = self.outline.map(|v| TextOutline::solid(v.color, v.width)).into_iter().collect();
+        if let Some(fill) = &self.fill {
+            text.fill = fill.clone();
+        }
+        text.outlines = match &self.outlines {
+            Some(outlines) => outlines.clone(),
+            None => self.outline.map(|v| TextOutline::solid(v.color, v.width)).into_iter().collect(),
+        };
         text.background = self.background.map(|v| TextBackground { color: v.color, padding: v.padding, radius: v.radius });
-        text.shadows = self.shadow.map(|v| TextShadow::solid(v.color, v.offset, v.blur)).into_iter().collect();
+        text.shadows = match &self.shadows {
+            Some(shadows) => shadows.clone(),
+            None => self.shadow.map(|v| TextShadow::solid(v.color, v.offset, v.blur)).into_iter().collect(),
+        };
+        text.inner_shadows = self.inner_shadows.clone().unwrap_or_default();
         text.glow = self.glow.map(|v| {
             let mut glow = TextGlow { color: v.color, outer_color: v.outer_color, radius: v.radius, intensity: 1.0, falloff: 2.0 };
             glow.intensity = v.intensity.unwrap_or(glow.intensity);
@@ -251,8 +287,25 @@ pub fn check_pack_style(style: &PackTextStyle) -> Result<(), String> {
             return Err("shadow.offset must be finite numbers".to_owned());
         }
     }
-    if let Some(problem) = engine::text_style_problems(&style.text("x", 0.1)).into_iter().next() {
+    for (old, new, both) in [("color", "fill", style.color.is_some() && style.fill.is_some()), ("outline", "outlines", style.outline.is_some() && style.outlines.is_some()), ("shadow", "shadows", style.shadow.is_some() && style.shadows.is_some())] {
+        if both {
+            return Err(format!("{old} and {new} are both given; {new} takes the place of {old}"));
+        }
+    }
+    let mut text = style.text("x", 0.1);
+    if let Some(problem) = engine::text_style_problems(&text).into_iter().next() {
         return Err(format!("{} {} must be {}", problem.field, problem.value, problem.allowed));
+    }
+    for paint in text.paints_mut() {
+        let Some(image) = paint.texture_image() else { continue };
+        match image {
+            TextImageRef::File { path } => return Err(format!("the texture \"{path}\" must name a picture of a text style pack, not a file")),
+            TextImageRef::Pack { pack, file } => {
+                if !(d3d12_backend::is_safe_pack_file(pack, file) && is_texture(file)) {
+                    return Err(format!("the texture \"{pack}/{file}\" is not a PNG or JPEG picture of a pack"));
+                }
+            }
+        }
     }
     if style.font_hint.len() > MAX_FONT_HINTS {
         return Err(format!("font_hint names more than {MAX_FONT_HINTS} fonts"));
@@ -312,7 +365,12 @@ pub fn check_text_style_fields(manifest: &TextStyleManifest) -> Result<(), Impor
     if manifest.kind != TEXT_STYLE_TYPE {
         return Err(ImportProblem::UnknownType(manifest.kind.clone()));
     }
-    check_pack_header(manifest.format, &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "styles")?;
+    // Format 2 has the header of format 1.
+    let layered = manifest.format == LAYERED_STYLE_FORMAT;
+    check_pack_header(if layered { SUPPORTED_FORMAT } else { manifest.format }, &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "styles")?;
+    if let Some(item) = manifest.items.iter().find(|item| !layered && item.style.has_layers()) {
+        return Err(ImportProblem::BadManifest(format!("the item \"{}\": fill, outlines, shadows and inner_shadows need format {LAYERED_STYLE_FORMAT}", item.id)));
+    }
     check_item_ids(manifest.items.iter().map(|item| (item.id.as_str(), item.name.as_str())))?;
     manifest.items.iter().try_for_each(|item| check_style_item_parts(&item.id, &item.name, item.category.as_deref(), item.preview_text.as_deref(), &item.style, item.animation.as_ref()))
 }
@@ -320,6 +378,37 @@ pub fn check_text_style_fields(manifest: &TextStyleManifest) -> Result<(), Impor
 /// A pack holds no media file.
 pub(crate) fn no_media(_: &str) -> bool {
     false
+}
+
+/// Whether `file` is a picture a text layer may be painted with.
+pub(crate) fn is_texture(file: &str) -> bool {
+    let extension = Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    d3d12_backend::ASSET_TEXTURE_EXTENSIONS.contains(&extension.as_str())
+}
+
+/// The pictures of its own pack that the styles of `manifest` paint with, each once.
+fn own_textures(manifest: &TextStyleManifest) -> Vec<&str> {
+    let mut files: Vec<&str> = Vec::new();
+    for item in &manifest.items {
+        let style = &item.style;
+        let mut paints: Vec<&TextPaint> = style.fill.iter().collect();
+        for outline in style.outlines.iter().flatten() {
+            paints.push(&outline.paint);
+        }
+        for shadow in style.shadows.iter().flatten() {
+            paints.push(&shadow.paint);
+            paints.extend(shadow.outlines.iter().map(|outline| &outline.paint));
+        }
+        paints.extend(style.inner_shadows.iter().flatten().map(|shadow| &shadow.paint));
+        for image in paints.into_iter().filter_map(TextPaint::texture_image) {
+            if let TextImageRef::Pack { pack, file } = image {
+                if pack.eq_ignore_ascii_case(&manifest.id) && !files.contains(&file.as_str()) {
+                    files.push(file);
+                }
+            }
+        }
+    }
+    files
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. An existing pack of the same id is
@@ -335,10 +424,13 @@ pub fn install_text_style_pack(source: &Path, user_root: &Path, overwrite: bool)
     let mut zip = ZipArchive::new(BufReader::new(file)).map_err(|e| ImportProblem::NotAZip(e.to_string()))?;
     let entries = entries_of(&mut zip, STYLE_PACK_LIMITS)?;
     validate_entries(&entries, STYLE_PACK_LIMITS)?;
-    check_entry_extensions(&entries, no_media)?;
     let manifest = parse_text_style_manifest(&read_manifest(&mut zip)?)?;
     check_text_style_fields(&manifest)?;
-    check_named_files(&manifest.license.files, std::iter::empty(), &entries, no_media, "media")?;
+    // Only a pack of format 2 may hold pictures, and every picture of its own a style names must be
+    // in it.
+    let media: fn(&str) -> bool = if manifest.format == LAYERED_STYLE_FORMAT { is_texture } else { no_media };
+    check_entry_extensions(&entries, media)?;
+    check_named_files(&manifest.license.files, own_textures(&manifest).into_iter(), &entries, media, "a PNG or JPEG picture")?;
 
     let id = manifest.id.to_ascii_lowercase();
     let check_unpacked = |temporary: &Path| {
@@ -429,7 +521,8 @@ pub(crate) mod tests {
         for (name, text, wanted) in [
             ("an unknown field", full.replacen(r#""id":"Avs-Text""#, r#""extra":1,"id":"Avs-Text""#, 1), "BadManifest"),
             ("an unknown item field", full.replace(r#""category":"glow""#, r#""category":"glow","speed":2"#), "BadManifest"),
-            ("an unknown style field", full.replace(r#""italic":true"#, r#""italic":true,"shadows":[]"#), "BadManifest"),
+            ("an unknown style field", full.replace(r#""italic":true"#, r#""italic":true,"bloom":[]"#), "BadManifest"),
+            ("a layer field in format 1", full.replace(r#""italic":true"#, r#""italic":true,"shadows":[]"#), "BadManifest"),
             ("an unknown outline field", full.replace(r#""width":0.05"#, r#""width":0.05,"join":"round""#), "BadManifest"),
             ("an unknown animation group", full.replace(r#""loop":{"#, r#""middle":{"#), "BadManifest"),
             ("an unknown align", full.replace(r#""align":"left""#, r#""align":"justify""#), "BadManifest"),
@@ -448,7 +541,7 @@ pub(crate) mod tests {
             ("a long duration", full.replace(r#""duration":2"#, r#""duration":600"#), "BadManifest"),
             ("an unsafe item id", full.replace(r#""id":"neon""#, r#""id":"a/b""#), "BadManifest"),
             ("a duplicate item id", full.replace(ITEM_JSON, &format!("{ITEM_JSON},{}", ITEM_JSON.replace(r#""id":"neon""#, r#""id":"NEON""#))), "BadManifest"),
-            ("another format", full.replacen(r#""format":1"#, r#""format":2"#, 1), "BadManifest"),
+            ("another format", full.replacen(r#""format":1"#, r#""format":3"#, 1), "BadManifest"),
             ("no items", full.split(r#""items""#).next().unwrap().to_owned() + r#""items":[]}"#, "BadManifest"),
             ("a licence file not in the zip", full.replace(r#""LICENSE.txt""#, r#""GONE.txt""#), "BadManifest"),
             ("an unsafe id", full.replace("Avs-Text", "../x"), "BadId"),
@@ -459,6 +552,63 @@ pub(crate) mod tests {
             assert!(!dir.join("root/packages/text-style").exists(), "{name}: nothing installed");
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    /// A format 2 manifest whose style fills with a picture of its own pack, outlines with a
+    /// gradient and stacks two shadows.
+    fn layered_manifest(style: &str) -> String {
+        manifest_json().replacen(r#""format":1"#, r#""format":2"#, 1).replace(r#""color":[255,255,255,255],"outline":{"color":[0,0,0,255],"width":0.05},"#, style)
+    }
+
+    const LAYERED_STYLE: &str = r#""fill":{"kind":"texture","image":{"kind":"pack","pack":"Avs-Text","file":"textures/gold.png"},"fit":"tile","scale":0.5},"outlines":[{"width":0.05,"paint":{"kind":"gradient","stops":[{"position":0,"color":[255,0,0,255]},{"position":1,"color":[0,0,255,255]}],"angle":90}}],"shadows":[{"distance":0.02,"angle":-45,"paint":{"kind":"solid","color":[0,0,0,255]}},{"distance":0.04,"angle":-45,"paint":{"kind":"solid","color":[0,0,0,255]},"outlines":[{"width":0.02,"paint":{"kind":"solid","color":[255,255,255,255]}}]}],"inner_shadows":[{"distance":0.01,"angle":90,"blur":0.01,"paint":{"kind":"solid","color":[0,0,0,128]}}],"#;
+
+    fn layered_pack(manifest: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut all: Vec<(&str, &[u8])> = vec![("manifest.json", manifest.as_bytes()), ("LICENSE.txt", b"license")];
+        all.extend_from_slice(files);
+        zip_of(&all)
+    }
+
+    #[test]
+    fn a_format_2_pack_holds_its_pictures_and_its_styles_give_layers() {
+        let dir = scratch("layered");
+        let root = dir.join("root");
+        let manifest = layered_manifest(LAYERED_STYLE);
+        let outcome = install_zip(&written(&dir, &layered_pack(&manifest, &[("textures/gold.png", b"png"), ("textures/spare.JPG", b"jpg")])), &root, false).unwrap();
+        assert!(matches!(outcome, ImportOutcome::TextStyleInstalled(_)), "{outcome:?}");
+        assert!(root.join("packages/text-style/avs-text/textures/gold.png").is_file());
+        let manifest = parse_text_style_manifest(manifest.as_bytes()).unwrap();
+        let text = manifest.items[0].style.text("Hi", 0.2);
+        assert_eq!(text.fill.texture_image(), Some(&TextImageRef::Pack { pack: "Avs-Text".to_owned(), file: "textures/gold.png".to_owned() }));
+        assert_eq!((text.outlines.len(), text.shadows.len(), text.shadows[1].outlines.len(), text.inner_shadows.len()), (1, 2, 1, 1));
+        assert!(matches!(text.outlines[0].paint, TextPaint::Gradient { .. }));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_format_2_pack_is_refused_for_what_it_must_not_hold() {
+        let png: &[(&str, &[u8])] = &[("textures/gold.png", b"png")];
+        let many_shadows = format!(r#""shadows":[{}],"#, vec![r#"{"distance":0.01,"angle":0,"paint":{"kind":"solid","color":[0,0,0,255]}}"#; engine::MAX_TEXT_SHADOWS + 1].join(","));
+        let file_texture = LAYERED_STYLE.replace(r#"{"kind":"pack","pack":"Avs-Text","file":"textures/gold.png"}"#, r#"{"kind":"file","path":"C:/gold.png"}"#);
+        let both = format!(r#""color":[255,255,255,255],{LAYERED_STYLE}"#);
+        for (name, manifest, files, wanted) in [
+            ("its own picture missing", layered_manifest(LAYERED_STYLE), &[][..], "BadManifest"),
+            ("a picture that is not PNG or JPEG", layered_manifest(&LAYERED_STYLE.replace("gold.png", "gold.gif")), &[("textures/gold.gif", &b"gif"[..])][..], "BadManifest"),
+            ("a texture that is a file", layered_manifest(&file_texture), png, "BadManifest"),
+            ("too many shadows", layered_manifest(&many_shadows), &[][..], "BadManifest"),
+            ("a fill and a colour", layered_manifest(&both), png, "BadManifest"),
+            ("a picture in a format 1 pack", manifest_json(), png, "Entry"),
+        ] {
+            let dir = scratch("layered-bad");
+            let error = install_zip(&written(&dir, &layered_pack(&manifest, files)), &dir.join("root"), false).unwrap_err();
+            assert!(format!("{error:?}").starts_with(wanted), "{name}: {error:?}");
+            assert!(!dir.join("root/packages/text-style").exists(), "{name}: nothing installed");
+            let _ = fs::remove_dir_all(&dir);
+        }
+        // A picture of another pack need not be in the zip, as an animation of another pack need not.
+        let dir = scratch("layered-other");
+        let other = layered_manifest(&LAYERED_STYLE.replace(r#""pack":"Avs-Text""#, r#""pack":"metal""#));
+        assert!(install_zip(&written(&dir, &layered_pack(&other, &[])), &dir.join("root"), false).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

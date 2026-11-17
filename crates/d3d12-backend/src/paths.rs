@@ -94,6 +94,11 @@ pub const ASSET_IMAGE_EXTENSIONS: [&str; 4] = engine::IMAGE_EXTENSIONS;
 pub const FONT_ASSET_TYPE: &str = "font";
 /// The extensions of the files of a font pack a text may draw with.
 pub const ASSET_FONT_EXTENSIONS: [&str; 3] = ["ttf", "otf", "ttc"];
+/// The pack type whose pictures paint text layers (see [`ProjectPaths::texture_pack_path`]). It is
+/// not one of [`ASSET_TYPES`]: no clip source names a texture.
+pub const TEXT_STYLE_ASSET_TYPE: &str = "text-style";
+/// The extensions of the pictures of a text style pack a text layer may be painted with.
+pub const ASSET_TEXTURE_EXTENSIONS: [&str; 3] = ["png", "jpg", "jpeg"];
 /// The longest pack id, which is also a folder name.
 pub const MAX_ASSET_ID_LENGTH: usize = 128;
 /// What an asset source that cannot be resolved turns into: no file can have this name on Windows.
@@ -161,6 +166,8 @@ pub enum AssetProblem {
     NotImage { source: String },
     /// The file is not a font a text may draw with.
     NotFont { source: String },
+    /// The file is not a picture a text layer may be painted with.
+    NotTexture { source: String },
     /// No package root holds the pack.
     PackMissing { kind: String, id: String },
     FileMissing { kind: String, id: String, file: String },
@@ -176,6 +183,7 @@ impl fmt::Display for AssetProblem {
             Self::NotAudio { source } => write!(f, "'{source}' is not an audio file of a pack"),
             Self::NotImage { source } => write!(f, "'{source}' is not an image of a pack"),
             Self::NotFont { source } => write!(f, "'{source}' is not a font of a pack"),
+            Self::NotTexture { source } => write!(f, "'{source}' is not a texture picture of a pack"),
             Self::PackMissing { kind, id } => write!(f, "the {kind} pack '{id}' is not installed"),
             Self::FileMissing { kind, id, file } => write!(f, "the {kind} pack '{id}' has no file '{file}'"),
             Self::Escapes { source } => write!(f, "'{source}' leads out of its pack"),
@@ -220,7 +228,7 @@ pub fn parse_asset_source(source: &str) -> Result<AssetRef, AssetProblem> {
 }
 
 /// Whether `id` and `file` (forward slashes) name a place inside a pack and nowhere else.
-fn is_safe_pack_file(id: &str, file: &str) -> bool {
+pub fn is_safe_pack_file(id: &str, file: &str) -> bool {
     let unsafe_part = |part: &str| part.is_empty() || part == "." || part == ".." || check_path_part(part).is_err();
     is_safe_id(id) && !file.contains('\\') &&!file.split('/').any(unsafe_part)
 }
@@ -358,6 +366,19 @@ impl ProjectPaths {
             return Err(AssetProblem::NotFont { source });
         }
         self.pack_file(AssetRef { kind: FONT_ASSET_TYPE.to_owned(), id: pack.to_ascii_lowercase(), file: file.to_owned() }, &source)
+    }
+
+    /// The picture `file` of the text style pack `pack`, in the first root holding the pack, checked
+    /// as an `asset:` source is.
+    pub fn texture_pack_path(&self, pack: &str, file: &str) -> Result<PathBuf, AssetProblem> {
+        let source = asset_source(TEXT_STYLE_ASSET_TYPE, pack, file);
+        if !is_safe_pack_file(pack, file) {
+            return Err(AssetProblem::Invalid { source });
+        }
+        if !ASSET_TEXTURE_EXTENSIONS.contains(&file_extension(file).as_str()) {
+            return Err(AssetProblem::NotTexture { source });
+        }
+        self.pack_file(AssetRef { kind: TEXT_STYLE_ASSET_TYPE.to_owned(), id: pack.to_ascii_lowercase(), file: file.to_owned() }, &source)
     }
 
     /// `asset` looked for in the roots, in order.
@@ -527,6 +548,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch).unwrap();
         scratch
+    }
+
+    #[test]
+    fn a_texture_of_a_text_style_pack_resolves_inside_its_pack_and_nothing_else_does() {
+        let scratch = asset_scratch("texture");
+        std::fs::create_dir_all(scratch.join("packages/text-style/gold/textures")).unwrap();
+        let pack = pack_in(&scratch, "text-style", "gold", &["textures/a.png", "b.JPG", "manifest.json"]);
+        let paths = ProjectPaths::new(&scratch.join("p.json"), vec![scratch.clone()]);
+        assert_eq!(paths.texture_pack_path("Gold", "textures/a.png"), Ok(pack.join("textures/a.png")));
+        assert_eq!(paths.texture_pack_path("gold", "b.JPG"), Ok(pack.join("b.JPG")));
+        assert!(matches!(paths.texture_pack_path("gold", "manifest.json"), Err(AssetProblem::NotTexture { .. })));
+        assert!(matches!(paths.texture_pack_path("gold", "c.png"), Err(AssetProblem::FileMissing { .. })));
+        assert!(matches!(paths.texture_pack_path("gold", "../gold/b.JPG"), Err(AssetProblem::Invalid { .. })));
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]
