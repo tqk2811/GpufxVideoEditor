@@ -290,6 +290,25 @@ fn the_list_is_bounded_under_the_still_textures() {
     assert_eq!(items[0].package, "hovered");
 }
 
+#[test]
+fn the_hovered_tile_of_a_later_grid_still_comes_first() {
+    let mut manager = PreviewManager::default();
+    manager.set_wanted(None, ["a", "b"]);
+    manager.add_wanted(Some("z"), ["z", "c"]);
+    assert_eq!(manager.wanted[..2], [item("z", PreviewJobKind::Still), item("z", PreviewJobKind::Loop)]);
+    assert!(manager.wanted.contains(&item("a", PreviewJobKind::Still)) && manager.wanted.contains(&item("c", PreviewJobKind::Still)));
+}
+
+#[test]
+fn the_hovered_tile_of_a_later_grid_is_kept_when_the_first_grid_filled_the_list() {
+    let names: Vec<String> = (0..1000).map(|n| n.to_string()).collect();
+    let mut manager = PreviewManager::default();
+    manager.set_wanted(None, names.iter().map(String::as_str));
+    manager.add_wanted(Some("hovered"), ["hovered"]);
+    assert_eq!(manager.wanted.len(), MAX_WANTED);
+    assert_eq!(manager.wanted[..2], [item("hovered", PreviewJobKind::Still), item("hovered", PreviewJobKind::Loop)]);
+}
+
 // The cache.
 
 #[test]

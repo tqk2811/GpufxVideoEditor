@@ -199,7 +199,7 @@ fn effects_tab_contents(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey
     let attached_height = (ui.available_height() * 0.45).max(60.0);
     egui::ScrollArea::vertical().id_salt("clip-effects").max_height(attached_height).auto_shrink([false, true]).show(ui, |ui| effects(ui, state, key, editable));
     ui.separator();
-    ui.add_enabled_ui(editable, |ui| super::left_panel::picker(ui, state, requests, super::left_panel::PickerFor::Effects));
+    super::left_panel::picker(ui, state, requests, super::left_panel::PickerFor::Effects, editable);
 }
 
 fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
@@ -1037,6 +1037,40 @@ mod tests {
         assert_eq!(state.selection(), Some(ClipKey { track: 0, clip: 0 }), "it stays selected");
         assert!(!matches!(state.status(), Status::Refused(_)), "the controls are off, not refused: {:?}", state.status());
         assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn a_locked_clip_still_imports_packages_from_the_effects_tab() {
+        let ctx = egui::Context::default();
+        let mut state = selected_clip();
+        state.toggle_track_locked(0);
+        state.ui.clip_tab = ClipTab::Picture;
+        state.ui.picture_tab = PictureTab::Effects;
+        let label = state.language().t(Message::ImportPackage);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 500.0));
+        let mut pass = |events: Vec<egui::Event>| {
+            let mut requests = Vec::new();
+            let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let mut output = ctx.run_ui(raw, |ui| show(ui, &mut state, &mut requests));
+            output.textures_delta.clear();
+            (output, requests)
+        };
+        fn find(shape: &egui::Shape, label: &str, found: &mut Option<egui::Pos2>) {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => *found = Some(text.visual_bounding_rect().center()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| find(shape, label, found)),
+                _ => {}
+            }
+        }
+        let (output, _) = pass(vec![]);
+        let mut at = None;
+        output.shapes.iter().for_each(|clipped| find(&clipped.shape, &label, &mut at));
+        let at = at.expect("the import button is drawn");
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        pass(vec![egui::Event::PointerMoved(at)]);
+        pass(vec![button(true)]);
+        let (_, requests) = pass(vec![button(false)]);
+        assert!(requests.iter().any(|request| matches!(request, UiRequest::ImportPackage)), "{requests:?}");
     }
 
     #[test]

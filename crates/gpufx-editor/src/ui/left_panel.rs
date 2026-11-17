@@ -63,7 +63,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
             state.ui.tile_hover.clear();
             audio_tab(ui, state, requests);
         }
-        LeftTab::Transitions => picker(ui, state, requests, PickerFor::Transitions),
+        LeftTab::Transitions => picker(ui, state, requests, PickerFor::Transitions, true),
         LeftTab::Stickers => {
             state.ui.tile_hover.clear();
             sticker_tab(ui, state, requests);
@@ -599,7 +599,9 @@ impl PickerFor {
 }
 
 /// A package list with its filter, the import button and the button that adds the selection.
-pub(super) fn picker(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, which: PickerFor) {
+/// With `may_add` off (a locked track) the list is still searched and browsed and packages are
+/// still imported, but nothing is added to the clip.
+pub(super) fn picker(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, which: PickerFor, may_add: bool) {
     let language: Language = state.language();
     if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportPackage), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
         requests.push(UiRequest::ImportPackage);
@@ -610,12 +612,12 @@ pub(super) fn picker(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut 
     } else if state.catalog.effects.is_empty() && state.catalog.transitions.is_empty() {
         ui.colored_label(theme::refused(), language.t(Message::NoPackages(crate::project_file::PACKAGE_ROOT_VARIABLE.to_owned())));
     }
-    picker_list(ui, state, which);
+    picker_list(ui, state, which, may_add);
     let selected = match which {
         PickerFor::Transitions => state.picker.addable(&state.catalog),
         PickerFor::Effects => state.effect_picker.addable(&state.catalog),
     };
-    if ui.add_enabled(selected.is_some(), egui::Button::new(language.t(Message::AddToClip)).min_size(Vec2::new(ui.available_width(), 28.0))).clicked() {
+    if ui.add_enabled(selected.is_some() && may_add, egui::Button::new(language.t(Message::AddToClip)).min_size(Vec2::new(ui.available_width(), 28.0))).clicked() {
         if let Some(package) = &selected {
             add_package(state, which, package);
         }
@@ -802,7 +804,7 @@ fn tile_view(ctx: &egui::Context, now: f64, kind: PackageKind, package: &str, ti
     TileView { image, busy: None }
 }
 
-fn picker_list(ui: &mut egui::Ui, state: &mut EditorState, which: PickerFor) {
+fn picker_list(ui: &mut egui::Ui, state: &mut EditorState, which: PickerFor, may_add: bool) {
     let language = state.language();
     // Taken out for the drawing, which borrows the rest of the state, and put back below.
     let (picker, hover) = which.parts(state);
@@ -848,7 +850,7 @@ fn picker_list(ui: &mut egui::Ui, state: &mut EditorState, which: PickerFor) {
     state.previews.borrow_mut().add_wanted(playing.as_deref(), visible.iter().copied());
     let (picker_slot, hover_slot) = which.parts(state);
     (*picker_slot, *hover_slot) = (picker, tile_hover);
-    if let Some(package) = double_clicked {
+    if let (Some(package), true) = (double_clicked, may_add) {
         add_package(state, which, &package);
     }
 }
