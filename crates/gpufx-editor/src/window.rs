@@ -27,6 +27,7 @@ use crate::asset_install::recover_interrupted_install;
 use crate::editor::{EditorState, LeftTab, RecoveryChoice, RecoveryOffer, SoundPreviewWish, Status};
 use crate::export::{encoder_options, export_blocker, reselect, EncoderOption, EncoderStatus, finished_message, sibling_render_exe, ExportOutcome, ExportWorker};
 use crate::i18n::{Language, Message};
+use crate::package_manager::InstalledPack;
 use crate::packages::{scan, Catalog};
 use crate::playback::device::Playback;
 use crate::playback::plan::{frames_to_ms, TransportCommand};
@@ -163,6 +164,8 @@ struct Session {
     encoder_probe: Option<Receiver<Vec<EncoderOption>>>,
     clip_animation_library: Option<Receiver<(ClipAnimationLibrary, engine::PackPresets)>>,
     text_style_library: Option<Receiver<TextStyleLibrary>>,
+    /// The installed packs for the package manager, once their read has finished.
+    pack_list: Option<Receiver<Vec<InstalledPack>>>,
     tasks: Tasks,
     arrivals: Receiver<Arrival>,
     arrival_sender: Sender<Arrival>,
@@ -210,6 +213,7 @@ impl Session {
         state.ui.panel_sizes = crate::settings::startup_panel_sizes();
         state.ui.theme = crate::settings::startup_theme();
         state.ui.autosave_seconds = crate::settings::startup_autosave_seconds();
+        state.ui.save_with_packs = crate::settings::startup_save_with_packs();
         #[cfg(debug_assertions)]
         let smoke = {
             let mut smoke = Smoke::default();
@@ -290,6 +294,7 @@ impl Session {
             encoder_probe: Some(encoder_probe),
             clip_animation_library: Some(clip_animation_library),
             text_style_library: Some(text_style_library),
+            pack_list: None,
             tasks: Tasks::default(),
             arrivals,
             arrival_sender,
@@ -703,6 +708,7 @@ impl Session {
         self.collect_encoder_probe();
         self.collect_clip_animation_library();
         self.collect_text_style_library();
+        self.collect_pack_list();
         self.collect_arrivals();
         self.poll_export();
         self.collect_preview();
@@ -811,6 +817,7 @@ impl Session {
         self.paths_file = self.state.project_file().map(Path::to_path_buf);
         self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
+        self.offer_pack_restore();
         // The audio played on since this frame polled it, so catch up first.
         self.poll_playback();
         self.playback = None;
@@ -925,7 +932,15 @@ impl Session {
             return;
         }
         match save_project_file(self.state.project(), &file) {
-            Ok(()) => self.state.mark_saved(file),
+            Ok(()) => {
+                if self.state.ui.save_with_packs {
+                    let paths = project_paths(Some(&file), &self.package_roots);
+                    if let Err(message) = crate::package_manager::backup_used_packs(self.state.project(), &paths, &file) {
+                        self.state.report_error(Message::PackBackupFailed(message));
+                    }
+                }
+                self.state.mark_saved(file);
+            }
             Err(message) => self.state.report_error(Message::SaveFailed(message)),
         }
     }
@@ -1040,12 +1055,30 @@ impl Session {
                 self.tracker = RequestTracker::default();
                 self.shown = None;
             }
-            Action::PackageInstalled { package } => self.package_installed(&package),
-            Action::AudioPackInstalled => self.audio_pack_installed(),
-            Action::StickerPackInstalled => self.sticker_pack_installed(),
-            Action::FontPackInstalled => self.font_pack_installed(),
-            Action::ClipAnimationPackInstalled => self.clip_animation_library = Some(spawn_clip_animation_scan(self.package_roots.clone(), self.window.clone())),
-            Action::TextStylePackInstalled => self.text_style_library = Some(spawn_text_style_scan(self.package_roots.clone(), self.window.clone())),
+            Action::PackageInstalled { package } => {
+                self.package_installed(&package);
+                self.refresh_pack_list_if_open();
+            }
+            Action::AudioPackInstalled => {
+                self.audio_pack_installed();
+                self.refresh_pack_list_if_open();
+            }
+            Action::StickerPackInstalled => {
+                self.sticker_pack_installed();
+                self.refresh_pack_list_if_open();
+            }
+            Action::FontPackInstalled => {
+                self.font_pack_installed();
+                self.refresh_pack_list_if_open();
+            }
+            Action::ClipAnimationPackInstalled => {
+                self.clip_animation_library = Some(spawn_clip_animation_scan(self.package_roots.clone(), self.window.clone()));
+                self.refresh_pack_list_if_open();
+            }
+            Action::TextStylePackInstalled => {
+                self.text_style_library = Some(spawn_text_style_scan(self.package_roots.clone(), self.window.clone()));
+                self.refresh_pack_list_if_open();
+            }
             Action::SaveTo(path) => self.save_project(path),
             Action::StartExport(path) => self.start_export(path, None),
             Action::ProjectReplaced => {
@@ -1155,6 +1188,137 @@ impl Session {
         self.shown = None;
     }
 
+    /// Reads the installed packs for the package manager away from the UI thread: a shader package
+    /// is opened to read its manifest.
+    fn refresh_pack_list(&mut self) {
+        self.state.ui.packages.reading = true;
+        let (sender, receiver) = channel();
+        let (roots, window) = (self.package_roots.clone(), self.window.clone());
+        let reader = std::thread::Builder::new().name("pack-list".to_owned()).spawn(move || {
+            let _ = sender.send(crate::package_manager::list_installed(&roots, user_package_root().as_deref()));
+            window.request_redraw();
+        });
+        match reader {
+            Ok(_) => self.pack_list = Some(receiver),
+            Err(e) => {
+                self.state.ui.packages.reading = false;
+                eprintln!("gpufx-editor: the pack list could not start: {e}");
+            }
+        }
+    }
+
+    fn refresh_pack_list_if_open(&mut self) {
+        if self.state.ui.packages.open {
+            self.refresh_pack_list();
+        }
+    }
+
+    fn collect_pack_list(&mut self) {
+        if let Some(Ok(packs)) = self.pack_list.as_ref().map(Receiver::try_recv) {
+            let packages = &mut self.state.ui.packages;
+            packages.packs = packs;
+            packages.reading = false;
+            // An index asked about belongs to the old list.
+            packages.confirm_remove = None;
+            self.pack_list = None;
+        }
+    }
+
+    /// The pack `index` of the list the package manager shows, while no new list is being read.
+    fn listed_pack(&self, index: usize) -> Option<InstalledPack> {
+        (!self.state.ui.packages.reading).then(|| self.state.ui.packages.packs.get(index).cloned()).flatten()
+    }
+
+    /// Reads every library again after packs were turned on or off, removed or restored, and lets
+    /// go of what was built from the old files, then reads the pack list again.
+    fn packs_changed(&mut self) {
+        let roots = self.package_roots.clone();
+        self.catalog = Some(spawn_catalog_scan(roots.clone(), self.window.clone()));
+        self.audio_library = Some(spawn_audio_scan(roots.clone(), self.window.clone()));
+        self.sticker_library = Some(spawn_sticker_scan(roots.clone(), self.window.clone()));
+        self.font_library = Some(spawn_font_scan(roots.clone(), self.window.clone()));
+        self.clip_animation_library = Some(spawn_clip_animation_scan(roots.clone(), self.window.clone()));
+        self.text_style_library = Some(spawn_text_style_scan(roots.clone(), self.window.clone()));
+        // The font paths read the packs turned off when they were made.
+        self.state.font_paths = ProjectPaths::roots_only(Path::new(crate::editor::FONT_PATHS_FILE), roots);
+        self.build_paths();
+        self.state.visuals.get_mut().set_paths(self.paths.clone());
+        self.tracker = RequestTracker::default();
+        self.shown = None;
+        self.refresh_pack_list();
+    }
+
+    fn set_pack_enabled(&mut self, index: usize, enabled: bool) {
+        let Some(pack) = self.listed_pack(index) else { return };
+        let Some(user_root) = user_package_root() else { return self.state.report_error(Message::NoUserPackageFolder) };
+        match crate::package_manager::set_enabled(&user_root, &pack.key, enabled) {
+            Ok(()) => self.packs_changed(),
+            Err(message) => self.state.report_error(Message::PackToggleFailed(message)),
+        }
+    }
+
+    /// Finds where the open project uses the pack, for the package manager to show before it goes.
+    fn ask_pack_removal(&mut self, index: usize) {
+        let Some(pack) = self.listed_pack(index) else { return };
+        let uses = crate::package_manager::uses_of(self.state.project(), &self.paths, &pack.key);
+        self.state.ui.packages.confirm_remove = Some((index, uses));
+    }
+
+    fn remove_pack(&mut self, index: usize) {
+        let Some(pack) = self.listed_pack(index) else { return };
+        let Some(user_root) = user_package_root() else { return self.state.report_error(Message::NoUserPackageFolder) };
+        // A sound being played, or a running playback, holds files of the pack open.
+        self.audio_preview.stop();
+        self.playback = None;
+        self.state.reopen_playback();
+        match crate::package_manager::uninstall(&user_root, &pack) {
+            Ok(()) => {
+                self.state.report_info(Message::PackRemoved(pack.name.clone()));
+                if crate::package_manager::is_shader_key(&pack.key) {
+                    self.state.previews.get_mut().forget(&format!("packages/{}", pack.key));
+                }
+                self.packs_changed();
+            }
+            Err(message) => self.state.report_error(Message::PackRemoveFailed(message)),
+        }
+    }
+
+    fn open_pack_folder(&mut self, index: usize) {
+        let Some(pack) = self.listed_pack(index) else { return };
+        // A zipped shader package is shown selected in its folder.
+        let mut explorer = std::process::Command::new("explorer");
+        if pack.path.is_dir() {
+            explorer.arg(&pack.path);
+        } else {
+            explorer.arg(format!("/select,{}", pack.path.display()));
+        }
+        if let Err(e) = explorer.spawn() {
+            self.state.report_error(Message::PackOpenFolderFailed(e.to_string()));
+        }
+    }
+
+    /// Offers the packs the project just opened needs that the copy beside it can install.
+    fn offer_pack_restore(&mut self) {
+        let offer = self.paths_file.as_deref().map(|file| crate::package_manager::packs_to_restore(self.state.project(), &self.paths, file)).unwrap_or_default();
+        if !offer.is_empty() {
+            self.state.ui.packages.open = true;
+            self.refresh_pack_list();
+        }
+        self.state.ui.packages.restore_offer = offer;
+    }
+
+    fn restore_packs(&mut self) {
+        let keys = std::mem::take(&mut self.state.ui.packages.restore_offer);
+        let (Some(file), Some(user_root)) = (self.paths_file.clone(), user_package_root()) else { return self.state.report_error(Message::NoUserPackageFolder) };
+        match crate::package_manager::restore_packs(&file, &keys, &user_root) {
+            Ok(count) => {
+                self.state.report_info(Message::PackRestored(count));
+                self.packs_changed();
+            }
+            Err(message) => self.state.report_error(Message::PackRestoreFailed(message)),
+        }
+    }
+
     /// Takes the results of finished dialogs and loads, and applies a load that had to wait.
     fn collect_arrivals(&mut self) {
         while let Ok(arrival) = self.arrivals.try_recv() {
@@ -1247,6 +1411,22 @@ impl Session {
                 }
             }
             UiRequest::Recovery { index, choice } => self.answer_recovery(index, choice),
+            UiRequest::OpenPackageManager => {
+                self.state.ui.packages.open = true;
+                self.refresh_pack_list();
+            }
+            UiRequest::RefreshPacks => self.refresh_pack_list(),
+            UiRequest::SetPackEnabled { index, enabled } => self.set_pack_enabled(index, enabled),
+            UiRequest::RemovePack { index } => self.ask_pack_removal(index),
+            UiRequest::RemovePackConfirmed { index } => self.remove_pack(index),
+            UiRequest::OpenPackFolder { index } => self.open_pack_folder(index),
+            UiRequest::RestorePacks => self.restore_packs(),
+            UiRequest::SetSaveWithPacks(enabled) => {
+                self.state.ui.save_with_packs = enabled;
+                if let Err(message) = crate::settings::save_save_with_packs(enabled) {
+                    self.state.report_error(Message::PackSaveWithPacksFailed(message));
+                }
+            }
             // winit restores the placement it saved on entry, maximised or not, on leaving.
             UiRequest::ToggleFullscreen => {
                 let leaving = self.presenter.window().fullscreen().is_some();

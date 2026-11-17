@@ -5,6 +5,7 @@ mod icons;
 mod inspector;
 mod left_panel;
 mod numeric;
+pub mod package_manager;
 mod param_widgets;
 mod placement;
 mod animation_inspector;
@@ -47,6 +48,19 @@ pub enum UiRequest {
     RetryProxies,
     /// The choice for autosave `index` of the recovery dialog.
     Recovery { index: usize, choice: crate::editor::RecoveryChoice },
+    OpenPackageManager,
+    /// Reads the installed packs again for the package manager.
+    RefreshPacks,
+    /// Turns pack `index` of the package manager's list on or off.
+    SetPackEnabled { index: usize, enabled: bool },
+    /// Asks to remove pack `index`: the window finds where the open project uses it first.
+    RemovePack { index: usize },
+    RemovePackConfirmed { index: usize },
+    OpenPackFolder { index: usize },
+    /// Installs the packs the open project needs from the copy saved beside it.
+    RestorePacks,
+    /// Whether a save also copies the packs the project uses beside it.
+    SetSaveWithPacks(bool),
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {
@@ -65,6 +79,9 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
         in_rect(root, "fullscreen-player", screen, |ui| player::show_fullscreen(ui, state, requests, preview));
     } else {
         editing_panels(root, state, requests, preview);
+    }
+    if state.ui.packages.open {
+        package_manager::show(root.ctx(), state, requests);
     }
     if !state.ui.recovery_offers.is_empty() {
         recovery_dialog::show(root.ctx(), state, requests);

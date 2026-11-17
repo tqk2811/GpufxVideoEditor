@@ -354,6 +354,10 @@ pub struct UiState {
     pub proxy_pending: (usize, Option<f32>),
     /// How many proxies failed or were stopped, so can be retried.
     pub proxy_retryable: usize,
+    /// The package manager window.
+    pub packages: crate::ui::package_manager::PackageManagerUi,
+    /// Whether a save also copies the packs the project uses into `<project>.packages`.
+    pub save_with_packs: bool,
 }
 
 /// An autosave left behind by an editor that did not close cleanly.
