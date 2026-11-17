@@ -378,3 +378,88 @@ fn a_per_glyph_gradient_runs_across_each_glyph() {
     let own = second_left(&mut r, &text);
     assert!(own[0] > own[2], "{own:?}");
 }
+
+/// Two cells side by side, red then blue: glyph 0, 2, 4... red, glyph 1, 3... blue.
+fn red_blue_cells(dir: &std::path::Path) -> TextPaint {
+    TextPaint::Texture(TextTexture { fit: TextureFit::Glyph, cells: 2, ..TextTexture::new(picture(dir, "red-blue.png", &[[255, 0, 0, 255], [0, 0, 255, 255]])) })
+}
+
+fn blue(p: [u8; 4]) -> bool {
+    p[2] > 200 && p[0] < 60 && p[1] < 60 && p[3] > 200
+}
+
+#[test]
+fn glyphs_whose_boxes_overlap_keep_their_own_cells() {
+    let Some(mut r) = rasterizer() else { return };
+    let dir = scratch("kerned");
+    // The top of the V's left arm lies inside the box of the A, kerned under it.
+    let mut text = TextContent::new("AV", SIZE);
+    text.fill = red_blue_cells(&dir);
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let top = (0..image.height as i32).find(|&y| (0..image.width as i32).any(|x| pixel(&image, x, y)[3] == 255)).expect("ink") + 4;
+    let found = runs(&image, top, |p| p[3] == 255);
+    assert_eq!(found.len(), 3, "the apex of the A and both arms of the V: {found:?}");
+    let middle = |(a, b): (i32, i32)| pixel(&image, (a + b) / 2, top);
+    assert!(red(middle(found[0])), "the A {:?}", middle(found[0]));
+    assert!(blue(middle(found[1])) && blue(middle(found[2])), "the V {:?} {:?}", middle(found[1]), middle(found[2]));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_outline_painted_per_glyph_takes_the_cell_of_the_nearest_glyph() {
+    let Some(mut r) = rasterizer() else { return };
+    let dir = scratch("ring");
+    let font_px = SIZE * HEIGHT as f32;
+    let mut text = TextContent::new("II", SIZE);
+    text.fill = TextPaint::solid([0, 255, 0, 255]);
+    // Grown by the outline, the boxes of the two glyphs overlap between them.
+    text.outlines = vec![TextOutline { width: 0.25, paint: red_blue_cells(&dir) }];
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let y = image.height as i32 / 2;
+    let stems = runs(&image, y, |p| p[1] > 200 && p[0] < 60);
+    assert_eq!(stems.len(), 2, "{stems:?}");
+    let step = (0.02 * font_px).round() as i32;
+    assert!(red(pixel(&image, stems[0].1 + step, y)), "right of the first glyph {:?}", pixel(&image, stems[0].1 + step, y));
+    assert!(blue(pixel(&image, stems[1].0 - step, y)), "left of the second glyph {:?}", pixel(&image, stems[1].0 - step, y));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn per_glyph_paints_follow_glyphs_that_move() {
+    let Some(mut r) = rasterizer() else { return };
+    let dir = scratch("follow");
+    let stops = vec![GradientStop { position: 0.0, color: [255, 0, 0, 255] }, GradientStop { position: 1.0, color: [0, 0, 255, 255] }];
+    let mut text = TextContent::new("III", SIZE);
+    text.fill = red_blue_cells(&dir);
+    text.outlines = vec![TextOutline { width: 0.03, paint: TextPaint::Gradient { stops: stops.clone(), angle: 0.0, per_glyph: true } }];
+    let still = r.rasterize(&text, HEIGHT, 1.0);
+    // At rest, the characters drawn one by one look like the still text.
+    let nudged = vec![(engine::TextUnit::Char, vec![engine::AnimationPose { dx: 1e-7, ..engine::AnimationPose::IDENTITY }; 3])];
+    let drawn = r.rasterize_units(&text, HEIGHT, 1.0, &nudged);
+    assert_eq!((drawn.width, drawn.height), (still.width, still.height));
+    let worst = still.pixels.iter().zip(&drawn.pixels).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(worst <= 3, "{worst}");
+    // The middle glyph dropped by a quarter of the font size keeps its cell, and the first and
+    // last theirs.
+    text.outlines.clear();
+    let outline = TextOutline { width: 0.03, paint: TextPaint::Gradient { stops, angle: 0.0, per_glyph: true } };
+    let font_px = SIZE * HEIGHT as f32;
+    let dropped = vec![(engine::TextUnit::Char, vec![engine::AnimationPose::IDENTITY, engine::AnimationPose { dy: 0.25, ..engine::AnimationPose::IDENTITY }, engine::AnimationPose::IDENTITY])];
+    let image = r.rasterize_units(&text, HEIGHT, 1.0, &dropped);
+    let y = (image.height as f32 / 2.0 + 0.25 * font_px) as i32 + 2;
+    let found = runs(&image, y, |p| p[3] == 255 && (red(p) || blue(p)));
+    let middle = |(a, b): (i32, i32)| pixel(&image, (a + b) / 2, y);
+    assert!(found.len() == 3 && red(middle(found[0])) && blue(middle(found[1])) && red(middle(found[2])), "{:?}", found.iter().map(|s| middle(*s)).collect::<Vec<_>>());
+    // Turned, the middle glyph's outline still runs red to blue across the glyph as it lies.
+    text.fill = TextPaint::solid([0, 255, 0, 255]);
+    text.outlines = vec![outline];
+    let turned = vec![(engine::TextUnit::Char, vec![engine::AnimationPose::IDENTITY, engine::AnimationPose { rotation: 180.0, ..engine::AnimationPose::IDENTITY }, engine::AnimationPose::IDENTITY])];
+    let image = r.rasterize_units(&text, HEIGHT, 1.0, &turned);
+    let y = image.height as i32 / 2;
+    let stems = runs(&image, y, |p| p[1] > 200 && p[0] < 60);
+    assert_eq!(stems.len(), 3, "{stems:?}");
+    let step = (0.015 * font_px).round() as i32;
+    let (left, right) = (pixel(&image, stems[1].0 - step, y), pixel(&image, stems[1].1 + step, y));
+    assert!(left[2] > left[0] && right[0] > right[2], "a half turn puts the blue end on the left: {left:?} {right:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

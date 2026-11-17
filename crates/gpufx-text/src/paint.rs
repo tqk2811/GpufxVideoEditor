@@ -98,13 +98,7 @@ impl Textures {
 
 /// Every picture the layers of `text` paint with, each once.
 pub fn text_images(text: &TextContent) -> Vec<&TextImageRef> {
-    let mut paints: Vec<&TextPaint> = vec![&text.fill];
-    paints.extend(text.outlines.iter().map(|outline| &outline.paint));
-    for shadow in &text.shadows {
-        paints.push(&shadow.paint);
-        paints.extend(shadow.outlines.iter().map(|outline| &outline.paint));
-    }
-    paints.extend(text.inner_shadows.iter().map(|shadow| &shadow.paint));
+    let paints = text_paints(text);
     let mut images: Vec<&TextImageRef> = Vec::new();
     for image in paints.into_iter().filter_map(TextPaint::texture_image) {
         if !images.contains(&image) {
@@ -216,16 +210,155 @@ impl TextureCache {
     }
 }
 
-/// Where the paints are laid: the box of the whole text in the picture being drawn, the boxes of
-/// its glyphs, the font size and the pictures of the textures.
+/// Whether `paint` lies over each glyph on its own (a per-glyph gradient, a [`TextureFit::Glyph`]
+/// texture, or a texture over such a base), and so needs a [`GlyphMap`].
+fn is_per_glyph(paint: &TextPaint) -> bool {
+    match paint {
+        TextPaint::Solid { .. } => false,
+        TextPaint::Gradient { per_glyph, .. } => *per_glyph,
+        TextPaint::Texture(texture) => texture.fit == TextureFit::Glyph || texture.base.as_deref().is_some_and(is_per_glyph),
+    }
+}
+
+/// Every paint of the layers of `text`.
+fn text_paints(text: &TextContent) -> Vec<&TextPaint> {
+    let mut paints: Vec<&TextPaint> = vec![&text.fill];
+    paints.extend(text.outlines.iter().map(|outline| &outline.paint));
+    for shadow in &text.shadows {
+        paints.push(&shadow.paint);
+        paints.extend(shadow.outlines.iter().map(|outline| &outline.paint));
+    }
+    paints.extend(text.inner_shadows.iter().map(|shadow| &shadow.paint));
+    paints
+}
+
+/// Whether some layer of `text` paints each glyph on its own, so drawing it needs a [`GlyphMap`].
+pub(crate) fn wants_glyph_map(text: &TextContent) -> bool {
+    text_paints(text).into_iter().any(is_per_glyph)
+}
+
+/// A box (x0, y0, x1, y1) in pixels.
+type Box4 = (f32, f32, f32, f32);
+
+/// No glyph owns the pixel.
+const NO_GLYPH: u32 = u32::MAX;
+
+/// A glyph a [`GlyphMap`] knows: its ink box at rest and how a point of the picture goes back to
+/// where it lies on the glyph at rest, so a per-glyph paint moves, turns and scales with its glyph.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GlyphEntry {
+    /// The ink box (x0, y0, x1, y1) of the glyph at rest, in the pixels of the map.
+    pub rect: (f32, f32, f32, f32),
+    /// The affine map `(x, y) -> (a x + b y + c, d x + e y + f)` from a pixel of the map to the
+    /// point of the glyph at rest it shows; the identity for a glyph that does not move.
+    pub back: [f32; 6],
+}
+
+impl GlyphEntry {
+    pub const IDENTITY: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+
+    pub fn at_rest(rect: (f32, f32, f32, f32)) -> GlyphEntry {
+        GlyphEntry { rect, back: Self::IDENTITY }
+    }
+}
+
+/// Which glyph each pixel of a picture belongs to, for the paints that lie over each glyph on its
+/// own. A covered pixel belongs to the glyph that covers it most, so glyphs whose boxes overlap
+/// (kerned pairs such as "AV", italics) each keep their own pixels; any other pixel (an outline, a
+/// shadow, a glow) belongs to the nearest covered pixel's glyph. Looking a pixel up costs the same
+/// however many glyphs the text has.
+///
+/// The glyphs are numbered among the glyphs with ink, in the order of the text: a space draws no
+/// glyph, so it takes no cell of a [`TextureFit::Glyph`] texture. That is an assumption; the CapCut
+/// packs read so far say nothing about spaces.
+pub(crate) struct GlyphMap {
+    width: usize,
+    height: usize,
+    owner: Vec<u32>,
+    entries: Vec<GlyphEntry>,
+}
+
+impl GlyphMap {
+    /// The glyph pixel `(px, py)` of the map belongs to, with its number; a point past the edge
+    /// counts as the nearest pixel on it.
+    pub fn at(&self, px: f32, py: f32) -> Option<(usize, &GlyphEntry)> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+        let x = (px.floor().max(0.0) as usize).min(self.width - 1);
+        let y = (py.floor().max(0.0) as usize).min(self.height - 1);
+        let number = self.owner[y * self.width + x];
+        (number != NO_GLYPH).then(|| (number as usize, &self.entries[number as usize]))
+    }
+
+    /// The bytes the map takes.
+    pub fn bytes(&self) -> usize {
+        self.owner.len() * 4 + self.entries.len() * std::mem::size_of::<GlyphEntry>()
+    }
+}
+
+/// Builds a [`GlyphMap`] from the coverage of each glyph, given pixel by pixel.
+pub(crate) struct GlyphMapBuilder {
+    map: GlyphMap,
+    best: Vec<f32>,
+}
+
+impl GlyphMapBuilder {
+    /// A map `width` by `height` of the glyphs `entries`, numbered by their place in it.
+    pub fn new(width: usize, height: usize, entries: Vec<GlyphEntry>) -> GlyphMapBuilder {
+        GlyphMapBuilder { map: GlyphMap { width, height, owner: vec![NO_GLYPH; width * height], entries }, best: vec![0.0; width * height] }
+    }
+
+    /// Glyph `number` covers pixel `(x, y)` by `a`.
+    pub fn claim(&mut self, x: i32, y: i32, a: f32, number: u32) {
+        let (width, height) = (self.map.width, self.map.height);
+        if a <= 0.0 || x < 0 || y < 0 || x as usize >= width || y as usize >= height || number as usize >= self.map.entries.len() {
+            return;
+        }
+        let at = y as usize * width + x as usize;
+        if a > self.best[at] {
+            self.best[at] = a;
+            self.map.owner[at] = number;
+        }
+    }
+
+    /// Gives every pixel no glyph covers to the glyph of the nearest covered pixel (eight
+    /// neighbours a step), and the map.
+    pub fn finish(self) -> GlyphMap {
+        let mut map = self.map;
+        let (width, height) = (map.width, map.height);
+        let mut queue: std::collections::VecDeque<usize> = (0..map.owner.len()).filter(|&at| map.owner[at] != NO_GLYPH).collect();
+        while let Some(at) = queue.pop_front() {
+            let (x, y) = ((at % width) as i64, (at / width) as i64);
+            let number = map.owner[at];
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                let (nx, ny) = (x + dx, y + dy);
+                if nx < 0 || ny < 0 || nx >= width as i64 || ny >= height as i64 {
+                    continue;
+                }
+                let next = ny as usize * width + nx as usize;
+                if map.owner[next] == NO_GLYPH {
+                    map.owner[next] = number;
+                    queue.push_back(next);
+                }
+            }
+        }
+        map
+    }
+}
+
+/// Where the paints are laid: the box of the whole text in the picture being drawn, which glyph
+/// each pixel belongs to, the font size and the pictures of the textures.
 #[derive(Clone, Copy)]
 pub(crate) struct Painter<'a> {
     pub textures: &'a Textures,
     /// The line boxes of the text (x0, y0, x1, y1), in the pixels of the picture drawn into.
     pub rect: (f32, f32, f32, f32),
-    /// The ink box of each glyph with ink (x0, y0, x1, y1), around the top left of `rect`, in
-    /// the order of the text: what per-glyph gradients and [`TextureFit::Glyph`] lie over.
-    pub glyphs: &'a [(f32, f32, f32, f32)],
+    /// Which glyph each pixel belongs to: what per-glyph gradients and [`TextureFit::Glyph`] lie
+    /// over. `None` when no paint of the text needs it; such paints then lie over the whole text.
+    pub glyph_map: Option<&'a GlyphMap>,
+    /// Where pixel `(0, 0)` of the picture drawn into lies in the pixels of `glyph_map`.
+    pub map_offset: (f32, f32),
     /// How far the glyph boxes are grown on each side, in pixels: the width of the outline being
     /// painted, so a per-glyph paint covers the outline around its glyph as CapCut lays it.
     pub grow: f32,
@@ -236,7 +369,13 @@ impl<'a> Painter<'a> {
     /// The same paints for a picture whose pixel `(0, 0)` is pixel `(dx, dy)` of this one's.
     pub fn moved(&self, dx: f32, dy: f32) -> Painter<'a> {
         let (x0, y0, x1, y1) = self.rect;
-        Painter { rect: (x0 - dx, y0 - dy, x1 - dx, y1 - dy), ..*self }
+        let (ox, oy) = self.map_offset;
+        Painter { rect: (x0 - dx, y0 - dy, x1 - dx, y1 - dy), map_offset: (ox + dx, oy + dy), ..*self }
+    }
+
+    /// The same paints with `map`, whose pixels are those of the picture drawn into.
+    pub fn with_glyph_map(&self, map: Option<&'a GlyphMap>) -> Painter<'a> {
+        Painter { glyph_map: map, map_offset: (0.0, 0.0), ..*self }
     }
 
     /// The same paints with the glyph boxes grown by `grow` pixels on each side.
@@ -253,8 +392,11 @@ impl<'a> Painter<'a> {
         match paint {
             TextPaint::Solid { color } => premultiplied(*color),
             TextPaint::Gradient { stops, angle, per_glyph } => {
-                let rect = if *per_glyph { self.glyph_at(px, py).1 } else { self.rect };
-                gradient_color(stops, gradient_t(rect, *angle, px, py))
+                let (rect, (qx, qy)) = match self.glyph_at(px, py).filter(|_| *per_glyph) {
+                    Some((_, rect, at)) => (rect, at),
+                    None => (self.rect, (px, py)),
+                };
+                gradient_color(stops, gradient_t(rect, *angle, qx, qy))
             }
             TextPaint::Texture(texture) => {
                 let color = self.texture_color(texture, px, py);
@@ -270,25 +412,18 @@ impl<'a> Painter<'a> {
         }
     }
 
-    /// The glyph whose ink box holds `(px, py)`, else the nearest one: its number among the glyphs
-    /// with ink and its box in the picture. The whole text box when there is no glyph.
-    fn glyph_at(&self, px: f32, py: f32) -> (usize, (f32, f32, f32, f32)) {
-        let (ox, oy, _, _) = self.rect;
-        let mut best = (f32::INFINITY, 0, self.rect);
-        for (number, &(x0, y0, x1, y1)) in self.glyphs.iter().enumerate() {
-            let g = self.grow;
-            let rect = (ox + x0 - g, oy + y0 - g, ox + x1 + g, oy + y1 + g);
-            let dx = (rect.0 - px).max(px - rect.2).max(0.0);
-            let dy = (rect.1 - py).max(py - rect.3).max(0.0);
-            let far = dx * dx + dy * dy;
-            if far < best.0 {
-                best = (far, number, rect);
-                if far == 0.0 {
-                    break;
-                }
-            }
-        }
-        (best.1, best.2)
+    /// The glyph pixel `(px, py)` belongs to (see [`GlyphMap`]): its number among the glyphs with
+    /// ink, its box at rest grown by [`Self::grow`], and the point of the glyph at rest `(px, py)`
+    /// shows, both in the pixels of the picture drawn into. `None` with no map or no glyph.
+    fn glyph_at(&self, px: f32, py: f32) -> Option<(usize, Box4, (f32, f32))> {
+        let (ox, oy) = self.map_offset;
+        let (mx, my) = (px + ox, py + oy);
+        let (number, entry) = self.glyph_map?.at(mx, my)?;
+        let [a, b, c, d, e, f] = entry.back;
+        let (qx, qy) = (a * mx + b * my + c - ox, d * mx + e * my + f - oy);
+        let (x0, y0, x1, y1) = entry.rect;
+        let g = self.grow;
+        Some((number, (x0 - ox - g, y0 - oy - g, x1 - ox + g, y1 - oy + g), (qx, qy)))
     }
 }
 
@@ -314,7 +449,7 @@ impl<'a> Painter<'a> {
         let opacity = if texture.opacity.is_finite() { texture.opacity.clamp(0.0, 1.0) } else { 1.0 };
         if texture.fit == TextureFit::Glyph {
             // One cell per glyph, in turn, covering the glyph's box and centred on it.
-            let (number, (x0, y0, x1, y1)) = self.glyph_at(px, py);
+            let (number, (x0, y0, x1, y1), (px, py)) = self.glyph_at(px, py).unwrap_or((0, self.rect, (px, py)));
             let cells = texture.cells.clamp(1, engine::MAX_TEXTURE_CELLS) as usize;
             let cell_width = (picture.width / cells).max(1);
             let cell = number % cells;

@@ -31,7 +31,7 @@ use std::sync::{Arc, OnceLock};
 
 use engine::{unit_ranges, AnimationPose, TextUnit};
 
-use super::paint::{draw_inner_shadows, text_texture_stamps, Textures};
+use super::paint::{draw_inner_shadows, text_texture_stamps, wants_glyph_map, GlyphEntry, GlyphMap, GlyphMapBuilder, Textures};
 use super::{draw_background, draw_under, over, text_font_stamp, Layout, Mask, TextContent, TextImage, TextRasterizer, MAX_DIMENSION, MAX_PIXELS};
 use cosmic_text::SwashContent;
 
@@ -57,6 +57,11 @@ pub(crate) struct Sprite {
     start: usize,
     /// Its ink box in the text picture.
     ink: (f32, f32, f32, f32),
+    /// The glyph (its number among the glyphs with ink) each pixel of `coverage` belongs to, the
+    /// one covering it most; empty when no paint of the text lies over each glyph on its own.
+    owners: Vec<u32>,
+    /// The numbers of its glyphs among the glyphs with ink.
+    numbers: Vec<u32>,
 }
 
 /// What a frame of a moving text is drawn from: the text, the coverage of each character, the
@@ -73,6 +78,9 @@ pub(crate) struct Prepared {
     layers: Layout,
     /// The texture pictures the layers paint with.
     textures: Textures,
+    /// The glyphs with ink at rest, in the pixels of the still picture, when a paint lies over
+    /// each glyph on its own, with which glyph each pixel of the still picture belongs to.
+    glyphs: Option<(Vec<GlyphEntry>, GlyphMap)>,
     /// How far the glow, shadow and outline of a character reach past its coverage, in pixels.
     room: i32,
     /// The size of the still picture.
@@ -227,7 +235,8 @@ impl Prepared {
             }
             let mut under = vec![[0f32; 4]; width * height];
             let (x, y, _, _) = sprite.under_rect(self.room);
-            let painter = self.layers.painter(&self.textures).moved(x as f32, y as f32);
+            // The picture is drawn at rest and moved whole, so the glyphs are those of the still text.
+            let painter = self.layers.painter(&self.textures, self.glyphs.as_ref().map(|(_, map)| map)).moved(x as f32, y as f32);
             draw_under(&self.text, &self.layers, &fill, &mut under, &painter);
             under
         })
@@ -318,8 +327,10 @@ impl UnitsPlan {
                 }),
             }
         }
-        // The paints lie over the line boxes, moved with the still picture into the frame.
-        let painter = plan.layers.painter(&plan.textures).moved(-(margin_x as f32), -(margin_y as f32));
+        // The paints lie over the line boxes, moved with the still picture into the frame; a
+        // per-glyph paint follows its glyph wherever it moved.
+        let frame_map = plan.glyphs.as_ref().map(|(entries, _)| frame_glyph_map(sprites, &placed, entries, shift, canvas_width, canvas_height));
+        let painter = plan.layers.painter(&plan.textures, None).moved(-(margin_x as f32), -(margin_y as f32)).with_glyph_map(frame_map.as_ref());
         if any_whole {
             draw_under(&plan.text, &plan.layers, &mask, &mut canvas, &painter);
         }
@@ -359,6 +370,53 @@ impl UnitsPlan {
     pub fn bytes(&self) -> usize {
         self.0.bytes
     }
+}
+
+/// Which glyph each pixel of a frame `canvas_width` by `canvas_height` belongs to, with each
+/// character placed through `shift` after its map of `placed`: every glyph whose character shows
+/// maps a pixel back to where it lies on the glyph at rest in the frame, so a per-glyph paint at
+/// rest is that of the still picture and moves, turns and scales with its glyph.
+fn frame_glyph_map(sprites: &[Sprite], placed: &[(Affine, f32)], entries: &[GlyphEntry], shift: Affine, canvas_width: usize, canvas_height: usize) -> GlyphMap {
+    let (mx, my) = (shift.0[2], shift.0[5]);
+    let mut entries: Vec<GlyphEntry> = entries.iter().map(|e| GlyphEntry::at_rest((e.rect.0 + mx, e.rect.1 + my, e.rect.2 + mx, e.rect.3 + my))).collect();
+    let unshift = Affine::translate(-mx, -my);
+    for (sprite, (map, opacity)) in sprites.iter().zip(placed) {
+        if *opacity <= 0.0 {
+            continue;
+        }
+        let Some(back) = map.inverse() else { continue };
+        let back = shift.after(back).after(unshift).0;
+        for &number in &sprite.numbers {
+            if let Some(entry) = entries.get_mut(number as usize) {
+                entry.back = back;
+            }
+        }
+    }
+    let mut builder = GlyphMapBuilder::new(canvas_width, canvas_height, entries);
+    for (sprite, (map, opacity)) in sprites.iter().zip(placed) {
+        if *opacity <= 0.0 || sprite.owners.is_empty() {
+            continue;
+        }
+        let map = shift.after(*map);
+        match map.whole_shift() {
+            Some((dx, dy)) => {
+                for j in 0..sprite.height {
+                    for i in 0..sprite.width {
+                        let at = j * sprite.width + i;
+                        builder.claim(sprite.x + dx + i as i32, sprite.y + dy + j as i32, f32::from(sprite.coverage[at]) / 255.0, sprite.owners[at]);
+                    }
+                }
+            }
+            None => cover(canvas_width, canvas_height, sprite.rect(), map, |x, y, sx, sy| {
+                let c = sample(&sprite.coverage, sprite.width, sprite.height, sx, sy, coverage_mix);
+                let (i, j) = (sx.round(), sy.round());
+                if c > 0 && i >= 0.0 && j >= 0.0 && (i as usize) < sprite.width && (j as usize) < sprite.height {
+                    builder.claim(x as i32, y as i32, f32::from(c) / 255.0, sprite.owners[j as usize * sprite.width + i as usize]);
+                }
+            }),
+        }
+    }
+    builder.finish()
 }
 
 /// The margins of a frame whose characters reach `reach_x` and `reach_y` pixels past a still
@@ -424,7 +482,7 @@ impl TextRasterizer {
         let (textures, missing_texture) = self.textures.textures_for(text);
         let blank = TextImage { missing_texture, ..blank };
         let bytes = textures.bytes();
-        let mut prepared = Prepared { text: text.clone(), layers, textures, room: 0, width: 0, height: 0, background: None, sprites: Vec::new(), blank, bytes };
+        let mut prepared = Prepared { text: text.clone(), layers, textures, glyphs: None, room: 0, width: 0, height: 0, background: None, sprites: Vec::new(), blank, bytes };
         let (width, height) = (layout.width as usize, layout.height as usize);
         if width == 0 || height == 0 {
             return prepared;
@@ -446,6 +504,8 @@ impl TextRasterizer {
         let (left, top) = layout.origin;
         // The glyphs and the ink of each character.
         let mut members: Vec<(Vec<usize>, Option<(f32, f32, f32, f32)>)> = vec![(Vec::new(), None); graphemes.len()];
+        let ink_numbers = layout.ink_numbers();
+        let mut owners = wants_glyph_map(text).then(|| GlyphMapBuilder::new(width, height, layout.glyph_entries()));
         for (number, start) in layout.glyph_starts.iter().enumerate() {
             let (Some(unit), Some(Some(ink))) = (holding(&graphemes, *start), layout.glyph_ink.get(number)) else { continue };
             let entry = &mut members[unit];
@@ -464,6 +524,9 @@ impl TextRasterizer {
             let (x, y) = (ink.0.floor() as i32 - room, ink.1.floor() as i32 - room);
             let (sprite_width, sprite_height) = ((ink.2.ceil() as i32 + room - x).max(1) as usize, (ink.3.ceil() as i32 + room - y).max(1) as usize);
             let mut fill = Mask::new(sprite_width, sprite_height);
+            // The glyph covering each pixel most, when a paint lies over each glyph on its own.
+            let mut local = owners.is_some().then(|| GlyphMapBuilder::new(sprite_width, sprite_height, vec![GlyphEntry::at_rest((0.0, 0.0, 0.0, 0.0)); layout.glyph_boxes.len()]));
+            let numbers: Vec<u32> = glyphs.iter().filter_map(|&number| ink_numbers[number]).collect();
             for number in glyphs {
                 let glyph = &layout.glyphs[number];
                 let Some(picture) = self.cache.get_image(&mut self.font_system, glyph.cache_key).as_ref() else { continue };
@@ -477,7 +540,12 @@ impl TextRasterizer {
                 for j in 0..p.height as i32 {
                     for i in 0..p.width as i32 {
                         let index = (j as usize * p.width as usize + i as usize) * stride;
-                        fill.add(gx + i, gy + j, picture.data[index + stride - 1] as f32 / 255.0);
+                        let a = picture.data[index + stride - 1] as f32 / 255.0;
+                        fill.add(gx + i, gy + j, a);
+                        if let (Some(local), Some(owners), Some(ink)) = (local.as_mut(), owners.as_mut(), ink_numbers[number]) {
+                            local.claim(gx + i, gy + j, a, ink);
+                            owners.claim(x + gx + i, y + gy + j, a, ink);
+                        }
                     }
                 }
             }
@@ -491,9 +559,25 @@ impl TextRasterizer {
             for j in top_row..=bottom_row {
                 coverage.extend(fill.data[j * sprite_width + left_column..=j * sprite_width + right_column].iter().map(|a| (a * 255.0 + 0.5).clamp(0.0, 255.0) as u8));
             }
+            // A pixel of the cut no glyph covers takes the nearest covered pixel's glyph.
+            let owner_map = local.map(GlyphMapBuilder::finish);
+            let mut sprite_owners = Vec::new();
+            if let Some(owner_map) = &owner_map {
+                sprite_owners.reserve(cut_width * cut_height);
+                for j in top_row..=bottom_row {
+                    for i in left_column..=right_column {
+                        sprite_owners.push(owner_map.at(i as f32, j as f32).map_or(0, |(number, _)| number as u32));
+                    }
+                }
+            }
             let under_pixels = (cut_width + 2 * room as usize) * (cut_height + 2 * room as usize);
-            prepared.bytes += coverage.len() + under_pixels * 16;
-            prepared.sprites.push(Sprite { x: x + left_column as i32, y: y + top_row as i32, width: cut_width, height: cut_height, coverage, under: OnceLock::new(), start: range.start, ink });
+            prepared.bytes += coverage.len() + sprite_owners.len() * 4 + under_pixels * 16;
+            prepared.sprites.push(Sprite { x: x + left_column as i32, y: y + top_row as i32, width: cut_width, height: cut_height, coverage, under: OnceLock::new(), start: range.start, ink, owners: sprite_owners, numbers });
+        }
+        if let Some(owners) = owners {
+            let map = owners.finish();
+            prepared.bytes += map.bytes();
+            prepared.glyphs = Some((layout.glyph_entries(), map));
         }
         prepared
     }
