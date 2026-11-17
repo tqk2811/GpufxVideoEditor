@@ -31,8 +31,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     let key = state.selection().filter(|key| clip_of(state, *key).is_some());
     follow_clip(ui.ctx(), state, key);
     let transition = if key.is_none() { state.selected_transition() } else { None };
-    let title = state.language().t(if key.is_some() {
-        Message::ClipTitle
+    let title = state.language().t(if let Some(key) = key {
+        clip_title(state.project().tracks[key.track].kind, clip_of(state, key))
     } else if transition.is_some() {
         Message::TransitionTitle
     } else {
@@ -51,6 +51,22 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
             (None, None) => project_summary(ui, state),
         });
     });
+}
+
+/// The inspector title for a clip on a track of `kind`: what the clip is, not just "Clip".
+fn clip_title(kind: engine::TrackKind, clip: Option<&engine::Clip>) -> Message {
+    let source = clip.map_or("", |clip| clip.source.as_str());
+    if clip.is_some_and(engine::Clip::is_text) || kind == engine::TrackKind::Text {
+        Message::ClipTitleText
+    } else if kind == engine::TrackKind::Audio {
+        Message::ClipTitleAudio
+    } else if engine::is_sticker_source(source) {
+        Message::ClipTitleSticker
+    } else if engine::is_image_source(source) {
+        Message::ClipTitleImage
+    } else {
+        Message::ClipTitleVideo
+    }
 }
 
 /// Notices that the inspector shows another clip, or the same one elsewhere. The expression

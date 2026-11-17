@@ -371,7 +371,11 @@ pub(super) fn text(message: &Message) -> String {
         Message::PreviewUnavailable(reason) => format!("Không có ảnh xem trước: {reason}"),
         Message::PackageProblems(count) => format!("{count} gói không đọc được"),
 
-        Message::ClipTitle => "Clip".to_owned(),
+        Message::ClipTitleVideo => "Video".to_owned(),
+        Message::ClipTitleAudio => "Âm thanh".to_owned(),
+        Message::ClipTitleImage => "Ảnh".to_owned(),
+        Message::ClipTitleSticker => "Sticker".to_owned(),
+        Message::ClipTitleText => "Chữ".to_owned(),
         Message::TransitionTitle => "Chuyển cảnh".to_owned(),
         Message::ProjectTitle => "Dự án".to_owned(),
         Message::FieldSize => "Kích thước".to_owned(),

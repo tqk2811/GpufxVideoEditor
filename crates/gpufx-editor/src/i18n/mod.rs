@@ -425,7 +425,12 @@ pub enum Message {
     PreviewUnavailable(String),
 
     // Inspector.
-    ClipTitle,
+    /// Inspector titles by what the selected clip is.
+    ClipTitleVideo,
+    ClipTitleAudio,
+    ClipTitleImage,
+    ClipTitleSticker,
+    ClipTitleText,
     TransitionTitle,
     ProjectTitle,
     FieldSize,
