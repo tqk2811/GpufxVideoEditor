@@ -307,6 +307,11 @@ pub enum Message {
     FilterFont,
     /// The font list is not read yet.
     LoadingFonts,
+    SearchFonts,
+    FontSourceAll,
+    FontSourceSystem,
+    FontSourcePack,
+    NoFontFound,
     /// The font a text asks for is not installed and the default one draws it.
     FontMissing(String),
     /// The project changed while the font file dialog was up, so the file chosen is not used.
@@ -660,6 +665,11 @@ mod tests {
             Message::ChooseFontFile,
             Message::FilterFont,
             Message::LoadingFonts,
+            Message::SearchFonts,
+            Message::FontSourceAll,
+            Message::FontSourceSystem,
+            Message::FontSourcePack,
+            Message::NoFontFound,
             Message::FontMissing(name()),
             Message::FontTargetChanged,
             Message::ImportSubtitles,
