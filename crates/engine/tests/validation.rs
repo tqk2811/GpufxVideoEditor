@@ -29,7 +29,7 @@ fn valid_project_has_no_errors() {
 
 #[test]
 fn rejects_unknown_version() {
-    let text = r#"{"version":3,"output":{"width":1,"height":1,"frame_duration":3000},"tracks":[]}"#;
+    let text = r#"{"version":3,"output":{"width":1,"height":1,"frame_rate":{"num":30,"den":1}},"tracks":[]}"#;
     match Project::from_json(text) {
         Err(LoadError::UnsupportedVersion(3)) => {}
         other => panic!("expected UnsupportedVersion(3), got {other:?}"),
@@ -237,25 +237,24 @@ fn non_positive_transition_duration() {
 }
 
 #[test]
-fn non_positive_frame_duration() {
-    for fd in [0, -3003] {
-        let p = project(fd, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])]);
-        assert_eq!(
-            only(&p),
-            vec![E::NonPositiveFrameDuration {
-                frame_duration: t(fd)
-            }]
-        );
+fn a_zero_part_of_the_frame_rate_is_refused() {
+    for frame_rate in [engine::FrameRate { num: 0, den: 1 }, engine::FrameRate { num: 30, den: 0 }] {
+        let p = common::project_at(frame_rate, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])]);
+        assert_eq!(only(&p), vec![E::InvalidFrameRate { frame_rate }]);
     }
 }
 
 #[test]
 fn more_than_60_fps_is_refused_and_60_is_not() {
     let p = project(1_499, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])]);
-    assert_eq!(only(&p), vec![E::FrameDurationTooShort { frame_duration: t(1_499) }]);
+    assert_eq!(only(&p), vec![E::FrameRateTooHigh { frame_rate: common::rate(1_499) }]);
     let message = only(&p)[0].to_string();
     assert!(message.contains("60 fps"), "{message}");
     assert_eq!(only(&project(1_500, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])])), vec![]);
+    // 1 fps is the slowest an output may run, as the UI and the agent tools say.
+    let slow = engine::FrameRate { num: 1, den: 2 };
+    assert_eq!(only(&common::project_at(slow, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])])), vec![E::FrameRateTooLow { frame_rate: slow }]);
+    assert_eq!(only(&common::project_at(engine::FrameRate::MIN, vec![track(vec![clip("a.mp4", 0, 0, 3000)], vec![])])), vec![]);
 }
 
 #[test]

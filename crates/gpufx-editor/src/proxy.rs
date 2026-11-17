@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
 use d3d12_backend::{probe_media, probe_video_format, EncoderChoice, ExportJob, ProjectPaths, ProxyFile, ProxyTiming, VideoCodec, VideoFormat};
-use engine::{ClipPlacement, Output, Project, Time, Track, TrackKind, MIN_FRAME_DURATION, SUPPORTED_VERSION};
+use engine::{ClipPlacement, Output, Project, Time, Track, TrackKind, FrameRate, SUPPORTED_VERSION};
 
 use crate::visuals::worker::FileStamp;
 
@@ -196,7 +196,7 @@ fn covering_placement(format: &VideoFormat, width: u32, height: u32) -> ClipPlac
 /// constant-rate source. A source above 60 fps gets 60, the fastest a project may run, and one
 /// that states no rate at all 30.
 pub fn proxy_frame_duration(format: &VideoFormat) -> Time {
-    format.frame_duration.map_or(Time::from_ticks(3000), |ticks| ticks.max(MIN_FRAME_DURATION))
+    format.frame_duration.map_or(Time::from_ticks(3000), |ticks| ticks.max(FrameRate::MAX.frame_duration()))
 }
 
 /// What the preview needs to read the proxy at `path` of a video of `format` in its place: the
@@ -219,7 +219,8 @@ pub fn proxy_project(original: &Path, format: &VideoFormat, duration: Time) -> P
     clip.muted = true;
     Project {
         version: SUPPORTED_VERSION,
-        output: Output { width, height, frame_duration, audio: None },
+        // The proxy keeps whole-tick frames so its frames line up with [`ProxyTiming`].
+        output: Output { width, height, frame_rate: FrameRate::from_frame_duration(frame_duration).unwrap_or(FrameRate::whole(30)), audio: None },
         tracks: vec![Track { kind: TrackKind::Video, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
         markers: Vec::new(),
         beats: Default::default(),
@@ -852,7 +853,7 @@ mod tests {
         assert_eq!(project.tracks[0].clips[0].duration, Time::from_ticks(90_000));
         let fast_format = VideoFormat { rate: Some((120, 1)), frame_duration: Some(Time::from_ticks(750)), ..format(3840, 2160) };
         let fast = proxy_project(Path::new(r"D:\a.mp4"), &fast_format, Time::from_ticks(90_000));
-        assert_eq!(fast.output.frame_duration, MIN_FRAME_DURATION, "120 fps becomes the 60 fps a project may have");
+        assert_eq!(fast.output.frame_rate, FrameRate::MAX, "120 fps becomes the 60 fps a project may have");
         assert_eq!(preview_file(PathBuf::from("p.mp4"), &fast_format).timing, None, "a capped proxy is read at the original's time");
     }
 
@@ -864,7 +865,7 @@ mod tests {
         assert_eq!(file.display_aspect, Some(2160.0 / 3840.0), "the original's shape, not 304/540");
         let film = VideoFormat { rate: Some((24000, 1001)), frame_duration: d3d12_backend::frame_ticks_floor(24000, 1001), ..format(3840, 2160) };
         let project = proxy_project(Path::new(r"D:\a.mp4"), &film, Time::from_ticks(90_000));
-        assert_eq!(project.output.frame_duration, Time::from_ticks(3753), "one 23.976 frame, rounded down");
+        assert_eq!(project.output.frame_rate.frame_duration(), Time::from_ticks(3753), "one 23.976 frame, rounded down");
         assert_eq!(preview_file(PathBuf::from("p.mp4"), &film).timing, Some(ProxyTiming { rate: (24000, 1001), time_base: (1, 15360), frame_duration: Time::from_ticks(3753) }));
         let variable = VideoFormat { constant_rate: false, ..film };
         assert_eq!(preview_file(PathBuf::from("p.mp4"), &variable).timing, None, "a variable rate is read at the original's time");

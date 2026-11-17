@@ -1,7 +1,8 @@
 //! Project validation. Every error names its location (track, clip, transition, effect index).
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
-use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_FRAME_DURATION, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
+use crate::frame_rate::FrameRate;
+use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -71,10 +72,12 @@ impl Resolver for AcceptAll {
 pub enum ValidationError {
     /// `output.width` or `output.height` is zero.
     InvalidOutputSize { width: u32, height: u32 },
-    /// `output.frame_duration` is zero or negative.
-    NonPositiveFrameDuration { frame_duration: Time },
-    /// `output.frame_duration` is shorter than [`MIN_FRAME_DURATION`]: more than 60 fps.
-    FrameDurationTooShort { frame_duration: Time },
+    /// A part of `output.frame_rate` is zero.
+    InvalidFrameRate { frame_rate: FrameRate },
+    /// `output.frame_rate` is faster than [`FrameRate::MAX`], 60 fps.
+    FrameRateTooHigh { frame_rate: FrameRate },
+    /// `output.frame_rate` is slower than [`FrameRate::MIN`], 1 fps.
+    FrameRateTooLow { frame_rate: FrameRate },
     /// `output.audio.sample_rate` is not 48000.
     UnsupportedSampleRate { sample_rate: u32 },
     /// `output.audio.channels` is not 2.
@@ -289,11 +292,14 @@ impl fmt::Display for ValidationError {
             InvalidOutputSize { width, height } => {
                 write!(f, "output: size {width}x{height} must be positive")
             }
-            NonPositiveFrameDuration { frame_duration } => {
-                write!(f, "output: frame_duration {frame_duration} must be positive")
+            InvalidFrameRate { frame_rate } => {
+                write!(f, "output: frame_rate {frame_rate} must have a positive numerator and denominator")
             }
-            FrameDurationTooShort { frame_duration } => {
-                write!(f, "output: frame_duration {frame_duration} is more than 60 fps, it must be at least {MIN_FRAME_DURATION} ticks")
+            FrameRateTooHigh { frame_rate } => {
+                write!(f, "output: frame_rate {frame_rate} is more than {} fps", FrameRate::MAX)
+            }
+            FrameRateTooLow { frame_rate } => {
+                write!(f, "output: frame_rate {frame_rate} is less than {} fps", FrameRate::MIN)
             }
             UnsupportedSampleRate { sample_rate } => {
                 write!(f, "output: audio sample_rate {sample_rate} must be 48000")
@@ -503,14 +509,13 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             height: project.output.height,
         });
     }
-    if project.output.frame_duration <= Time::ZERO {
-        errors.push(NonPositiveFrameDuration {
-            frame_duration: project.output.frame_duration,
-        });
-    } else if project.output.frame_duration < MIN_FRAME_DURATION {
-        errors.push(FrameDurationTooShort {
-            frame_duration: project.output.frame_duration,
-        });
+    let frame_rate = project.output.frame_rate;
+    if !frame_rate.is_valid() {
+        errors.push(InvalidFrameRate { frame_rate });
+    } else if frame_rate.is_faster_than(FrameRate::MAX) {
+        errors.push(FrameRateTooHigh { frame_rate });
+    } else if FrameRate::MIN.is_faster_than(frame_rate) {
+        errors.push(FrameRateTooLow { frame_rate });
     }
     if let Some(audio) = &project.output.audio {
         if audio.sample_rate != 48_000 {

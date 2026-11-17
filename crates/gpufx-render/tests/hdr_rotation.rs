@@ -43,7 +43,7 @@ impl FrameSink for First {
 /// The first frame of a project of one clip of `source`, `width` x `height`.
 fn render_first(gpu: &Arc<Gpu>, source: &Path, width: u32, height: u32) -> Vec<u8> {
     let clip = format!(r#"{{"source":"{}","start":0,"source_in":0,"duration":{},"effects":[]}}"#, json_path(source), 3 * FRAME);
-    let json = format!(r#"{{"version":1,"output":{{"width":{width},"height":{height},"frame_duration":{FRAME}}},"tracks":[{{"clips":[{clip}]}}]}}"#);
+    let json = format!(r#"{{"version":1,"output":{{"width":{width},"height":{height},"frame_rate":{{"num":90000,"den":{FRAME}}}}},"tracks":[{{"clips":[{clip}]}}]}}"#);
     let project = Project::from_json(&json).expect("project parses");
     let paths = Arc::new(ProjectPaths::new(Path::new(&format!("{}/test.json", clips_dir().display())), vec![packages_root()]));
     let errors = validate(&project, paths.as_ref());

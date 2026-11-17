@@ -51,6 +51,7 @@ use crate::per_unit::{unit_poses, PerUnit, TextUnit, UnitOrder};
 use crate::project::{ClipAnimation, AnimationRef, Effect};
 use crate::schedule::SourceSample;
 use crate::schedule::ClipClock;
+use crate::frame_rate::FrameRate;
 use crate::time::{Time, TICKS_PER_SECOND};
 
 /// What parts a preset of a pack: `"<pack id>/<item id>"`. A built-in preset id never holds it.
@@ -838,13 +839,14 @@ pub fn animation_pose(animation: &ClipAnimation, clock: ClipClock) -> AnimationP
 }
 
 /// The effects the presets of `animation` run at `clock`, each with its progress parameter set
-/// (see the module notes for the progress of each group), for output frames `frame` long. Empty
+/// (see the module notes for the progress of each group), for output frames of `frame_rate`. Empty
 /// outside every window, for presets without an effect and for a clip with no visible time.
-pub fn animation_effects(animation: &ClipAnimation, clock: ClipClock, frame: Time) -> Vec<Effect> {
+pub fn animation_effects(animation: &ClipAnimation, clock: ClipClock, frame_rate: FrameRate) -> Vec<Effect> {
     if animation.is_empty() || clock.duration.ticks() <= 0 {
         return Vec::new();
     }
-    let frame = frame.ticks().max(0) as f64;
+    // The exact length of one frame (3753.75 ticks at 23.976 fps), not a whole-tick floor of it.
+    let frame = if frame_rate.is_valid() { f64::from(frame_rate.den) * TICKS_PER_SECOND as f64 / f64::from(frame_rate.num) } else { 0.0 };
     // The last frame of a window starts one frame before its end, and has progress 1.
     let by_frames = |progress: f64, window: f64| {
         let span = window - frame;
@@ -870,10 +872,10 @@ pub fn animation_effects(animation: &ClipAnimation, clock: ClipClock, frame: Tim
 }
 
 /// The effects a sample is drawn with: the clip's own, their keyframes applied, then those of its
-/// preset animations (see [`animation_effects`]), for output frames `frame` long.
-pub fn effects_with_animation<'a>(sample: &SourceSample<'a>, frame: Time) -> Cow<'a, [Effect]> {
+/// preset animations (see [`animation_effects`]), for output frames of `frame_rate`.
+pub fn effects_with_animation<'a>(sample: &SourceSample<'a>, frame_rate: FrameRate) -> Cow<'a, [Effect]> {
     let own = effects_at(sample.effects, sample.offset);
-    let added = animation_effects(&sample.model.animation, sample.clock, frame);
+    let added = animation_effects(&sample.model.animation, sample.clock, frame_rate);
     if added.is_empty() {
         return own;
     }
@@ -1000,7 +1002,7 @@ mod tests {
         let clock = |elapsed| ClipClock { elapsed: Time::from_ticks(elapsed), duration: Time::from_ticks(1000) };
         let progress = |effects: &[Effect], package: &str| effects.iter().find(|e| e.package == package).map(|e| e.params["t"].as_f64().unwrap());
         // Frames 100 ticks long: frames start at 0, 100, ..., 900 of a clip 1000 long.
-        let frame = Time::from_ticks(100);
+        let frame = FrameRate::whole(900);
 
         let both = ClipAnimation { enter: slot("p/in", 200), exit: slot("p/out", 400), ..ClipAnimation::default() };
         let at = |elapsed| animation_effects(&both, clock(elapsed), frame);
@@ -1027,6 +1029,14 @@ mod tests {
         assert!(animation_effects(&bare, clock(50), frame).is_empty());
         assert_eq!(animation_pose(&bare, clock(50)).opacity, 1.0);
         assert!(animation_effects(&ClipAnimation { enter: slot("fade", 200), ..ClipAnimation::default() }, clock(50), frame).is_empty(), "built-in presets have no effect");
+
+        // 23.976 fps: an enter of four frames is 15015 ticks and its last frame starts 3753.75 ticks
+        // before the end. Measured with the floored 3753-tick frame it would settle late.
+        let film = ClipAnimation { enter: slot("p/in", 15_015), ..ClipAnimation::default() };
+        let long = |elapsed| ClipClock { elapsed: Time::from_ticks(elapsed), duration: Time::from_ticks(90_000) };
+        let last = progress(&animation_effects(&film, long(11_261), FrameRate::NTSC_FILM), "fx-in").unwrap();
+        assert!((1.0 - last).abs() < 5e-5, "the last frame of the enter is settled: {last}");
+        assert_eq!(progress(&animation_effects(&film, long(11_262), FrameRate::NTSC_FILM), "fx-in"), Some(1.0));
     }
 
     /// The hard-coded presets the curves replaced, kept to show the curves give the same poses.

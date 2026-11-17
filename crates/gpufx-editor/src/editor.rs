@@ -29,8 +29,8 @@ use crate::text_clip::{default_text, natural_placement, rescaled_placement};
 use crate::beats::{BeatDetector, BeatStatus};
 use engine::{
     keyframe_neighbors, keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, Keyframe, remove_keyframe, set_effect_params_at, set_keyframe, set_motion_value, set_placement_at, ClipPlacement, ClipProperty, Easing, KeyframeTarget, PlacedRect,
-    add_clip, add_effect, add_track, remove_track, add_transition_report, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_speed,
-    add_text_clip, set_text, TextContent, set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
+    add_clip, add_effect, add_track, remove_track, add_transition_report, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_rate, set_muted, set_output_size, set_placement, set_speed,
+    add_text_clip, set_text, TextContent, set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, FrameRate, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
 use d3d12_backend::MediaProbe;
 use serde_json::{Map, Value};
@@ -456,9 +456,9 @@ pub fn speed_limits(project: &Project, key: ClipKey) -> Option<(f64, f64)> {
 /// The sizes offered for the output, widest shapes first.
 pub const OUTPUT_PRESETS: [(u32, u32); 6] = [(3840, 2160), (2560, 1440), (1920, 1080), (1280, 720), (1080, 1920), (1080, 1080)];
 pub const MAX_OUTPUT_SIDE: u32 = 7680;
-/// The frame rates offered for the output, as ticks per frame: 24, 25, 29.97, 30, 50 and 60 fps.
-/// Only rates with a whole number of ticks per frame can be kept exactly, which leaves out 23.976 and 59.94.
-pub const OUTPUT_FRAME_DURATIONS: [Time; 6] = [Time::from_ticks(3750), Time::from_ticks(3600), Time::from_ticks(3003), Time::from_ticks(3000), Time::from_ticks(1800), Time::from_ticks(1500)];
+/// The frame rates offered for the output: 23.976, 24, 25, 29.97, 30, 50, 59.94 and 60 fps, the
+/// NTSC ones as their exact fractions.
+pub const OUTPUT_FRAME_RATES: [FrameRate; 8] = [FrameRate::NTSC_FILM, FrameRate::whole(24), FrameRate::whole(25), FrameRate::NTSC, FrameRate::whole(30), FrameRate::whole(50), FrameRate::NTSC_DOUBLE, FrameRate::whole(60)];
 
 /// `side` as an output side: encoders of 4:2:0 video need it even.
 pub(crate) fn even_side(side: u32) -> u32 {
@@ -500,7 +500,7 @@ fn default_project() -> Project {
         output: Output {
             width: 1920,
             height: 1080,
-            frame_duration: Time::from_ticks(3000),
+            frame_rate: FrameRate::whole(30),
             audio: Some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }),
         },
         tracks: Vec::new(),
@@ -1531,7 +1531,7 @@ impl EditorState {
 
     /// How far from a keyframe the playhead still counts as on it.
     pub fn keyframe_tolerance(&self) -> Time {
-        keyframe_tolerance(self.project().output.frame_duration)
+        keyframe_tolerance(self.project().output.frame_rate.frame_duration())
     }
 
     /// The keyframe of `target` of clip `key` that the playhead is on, within half an output frame:
@@ -1626,9 +1626,9 @@ impl EditorState {
         self.run(|project| set_output_size(project, width, height));
     }
 
-    /// Sets how long one output frame lasts.
-    pub fn set_frame_duration(&mut self, frame_duration: Time) {
-        self.run(|project| set_frame_duration(project, frame_duration));
+    /// Sets the output frame rate.
+    pub fn set_frame_rate(&mut self, frame_rate: FrameRate) {
+        self.run(|project| set_frame_rate(project, frame_rate));
     }
 
     pub fn set_muted(&mut self, muted: bool) {
@@ -2077,7 +2077,7 @@ impl EditorState {
     /// about its cues. Each shows its cue in `style`, or as the default text when there is none,
     /// placed where the style's layout says (near the bottom without one).
     pub fn subtitle_clips(&self, srt: &str, style: Option<&LibraryTextStyle>) -> (Vec<engine::Clip>, Vec<CueNote>) {
-        let (spans, notes) = cue_spans(srt, self.project().output.frame_duration);
+        let (spans, notes) = cue_spans(srt, self.project().output.frame_rate.frame_duration());
         let families = if style.is_some() { available_families() } else { Default::default() };
         let layout = style.and_then(|style| style.layout).unwrap_or(DEFAULT_SUBTITLE_LAYOUT);
         let output = self.output_pixels();
@@ -2574,7 +2574,7 @@ pub fn transition_duration_limits(project: &Project, track: usize, after_clip: u
     let usable_first = first.duration.saturating_sub(head_used(after_clip));
     let usable_second = second.duration.saturating_sub(tail_used(after_clip + 1));
     let longest = Time::from_ticks(usable_first.min(usable_second).ticks().saturating_mul(2));
-    let shortest = project.output.frame_duration;
+    let shortest = project.output.frame_rate.frame_duration();
     (longest >= shortest).then_some((shortest, longest))
 }
 
@@ -4213,7 +4213,7 @@ mod tests {
         let mut state = two_touching_clips();
         state.add_transition_package("mix");
         let (shortest, longest) = transition_duration_limits(state.project(), 0, 0).unwrap();
-        assert_eq!(shortest, state.project().output.frame_duration);
+        assert_eq!(shortest, state.project().output.frame_rate.frame_duration());
         assert_eq!(longest, Time::from_ticks(DEFAULT_CLIP_DURATION.ticks() * 2));
         state.live_transition(0, 0, Map::new(), seconds(4));
         state.commit_live();
@@ -4263,9 +4263,9 @@ mod tests {
     fn a_custom_frame_rate_outside_the_presets_is_kept_and_undoes() {
         let mut state = state_with_clip();
         let before = state.project().clone();
-        let custom = crate::timecode::frame_duration_from_fps(7.0).expect("in range");
-        state.set_frame_duration(custom);
-        assert_eq!(state.project().output.frame_duration, Time::from_ticks(12_857));
+        let custom = FrameRate::from_fps(7.0).expect("in range");
+        state.set_frame_rate(custom);
+        assert_eq!(state.project().output.frame_rate, FrameRate::whole(7));
         state.undo();
         assert_eq!(state.project(), &before);
     }
@@ -4274,8 +4274,8 @@ mod tests {
     fn the_frame_rate_changes_and_undoes() {
         let mut state = state_with_clip();
         let before = state.project().clone();
-        state.set_frame_duration(OUTPUT_FRAME_DURATIONS[5]);
-        assert_eq!(state.project().output.frame_duration, Time::from_ticks(1500));
+        state.set_frame_rate(OUTPUT_FRAME_RATES[0]);
+        assert_eq!(state.project().output.frame_rate, FrameRate::NTSC_FILM);
         state.undo();
         assert_eq!(state.project(), &before);
     }
@@ -4479,7 +4479,7 @@ mod tests {
     fn the_source_in_field_stops_at_the_next_clip_and_at_the_shortest_length() {
         let mut state = state_with_clip();
         state.apply_clip_field(ClipField::SourceIn(1_000.0));
-        let frame = state.project().output.frame_duration;
+        let frame = state.project().output.frame_rate.frame_duration();
         assert_eq!(state.project().tracks[0].clips[0].duration, frame, "a cut leaves one frame");
         state.apply_clip_field(ClipField::SourceIn(0.0));
         assert_eq!(state.project().tracks[0].clips[0].source_in, Time::ZERO);

@@ -52,6 +52,10 @@ Hai tiến trình editor dùng chung `%LOCALAPPDATA%\gpufx-editor\proxies`: `swe
 
 Khi có proxy, preview dùng `ProjectPaths` riêng còn capture của agent dùng bản gốc; `D3d12Producer::use_paths` (`crates/gpufx-editor/src/preview/backend.rs:64`) bỏ compositor mỗi khi paths đổi, nên capture xen với preview dựng lại graph mỗi lần đổi. Nên giữ compositor riêng cho capture. Ghi ngày 2026-11-17.
 
+### [Thấp] Proxy dùng nhịp khung tròn tick thay vì phân số chính xác của nguồn
+
+`crates/gpufx-editor/src/proxy.rs` (`proxy_project`) đặt nhịp của project proxy là `FrameRate::from_frame_duration` của khung tròn tick (`proxy_frame_duration`), nên nguồn 23,976 fps cho proxy 90000/3753 = 30000/1251, hiện là "23.981 fps", thay vì 24000/1001. Giữ vậy để khung proxy khớp `ProxyTiming::proxy_time` (bước đều theo tick, `crates/d3d12-backend/src/paths.rs`). Muốn proxy đúng nhịp nguồn thì phải dùng `FrameRate` của nguồn và viết lại `proxy_time` theo mốc khung phân số. Ghi ngày 2026-11-17.
+
 ### [Thấp] Proxy chế độ Tự động chỉ xét chiều cao, proxy tối đa 60 fps
 
 `crates/gpufx-editor/src/proxy.rs:75` (`ProxyMode::wants`) chỉ xét cao hơn 1080; chưa xét fps cao hay codec nặng (HEVC 10-bit, AV1). `proxy_frame_duration` (`proxy.rs`) kẹp tốc độ khung về 60 fps vì project không cho nhanh hơn, nên nguồn 120 fps có proxy 60 fps và preview đọc proxy theo thời gian của gốc (`preview_file` bỏ `ProxyTiming`), lệch dưới một khung proxy. Nguồn VFR (avg khác `r_frame_rate`) cũng không giữ PTS gốc: proxy lấy mẫu theo `r_frame_rate` làm tròn xuống và đọc theo thời gian của gốc, nên khung hiện ra có thể là khung gốc trước đó tối đa một bước proxy; muốn khớp tuyệt đối phải mã proxy giữ PTS gốc. Ghi ngày 2026-11-17.
@@ -175,10 +179,6 @@ Package `scale` của `crates/d3d12-backend/src/compositor.rs` kéo giãn thẳn
 
 `crates/d3d12-backend/src/decoder.rs:348-352` và `:365` nhận khung đầu tiên sau seek dù pts của nó lớn hơn đích, coi như nguồn bắt đầu ở đó. Với demuxer seek theo DTS hoặc luồng open-GOP, khung đầu sau seek có thể muộn hơn đích trong khi khung đúng nằm trước nó, và lỗi này bị bỏ qua âm thầm. Chưa kiểm chứng; các test hiện chỉ dùng MP4 closed-GOP. Ghi ngày 2026-11-09.
 
-### [Vừa] Đầu ra 23,976 và 59,94 fps không biểu diễn được bằng frame_duration nguyên
-
-Đơn vị thời gian 1/90000 cho 3753,75 tick mỗi khung ở 23,976 fps và 1501,5 ở 59,94 fps (`docs/plans/spec-engine-phase1-vi.md:24`, `crates/engine/src/time.rs`). `frame_duration` là số nguyên nên hai nhịp này bị làm tròn và lệch dần. Cần đổi đơn vị thời gian hoặc lưu nhịp khung dạng phân số. Ghi ngày 2026-11-09.
-
 ### [Vừa] Hai đường màu độc lập: shader gpufx và hàm rgba_to_nv12 viết tay
 
 Giải mã và ghép dùng shader gpufx, còn xuất dùng `rgba_to_nv12` ở `crates/d3d12-backend/src/encoder.rs:185-207` với hệ số nguyên tự viết, nên sai lệch giữa hai đường không có gì kiểm (lỗi hệ số Cb từng nằm ở đây). Nên cân nhắc swscale hoặc cho gpufx xuất thẳng NV12. Kèm vấn đề vị trí mẫu chroma: trung bình 2x2 là đặt chroma ở tâm khối, trong khi H.264 thường là left-sited, và encoder không đặt `chroma_sample_location`. Ghi ngày 2026-11-09.
@@ -219,9 +219,9 @@ Kéo clip ra ngoài các hàng và kéo file từ thư viện vẫn hút mép l�
 
 Khi kéo clip hoặc cạnh trim tới mép trái/phải của vùng track, view đứng yên nên không kéo được tới phần đang ngoài màn hình; phải thả, cuộn rồi kéo lại (`crates/gpufx-editor/src/ui.rs`, `handle_tracks`). Ghi ngày 2026-11-09.
 
-### [Thấp] Vị trí thả clip chưa làm tròn theo frame_duration
+### [Thấp] Vị trí thả clip chưa làm tròn theo khung xuất
 
-Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, không làm tròn về bội của `frame_duration` (`crates/gpufx-editor/src/timeline/drag.rs`, `drag_command`). Clip có thể bắt đầu giữa hai khung. Cần quyết định trước khi xuất video. Ghi ngày 2026-11-09.
+Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, không làm tròn về mốc khung của `output.frame_rate` (`crates/gpufx-editor/src/timeline/drag.rs`, `drag_command`). Clip có thể bắt đầu giữa hai khung. Cần quyết định trước khi xuất video. Ghi ngày 2026-11-09.
 
 ### [Thấp] POC duyệt TexturesDelta không drain
 
@@ -472,7 +472,7 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 ### [Thấp] Kẹp file trên 60 fps về 60 fps mà người dùng không biết
 
-`crates/gpufx-editor/src/project_file.rs:120`: mở file có `frame_duration` dưới 1500 tick chỉ ghi stderr, project không bị đánh dấu chưa lưu, nên có thể xuất 60 fps mà không hay. Nên báo ở thanh trạng thái hoặc đánh dấu chưa lưu. CLI `gpufx-render` thì từ chối chính file đó, chờ user chốt có dùng chung cách kẹp không. Ghi ngày 2026-11-10.
+`crates/gpufx-editor/src/project_file.rs:120`: mở file có `frame_rate` trên 60 fps chỉ ghi stderr, project không bị đánh dấu chưa lưu, nên có thể xuất 60 fps mà không hay. Nên báo ở thanh trạng thái hoặc đánh dấu chưa lưu. CLI `gpufx-render` thì từ chối chính file đó, chờ user chốt có dùng chung cách kẹp không. Ghi ngày 2026-11-10.
 
 ### [Thấp] Test preview bỏ khung chưa chứng minh được `LatestSlot`
 

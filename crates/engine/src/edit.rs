@@ -50,6 +50,7 @@
 //!   the source itself. Markers belong to no track.
 
 use crate::audio_schedule::sample_position;
+use crate::frame_rate::FrameRate;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
 use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipMatte, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
@@ -1137,7 +1138,7 @@ pub fn remove_keyframe(project: &Project, key: ClipKey, target: &KeyframeTarget,
 pub fn set_motion_value(project: &Project, key: ClipKey, property: ClipProperty, at: Time, value: f64, output_aspect: f64, source_aspect: f64) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let mut next = project.clone();
-    let tolerance = keyframe_tolerance(project.output.frame_duration);
+    let tolerance = keyframe_tolerance(project.output.frame_rate.frame_duration());
     let clip = clip_mut(&mut next, key)?;
     if clip.motion.has_keyframes(property) {
         let at = snap_to_keyframe(clip, clip.keyframes_of(&KeyframeTarget::Property(property)).unwrap_or_default(), at, tolerance);
@@ -1173,7 +1174,7 @@ pub fn set_motion_value(project: &Project, key: ClipKey, property: ClipProperty,
 pub fn set_placement_at(project: &Project, key: ClipKey, at: Time, placement: ClipPlacement, output_aspect: f64, source_aspect: f64) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let mut next = project.clone();
-    let tolerance = keyframe_tolerance(project.output.frame_duration);
+    let tolerance = keyframe_tolerance(project.output.frame_rate.frame_duration());
     let clip = clip_mut(&mut next, key)?;
     let fit = PlacedRect::of(clip.placement, output_aspect, source_aspect);
     let mut base = clip.placement.unwrap_or(ClipPlacement { x: fit.x, y: fit.y, width: fit.width });
@@ -1214,7 +1215,7 @@ pub fn set_effect_params_at(project: &Project, key: ClipKey, effect: usize, para
     unlocked(project, key.track)?;
     let mut next = project.clone();
     let clip = clip_mut(&mut next, key)?;
-    let tolerance = keyframe_tolerance(project.output.frame_duration);
+    let tolerance = keyframe_tolerance(project.output.frame_rate.frame_duration());
     let (duration, shown_at) = (clip.duration, at);
     let target = clip.effects.get_mut(effect).ok_or(EditError::EffectNotFound { key, effect })?;
     let mut merged = params;
@@ -1241,10 +1242,11 @@ pub fn set_effect_params_at(project: &Project, key: ClipKey, effect: usize, para
     finish(next)
 }
 
-/// Changes how long one output frame lasts. Anything above 60 fps is refused.
-pub fn set_frame_duration(project: &Project, frame_duration: Time) -> Result<Project, EditError> {
+/// Changes the output frame rate, reduced (60/2 is stored as 30/1). Anything outside 1 to 60 fps
+/// is refused.
+pub fn set_frame_rate(project: &Project, frame_rate: FrameRate) -> Result<Project, EditError> {
     let mut next = project.clone();
-    next.output.frame_duration = frame_duration;
+    next.output.frame_rate = FrameRate::new(frame_rate.num, frame_rate.den);
     finish(next)
 }
 

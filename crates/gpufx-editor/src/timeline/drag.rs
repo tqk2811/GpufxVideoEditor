@@ -67,7 +67,7 @@ pub fn clamp_trim(project: &Project, command: EditCommand) -> EditCommand {
     let Some(track) = project.tracks.get(key.track) else { return command };
     let Some(clip) = track.clips.get(key.clip) else { return command };
     let Some(end) = clip.end() else { return command };
-    let minimum = clip.fade_in.saturating_add(clip.fade_out).max(project.output.frame_duration);
+    let minimum = clip.fade_in.saturating_add(clip.fade_out).max(project.output.frame_rate.frame_duration());
     match command {
         EditCommand::TrimStart { new_start, .. } => {
             let previous_end = key.clip.checked_sub(1).and_then(|index| track.clips.get(index)).and_then(|previous| previous.end()).unwrap_or(Time::ZERO);
@@ -105,7 +105,7 @@ pub fn clamp_source_in(project: &Project, key: ClipKey, wanted: Time) -> Option<
     let clip = track.clips.get(key.clip)?;
     let end = clip.end()?;
     let grid = clip.speed_grid();
-    let minimum = clip.fade_in.saturating_add(clip.fade_out).max(project.output.frame_duration);
+    let minimum = clip.fade_in.saturating_add(clip.fade_out).max(project.output.frame_rate.frame_duration());
     let room = track.clips.get(key.clip + 1).map_or(i64::MAX, |next| next.start.saturating_sub(end).ticks()).max(0);
     let back = clip.timeline_ticks(clip.source_in).ticks().min(room).max(0);
     if wanted == Time::ZERO && back == clip.timeline_ticks(clip.source_in).ticks() {
@@ -173,7 +173,7 @@ mod tests {
     fn project() -> Project {
         let empty = Project {
             version: engine::SUPPORTED_VERSION,
-            output: Output { width: 1920, height: 1080, frame_duration: Time::from_ticks(3000), audio: None },
+            output: Output { width: 1920, height: 1080, frame_rate: engine::FrameRate::whole(30), audio: None },
             tracks: Vec::new(),
             markers: Vec::new(), beats: Default::default(),
         };

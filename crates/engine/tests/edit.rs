@@ -6,7 +6,7 @@ use common::*;
 use engine::{
     add_clip, add_effect, add_track, add_transition, audio_sample_count, audio_segments, clip_at,
     delete_clip, frame_count, remove_track, layers_at_frame, move_clip, nearest_free_start, remove_effect,
-    remove_transition, set_effect_params, set_fades, set_gain, set_frame_duration, set_muted, set_output_size, set_placement, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, validate,
+    remove_transition, set_effect_params, set_fades, set_gain, set_frame_rate, set_muted, set_output_size, set_placement, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, validate,
     AcceptAll, ClipKey, ClipPlacement, PlacedRect, EditError, EditHistory, Effect, LayerContent, Project, SourceSample, Time,
     TrackKind, ValidationError,
 };
@@ -24,11 +24,15 @@ fn the_output_size_changes_and_zero_is_refused() {
 }
 
 #[test]
-fn the_frame_duration_changes_and_zero_is_refused() {
+fn the_frame_rate_changes_and_zero_is_refused() {
     let start = project(3_000, vec![]);
-    assert_eq!(set_frame_duration(&start, t(1_500)).unwrap().output.frame_duration, t(1_500));
-    assert!(matches!(set_frame_duration(&start, t(0)), Err(EditError::Invalid(_))));
-    assert!(matches!(set_frame_duration(&start, t(1_499)), Err(EditError::Invalid(_))), "more than 60 fps");
+    assert_eq!(set_frame_rate(&start, engine::FrameRate::NTSC_FILM).unwrap().output.frame_rate, engine::FrameRate::NTSC_FILM);
+    assert_eq!(set_frame_rate(&start, engine::FrameRate::whole(60)).unwrap().output.frame_rate, engine::FrameRate::whole(60));
+    assert_eq!(set_frame_rate(&start, engine::FrameRate { num: 60, den: 2 }).unwrap().output.frame_rate, engine::FrameRate::whole(30), "stored reduced");
+    assert!(matches!(set_frame_rate(&start, engine::FrameRate { num: 1, den: 2 }), Err(EditError::Invalid(_))), "less than 1 fps");
+    assert!(matches!(set_frame_rate(&start, engine::FrameRate { num: 0, den: 1 }), Err(EditError::Invalid(_))));
+    assert!(matches!(set_frame_rate(&start, engine::FrameRate { num: 30, den: 0 }), Err(EditError::Invalid(_))));
+    assert!(matches!(set_frame_rate(&start, engine::FrameRate::new(60_001, 1000)), Err(EditError::Invalid(_))), "more than 60 fps");
 }
 
 #[test]

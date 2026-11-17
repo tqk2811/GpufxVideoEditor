@@ -36,7 +36,7 @@ Phiên bản 2 thêm các trường tuỳ chọn. Engine vẫn đọc được p
 {
   "version": 2,
   "output": {
-    "width": 1920, "height": 1080, "frame_duration": 3000,
+    "width": 1920, "height": 1080, "frame_rate": { "num": 30, "den": 1 },
     "audio": { "sample_rate": 48000, "channels": 2, "bitrate": 192000 }
   },
   "tracks": [

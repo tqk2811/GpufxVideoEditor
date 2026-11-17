@@ -84,7 +84,7 @@ mod tests {
     fn project() -> Project {
         let empty = Project {
             version: engine::SUPPORTED_VERSION,
-            output: Output { width: 1920, height: 1080, frame_duration: Time::from_ticks(3000), audio: None },
+            output: Output { width: 1920, height: 1080, frame_rate: engine::FrameRate::whole(30), audio: None },
             tracks: Vec::new(),
             markers: Vec::new(), beats: Default::default(),
         };

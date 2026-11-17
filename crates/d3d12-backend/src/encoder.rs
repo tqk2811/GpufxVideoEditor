@@ -7,7 +7,7 @@ use std::ptr;
 use std::sync::{Mutex, OnceLock};
 
 use engine::render::{FrameSink, RenderError};
-use engine::{AudioOutput, Output, TICKS_PER_SECOND};
+use engine::{AudioOutput, FrameRate, Output};
 
 use crate::ffi::{self, check, describe_error};
 
@@ -311,14 +311,6 @@ const fn stereo_layout() -> ffi::AVChannelLayout {
     }
 }
 
-fn gcd(a: i64, b: i64) -> i64 {
-    if b == 0 {
-        a
-    } else {
-        gcd(b, a % b)
-    }
-}
-
 impl Mp4Encoder {
     /// Creates `path` for frames of `output`. With [`EncoderChoice::Auto`] the encoders this FFmpeg
     /// has are opened in order until one opens, without a separate probe; that happens before the
@@ -390,11 +382,11 @@ impl Mp4Encoder {
         if self.codec_context.is_null() {
             return Err("avcodec_alloc_context3 failed".to_owned());
         }
-        let duration = output.frame_duration.ticks();
-        let divisor = gcd(duration, TICKS_PER_SECOND);
-        let time_base = ffi::AVRational { num: (duration / divisor) as i32, den: (TICKS_PER_SECOND / divisor) as i32 };
+        let time_base = Self::video_time_base(output.frame_rate)?;
         let global_header = (*(*self.format_context).oformat).flags & ffi::AVFMT_GLOBALHEADER != 0;
-        let gop = keyframe_interval.map_or_else(|| TICKS_PER_SECOND / duration.max(1) * 2, i64::from).clamp(1, 600) as i32;
+        // A keyframe about every two seconds unless the caller says otherwise.
+        let two_seconds = 2 * i64::from(output.frame_rate.num) / i64::from(output.frame_rate.den);
+        let gop = keyframe_interval.map_or(two_seconds, i64::from).clamp(1, 600) as i32;
         configure_video(&mut *self.codec_context, &self.encoder_name, output.width as i32, output.height as i32, self.pixel_format, time_base, Self::target_bit_rate(output), gop, global_header);
         check(ffi::avcodec_open2(self.codec_context, codec, ptr::null_mut()), "avcodec_open2")?;
 
@@ -404,7 +396,7 @@ impl Mp4Encoder {
         }
         (*self.stream).time_base = time_base;
         (*self.stream).avg_frame_rate = (*self.codec_context).framerate;
-        self.frame_duration = Self::duration_in_time_base(duration, time_base);
+        self.frame_duration = 1;
         check(ffi::avcodec_parameters_from_context((*self.stream).codecpar, self.codec_context), "avcodec_parameters_from_context")?;
 
         if let Some(settings) = output.audio {
@@ -471,17 +463,20 @@ impl Mp4Encoder {
         Ok(())
     }
 
-    /// `ticks` of project time as a count of `time_base` units, rounded to nearest.
-    fn duration_in_time_base(ticks: i64, time_base: ffi::AVRational) -> i64 {
-        let numerator = i128::from(ticks) * i128::from(time_base.den);
-        let denominator = i128::from(TICKS_PER_SECOND) * i128::from(time_base.num);
-        ((2 * numerator + denominator) / (2 * denominator)) as i64
+    /// One frame as the time base, `den / num` seconds, so frame `n` has pts `n` and the stream
+    /// states the exact rate (`r_frame_rate` 24000/1001, not a rounded 3753-tick frame).
+    fn video_time_base(frame_rate: FrameRate) -> Result<ffi::AVRational, String> {
+        let frame_rate = FrameRate::new(frame_rate.num, frame_rate.den);
+        match (i32::try_from(frame_rate.den), i32::try_from(frame_rate.num)) {
+            (Ok(num), Ok(den)) if num > 0 && den > 0 => Ok(ffi::AVRational { num, den }),
+            _ => Err(format!("frame rate {frame_rate} cannot be encoded")),
+        }
     }
 
     /// About 0.1 bit per pixel per frame, a quality setting all encoders understand.
     fn target_bit_rate(output: &Output) -> i64 {
         let pixels = i64::from(output.width) * i64::from(output.height);
-        (pixels * TICKS_PER_SECOND / output.frame_duration.ticks().max(1)) / 10
+        (pixels * i64::from(output.frame_rate.num) / i64::from(output.frame_rate.den.max(1))) / 10
     }
 
     /// The name of the encoder that opened.
@@ -775,11 +770,12 @@ mod tests {
     }
 
     #[test]
-    fn the_frame_duration_in_the_time_base_is_one_frame() {
-        for ticks in [3000, 3003, 3600, 1500] {
-            let divisor = gcd(ticks, TICKS_PER_SECOND);
-            let time_base = ffi::AVRational { num: (ticks / divisor) as i32, den: (TICKS_PER_SECOND / divisor) as i32 };
-            assert_eq!(Mp4Encoder::duration_in_time_base(ticks, time_base), 1);
-        }
+    fn the_time_base_is_one_frame_of_the_exact_rate() {
+        let base = |rate| Mp4Encoder::video_time_base(rate).map(|tb| (tb.num, tb.den));
+        assert_eq!(base(FrameRate::NTSC_FILM), Ok((1001, 24000)));
+        assert_eq!(base(FrameRate::NTSC), Ok((1001, 30000)));
+        assert_eq!(base(FrameRate::NTSC_DOUBLE), Ok((1001, 60000)));
+        assert_eq!(base(FrameRate { num: 60, den: 2 }), Ok((1, 30)));
+        assert!(base(FrameRate { num: 0, den: 1 }).is_err());
     }
 }

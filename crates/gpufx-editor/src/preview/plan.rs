@@ -4,11 +4,7 @@ use engine::{Project, Time};
 
 /// The output frame shown at `time`.
 pub fn frame_index(project: &Project, time: Time) -> i64 {
-    let duration = project.output.frame_duration.ticks();
-    if duration <= 0 {
-        return 0;
-    }
-    time.ticks().div_euclid(duration)
+    project.output.frame_rate.frame_at(time)
 }
 
 /// Which frame of which project state a request or result is about.
@@ -104,12 +100,12 @@ pub fn fit_size(image: (u32, u32), available: (f32, f32)) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::{Output, SUPPORTED_VERSION};
+    use engine::{FrameRate, Output, SUPPORTED_VERSION};
 
-    fn project(frame_duration: i64) -> Project {
+    fn project(frame_rate: FrameRate) -> Project {
         Project {
             version: SUPPORTED_VERSION,
-            output: Output { width: 16, height: 9, frame_duration: Time::from_ticks(frame_duration), audio: None },
+            output: Output { width: 16, height: 9, frame_rate, audio: None },
             tracks: Vec::new(),
             markers: Vec::new(), beats: Default::default(),
         }
@@ -117,7 +113,7 @@ mod tests {
 
     #[test]
     fn a_time_inside_a_frame_gives_that_frame() {
-        let p = project(3000);
+        let p = project(FrameRate::whole(30));
         assert_eq!(frame_index(&p, Time::ZERO), 0);
         assert_eq!(frame_index(&p, Time::from_ticks(2999)), 0);
         assert_eq!(frame_index(&p, Time::from_ticks(3000)), 1);
@@ -125,8 +121,18 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_frame_duration_does_not_divide_by_zero() {
-        assert_eq!(frame_index(&project(0), Time::from_ticks(5)), 0);
+    fn a_bad_frame_rate_does_not_divide_by_zero() {
+        assert_eq!(frame_index(&project(FrameRate { num: 0, den: 1 }), Time::from_ticks(5)), 0);
+        assert_eq!(frame_index(&project(FrameRate { num: 30, den: 0 }), Time::from_ticks(5)), 0);
+    }
+
+    #[test]
+    fn an_ntsc_film_frame_is_found_from_its_exact_start() {
+        // Frame 2 of 23.976 starts at 7507.5 ticks, rounded down to 7507.
+        let p = project(FrameRate::NTSC_FILM);
+        assert_eq!(frame_index(&p, Time::from_ticks(7506)), 1);
+        assert_eq!(frame_index(&p, Time::from_ticks(7507)), 2);
+        assert_eq!(frame_index(&p, Time::from_ticks(90_000 * 3600)), 86_313);
     }
 
     #[test]

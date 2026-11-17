@@ -12,8 +12,8 @@ fn sample_project_parses() {
     let p = Project::from_json(SAMPLE).expect("sample parses");
     assert_eq!(p.version, engine::SUPPORTED_VERSION);
     assert_eq!(
-        (p.output.width, p.output.height, p.output.frame_duration),
-        (1920, 1080, t(3000))
+        (p.output.width, p.output.height, p.output.frame_rate),
+        (1920, 1080, engine::FrameRate::whole(30))
     );
     assert_eq!(p.tracks.len(), 2);
     assert_eq!(p.tracks[0].clips.len(), 2);

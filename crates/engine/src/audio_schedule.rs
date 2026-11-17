@@ -51,7 +51,7 @@
 use crate::denoise::DenoiseSpec;
 use crate::project::{Clip, Project, Track, Transition, VoiceEffect, ROBOT_HZ};
 use crate::render::ClipKey;
-use crate::schedule::{frame_count, frame_time, transition_window};
+use crate::schedule::{frame_count, transition_window};
 use crate::stretch::Stretch;
 use crate::time::Time;
 use std::f64::consts::FRAC_PI_2;
@@ -71,8 +71,7 @@ pub fn sample_position(t: Time) -> i64 {
 /// frame, so audio and video end together. The frame count covers audio clips too (see
 /// [`frame_count`]), so the end of the last audio clip is always inside. An empty project has 0.
 pub fn audio_sample_count(project: &Project) -> i64 {
-    let end = frame_time(project, frame_count(project)).unwrap_or(Time::MAX);
-    sample_position(end)
+    project.output.frame_rate.frame_sample(frame_count(project), MIX_SAMPLE_RATE).unwrap_or(i64::MAX)
 }
 
 /// A transition window in samples.

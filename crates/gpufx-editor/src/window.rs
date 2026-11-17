@@ -1593,7 +1593,7 @@ mod tests {
         let track = |kind, clips| Track { kind, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None };
         let project = Project {
             version: SUPPORTED_VERSION,
-            output: Output { width: 1920, height: 1080, frame_duration: Time::from_ticks(3000), audio: None },
+            output: Output { width: 1920, height: 1080, frame_rate: engine::FrameRate::whole(30), audio: None },
             tracks: vec![
                 track(TrackKind::Video, vec![clip("a.mp4"), clip("b.png"), clip("a.mp4"), clip("asset:sticker/p/x.png")]),
                 track(TrackKind::Audio, vec![clip("music.mp4")]),

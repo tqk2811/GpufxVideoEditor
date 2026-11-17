@@ -92,9 +92,9 @@ fn project_summary(ui: &mut egui::Ui, state: &EditorState) {
     let language = state.language();
     let output = &state.project().output;
     field(ui, &language.t(Message::FieldSize), &format!("{}\u{d7}{}", output.width, output.height));
-    field(ui, &language.t(Message::FieldFrameRate), &format_fps(output.frame_duration));
+    field(ui, &language.t(Message::FieldFrameRate), &format_fps(output.frame_rate));
     field(ui, &language.t(Message::FieldAspect), &aspect_label(output.width, output.height));
-    field(ui, &language.t(Message::FieldDuration), &format_timecode(content_end(state.project()), output.frame_duration));
+    field(ui, &language.t(Message::FieldDuration), &format_timecode(content_end(state.project()), output.frame_rate));
     ui.add_space(8.0);
     ui.separator();
     ui.add(egui::Label::new(egui::RichText::new(language.t(Message::SelectClipHint)).color(theme::text_dim())).wrap());

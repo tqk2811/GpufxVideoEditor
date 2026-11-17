@@ -10,7 +10,7 @@
 
 use crate::audio_mix::{mix_audio_with, AudioSource, MixReport};
 use crate::stretch::StretchStates;
-use crate::audio_schedule::{sample_position, MIX_CHANNELS};
+use crate::audio_schedule::{MIX_CHANNELS, MIX_SAMPLE_RATE};
 use crate::clip_animation::animation_effects;
 use crate::keyframe::effects_at;
 use crate::keyframe::ClipTransform;
@@ -19,6 +19,7 @@ use crate::project::{text_step_up, Clip, ClipMatte, Effect, Project, TextContent
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, LayerContent, Progress, SourceSample,
 };
+use crate::frame_rate::FrameRate;
 use crate::time::Time;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -297,9 +298,9 @@ fn decode_sample<C: Compositor>(
 /// [`animation_effects`]). When that fails and a preset added an effect, the clip is prepared again
 /// with its own effects only: a preset effect whose package went away since the packs were read
 /// leaves the clip drawn without it, as a missing package does when the packs are read.
-fn prepare_sample<C: Compositor>(compositor: &mut C, key: ClipKey, frame: &mut <C::Decoder as Decoder>::Frame, sample: &SourceSample<'_>, at: FrameContext, frame_duration: Time) -> Result<C::Image, RenderError> {
+fn prepare_sample<C: Compositor>(compositor: &mut C, key: ClipKey, frame: &mut <C::Decoder as Decoder>::Frame, sample: &SourceSample<'_>, at: FrameContext, frame_rate: FrameRate) -> Result<C::Image, RenderError> {
     let own = effects_at(sample.effects, sample.offset);
-    let added = animation_effects(&sample.model.animation, sample.clock, frame_duration);
+    let added = animation_effects(&sample.model.animation, sample.clock, frame_rate);
     let matte = if sample.model.text.is_some() { ClipMatte::default() } else { sample.model.matte };
     with_preset_fallback(&own, added, |effects| compositor.prepare_clip(key, frame, effects, &matte, sample.transform, sample.clock, at))
 }
@@ -323,7 +324,7 @@ fn render_layer<C: Compositor>(
     track: usize,
     content: &LayerContent<'_>,
     at: FrameContext,
-    frame_duration: Time,
+    frame_rate: FrameRate,
 ) -> Result<C::Image, RenderError> {
     let key = |clip| ClipKey { track, clip };
     match content {
@@ -333,7 +334,7 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(sample.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let image = prepare_sample(compositor, key(sample.clip), &mut frame, sample, at, frame_duration)?;
+            let image = prepare_sample(compositor, key(sample.clip), &mut frame, sample, at, frame_rate)?;
             kept.0.push(frame);
             Ok(image)
         }
@@ -354,9 +355,9 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(to.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let from_image = prepare_sample(compositor, key(from.clip), &mut from_frame, from, at, frame_duration)?;
+            let from_image = prepare_sample(compositor, key(from.clip), &mut from_frame, from, at, frame_rate)?;
             let to_image =
-                match prepare_sample(compositor, key(to.clip), &mut to_frame, to, at, frame_duration) {
+                match prepare_sample(compositor, key(to.clip), &mut to_frame, to, at, frame_rate) {
                     Ok(image) => image,
                     Err(e) => {
                         compositor.release(from_image);
@@ -425,7 +426,7 @@ impl<C: Compositor> FrameRenderer<C> {
         for layer in &layers {
             used.extend(layer_clips(&layer.content, layer.track));
             let failed = |e: RenderError| RenderError(format!("frame {index}, track {}: {e}", layer.track));
-            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project.output.frame_duration) {
+            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project.output.frame_rate) {
                 Ok(image) => image,
                 Err(e) => {
                     if let Some(base) = canvas {
@@ -496,8 +497,7 @@ pub fn render_with_audio<C: Compositor, S: FrameSink>(
         sink.write_frame(index, &rgba)
             .map_err(|e| RenderError(format!("frame {index}: {e}")))?;
         if let Some(source) = &mut audio {
-            let end = frame_time(project, index + 1)
-                .map(sample_position)
+            let end = project.output.frame_rate.frame_sample(index + 1, MIX_SAMPLE_RATE)
                 .ok_or_else(|| RenderError(format!("frame {index}: time overflows")))?;
             samples.resize((end - mixed) as usize * MIX_CHANNELS, 0.0);
             let MixReport { clamped_samples: clamped } =
@@ -684,15 +684,15 @@ mod tests {
         )
     }
 
-    const TWO_TRACKS: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const TWO_TRACKS: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":200}]},
         {"clips":[{"source":"b","start":100,"source_in":500,"duration":100}]}]}"#;
 
-    const TRANSITION: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const TRANSITION: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":300},{"source":"b","start":300,"source_in":0,"duration":300}],
          "transitions":[{"after_clip":0,"package":"mix","duration":200}]}]}"#;
 
-    const GAP: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const GAP: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":100},{"source":"b","start":200,"source_in":0,"duration":100}]}]}"#;
 
     #[test]
@@ -823,7 +823,7 @@ mod tests {
         }
     }
 
-    const WITH_AUDIO: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100,"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
+    const WITH_AUDIO: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1},"audio":{"sample_rate":48000,"channels":2,"bitrate":128000}},"tracks":[
         {"clips":[{"source":"a","start":0,"source_in":0,"duration":300}]}]}"#;
 
     fn run_audio(json: &str, source: &mut dyn AudioSource) -> Result<(AudioSink, RenderSummary), RenderError> {
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(opened, ["open a", "open c"]);
     }
 
-    const TEXT: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[
+    const TEXT: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
         {"clips":[{"source":"text:","start":0,"source_in":0,"duration":300,"text":{"content":"Hi","size":0.1}}]}]}"#;
 
     #[test]
@@ -1097,7 +1097,7 @@ mod tests {
     #[test]
     fn empty_project_renders_nothing() {
         let (journal, summary) = run(
-            r#"{"version":1,"output":{"width":16,"height":16,"frame_duration":100},"tracks":[]}"#,
+            r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[]}"#,
         );
         assert_eq!(summary.frames, 0);
         assert!(journal.events.is_empty());

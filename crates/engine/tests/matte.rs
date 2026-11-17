@@ -9,7 +9,7 @@ use engine::render::ClipKey;
 fn project_of(clips: Vec<engine::Clip>) -> Project {
     Project {
         version: SUPPORTED_VERSION,
-        output: Output { width: 16, height: 16, frame_duration: t(3000), audio: None },
+        output: Output { width: 16, height: 16, frame_rate: engine::FrameRate::from_frame_duration(t(3000)).unwrap(), audio: None },
         tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
         markers: Vec::new(),
         beats: Default::default(),

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "output": { "width": 1920, "height": 1080, "frame_duration": 3000 },
+  "output": { "width": 1920, "height": 1080, "frame_rate":{"num":30,"den":1} },
   "tracks": [
     {
       "clips": [

@@ -48,7 +48,7 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `session_status` | Chế độ, đường dẫn project, revision, có đang xuất hoặc đang kéo không |
 | `project_new`, `project_open`, `project_save` | Tạo, mở, lưu project |
 | `project_get` | Trả project JSON, thời lượng và số khung |
-| `project_set_output` | Đổi kích thước khung xuất (2 đến 7680 mỗi cạnh, cạnh lẻ làm tròn xuống số chẵn) và `frame_duration` (tick, tối thiểu 1500 tức 60 fps); trường vắng giữ nguyên, phải có ít nhất một trường. Một bước undo, trả `output` đang dùng |
+| `project_set_output` | Đổi kích thước khung xuất (2 đến 7680 mỗi cạnh, cạnh lẻ làm tròn xuống số chẵn) và `frame_rate` (phân số `{num, den}` khung mỗi giây, 1 đến 60 fps, vd `{num: 30000, den: 1001}` là 29,97); trường vắng giữ nguyên, phải có ít nhất một trường. Một bước undo, trả `output` đang dùng |
 | `packages_list` | Danh sách effect và transition, lọc theo chuỗi |
 | `track_add` | Thêm track |
 | `track_set_locked`, `track_set_hidden` | Khoá hoặc ẩn track. Sửa track đang khoá bị từ chối với lỗi `track_locked` |

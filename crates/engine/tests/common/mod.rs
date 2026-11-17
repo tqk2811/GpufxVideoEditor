@@ -47,13 +47,25 @@ pub fn transition(after_clip: usize, duration: i64) -> Transition {
     }
 }
 
+/// The rate whose frames last `frame_duration` ticks; a duration that is not positive gives an
+/// invalid rate with a zero numerator.
+pub fn rate(frame_duration: i64) -> engine::FrameRate {
+    engine::FrameRate::from_frame_duration(t(frame_duration)).unwrap_or(engine::FrameRate { num: 0, den: 1 })
+}
+
+/// A 1920x1080 project whose frames last `frame_duration` ticks.
 pub fn project(frame_duration: i64, tracks: Vec<Track>) -> Project {
+    project_at(rate(frame_duration), tracks)
+}
+
+/// A 1920x1080 project at `frame_rate`.
+pub fn project_at(frame_rate: engine::FrameRate, tracks: Vec<Track>) -> Project {
     Project {
         version: engine::SUPPORTED_VERSION,
         output: Output {
             width: 1920,
             height: 1080,
-            frame_duration: t(frame_duration),
+            frame_rate,
             audio: None,
         },
         tracks,

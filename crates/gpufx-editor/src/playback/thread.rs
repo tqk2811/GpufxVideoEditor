@@ -448,7 +448,7 @@ mod tests {
         let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default() };
         Project {
             version: SUPPORTED_VERSION,
-            output: Output { width: 16, height: 16, frame_duration: Time::from_ticks(3000), audio: audio.then_some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
+            output: Output { width: 16, height: 16, frame_rate: engine::FrameRate::whole(30), audio: audio.then_some(AudioOutput { sample_rate: 48_000, channels: 2, bitrate: 192_000 }) },
             tracks: vec![Track { kind: clip_track, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
             markers: Vec::new(), beats: Default::default(),
         }

@@ -5,16 +5,18 @@
 //!
 //! # Rounding rules (defined once, here)
 //!
-//! * **Frame time.** Output frame `n` starts at `n * frame_duration` ticks. This is exact, so
-//!   the 30000/1001 cadence (`frame_duration = 3003`) never drifts.
+//! * **Frame time.** Output frame `n` starts at `floor(n * den * 90000 / num)` ticks for the rate
+//!   `num / den` ([`crate::FrameRate::frame_start`]). Each start is rounded on its own, so the
+//!   24000/1001 cadence (3753.75 ticks a frame) never drifts.
 //! * **Audio tracks.** Tracks of kind `audio` give no layer, but they still count in the
 //!   [`Layer::track`] numbering and in the frame count.
 //! * **Hidden tracks.** A hidden track gives no layer, transitions included, but still counts in the
 //!   frame count, so hiding a track does not change the length of the project.
 //! * **Frame count.** The timeline end is the largest clip end over all tracks, audio tracks
 //!   included, so music longer than the picture is not cut and a project of only audio has a
-//!   length. Frames past the last visual clip have no layer and show black. The count is
-//!   `ceil(end / frame_duration)`, so a final partial frame is kept. An empty project has 0 frames.
+//!   length. Frames past the last visual clip have no layer and show black. The count is the
+//!   number of frames that start before `end`, so a final partial frame is kept. An empty project
+//!   has 0 frames.
 //! * **Clip coverage.** A clip covers the half-open range `[start, start + duration)`. A frame is
 //!   inside the clip when its start time is in that range. The source time is exactly
 //!   `source_in + floor((frame_time - start) * speed)` ticks (see [`Clip::source_offset`]); the
@@ -129,7 +131,7 @@ pub struct Layer<'a> {
 }
 
 /// Total number of output frames (see the module rounding rules). 0 for an empty
-/// project or a non-positive `frame_duration`.
+/// project or an invalid frame rate.
 pub fn frame_count(project: &Project) -> i64 {
     let end = project
         .tracks
@@ -138,14 +140,12 @@ pub fn frame_count(project: &Project) -> i64 {
         .map(|c| c.start.saturating_add(c.duration))
         .max()
         .unwrap_or(Time::ZERO);
-    end.div_ceil(project.output.frame_duration)
-        .unwrap_or(0)
-        .max(0)
+    project.output.frame_rate.frames_before(end)
 }
 
-/// Start time of output frame `frame` (`frame * frame_duration`), or `None` on overflow.
+/// Start time of output frame `frame` (see [`FrameRate::frame_start`]), or `None` on overflow.
 pub fn frame_time(project: &Project, frame: i64) -> Option<Time> {
-    project.output.frame_duration.checked_mul(frame)
+    project.output.frame_rate.frame_start(frame)
 }
 
 /// Layers of output frame `frame`, bottom track first. Tracks with nothing at that time

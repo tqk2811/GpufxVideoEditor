@@ -6,13 +6,13 @@ use std::time::Instant;
 
 use d3d12_backend::{encoder_available, probe_encoder, probe_media, EncoderChoice, Mp4Encoder, VideoCodec};
 use engine::render::FrameSink;
-use engine::{Output, Time};
+use engine::{FrameRate, Output};
 
 const FRAMES: i64 = 30;
 
 /// A multiple of 8 on both sides, which libkvazaar needs.
 fn output() -> Output {
-    Output { width: 320, height: 176, frame_duration: Time::from_ticks(3000), audio: None }
+    Output { width: 320, height: 176, frame_rate: FrameRate::whole(30), audio: None }
 }
 
 fn out_path(name: &str) -> PathBuf {

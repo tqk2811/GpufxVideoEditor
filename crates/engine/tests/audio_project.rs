@@ -33,7 +33,7 @@ fn audio_clip() -> Project {
 const SPEC_EXAMPLE: &str = r#"{
   "version": 1,
   "output": {
-    "width": 1920, "height": 1080, "frame_duration": 3000,
+    "width": 1920, "height": 1080, "frame_rate":{"num":30,"den":1},
     "audio": { "sample_rate": 48000, "channels": 2, "bitrate": 192000 }
   },
   "tracks": [
@@ -74,7 +74,7 @@ fn audio_fields_round_trip_through_json() {
 
 #[test]
 fn a_malformed_audio_field_is_a_json_error() {
-    let text = r#"{"version":1,"output":{"width":1,"height":1,"frame_duration":3000},
+    let text = r#"{"version":1,"output":{"width":1,"height":1,"frame_rate":{"num":30,"den":1}},
         "tracks":[{"kind":"subtitle","clips":[]}]}"#;
     assert!(matches!(
         Project::from_json(text),
