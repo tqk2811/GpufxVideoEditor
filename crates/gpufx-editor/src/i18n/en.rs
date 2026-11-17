@@ -239,6 +239,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::PackInternal => "internal".to_owned(),
         Message::PackShadowed => "not used: a pack with the same id comes first".to_owned(),
         Message::PackReadOnly => "Comes with the app and cannot be removed".to_owned(),
+        Message::PackBusyExporting => "Packs cannot change while an export is running".to_owned(),
         Message::PackInstallZip => "Install from zip...".to_owned(),
         Message::PackRemove => "Remove".to_owned(),
         Message::PackOpenFolder => "Open folder".to_owned(),

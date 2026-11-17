@@ -1218,8 +1218,6 @@ impl Session {
             let packages = &mut self.state.ui.packages;
             packages.packs = packs;
             packages.reading = false;
-            // An index asked about belongs to the old list.
-            packages.confirm_remove = None;
             self.pack_list = None;
         }
     }
@@ -1261,17 +1259,18 @@ impl Session {
     fn ask_pack_removal(&mut self, index: usize) {
         let Some(pack) = self.listed_pack(index) else { return };
         let uses = crate::package_manager::uses_of(self.state.project(), &self.paths, &pack.key);
-        self.state.ui.packages.confirm_remove = Some((index, uses));
+        self.state.ui.packages.confirm_remove = Some((pack.key, pack.path, uses));
     }
 
-    fn remove_pack(&mut self, index: usize) {
-        let Some(pack) = self.listed_pack(index) else { return };
+    fn remove_pack(&mut self, key: &str, path: &Path) {
+        let packages = &self.state.ui.packages;
+        let Some(pack) = (!packages.reading).then(|| crate::package_manager::find_pack(&packages.packs, key, path).cloned()).flatten() else { return };
         let Some(user_root) = user_package_root() else { return self.state.report_error(Message::NoUserPackageFolder) };
         // A sound being played, or a running playback, holds files of the pack open.
         self.audio_preview.stop();
         self.playback = None;
         self.state.reopen_playback();
-        match crate::package_manager::uninstall(&user_root, &pack) {
+        match crate::package_manager::uninstall(&self.package_roots, &user_root, &pack) {
             Ok(()) => {
                 self.state.report_info(Message::PackRemoved(pack.name.clone()));
                 if crate::package_manager::is_shader_key(&pack.key) {
@@ -1418,7 +1417,11 @@ impl Session {
             UiRequest::RefreshPacks => self.refresh_pack_list(),
             UiRequest::SetPackEnabled { index, enabled } => self.set_pack_enabled(index, enabled),
             UiRequest::RemovePack { index } => self.ask_pack_removal(index),
-            UiRequest::RemovePackConfirmed { index } => self.remove_pack(index),
+            UiRequest::RemovePackConfirmed => {
+                if let Some((key, path, _)) = self.state.ui.packages.confirm_remove.take() {
+                    self.remove_pack(&key, &path);
+                }
+            }
             UiRequest::OpenPackFolder { index } => self.open_pack_folder(index),
             UiRequest::RestorePacks => self.restore_packs(),
             UiRequest::SetSaveWithPacks(enabled) => {

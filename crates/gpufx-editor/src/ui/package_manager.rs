@@ -4,7 +4,7 @@
 use super::{theme, UiRequest};
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
-use crate::package_manager::{filter_packs, InstalledPack, PackSource, PackTab, UseSite};
+use crate::package_manager::{filter_packs, find_pack, InstalledPack, PackSource, PackTab, UseSite};
 
 const DEFAULT_SIZE: [f32; 2] = [760.0, 460.0];
 
@@ -18,9 +18,9 @@ pub struct PackageManagerUi {
     pub packs: Vec<InstalledPack>,
     /// Whether a read of the packs is running.
     pub reading: bool,
-    /// The pack (an index into `packs`) the user asked to remove, with where the open project
-    /// uses it, until the removal is confirmed or cancelled.
-    pub confirm_remove: Option<(usize, Vec<UseSite>)>,
+    /// The pack (its key and path, which outlive a new read of `packs`) the user asked to remove,
+    /// with where the open project uses it, until the removal is confirmed or cancelled.
+    pub confirm_remove: Option<(String, std::path::PathBuf, Vec<UseSite>)>,
     /// The packs the open project needs that the copy beside it can install.
     pub restore_offer: Vec<String>,
 }
@@ -43,10 +43,13 @@ pub fn size_label(bytes: u64) -> String {
 
 pub fn show(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let language = state.language();
+    // Packs do not change under a running export, which reads them; the window drops such
+    // requests then too (see `handle`).
+    let busy = state.is_exporting();
     let mut open = state.ui.packages.open;
     egui::Window::new(language.t(Message::PackManagerTitle)).id(egui::Id::unique("package-manager")).open(&mut open).default_size(DEFAULT_SIZE).collapsible(false).show(ctx, |ui| {
         let ui_state = &mut state.ui.packages;
-        restore_banner(ui, language, ui_state, requests);
+        restore_banner(ui, language, ui_state, busy, requests);
         ui.horizontal_wrapped(|ui| {
             for tab in PackTab::ALL {
                 let count = ui_state.packs.iter().filter(|pack| pack.tab == tab).count();
@@ -55,9 +58,11 @@ pub fn show(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiR
         });
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.button(language.t(Message::PackInstallZip)).clicked() {
+            let install = ui.add_enabled(!busy, egui::Button::new(language.t(Message::PackInstallZip)));
+            if install.clicked() {
                 requests.push(UiRequest::ImportPackage);
             }
+            install.on_disabled_hover_text(language.t(Message::PackBusyExporting));
             if ui.add_enabled(!ui_state.reading, egui::Button::new(language.t(Message::PackRefresh))).clicked() {
                 requests.push(UiRequest::RefreshPacks);
             }
@@ -66,11 +71,14 @@ pub fn show(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiR
             }
             ui.add(egui::TextEdit::singleline(&mut ui_state.filter).hint_text(language.t(Message::PackFilter)).desired_width(f32::INFINITY));
         });
-        if let Some((index, uses)) = ui_state.confirm_remove.clone() {
-            confirm_removal(ui, language, ui_state, index, &uses, requests);
+        if let Some((key, path, uses)) = ui_state.confirm_remove.clone() {
+            confirm_removal(ui, language, ui_state, (&key, &path), &uses, busy, requests);
+        }
+        if busy {
+            ui.colored_label(theme::refused(), language.t(Message::PackBusyExporting));
         }
         ui.separator();
-        pack_table(ui, language, ui_state, requests);
+        pack_table(ui, language, ui_state, busy, requests);
     });
     if !open {
         state.ui.packages.open = false;
@@ -78,16 +86,18 @@ pub fn show(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiR
     }
 }
 
-fn restore_banner(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageManagerUi, requests: &mut Vec<UiRequest>) {
+fn restore_banner(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageManagerUi, busy: bool, requests: &mut Vec<UiRequest>) {
     if ui_state.restore_offer.is_empty() {
         return;
     }
     ui.colored_label(theme::accent(), language.t(Message::PackRestoreOffer(ui_state.restore_offer.len())));
     ui.label(egui::RichText::new(ui_state.restore_offer.join(", ")).small().color(theme::text_dim()));
     ui.horizontal(|ui| {
-        if ui.button(language.t(Message::PackRestoreInstall)).clicked() {
+        let install = ui.add_enabled(!busy, egui::Button::new(language.t(Message::PackRestoreInstall)));
+        if install.clicked() {
             requests.push(UiRequest::RestorePacks);
         }
+        install.on_disabled_hover_text(language.t(Message::PackBusyExporting));
         if ui.button(language.t(Message::PackRestoreDismiss)).clicked() {
             ui_state.restore_offer.clear();
         }
@@ -95,8 +105,8 @@ fn restore_banner(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageM
     ui.separator();
 }
 
-fn confirm_removal(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageManagerUi, index: usize, uses: &[UseSite], requests: &mut Vec<UiRequest>) {
-    let Some(pack) = ui_state.packs.get(index) else {
+fn confirm_removal(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageManagerUi, (key, path): (&str, &std::path::Path), uses: &[UseSite], busy: bool, requests: &mut Vec<UiRequest>) {
+    let Some(pack) = find_pack(&ui_state.packs, key, path) else {
         ui_state.confirm_remove = None;
         return;
     };
@@ -114,17 +124,19 @@ fn confirm_removal(ui: &mut egui::Ui, language: Language, ui_state: &mut Package
         });
     }
     ui.horizontal(|ui| {
-        if ui.button(language.t(Message::PackRemove)).clicked() {
-            requests.push(UiRequest::RemovePackConfirmed { index });
-            ui_state.confirm_remove = None;
+        let remove = ui.add_enabled(!busy, egui::Button::new(language.t(Message::PackRemove)));
+        if remove.clicked() {
+            // The window takes the pack from `confirm_remove` and clears it.
+            requests.push(UiRequest::RemovePackConfirmed);
         }
+        remove.on_disabled_hover_text(language.t(Message::PackBusyExporting));
         if ui.button(language.t(Message::Cancel)).clicked() {
             ui_state.confirm_remove = None;
         }
     });
 }
 
-fn pack_table(ui: &mut egui::Ui, language: Language, ui_state: &PackageManagerUi, requests: &mut Vec<UiRequest>) {
+fn pack_table(ui: &mut egui::Ui, language: Language, ui_state: &PackageManagerUi, busy: bool, requests: &mut Vec<UiRequest>) {
     let shown = filter_packs(&ui_state.packs, ui_state.tab, &ui_state.filter);
     if shown.is_empty() {
         ui.colored_label(theme::text_dim(), language.t(Message::PackNone));
@@ -140,9 +152,11 @@ fn pack_table(ui: &mut egui::Ui, language: Language, ui_state: &PackageManagerUi
             for pack in shown {
                 let index = ui_state.packs.iter().position(|candidate| std::ptr::eq(candidate, pack)).unwrap_or(usize::MAX);
                 let mut enabled = pack.enabled;
-                if ui.checkbox(&mut enabled, "").changed() {
+                let toggle = ui.add_enabled(!busy, egui::Checkbox::without_text(&mut enabled));
+                if toggle.changed() {
                     requests.push(UiRequest::SetPackEnabled { index, enabled });
                 }
+                toggle.on_disabled_hover_text(language.t(Message::PackBusyExporting));
                 name_cell(ui, language, pack);
                 ui.label(&pack.version);
                 ui.label(language.t(match pack.source {
@@ -155,12 +169,14 @@ fn pack_table(ui: &mut egui::Ui, language: Language, ui_state: &PackageManagerUi
                     if ui.button(language.t(Message::PackOpenFolder)).clicked() {
                         requests.push(UiRequest::OpenPackFolder { index });
                     }
-                    let remove = ui.add_enabled(pack.removable(), egui::Button::new(language.t(Message::PackRemove)));
+                    let remove = ui.add_enabled(pack.removable() && !busy, egui::Button::new(language.t(Message::PackRemove)));
                     if remove.clicked() {
                         requests.push(UiRequest::RemovePack { index });
                     }
                     if !pack.removable() {
                         remove.on_disabled_hover_text(language.t(Message::PackReadOnly));
+                    } else if busy {
+                        remove.on_disabled_hover_text(language.t(Message::PackBusyExporting));
                     }
                 });
                 ui.end_row();

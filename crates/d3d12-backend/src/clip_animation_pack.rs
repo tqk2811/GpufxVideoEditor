@@ -281,7 +281,7 @@ pub fn scan_clip_animation_folders(roots: &[PathBuf]) -> ClipAnimationScan {
         for folder in folders {
             let label = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
             let id = label.to_ascii_lowercase();
-            if taken.contains(&id) || disabled.contains(&format!("{CLIP_ANIMATION_FOLDER}/{id}")) {
+            if taken.contains(&id) || disabled.contains(&crate::paths::pack_key(&format!("{CLIP_ANIMATION_FOLDER}/{label}"))) {
                 continue;
             }
             match read_pack(&folder, &label) {
@@ -294,4 +294,23 @@ pub fn scan_clip_animation_folders(roots: &[PathBuf]) -> ClipAnimationScan {
         }
     }
     scan
+}
+
+#[cfg(test)]
+mod disabled_tests {
+    use super::*;
+
+    #[test]
+    fn a_pack_turned_off_is_matched_by_its_key_in_any_case() {
+        let root = std::env::temp_dir().join(format!("gpufx-clip-animation-disabled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("packages").join(CLIP_ANIMATION_FOLDER).join("\u{c9}clat");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("manifest.json"), "{").unwrap();
+        // The package manager writes every key through pack_key, so lower-cased past ASCII too.
+        std::fs::write(root.join("packages").join(crate::paths::DISABLED_PACKS_FILE), "[\"clip-animation/\u{e9}clat\"]").unwrap();
+        let scan = scan_clip_animation_folders(std::slice::from_ref(&root));
+        assert!(scan.problems.is_empty() && scan.packs.is_empty(), "a pack turned off is not read: {:?}", scan.problems);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

@@ -237,6 +237,8 @@ pub enum Message {
     PackInternal,
     PackShadowed,
     PackReadOnly,
+    /// Why packs cannot be installed, removed or turned on or off now.
+    PackBusyExporting,
     PackInstallZip,
     PackRemove,
     PackOpenFolder,
@@ -813,6 +815,7 @@ mod tests {
             Message::PackInternal,
             Message::PackShadowed,
             Message::PackReadOnly,
+            Message::PackBusyExporting,
             Message::PackInstallZip,
             Message::PackRemove,
             Message::PackOpenFolder,

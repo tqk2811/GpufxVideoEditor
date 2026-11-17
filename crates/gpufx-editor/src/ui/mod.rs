@@ -55,7 +55,9 @@ pub enum UiRequest {
     SetPackEnabled { index: usize, enabled: bool },
     /// Asks to remove pack `index`: the window finds where the open project uses it first.
     RemovePack { index: usize },
-    RemovePackConfirmed { index: usize },
+    /// Removes the pack `PackageManagerUi::confirm_remove` names (by key and path, found again in
+    /// the list read last: the list may have been read anew since the removal was asked).
+    RemovePackConfirmed,
     OpenPackFolder { index: usize },
     /// Installs the packs the open project needs from the copy saved beside it.
     RestorePacks,

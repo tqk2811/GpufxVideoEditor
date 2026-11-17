@@ -237,7 +237,7 @@ pub fn set_enabled(user_root: &Path, key: &str, enabled: bool) -> Result<(), Str
 /// Removes a pack the user installed. It is first renamed into a working folder, so it leaves its
 /// place at once and whole, then deleted; what cannot be deleted yet (a file still open) goes on
 /// the next removal. The install lock keeps an install of another editor out meanwhile.
-pub fn uninstall(user_root: &Path, pack: &InstalledPack) -> Result<(), String> {
+pub fn uninstall(roots: &[PathBuf], user_root: &Path, pack: &InstalledPack) -> Result<(), String> {
     let packages = user_root.join("packages");
     if !pack.removable() || !pack.path.starts_with(&packages) {
         return Err("the pack came with the app and cannot be removed".to_owned());
@@ -250,7 +250,11 @@ pub fn uninstall(user_root: &Path, pack: &InstalledPack) -> Result<(), String> {
     rename_with_retries(&pack.path, &moved).map_err(|e| format!("the pack is in use ({e})"))?;
     let _ = if moved.is_dir() { fs::remove_dir_all(&moved) } else { fs::remove_file(&moved) };
     let _ = fs::remove_dir(&removing);
-    // A pack installed again later starts turned on.
+    // A pack installed again later starts turned on; while another root still holds a pack of the
+    // key (a shipped one the removed pack hid), the user's choice for it stays.
+    if installed_path(roots, &pack.key).is_some() {
+        return Ok(());
+    }
     set_enabled(user_root, &pack.key, true)
 }
 
@@ -282,7 +286,8 @@ fn safe_key(key: &str) -> bool {
 
 /// Every pack `project` uses, by key, with where it is used. A text or subtitle style is copied
 /// into the clip, so its pack is not needed; an effect a clip animation item names is reached
-/// through the animation pack and not listed on its own.
+/// through the animation pack and not listed on its own. A key made from a project string that
+/// could leave its folder (`../x`) is dropped, so nothing is copied, renamed or deleted for it.
 pub fn pack_uses(project: &Project, paths: &ProjectPaths) -> Vec<(String, UseSite)> {
     let mut uses = Vec::new();
     for (track_index, track) in project.tracks.iter().enumerate() {
@@ -311,6 +316,7 @@ pub fn pack_uses(project: &Project, paths: &ProjectPaths) -> Vec<(String, UseSit
             }
         }
     }
+    uses.retain(|(key, _)| safe_key(key));
     uses.sort();
     uses.dedup();
     uses
@@ -367,6 +373,10 @@ fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Copies `from` to `to` through `working`, a folder on the same drive, and renames it into place,
 /// replacing what was at `to` only once the copy is whole.
 fn copy_into_place(from: &Path, to: &Path, working: &Path) -> std::io::Result<()> {
+    copy_into_place_with(from, to, working, rename_with_retries)
+}
+
+fn copy_into_place_with(from: &Path, to: &Path, working: &Path, rename: impl Fn(&Path, &Path) -> std::io::Result<()>) -> std::io::Result<()> {
     fs::create_dir_all(working)?;
     let copy = working.join(next_unique());
     let old = working.join(next_unique());
@@ -377,17 +387,25 @@ fn copy_into_place(from: &Path, to: &Path, working: &Path) -> std::io::Result<()
         }
         let replacing = fs::symlink_metadata(to).is_ok();
         if replacing {
-            rename_with_retries(to, &old)?;
+            rename(to, &old)?;
         }
-        if let Err(error) = rename_with_retries(&copy, to) {
+        if let Err(error) = rename(&copy, to) {
             if replacing {
-                let _ = rename_with_retries(&old, to);
+                if let Err(back) = rename(&old, to) {
+                    // The old copy is all there is now: keep it where it is and say so.
+                    let _ = if copy.is_dir() { fs::remove_dir_all(&copy) } else { fs::remove_file(&copy) };
+                    return Err(std::io::Error::other(format!("{error}; the old copy could not go back and is kept at {} ({back})", old.display())));
+                }
             }
             return Err(error);
         }
         Ok(())
     })();
+    let old_kept = result.is_err() && fs::symlink_metadata(&old).is_ok() && fs::symlink_metadata(to).is_err();
     for leftover in [&copy, &old] {
+        if old_kept && leftover == &old {
+            continue;
+        }
         let _ = if leftover.is_dir() { fs::remove_dir_all(leftover) } else { fs::remove_file(leftover) };
     }
     let _ = fs::remove_dir(working);
@@ -403,7 +421,11 @@ pub fn backup_used_packs(project: &Project, paths: &ProjectPaths, project_file: 
     let mut copied = 0;
     for key in used_keys(project, paths) {
         let Some(from) = installed_path(paths.package_roots(), &key) else { continue };
-        copy_into_place(&from, &packages.join(&key), &working).map_err(|e| format!("copying {key} failed: {e}"))?;
+        let to = packages.join(&key);
+        if !safe_key(&key) || !to.starts_with(&packages) || to.components().any(|part| !matches!(part, Component::Normal(_) | Component::Prefix(_) | Component::RootDir)) {
+            continue;
+        }
+        copy_into_place(&from, &to, &working).map_err(|e| format!("copying {key} failed: {e}"))?;
         copied += 1;
     }
     Ok(copied)
@@ -437,6 +459,11 @@ pub fn restore_packs(project_file: &Path, keys: &[String], user_root: &Path) -> 
         restored += 1;
     }
     Ok(restored)
+}
+
+/// The pack of `key` at `path` in `packs`, found again after the list was read anew.
+pub fn find_pack<'a>(packs: &'a [InstalledPack], key: &str, path: &Path) -> Option<&'a InstalledPack> {
+    packs.iter().find(|pack| pack.key == key && pack.path == path)
 }
 
 /// Whether a key names a shader package, which the effect catalog lists.
@@ -542,15 +569,15 @@ mod tests {
         set_enabled(&user, "sticker/mine", false).unwrap();
         let packs = list_installed_with(&roots, Some(&user), fake_read);
         let mine = packs.iter().find(|pack| pack.key == "sticker/mine").unwrap();
-        uninstall(&user, mine).unwrap();
+        uninstall(&roots, &user, mine).unwrap();
         assert!(!mine.path.exists());
         assert!(!user.join("packages").join(REMOVING_FOLDER).exists(), "the working folder goes");
         assert!(read_disabled_packs(&roots).is_empty(), "installed again, it starts turned on");
         let shipped_pack = packs.iter().find(|pack| pack.key == "gpufx/g/blur").unwrap();
-        assert!(uninstall(&user, shipped_pack).is_err());
+        assert!(uninstall(&roots, &user, shipped_pack).is_err());
         assert!(shipped_pack.path.exists());
         let broken = packs.iter().find(|pack| pack.key == "gpufx/user/broken").unwrap();
-        uninstall(&user, broken).unwrap();
+        uninstall(&roots, &user, broken).unwrap();
         assert!(!broken.path.exists());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -617,5 +644,75 @@ mod tests {
         assert!(!safe_key("C:/evil"));
         assert!(!safe_key(""));
         assert!(safe_key("gpufx/user/io.example.iris.zip"));
+    }
+
+    #[test]
+    fn a_pack_name_that_leaves_its_folder_is_never_copied_beside_the_project() {
+        let (dir, shipped, user) = fixture("escape");
+        let project_file = dir.join("work").join("film.json");
+        fs::create_dir_all(project_file.parent().unwrap()).unwrap();
+        // shipped/packages/font/../../../evil is dir/evil; the copy would go to dir/work/evil.
+        fs::create_dir_all(dir.join("evil")).unwrap();
+        fs::write(dir.join("evil/manifest.json"), "{}").unwrap();
+        fs::create_dir_all(dir.join("work/evil")).unwrap();
+        fs::write(dir.join("work/evil/keep.txt"), "mine").unwrap();
+        let mut project = project_using("packages/gpufx/g/blur");
+        let mut text = engine::TextContent::new("x", 10.0);
+        text.font = engine::FontRef::Pack { pack: "../../../evil".to_owned(), file: "a.ttf".to_owned() };
+        project.tracks[0].clips[0].text = Some(text);
+        project.tracks[0].clips[0].animation.enter = Some(engine::AnimationRef { preset: "../x".to_owned(), duration: Time::from_ticks(30) });
+        let paths = ProjectPaths::new(&project_file, vec![shipped.clone(), user.clone()]);
+        assert!(pack_uses(&project, &paths).iter().all(|(key, _)| safe_key(key)), "{:?}", pack_uses(&project, &paths));
+        assert_eq!(backup_used_packs(&project, &paths, &project_file).unwrap(), 2);
+        assert_eq!(fs::read_to_string(dir.join("work/evil/keep.txt")).unwrap(), "mine", "a folder outside the copies is left alone");
+        assert!(!dir.join("work/evil/manifest.json").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn removing_a_hidden_user_pack_keeps_the_shipped_one_turned_off() {
+        let (dir, shipped, user) = fixture("remove-shadowed");
+        let roots = [shipped.clone(), user.clone()];
+        set_enabled(&user, "sticker/shared", false).unwrap();
+        let packs = list_installed_with(&roots, Some(&user), fake_read);
+        let hidden = packs.iter().find(|pack| pack.key == "sticker/shared" && pack.source == PackSource::User).unwrap();
+        uninstall(&roots, &user, hidden).unwrap();
+        assert!(!hidden.path.exists());
+        assert!(read_disabled_packs(&roots).contains("sticker/shared"), "the shipped pack the user turned off stays off");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_old_copy_that_cannot_go_back_is_kept() {
+        let dir = scratch("keep-old");
+        let (from, to, working) = (dir.join("from"), dir.join("to"), dir.join("working"));
+        fs::create_dir_all(&from).unwrap();
+        fs::write(from.join("manifest.json"), "new").unwrap();
+        fs::create_dir_all(&to).unwrap();
+        fs::write(to.join("manifest.json"), "old").unwrap();
+        // The first rename (to -> old) works; every later one fails.
+        let calls = std::cell::Cell::new(0);
+        let rename = |a: &Path, b: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 { fs::rename(a, b) } else { Err(std::io::Error::other("busy")) }
+        };
+        assert!(copy_into_place_with(&from, &to, &working, rename).is_err());
+        let kept: Vec<_> = fs::read_dir(&working).map(|entries| entries.flatten().map(|entry| entry.path()).collect()).unwrap_or_default();
+        assert!(kept.iter().any(|path| fs::read_to_string(path.join("manifest.json")).is_ok_and(|text| text == "old")), "the old copy is still there: {kept:?}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_pack_is_found_again_by_key_and_path_in_a_new_list() {
+        let (dir, shipped, user) = fixture("find");
+        let roots = [shipped.clone(), user.clone()];
+        let packs = list_installed_with(&roots, Some(&user), fake_read);
+        let wanted = packs.iter().find(|pack| pack.key == "sticker/shared" && pack.source == PackSource::User).unwrap().clone();
+        let mut reordered = packs.clone();
+        reordered.reverse();
+        let found = find_pack(&reordered, &wanted.key, &wanted.path).unwrap();
+        assert_eq!((found.key.as_str(), &found.path, found.source), (wanted.key.as_str(), &wanted.path, PackSource::User));
+        assert!(find_pack(&reordered, "sticker/gone", &wanted.path).is_none());
+        fs::remove_dir_all(dir).unwrap();
     }
 }

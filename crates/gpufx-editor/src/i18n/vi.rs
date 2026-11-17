@@ -221,6 +221,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::PackInternal => "nội bộ".to_owned(),
         Message::PackShadowed => "không dùng: một gói cùng id được tìm thấy trước".to_owned(),
         Message::PackReadOnly => "Kèm theo app, không gỡ được".to_owned(),
+        Message::PackBusyExporting => "Đang xuất video, chưa đổi gói được".to_owned(),
         Message::PackInstallZip => "Cài từ zip...".to_owned(),
         Message::PackRemove => "Gỡ".to_owned(),
         Message::PackOpenFolder => "Mở thư mục".to_owned(),
