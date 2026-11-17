@@ -273,6 +273,7 @@ fn read_pack(folder: &Path, label: &str) -> Result<ClipAnimationManifest, String
 pub fn scan_clip_animation_folders(roots: &[PathBuf]) -> ClipAnimationScan {
     let mut scan = ClipAnimationScan::default();
     let mut taken: HashSet<String> = HashSet::new();
+    let disabled = crate::paths::read_disabled_packs(roots);
     for root in roots {
         let Ok(entries) = std::fs::read_dir(root.join("packages").join(CLIP_ANIMATION_FOLDER)) else { continue };
         let mut folders: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
@@ -280,7 +281,7 @@ pub fn scan_clip_animation_folders(roots: &[PathBuf]) -> ClipAnimationScan {
         for folder in folders {
             let label = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
             let id = label.to_ascii_lowercase();
-            if taken.contains(&id) {
+            if taken.contains(&id) || disabled.contains(&format!("{CLIP_ANIMATION_FOLDER}/{id}")) {
                 continue;
             }
             match read_pack(&folder, &label) {

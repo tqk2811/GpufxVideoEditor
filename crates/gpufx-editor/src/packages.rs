@@ -91,12 +91,13 @@ pub fn scan(roots: &[PathBuf], read: impl Fn(&Path) -> Result<PackageInfo, Strin
     let mut catalog = Catalog { loaded: true, ..Catalog::default() };
     // The first root with a name is the one a project resolves it to.
     let mut seen = HashSet::new();
+    let disabled = d3d12_backend::read_disabled_packs(roots);
     for root in roots {
         let mut found = Vec::new();
         collect(&root.join("packages").join("gpufx"), 0, &mut found);
         for path in found {
             let package = package_name(root, &path);
-            if !seen.insert(package.clone()) {
+            if !seen.insert(package.clone()) || d3d12_backend::pack_key_of(root, &path).is_some_and(|key| disabled.contains(&key)) {
                 continue;
             }
             let info = catch_unwind(AssertUnwindSafe(|| read(&path))).unwrap_or_else(|_| Err("reading the package panicked".to_owned()));
@@ -336,5 +337,15 @@ mod tests {
         assert_eq!(catalog.problems.len(), 1);
         std::fs::remove_dir_all(&first).unwrap();
         std::fs::remove_dir_all(&second).unwrap();
+    }
+
+    #[test]
+    fn a_disabled_package_is_left_out_of_the_catalog() {
+        let root = fixture("disabled");
+        std::fs::write(root.join("packages").join(d3d12_backend::DISABLED_PACKS_FILE), r#"["gpufx/group/blur"]"#).unwrap();
+        let catalog = scan(std::slice::from_ref(&root), fake_read);
+        assert!(catalog.effects.is_empty());
+        assert_eq!(catalog.transitions.len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

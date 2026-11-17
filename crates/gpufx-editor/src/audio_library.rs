@@ -110,6 +110,7 @@ fn read_pack(root: &Path, kind: AudioPackKind, folder: &Path, library: &mut Audi
 pub fn scan_audio_packs(roots: &[PathBuf]) -> AudioLibrary {
     let mut library = AudioLibrary { loaded: true, ..AudioLibrary::default() };
     let mut seen: HashSet<(AudioPackKind, String)> = HashSet::new();
+    let disabled = d3d12_backend::read_disabled_packs(roots);
     for root in roots {
         for kind in PACK_TYPES {
             let Ok(entries) = std::fs::read_dir(root.join("packages").join(kind.name())) else { continue };
@@ -117,7 +118,7 @@ pub fn scan_audio_packs(roots: &[PathBuf]) -> AudioLibrary {
             folders.sort();
             for folder in folders {
                 let id = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().to_ascii_lowercase());
-                if seen.contains(&(kind, id.clone())) {
+                if seen.contains(&(kind, id.clone())) || disabled.contains(&format!("{}/{id}", kind.name())) {
                     continue;
                 }
                 if let Some(pack) = read_pack(root, kind, &folder, &mut library) {

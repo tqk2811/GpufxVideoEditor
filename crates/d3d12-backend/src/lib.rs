@@ -46,7 +46,7 @@ pub use clip_animation_pack::{check_clip_animation_fields, is_clip_animation_typ
 pub use pack_presets::read_pack_presets;
 pub use preset_effects::{effect_mismatch, resolve_item_effects, ItemEffects};
 pub use packages::{expression_error, read_package_info, read_zip_package_info, PackageInfo, ParamInfo, ParamKind, CLIP_DURATION, CLIP_TIME};
-pub use paths::{asset_source, check_path_part, is_asset_source, is_safe_id, parse_asset_source, AssetProblem, AssetRef, PathPartProblem, ProjectPaths, ProxyFile, ProxyTiming, ASSET_AUDIO_EXTENSIONS, ASSET_FONT_EXTENSIONS, ASSET_IMAGE_EXTENSIONS, ASSET_PREFIX, ASSET_TYPES, FONT_ASSET_TYPE, MAX_ASSET_ID_LENGTH};
+pub use paths::{asset_source, check_path_part, pack_key, pack_key_of, read_disabled_packs, DISABLED_PACKS_FILE, is_asset_source, is_safe_id, parse_asset_source, AssetProblem, AssetRef, PathPartProblem, ProjectPaths, ProxyFile, ProxyTiming, ASSET_AUDIO_EXTENSIONS, ASSET_FONT_EXTENSIONS, ASSET_IMAGE_EXTENSIONS, ASSET_PREFIX, ASSET_TYPES, FONT_ASSET_TYPE, MAX_ASSET_ID_LENGTH};
 pub use probe::{frame_ticks_floor, probe_media, probe_video_format, MediaProbe, VideoFormat};
 pub use progress::{ProgressEvent, CANCEL_LINE, MAX_EVENT_LINE, PROGRESS_PROTOCOL};
 pub use still::{read_still, still_dimensions, still_thumbnail, StillPicture, MAX_STILL_SIDE};

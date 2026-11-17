@@ -104,6 +104,7 @@ fn read_pack(root: &Path, folder: &Path, library: &mut FontLibrary) -> Option<Ve
 /// one, as it does when a text resolves it.
 pub fn scan_font_packs(roots: &[PathBuf]) -> FontLibrary {
     let mut library = FontLibrary { loaded: true, ..FontLibrary::default() };
+    let disabled = d3d12_backend::read_disabled_packs(roots);
     let mut seen: HashSet<String> = HashSet::new();
     let mut packs = Vec::new();
     for root in roots {
@@ -112,7 +113,7 @@ pub fn scan_font_packs(roots: &[PathBuf]) -> FontLibrary {
         folders.sort();
         for folder in folders {
             let id = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().to_ascii_lowercase());
-            if seen.contains(&id) {
+            if seen.contains(&id) || disabled.contains(&format!("{FONT_TYPE}/{id}")) {
                 continue;
             }
             if let Some(fonts) = read_pack(root, &folder, &mut library) {

@@ -114,6 +114,7 @@ fn read_pack(root: &Path, folder: &Path, library: &mut StickerLibrary) -> Option
 /// one, as it does when a clip resolves it.
 pub fn scan_sticker_packs(roots: &[PathBuf]) -> StickerLibrary {
     let mut library = StickerLibrary { loaded: true, ..StickerLibrary::default() };
+    let disabled = d3d12_backend::read_disabled_packs(roots);
     let mut seen: HashSet<String> = HashSet::new();
     for root in roots {
         let Ok(entries) = std::fs::read_dir(root.join("packages").join(STICKER_TYPE)) else { continue };
@@ -121,7 +122,7 @@ pub fn scan_sticker_packs(roots: &[PathBuf]) -> StickerLibrary {
         folders.sort();
         for folder in folders {
             let id = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().to_ascii_lowercase());
-            if seen.contains(&id) {
+            if seen.contains(&id) || disabled.contains(&format!("{STICKER_TYPE}/{id}")) {
                 continue;
             }
             if let Some(pack) = read_pack(root, &folder, &mut library) {

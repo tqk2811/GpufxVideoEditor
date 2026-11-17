@@ -166,6 +166,37 @@ pub enum AssetProblem {
     FileMissing { kind: String, id: String, file: String },
     /// The file exists, but through a link that leads out of the pack.
     Escapes { source: String },
+    /// The pack is installed, but the user turned it off (see [`read_disabled_packs`]).
+    PackDisabled { kind: String, id: String },
+}
+
+/// The file under `<root>/packages` listing the packs the user turned off.
+pub const DISABLED_PACKS_FILE: &str = "disabled.json";
+
+/// The key of a pack in [`DISABLED_PACKS_FILE`]: its path under `packages/`, lower-cased, with
+/// forward slashes, e.g. `sticker/my-pack` or `gpufx/user/io.example.iris.zip`.
+pub fn pack_key(relative: &str) -> String {
+    relative.replace('\\', "/").trim_matches('/').to_lowercase()
+}
+
+/// The key of the pack at `path`, when it is under `<root>/packages`.
+pub fn pack_key_of(root: &Path, path: &Path) -> Option<String> {
+    let inside = path.strip_prefix(root.join("packages")).ok()?;
+    let parts: Vec<String> = inside.components().map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
+    (!parts.is_empty()).then(|| pack_key(&parts.join("/")))
+}
+
+/// The packs turned off, from the [`DISABLED_PACKS_FILE`] of every root. The editor writes it only
+/// in the user's root, but it applies to the packs of every root. A file that cannot be read
+/// turns nothing off.
+pub fn read_disabled_packs(roots: &[PathBuf]) -> std::collections::HashSet<String> {
+    let mut disabled = std::collections::HashSet::new();
+    for root in roots {
+        let Ok(bytes) = std::fs::read(root.join("packages").join(DISABLED_PACKS_FILE)) else { continue };
+        let Ok(keys) = serde_json::from_slice::<Vec<String>>(&bytes) else { continue };
+        disabled.extend(keys.iter().map(|key| pack_key(key)));
+    }
+    disabled
 }
 
 impl fmt::Display for AssetProblem {
@@ -179,6 +210,7 @@ impl fmt::Display for AssetProblem {
             Self::PackMissing { kind, id } => write!(f, "the {kind} pack '{id}' is not installed"),
             Self::FileMissing { kind, id, file } => write!(f, "the {kind} pack '{id}' has no file '{file}'"),
             Self::Escapes { source } => write!(f, "'{source}' leads out of its pack"),
+            Self::PackDisabled { kind, id } => write!(f, "the {kind} pack '{id}' is turned off"),
         }
     }
 }
@@ -260,6 +292,8 @@ pub struct ProjectPaths {
     /// Smaller copies of video sources the preview decodes instead, by the absolute path of the
     /// original (see [`Self::video_decode_path`]). Empty for an export, which reads the originals.
     proxies: Arc<HashMap<PathBuf, ProxyFile>>,
+    /// The packs the user turned off, read once from the roots: none of them resolves.
+    disabled: Arc<std::collections::HashSet<String>>,
 }
 
 fn is_package(path: &Path) -> bool {
@@ -275,7 +309,8 @@ impl ProjectPaths {
     /// `project_file` is the path of the project JSON; `package_roots` are searched in order.
     pub fn new(project_file: &Path, package_roots: Vec<PathBuf>) -> Self {
         let base = project_file.parent().filter(|p| !p.as_os_str().is_empty()).map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-        Self { base, package_roots, project_packages: true, proxies: Arc::default() }
+        let disabled = Arc::new(read_disabled_packs(&package_roots));
+        Self { base, package_roots, project_packages: true, proxies: Arc::default(), disabled }
     }
 
     /// The same paths with `proxies`: the files the preview decodes in place of the originals, by
@@ -286,7 +321,7 @@ impl ProjectPaths {
 
     /// The same paths without proxies, so every source is read from its original file.
     pub fn without_proxies(&self) -> Self {
-        Self { base: self.base.clone(), package_roots: self.package_roots.clone(), project_packages: self.project_packages, proxies: Arc::default() }
+        Self { base: self.base.clone(), package_roots: self.package_roots.clone(), project_packages: self.project_packages, proxies: Arc::default(), disabled: self.disabled.clone() }
     }
 
     /// The package roots, in the order they are searched.
@@ -368,6 +403,9 @@ impl ProjectPaths {
             if !pack.join("manifest.json").is_file() {
                 continue;
             }
+            if self.disabled.contains(&pack_key(&format!("{}/{}", asset.kind, asset.id))) {
+                return Err(AssetProblem::PackDisabled { kind: asset.kind, id: asset.id });
+            }
             let file = asset.file.split('/').fold(pack, |path, part| path.join(part));
             if !file.is_file() {
                 return Err(AssetProblem::FileMissing { kind: asset.kind, id: asset.id, file: asset.file });
@@ -413,7 +451,13 @@ impl ProjectPaths {
         // The name as given is tried everywhere before the zipped one, so turning a folder into a zip
         // changes nothing for a project whose package still exists under its old name, and a bare
         // `mix` is not taken by an unrelated `mix.zip` beside the project.
-        direct(package).or_else(|| grouped(package)).or_else(|| zipped.as_deref().and_then(direct)).or_else(|| zipped.as_deref().and_then(grouped))
+        let found = direct(package).or_else(|| grouped(package)).or_else(|| zipped.as_deref().and_then(direct)).or_else(|| zipped.as_deref().and_then(grouped))?;
+        (!self.is_disabled(&found)).then_some(found)
+    }
+
+    /// Whether the package at `path`, under one of the roots, was turned off by the user.
+    pub fn is_disabled(&self, path: &Path) -> bool {
+        !self.disabled.is_empty() && self.package_roots.iter().filter_map(|root| pack_key_of(root, path)).any(|key| self.disabled.contains(&key))
     }
 }
 
@@ -699,4 +743,26 @@ mod tests {
         assert_eq!(even.proxy_time(Time::from_ticks(3000)), Time::from_ticks(3000));
     }
 
+    #[test]
+    fn a_disabled_pack_and_package_do_not_resolve() {
+        let root = std::env::temp_dir().join(format!("gpufx-paths-disabled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("packages/sticker/pack")).unwrap();
+        std::fs::write(root.join("packages/sticker/pack/manifest.json"), "{}").unwrap();
+        std::fs::write(root.join("packages/sticker/pack/a.png"), "x").unwrap();
+        std::fs::create_dir_all(root.join("packages/gpufx/g/blur")).unwrap();
+        std::fs::write(root.join("packages/gpufx/g/blur/manifest.json"), "{}").unwrap();
+        let paths = ProjectPaths::new(Path::new("p.json"), vec![root.clone()]);
+        assert!(paths.asset_path("asset:sticker/pack/a.png").is_ok());
+        assert!(paths.package_path("packages/gpufx/g/blur").is_some());
+        std::fs::write(root.join("packages").join(DISABLED_PACKS_FILE), r#"["Sticker/Pack", "gpufx/g/blur"]"#).unwrap();
+        assert_eq!(read_disabled_packs(std::slice::from_ref(&root)).len(), 2);
+        let paths = ProjectPaths::new(Path::new("p.json"), vec![root.clone()]);
+        assert!(matches!(paths.asset_path("asset:sticker/pack/a.png"), Err(AssetProblem::PackDisabled { .. })));
+        assert_eq!(paths.package_path("packages/gpufx/g/blur"), None);
+        assert_eq!(paths.package_path("blur"), None, "nor by its bare name");
+        std::fs::write(root.join("packages").join(DISABLED_PACKS_FILE), "not json").unwrap();
+        assert!(read_disabled_packs(std::slice::from_ref(&root)).is_empty(), "a broken file turns nothing off");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

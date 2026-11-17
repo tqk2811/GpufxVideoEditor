@@ -193,6 +193,7 @@ fn read_pack(folder: &Path, label: &str, kind: StyleKind) -> Result<TextStylePac
 /// accepted.
 pub fn scan_text_style_packs(roots: &[PathBuf]) -> TextStyleLibrary {
     let mut library = TextStyleLibrary { loaded: true, ..TextStyleLibrary::default() };
+    let disabled = d3d12_backend::read_disabled_packs(roots);
     for (kind, folder_name) in [(StyleKind::Text, TEXT_STYLE_TYPE), (StyleKind::Subtitle, SUBTITLE_STYLE_TYPE)] {
         let mut taken: HashSet<String> = HashSet::new();
         for root in roots {
@@ -202,7 +203,7 @@ pub fn scan_text_style_packs(roots: &[PathBuf]) -> TextStyleLibrary {
             for folder in folders {
                 let label = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
                 // A folder left by an interrupted install is not a pack.
-                if label.starts_with('.') || taken.contains(&label.to_ascii_lowercase()) {
+                if label.starts_with('.') || taken.contains(&label.to_ascii_lowercase()) || disabled.contains(&format!("{folder_name}/{}", label.to_ascii_lowercase())) {
                     continue;
                 }
                 match read_pack(&folder, &label, kind) {
