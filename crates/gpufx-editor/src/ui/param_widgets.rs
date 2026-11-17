@@ -1,7 +1,7 @@
 //! Widgets for package parameters. Each returns the new parameter map when the user changed one;
 //! the caller decides what that edit means.
 
-use super::numeric::drag_field;
+use super::numeric::{self, drag_field};
 use super::theme;
 use crate::params::{bool_value, color_json, color_value, display_name, editable, enum_value, expression_value, number_json, number_value, vector_json, vector_value, widget_for, with_value, ParamWidget};
 use d3d12_backend::{expression_error, ParamInfo, ParamKind};
@@ -147,7 +147,7 @@ fn slider(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>, min:
         if integer {
             slider = slider.integer();
         }
-        changed |= ui.add(slider).changed();
+        changed |= numeric::add_slider(ui, slider).changed();
         changed |= number_field(ui, &mut value, Some(min), Some(max), integer);
     });
     changed.then(|| number_json(info, value))

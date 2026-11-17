@@ -1,7 +1,7 @@
 //! The panel on the right: the project figures, or everything about the selected clip.
 
 use super::icons::{self, Icon};
-use super::numeric::{drag_field, speed_field};
+use super::numeric::{self, drag_field, speed_field};
 use super::param_widgets;
 use super::theme;
 use crate::editor::{clip_name, speed_limits, tempo_text, transition_duration_limits, ClipField, ClipTab, EditorState};
@@ -146,7 +146,7 @@ fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
         ui.colored_label(theme::text_dim(), language.t(Message::FieldVolume));
         let changed = ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-            let mut changed = ui.add(slider(&mut gain, GAIN_RANGE)).changed();
+            let mut changed = numeric::add_slider(ui, slider(&mut gain, GAIN_RANGE)).changed();
             changed |= drag_field(ui, &mut gain, GAIN_RANGE, 0.1, 1, " dB", None).1;
             changed
         });
@@ -237,7 +237,7 @@ fn matte_rows(ui: &mut egui::Ui, state: &mut EditorState, matte: &engine::ClipMa
         changed |= ui
             .horizontal(|ui| {
                 ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-                let mut changed = ui.add(slider(value, range.clone())).changed();
+                let mut changed = numeric::add_slider(ui, slider(value, range.clone())).changed();
                 changed |= drag_field(ui, value, range, step, decimals, suffix, None).1;
                 changed
             })
@@ -249,7 +249,7 @@ fn matte_rows(ui: &mut egui::Ui, state: &mut EditorState, matte: &engine::ClipMa
         .horizontal(|ui| {
             let range = 0.0..=f64::from(engine::MAX_MATTE_TEMPORAL);
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-            let mut changed = ui.add(slider(&mut temporal, range.clone()).step_by(1.0)).changed();
+            let mut changed = numeric::add_slider(ui, slider(&mut temporal, range.clone()).step_by(1.0)).changed();
             changed |= drag_field(ui, &mut temporal, range, 1.0, 0, "", None).1;
             changed
         })
@@ -290,7 +290,7 @@ fn denoise_rows(ui: &mut egui::Ui, state: &mut EditorState, denoise: &engine::Cl
     let changed = ui.horizontal(|ui| {
         ui.colored_label(theme::text_dim(), language.t(Message::DenoiseStrength));
         ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-        let mut changed = ui.add(slider(&mut percent, 0.0..=100.0)).changed();
+        let mut changed = numeric::add_slider(ui, slider(&mut percent, 0.0..=100.0)).changed();
         changed |= drag_field(ui, &mut percent, 0.0..=100.0, 1.0, 0, " %", None).1;
         changed
     });
@@ -322,7 +322,7 @@ fn voice_rows(ui: &mut egui::Ui, state: &mut EditorState, voice: &engine::ClipVo
     ui.colored_label(theme::text_dim(), language.t(Message::FieldPitch));
     let changed = ui.horizontal(|ui| {
         ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-        let mut changed = ui.add(slider(&mut semitones, range.clone()).step_by(0.1)).changed();
+        let mut changed = numeric::add_slider(ui, slider(&mut semitones, range.clone()).step_by(0.1)).changed();
         changed |= drag_field(ui, &mut semitones, range, 0.05, 1, "", None).1;
         changed
     });
@@ -524,7 +524,7 @@ fn speed_row(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, label: &s
     ui.add_enabled_ui(changeable, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-            let response = ui.add(slider(&mut value, SPEED_RANGE).logarithmic(true));
+            let response = numeric::add_slider(ui, slider(&mut value, SPEED_RANGE).logarithmic(true));
             // The frame of the release sets a value too, so it counts as part of the press.
             let pressed = response.interact_pointer_pos().is_some();
             let mut applied = slider_speed(response.changed(), pressed, pointer_moved(ui, response.id, pressed), value);
@@ -577,7 +577,7 @@ fn fade_row(ui: &mut egui::Ui, state: &mut EditorState, label: &str, value: Time
     ui.add_enabled_ui(enabled, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-            let mut changed = ui.add(slider(&mut seconds, 0.0..=max)).changed();
+            let mut changed = numeric::add_slider(ui, slider(&mut seconds, 0.0..=max)).changed();
             changed |= drag_field(ui, &mut seconds, 0.0..=max, 0.02, 2, " s", None).1;
             if changed {
                 apply(state, from_seconds(seconds));
@@ -672,7 +672,7 @@ fn transition_controls(ui: &mut egui::Ui, state: &mut EditorState, track: usize,
         ui.colored_label(theme::text_dim(), language.t(Message::FieldDuration));
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-            let mut changed = ui.add(slider(&mut seconds, low..=high)).changed();
+            let mut changed = numeric::add_slider(ui, slider(&mut seconds, low..=high)).changed();
             changed |= drag_field(ui, &mut seconds, low..=high, 0.02, 2, " s", None).1;
             if changed {
                 state.live_transition(track, transition.after_clip, transition.params.clone(), from_seconds(seconds));

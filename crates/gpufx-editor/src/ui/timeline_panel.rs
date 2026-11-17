@@ -1,7 +1,7 @@
 //! The timeline panel: toolbar, ruler, track headers and clips.
 
 use super::icons::{self, Icon};
-use super::{theme, UiRequest};
+use super::{numeric, theme, UiRequest};
 use crate::editor::{clip_name, format_speed, DropBatch, EditorState, MarkerDrag};
 use crate::i18n::{Language, Message};
 use crate::media::MediaItem;
@@ -117,7 +117,7 @@ fn zoom_controls(ui: &mut egui::Ui, state: &mut EditorState, toolbar_rect: Rect)
     }
     let mut fraction = state.view.zoom_fraction();
     ui.spacing_mut().slider_width = ZOOM_SLIDER_WIDTH;
-    if ui.add(egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false)).changed() {
+    if numeric::add_slider(ui, egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false)).changed() {
         state.view.set_zoom_fraction(fraction, center, &area);
     }
     if icons::button(ui, Icon::ZoomOut, &language.t(Message::ZoomOut), false).clicked() {

@@ -154,3 +154,14 @@ mod tests {
         assert_eq!(edit_field(5.0, 0.0..=10.0, Some("99")), (10.0, true));
     }
 }
+
+/// Adds a slider that takes the keyboard focus when it is clicked or dragged, so that the left and
+/// right arrows then move it. egui only moves a slider by keys while it has the focus, and a click
+/// alone does not give it.
+pub(crate) fn add_slider(ui: &mut Ui, slider: egui::Slider<'_>) -> Response {
+    let response = ui.add(slider);
+    if response.clicked() || response.drag_started() {
+        response.request_focus();
+    }
+    response
+}

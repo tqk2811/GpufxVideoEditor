@@ -3,7 +3,7 @@
 //! animation of the clip is its own section, in [`super::animation_inspector`].
 
 use super::icons::{self, Icon};
-use super::numeric::drag_field;
+use super::numeric::{self, drag_field};
 use super::theme;
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
@@ -240,7 +240,7 @@ fn slider_row(ui: &mut egui::Ui, label: &str, value: f64, range: RangeInclusive<
     let mut value = value;
     let changed = ui.horizontal(|ui| {
         ui.spacing_mut().slider_width = (ui.available_width() - 70.0).max(40.0);
-        let mut changed = ui.add(egui::Slider::new(&mut value, range.clone()).show_value(false).clamping(egui::SliderClamping::Edits)).changed();
+        let mut changed = numeric::add_slider(ui, egui::Slider::new(&mut value, range.clone()).show_value(false).clamping(egui::SliderClamping::Edits)).changed();
         let step = (range.end() - range.start()) / 300.0;
         changed |= drag_field(ui, &mut value, range, step, decimals, suffix, None).1;
         changed
