@@ -262,6 +262,204 @@ impl From<KaraokeModeParam> for engine::KaraokeMode {
     }
 }
 
+/// Which type of installed style pack holds a texture picture.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "kebab-case")]
+pub enum PackTypeParam {
+    TextStyle,
+    SubtitleStyle,
+}
+
+/// The picture of a texture: PNG or JPEG.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ImageParam {
+    /// A picture file by absolute path on a local disk (not a network share or device).
+    File { path: String },
+    /// The picture file (forward slashes, inside the pack) of the installed style pack pack;
+    /// pack_type is text-style (the default) or subtitle-style.
+    Pack { pack: String, file: String, pack_type: Option<PackTypeParam> },
+}
+
+/// How a texture covers the text.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum FitParam {
+    /// Stretched to cover the box of the whole text, keeping its shape.
+    Stretch,
+    /// Repeated from the top left corner of the text box.
+    Tile,
+    /// Like tile, every other copy mirrored.
+    Mirror,
+}
+
+/// A colour stop of a gradient.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct StopParam {
+    /// 0 at the start of the gradient, 1 at its end; not below the stop before.
+    pub position: f32,
+    /// [r, g, b, a], each 0 to 255.
+    pub color: [u8; 4],
+}
+
+/// What a layer of a text (the fill, an outline, a shadow) is painted with.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum PaintParam {
+    /// One colour, [r, g, b, a], each 0 to 255.
+    Solid { color: [u8; 4] },
+    /// Colours blending across the box of the whole text: 2 to 16 stops; angle in degrees
+    /// clockwise on screen, 0 left to right and 90 top to bottom (0 by default).
+    Gradient { stops: Vec<StopParam>, angle: Option<f32> },
+    /// A picture laid over the text. scale (0.01 to 100, 1 by default): with tile, one copy is
+    /// scale font sizes tall; with stretch it multiplies the size that covers the text. angle turns
+    /// the picture, degrees clockwise (0). opacity 0 to 1 (1). fit is stretch by default.
+    Texture { image: ImageParam, fit: Option<FitParam>, scale: Option<f32>, angle: Option<f32>, opacity: Option<f32> },
+}
+
+impl From<PaintParam> for engine::TextPaint {
+    fn from(paint: PaintParam) -> Self {
+        match paint {
+            PaintParam::Solid { color } => Self::Solid { color },
+            PaintParam::Gradient { stops, angle } => Self::Gradient { stops: stops.into_iter().map(|stop| engine::GradientStop { position: stop.position, color: stop.color }).collect(), angle: angle.unwrap_or(0.0) },
+            PaintParam::Texture { image, fit, scale, angle, opacity } => {
+                let image = match image {
+                    ImageParam::File { path } => engine::TextImageRef::File { path },
+                    ImageParam::Pack { pack, file, pack_type } => engine::TextImageRef::Pack {
+                        pack,
+                        file,
+                        pack_type: match pack_type {
+                            Some(PackTypeParam::SubtitleStyle) => engine::TexturePackType::SubtitleStyle,
+                            _ => engine::TexturePackType::TextStyle,
+                        },
+                    },
+                };
+                let fit = match fit {
+                    Some(FitParam::Tile) => engine::TextureFit::Tile,
+                    Some(FitParam::Mirror) => engine::TextureFit::Mirror,
+                    _ => engine::TextureFit::Stretch,
+                };
+                Self::Texture(engine::TextTexture { image, fit, scale: scale.unwrap_or(1.0), angle: angle.unwrap_or(0.0), opacity: opacity.unwrap_or(1.0) })
+            }
+        }
+    }
+}
+
+/// One outline of a list of outlines.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct LayerOutlineParam {
+    /// Width past the glyph edge, in parts of the font size, 0 to 0.25. Each outline is measured
+    /// from the glyph edge, and the widest is drawn first.
+    pub width: f32,
+    pub paint: PaintParam,
+}
+
+impl From<LayerOutlineParam> for engine::TextOutline {
+    fn from(outline: LayerOutlineParam) -> Self {
+        engine::TextOutline { width: outline.width, paint: outline.paint.into() }
+    }
+}
+
+/// One drop shadow of a list. Give where it lies either as distance and angle or as offset.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct LayerShadowParam {
+    /// How far it lies from the text, in parts of the font size, 0 to 4 (0 by default).
+    pub distance: Option<f32>,
+    /// Which way, in degrees counter-clockwise from the right: 0 right, 90 up, -45 down and to the
+    /// right (0 by default).
+    pub angle: Option<f32>,
+    /// [x, y] in parts of the font size, y down, in place of distance and angle.
+    pub offset: Option<[f32; 2]>,
+    /// Blur radius, in parts of the font size, 0 to 2 (0 by default).
+    pub blur: Option<f32>,
+    pub paint: PaintParam,
+    /// Outlines of the shadow itself, at most 4, as the text's outlines.
+    pub outlines: Option<Vec<LayerOutlineParam>>,
+}
+
+/// One shadow inside the glyphs, over the fill, the first on top. Units as for shadows; give
+/// distance and angle or offset.
+#[derive(Deserialize, JsonSchema, Clone)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct InnerShadowParam {
+    /// In parts of the font size, 0 to 4 (0 by default).
+    pub distance: Option<f32>,
+    /// Degrees counter-clockwise from the right (0 by default).
+    pub angle: Option<f32>,
+    /// [x, y] in parts of the font size, y down, in place of distance and angle.
+    pub offset: Option<[f32; 2]>,
+    /// In parts of the font size, 0 to 2 (0 by default).
+    pub blur: Option<f32>,
+    pub paint: PaintParam,
+}
+
+/// The distance and angle of a shadow given either way; refused when both ways are given.
+fn shadow_polar(field: &str, distance: Option<f32>, angle: Option<f32>, offset: Option<[f32; 2]>) -> Result<(f32, f32), AgentError> {
+    match offset {
+        Some(_) if distance.is_some() || angle.is_some() => Err(AgentError::new("invalid_params", format!("{field}: give offset, or distance and angle, not both"))),
+        Some(offset) => Ok(engine::offset_to_polar(offset)),
+        None => Ok((distance.unwrap_or(0.0), angle.unwrap_or(0.0))),
+    }
+}
+
+/// A soft light of one colour spread from the whole text, under it.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[schemars(inline)]
+#[serde(deny_unknown_fields)]
+pub struct BloomParam {
+    /// [r, g, b, a], each 0 to 255.
+    pub color: [u8; 4],
+    /// Brightness, 0 to 1 (0.5 by default).
+    pub strength: Option<f32>,
+    /// Spread, 0 to 1 (0.4 by default); 1 blurs it by one font size.
+    pub range: Option<f32>,
+    /// Moves the light right (negative left), -1 to 1 in parts of its spread (0 by default).
+    pub dir_x: Option<f32>,
+    /// Moves the light down (negative up), -1 to 1 in parts of its spread (0 by default).
+    pub dir_y: Option<f32>,
+}
+
+type ShadowLists = (Option<Vec<engine::TextShadow>>, Option<Vec<engine::TextInnerShadow>>);
+
+/// The shadows and inner shadows of a text style, as the engine has them.
+fn layers_patch(shadows: Option<Vec<LayerShadowParam>>, inner_shadows: Option<Vec<InnerShadowParam>>) -> Result<ShadowLists, AgentError> {
+    let shadows = shadows
+        .map(|shadows| {
+            shadows
+                .into_iter()
+                .enumerate()
+                .map(|(index, shadow)| {
+                    let (distance, angle) = shadow_polar(&format!("shadows[{index}]"), shadow.distance, shadow.angle, shadow.offset)?;
+                    let outlines = shadow.outlines.unwrap_or_default().into_iter().map(Into::into).collect();
+                    Ok(engine::TextShadow { distance, angle, blur: shadow.blur.unwrap_or(0.0), paint: shadow.paint.into(), outlines })
+                })
+                .collect::<Result<Vec<_>, AgentError>>()
+        })
+        .transpose()?;
+    let inner_shadows = inner_shadows
+        .map(|shadows| {
+            shadows
+                .into_iter()
+                .enumerate()
+                .map(|(index, shadow)| {
+                    let (distance, angle) = shadow_polar(&format!("inner_shadows[{index}]"), shadow.distance, shadow.angle, shadow.offset)?;
+                    Ok(engine::TextInnerShadow { distance, angle, blur: shadow.blur.unwrap_or(0.0), paint: shadow.paint.into() })
+                })
+                .collect::<Result<Vec<_>, AgentError>>()
+        })
+        .transpose()?;
+    Ok((shadows, inner_shadows))
+}
+
 /// The look of the words in one karaoke state; an absent field keeps the text's own.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[schemars(inline)]
@@ -397,6 +595,18 @@ pub struct TextStyleParam {
     /// null takes the glow off.
     #[serde(default, deserialize_with = "double_option")]
     pub glow: Option<Option<GlowParam>>,
+    /// The whole fill: solid, gradient or texture. Not together with color.
+    pub fill: Option<PaintParam>,
+    /// Every outline (at most 4), replacing the text's; [] takes them off. Not together with outline.
+    pub outlines: Option<Vec<LayerOutlineParam>>,
+    /// Every drop shadow (at most 32), replacing the text's; the first is drawn on top, so a stack
+    /// moving away step by step reads as 3D depth; [] takes them off. Not together with shadow.
+    pub shadows: Option<Vec<LayerShadowParam>>,
+    /// Every inner shadow (at most 32), replacing the text's; [] takes them off.
+    pub inner_shadows: Option<Vec<InnerShadowParam>>,
+    /// A light spread from the whole text; null takes it off.
+    #[serde(default, deserialize_with = "double_option")]
+    pub bloom: Option<Option<BloomParam>>,
     pub align: Option<AlignParam>,
     /// Line height as a multiple of the font size, above 0.
     pub line_spacing: Option<f32>,
@@ -419,8 +629,9 @@ pub struct TextStyleParam {
 }
 
 impl TextStyleParam {
-    fn patch(self, content: Option<String>) -> TextPatch {
-        TextPatch {
+    fn patch(self, content: Option<String>) -> Result<TextPatch, AgentError> {
+        let (shadows, inner_shadows) = layers_patch(self.shadows, self.inner_shadows)?;
+        Ok(TextPatch {
             content,
             font: self.font.map(Into::into),
             size: self.size,
@@ -429,6 +640,11 @@ impl TextStyleParam {
             background: self.background.map(|value| value.map(|v| engine::TextBackground { color: v.color, padding: v.padding, radius: v.radius })),
             shadow: self.shadow.map(|value| value.map(|v| engine::TextShadow::solid(v.color, v.offset, v.blur))),
             glow: self.glow.map(|value| value.map(|v| engine::TextGlow { color: v.color, outer_color: v.outer_color, radius: v.radius, intensity: v.intensity.unwrap_or(1.0), falloff: v.falloff.unwrap_or(2.0) })),
+            fill: self.fill.map(Into::into),
+            outlines: self.outlines.map(|outlines| outlines.into_iter().map(Into::into).collect()),
+            shadows,
+            inner_shadows,
+            bloom: self.bloom.map(|value| value.map(|v| engine::TextBloom { color: v.color, strength: v.strength.unwrap_or(0.5), range: v.range.unwrap_or(0.4), dir_x: v.dir_x.unwrap_or(0.0), dir_y: v.dir_y.unwrap_or(0.0) })),
             align: self.align.map(Into::into),
             line_spacing: self.line_spacing,
             weight: self.weight,
@@ -438,7 +654,7 @@ impl TextStyleParam {
             animation: self.animation.map(Into::into),
             karaoke: self.karaoke.map(|value| value.map(Into::into)),
             style_id: self.style_id,
-        }
+        })
     }
 }
 
@@ -494,6 +710,12 @@ params!(TextSetParams {
     shadow: Option<Option<ShadowParam>>,
     #[serde(default, deserialize_with = "double_option")]
     glow: Option<Option<GlowParam>>,
+    fill: Option<PaintParam>,
+    outlines: Option<Vec<LayerOutlineParam>>,
+    shadows: Option<Vec<LayerShadowParam>>,
+    inner_shadows: Option<Vec<InnerShadowParam>>,
+    #[serde(default, deserialize_with = "double_option")]
+    bloom: Option<Option<BloomParam>>,
     align: Option<AlignParam>,
     line_spacing: Option<f32>,
     weight: Option<u16>,
@@ -733,13 +955,13 @@ fn edit(expected_revision: u64, edit: AgentEdit) -> Result<AgentRequest, AgentEr
 }
 
 fn text_add(p: TextAddParams) -> Result<AgentRequest, AgentError> {
-    let style = p.style.unwrap_or_default().patch(None);
+    let style = p.style.unwrap_or_default().patch(None)?;
     edit(p.expected_revision, AgentEdit::TextAdd { track: p.track, start: ticks(p.start), duration: ticks(p.duration), content: p.content, style })
 }
 
 fn text_set(p: TextSetParams) -> Result<AgentRequest, AgentError> {
-    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, glow: p.glow, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation, karaoke: p.karaoke, style_id: p.style_id };
-    edit(p.expected_revision, AgentEdit::TextSet { clip: p.clip.into(), patch: style.patch(p.content) })
+    let style = TextStyleParam { font: p.font, size: p.size, color: p.color, outline: p.outline, background: p.background, shadow: p.shadow, glow: p.glow, fill: p.fill, outlines: p.outlines, shadows: p.shadows, inner_shadows: p.inner_shadows, bloom: p.bloom, align: p.align, line_spacing: p.line_spacing, weight: p.weight, italic: p.italic, transform: p.transform, letter_spacing: p.letter_spacing, animation: p.animation, karaoke: p.karaoke, style_id: p.style_id };
+    edit(p.expected_revision, AgentEdit::TextSet { clip: p.clip.into(), patch: style.patch(p.content)? })
 }
 
 /// Width a capture is limited to unless the call says otherwise.
@@ -772,8 +994,8 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("project_set_output", "Sets the output frame size in pixels (2 to 7680 a side, an odd side is rounded down to even) and the frame rate as an exact fraction {num, den} of frames per second, 1 to 60 fps: {num: 30, den: 1} is 30 fps, {num: 24000, den: 1001} is 23.976, {num: 30000, den: 1001} is 29.97 and {num: 60000, den: 1001} is 59.94. Give at least one; the others stay. Returns the output now in use. Text size and clip placement are parts of the frame, so they follow the new size: a vertical frame needs smaller text.", ProjectOutputParams, |p| edit(p.expected_revision, AgentEdit::ProjectSetOutput { width: p.width, height: p.height, frame_rate: p.frame_rate.map(|rate| engine::FrameRate { num: rate.num, den: rate.den }) })),
         tool!("track_set_hidden", "Hides or shows a track in picture and sound.", TrackHiddenParams, |p| edit(p.expected_revision, AgentEdit::TrackSetHidden { track: p.track, hidden: p.hidden })),
         tool!("clip_add", "Adds a source file, a still image (png, jpg, webp, on a video or sticker track), or a file of an installed pack as asset:<type>/<id>/<file> (type sfx, music or sticker; a sticker goes on a sticker track only), as a clip at start (ticks). duration defaults to what the stream the track plays still holds at that speed, and to 5 seconds for an image, whose end can be set freely. speed defaults to 1, between 0.1 and 10, and does not apply to an image. Returns the new clip.", ClipAddParams, |p| edit(p.expected_revision, AgentEdit::ClipAdd { track: p.track, source: p.source, start: ticks(p.start), source_in: p.source_in.map(ticks), duration: p.duration.map(ticks), speed: p.speed })),
-        tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track, which must be a text track, or, when track is absent, on the first text track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, glow, align, line_spacing, weight, italic, transform, letter_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
-        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow, glow, karaoke or an animation group off. outline and shadow change only the first outline or shadow of a text with several (null takes them all off); color fills the text with one colour, replacing a gradient or texture fill. karaoke sets how the spoken word is marked (mode none, color, box or scale; looks for active, spoken, upcoming and emphasis words) and may give each word its time in source ticks; without times the words share the cue by their characters. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
+        tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track, which must be a text track, or, when track is absent, on the first text track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, glow, fill, outlines, shadows, inner_shadows, bloom, align, line_spacing, weight, italic, transform, letter_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
+        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow, glow, karaoke or an animation group off. outline and shadow change only the first outline or shadow of a text with several (null takes them all off); color fills the text with one colour, replacing a gradient or texture fill. The layered look goes through fill (solid, gradient or texture paint), outlines, shadows and inner_shadows, each list replacing all the layers of its kind ([] takes them off), and bloom (null takes it off); paints of outlines and shadows are the same kinds. A texture picture is a pack picture or an absolute local file. color with fill, outline with outlines, or shadow with shadows is refused. project_get shows every layer of a text. karaoke sets how the spoken word is marked (mode none, color, box or scale; looks for active, spoken, upcoming and emphasis words) and may give each word its time in source ticks; without times the words share the cue by their characters. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
         tool!("font_list", "The fonts a text can name, each as the font value to give: the default font first (the system UI font, such as Segoe UI), then the installed families, then the fonts of the installed font packs (kind pack, with their name and pack_name). state is loading while the installed fonts are still being read; ask again then.", NoParams, |_| Ok(AgentRequest::FontList)),
         tool!("clip_animation_list", "The preset animations a clip with a picture (video, image, sticker or text) can name: each with its id, its group (in, out or loop) and default_duration in ticks (for loop, one cycle); a pack preset also has its name, pack and applies_to, and effect: null or {package, available}, the gpufx effect it runs while it plays and whether that package is installed (a missing one is left out and the preset plays only its motion). per_unit: true marks a preset that moves the characters, words or lines of a text one by one, such as typewriter; it is for text clips only. Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::ClipAnimationList)),
         tool!("asset_list", "The items of the installed music, sfx and sticker packs, filtered by type (music, sfx or sticker; all when absent) and by filter (every word must be in the name, category or a tag). Each has its type, the source to give clip_add (music and sfx go on an audio track, a sticker on a sticker track), name, category and tags; a sound also has duration in ticks (from its pack, may be absent) and loop, a sticker its size in pixels. state is loading while the packs are still being read.", AssetListParams, |p| Ok(AgentRequest::AssetList { kind: p.r#type, filter: p.filter })),

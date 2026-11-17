@@ -55,6 +55,26 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         positive("size", size)?;
         next.size = size;
     }
+    for (one, all, field) in [(patch.color.is_some(), patch.fill.is_some(), "color and fill"), (patch.outline.is_some(), patch.outlines.is_some(), "outline and outlines"), (patch.shadow.is_some(), patch.shadows.is_some(), "shadow and shadows")] {
+        if one && all {
+            return Err(invalid(format!("give only one of {field}")));
+        }
+    }
+    if let Some(fill) = &patch.fill {
+        next.fill = fill.clone();
+    }
+    if let Some(outlines) = &patch.outlines {
+        next.outlines.clone_from(outlines);
+    }
+    if let Some(shadows) = &patch.shadows {
+        next.shadows.clone_from(shadows);
+    }
+    if let Some(inner_shadows) = &patch.inner_shadows {
+        next.inner_shadows.clone_from(inner_shadows);
+    }
+    if let Some(bloom) = patch.bloom {
+        next.bloom = bloom;
+    }
     if let Some(color) = patch.color {
         // A gradient or texture fill is replaced by the colour, as the tool says.
         next.fill = engine::TextPaint::solid(color);

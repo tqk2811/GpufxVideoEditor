@@ -472,7 +472,7 @@ fn the_schemas_of_the_text_tools_name_every_field_an_agent_may_give() {
     let tools = gpufx_mcp::tools::all_tools();
     let schema = |name: &str| Value::Object(tools.iter().find(|tool| tool.name == name).unwrap().tool().input_schema.as_ref().clone());
     let set = schema("text_set");
-    for field in ["expected_revision", "clip", "content", "font", "size", "color", "outline", "background", "shadow", "glow", "align", "line_spacing", "weight", "italic", "transform", "letter_spacing", "animation", "style_id"] {
+    for field in ["expected_revision", "clip", "content", "font", "size", "color", "outline", "background", "shadow", "glow", "align", "line_spacing", "weight", "italic", "transform", "letter_spacing", "animation", "style_id", "fill", "outlines", "shadows", "inner_shadows", "bloom"] {
         assert!(set["properties"][field].is_object(), "text_set has no {field}: {set}");
     }
     let add = schema("text_add");
@@ -533,4 +533,80 @@ fn bad_subtitle_calls_are_refused() {
     assert_eq!(call_err(&mut session, "subtitle_set_style", json!({"expected_revision": added, "track": 0, "style_id": "subs/low"})).code, "invalid_params", "not a subtitle track");
     assert_eq!(call_err(&mut session, "subtitle_export_srt", json!({"track": 0})).code, "invalid_params");
     assert_eq!(call_err(&mut session, "subtitle_export_srt", json!({"track": 4})).code, "track_not_found");
+}
+
+#[test]
+fn text_set_sets_every_layer_of_the_look_and_the_old_fields_still_change_the_first() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let current = with_text(&mut session);
+    let clip = json!({"track": 0, "clip": 0});
+    let gold = json!({"kind": "gradient", "stops": [{"position": 0.0, "color": [255, 220, 0, 255]}, {"position": 1.0, "color": [160, 80, 0, 255]}], "angle": 90});
+    let set = call_ok(&mut session, "text_set", json!({
+        "expected_revision": current, "clip": clip,
+        "fill": gold,
+        "outlines": [{"width": 0.05, "paint": {"kind": "solid", "color": [0, 0, 0, 255]}}, {"width": 0.1, "paint": {"kind": "texture", "image": {"kind": "pack", "pack": "neon", "file": "glow.png", "pack_type": "subtitle-style"}, "fit": "tile", "scale": 0.5}}],
+        "shadows": [{"offset": [0.03, 0.04], "blur": 0.1, "paint": {"kind": "solid", "color": [0, 0, 0, 128]}, "outlines": [{"width": 0.02, "paint": {"kind": "solid", "color": [255, 0, 0, 255]}}]}, {"distance": 0.2, "angle": -45, "paint": {"kind": "solid", "color": [0, 0, 0, 64]}}],
+        "inner_shadows": [{"distance": 0.02, "angle": 90, "blur": 0.01, "paint": {"kind": "solid", "color": [0, 0, 0, 200]}}],
+        "bloom": {"color": [255, 0, 255, 255], "strength": 0.8}
+    }));
+    let text = text_of(&mut session, 0, 0);
+    let engine::TextPaint::Gradient { stops, angle } = &text.fill else { panic!("{:?}", text.fill) };
+    assert_eq!((stops.len(), *angle), (2, 90.0));
+    assert_eq!(text.outlines.len(), 2);
+    let engine::TextPaint::Texture(texture) = &text.outlines[1].paint else { panic!("{:?}", text.outlines[1].paint) };
+    assert_eq!((texture.fit, texture.scale, texture.opacity), (engine::TextureFit::Tile, 0.5, 1.0));
+    assert_eq!(texture.image, engine::TextImageRef::Pack { pack: "neon".to_owned(), file: "glow.png".to_owned(), pack_type: engine::TexturePackType::SubtitleStyle });
+    assert!((text.shadows[0].distance - 0.05).abs() < 1e-6, "an offset of 3 by 4 hundredths lies 5 away: {:?}", text.shadows[0]);
+    assert_eq!((text.shadows[0].outlines.len(), text.shadows[1].angle), (1, -45.0));
+    assert_eq!(text.inner_shadows[0].angle, 90.0);
+    let bloom = text.bloom.expect("a bloom");
+    assert_eq!((bloom.strength, bloom.range), (0.8, 0.4), "an absent range is the default");
+    // The old outline field changes only the first outline; null takes the bloom off.
+    let next = call_ok(&mut session, "text_set", json!({"expected_revision": revision(&set), "clip": clip, "outline": {"color": [9, 9, 9, 255], "width": 0.03}, "bloom": null}));
+    let text = text_of(&mut session, 0, 0);
+    assert_eq!((text.outlines.len(), text.outlines[0].width, text.bloom), (2, 0.03, None));
+    call_ok(&mut session, "text_set", json!({"expected_revision": revision(&next), "clip": clip, "shadows": [], "inner_shadows": []}));
+    let text = text_of(&mut session, 0, 0);
+    assert!(text.shadows.is_empty() && text.inner_shadows.is_empty());
+    let value = call_ok(&mut session, "project_get", json!({}));
+    assert_eq!(value["project"]["tracks"][0]["clips"][0]["text"]["fill"]["kind"], "gradient", "project_get shows the layers");
+}
+
+#[test]
+fn layers_no_text_can_have_are_refused_and_change_nothing() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let current = with_text(&mut session);
+    let known = project_of(&mut session);
+    let solid = json!({"kind": "solid", "color": [0, 0, 0, 255]});
+    let outline = json!({"width": 0.05, "paint": solid});
+    for (arguments, why) in [
+        (json!({"fill": solid, "color": [1, 2, 3, 255]}), "color with fill"),
+        (json!({"outlines": [outline], "outline": {"color": [0, 0, 0, 255], "width": 0.1}}), "outline with outlines"),
+        (json!({"outlines": [outline, outline, outline, outline, outline]}), "five outlines"),
+        (json!({"outlines": [{"width": 0.5, "paint": solid}]}), "an outline too wide"),
+        (json!({"fill": {"kind": "gradient", "stops": [{"position": 0.0, "color": [0, 0, 0, 255]}]}}), "a gradient of one stop"),
+        (json!({"fill": {"kind": "gradient", "stops": [{"position": 0.8, "color": [0, 0, 0, 255]}, {"position": 0.2, "color": [0, 0, 0, 255]}]}}), "stops going back"),
+        (json!({"fill": {"kind": "texture", "image": {"kind": "file", "path": "pictures/a.png"}}}), "a relative texture file"),
+        (json!({"fill": {"kind": "texture", "image": {"kind": "file", "path": "//server/share/a.png"}}}), "a texture file on a network share"),
+        (json!({"fill": {"kind": "texture", "image": {"kind": "pack", "pack": "p", "file": "a.png"}, "scale": 0}}), "a texture of scale 0"),
+        (json!({"shadows": [{"offset": [0.1, 0.1], "distance": 0.1, "paint": solid}]}), "offset with distance"),
+        (json!({"shadows": [{"distance": 5.0, "paint": solid}]}), "a shadow too far"),
+        (json!({"inner_shadows": [{"blur": -1.0, "paint": solid}]}), "a negative blur"),
+        (json!({"bloom": {"color": [0, 0, 0, 255], "strength": 2.0}}), "a bloom too strong"),
+        (json!({"fill": {"kind": "plaid"}}), "an unknown paint"),
+    ] {
+        let mut call = json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}});
+        for (name, value) in arguments.as_object().unwrap() {
+            call[name] = value.clone();
+        }
+        assert_eq!(call_err(&mut session, "text_set", call).code, "invalid_params", "{why}");
+    }
+    let error = call_err(&mut session, "text_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}, "outlines": [{"width": 0.5, "paint": solid}]}));
+    assert!(error.message.contains("outlines[0].width"), "names the field: {}", error.message);
+    assert_eq!(project_of(&mut session), known, "a refusal changes nothing");
+    // text_add takes the layers in its style.
+    let added = call_ok(&mut session, "text_add", json!({"expected_revision": current, "start": 5 * SECOND, "duration": SECOND, "content": "x", "style": {"fill": {"kind": "gradient", "stops": [{"position": 0.0, "color": [255, 0, 0, 255]}, {"position": 1.0, "color": [0, 0, 255, 255]}]}, "bloom": {"color": [255, 255, 255, 255]}}}));
+    let key = &added["clip"];
+    let text = text_of(&mut session, key["track"].as_u64().unwrap() as usize, key["clip"].as_u64().unwrap() as usize);
+    assert!(matches!(text.fill, engine::TextPaint::Gradient { .. }) && text.bloom.is_some(), "{text:?}");
 }

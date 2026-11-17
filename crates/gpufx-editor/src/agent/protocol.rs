@@ -56,6 +56,22 @@ pub struct TextPatch {
     pub shadow: Option<Option<TextShadow>>,
     #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
     pub glow: Option<Option<TextGlow>>,
+    /// The whole fill, any kind of paint; not together with `color`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<engine::TextPaint>,
+    /// Every outline, replacing the text's (an empty list takes them off); not together with
+    /// `outline`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outlines: Option<Vec<TextOutline>>,
+    /// Every shadow, replacing the text's; not together with `shadow`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadows: Option<Vec<TextShadow>>,
+    /// Every inner shadow, replacing the text's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner_shadows: Option<Vec<engine::TextInnerShadow>>,
+    /// The bloom; `null` takes it off.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub bloom: Option<Option<engine::TextBloom>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<TextAlign>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
