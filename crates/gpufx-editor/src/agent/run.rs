@@ -302,8 +302,8 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 return Err(AgentError::new("invalid_params", "duration must be above 0"));
             }
             let patch = super::protocol::TextPatch { content: Some(content), ..style };
-            let styled = styled_base(&state.text_style_library, &available_families(), patch.style_id.as_deref(), &default_text(String::new()), &engine::ClipAnimation::default())?;
-            check_font_pack(&state.font_library, patch.font.as_ref())?;
+            let styled = styled_base(&state.text_style_library, &available_families(), &state.font_library.fonts, patch.style_id.as_deref(), &default_text(String::new()), &engine::ClipAnimation::default())?;
+            check_font_pack(&state.font_paths, patch.font.as_ref())?;
             let text = apply_patch(&styled.text, &patch)?;
             let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::Text, &styled.animation, &patch)?.unwrap_or(styled.animation);
             let animation = Some(animation).filter(|animation| !animation.is_empty());
@@ -342,8 +342,8 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             let key = ClipKey::from(clip);
             let found = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).and_then(|track| track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key })).map_err(|error| AgentError::from_edit(&error))?;
             let Some(old) = found.text.as_ref() else { return Err(AgentError::from_edit(&engine::EditError::NotText { key })) };
-            let styled = styled_base(&state.text_style_library, &available_families(), patch.style_id.as_deref(), old, &found.animation)?;
-            check_font_pack(&state.font_library, patch.font.as_ref())?;
+            let styled = styled_base(&state.text_style_library, &available_families(), &state.font_library.fonts, patch.style_id.as_deref(), old, &found.animation)?;
+            check_font_pack(&state.font_paths, patch.font.as_ref())?;
             let mut text = apply_patch(&styled.text, &patch)?;
             // A cue of a subtitle track given a style of its own keeps it when the track's changes.
             // The track's own style is not a style of its own.

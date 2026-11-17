@@ -236,6 +236,7 @@ impl Session {
         let proxies = ProxyManager::start(ChildProxyMaker { tool: sibling_render_exe(), package_roots: package_roots.clone() }, proxy_folder(), proxy_mode, Some(Arc::new(move || proxies_window.request_redraw())));
         let paths = Arc::new(project_paths(None, &package_roots));
         state.visuals.get_mut().set_paths(paths.clone());
+        state.font_paths = ProjectPaths::roots_only(Path::new(crate::editor::FONT_PATHS_FILE), package_roots.clone());
         let visuals_window = session_window.clone();
         state.visuals.get_mut().set_waker(Arc::new(move || visuals_window.request_redraw()));
         let previews_window = session_window.clone();
@@ -408,6 +409,10 @@ impl Session {
         if let Some(Ok(library)) = self.font_library.as_ref().map(Receiver::try_recv) {
             self.state.font_library = library;
             self.font_library = None;
+            // Frames drawn before the packs were known are drawn again; a text's shape is keyed by
+            // the stamp of its font file, so it follows the file on its own.
+            self.tracker = RequestTracker::default();
+            self.shown = None;
         }
     }
 

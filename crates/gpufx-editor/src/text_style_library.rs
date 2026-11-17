@@ -12,6 +12,7 @@ use engine::{AnimationRef, ClipAnimation, ClipPlacement, FontRef, TextContent, T
 
 use crate::audio_library::LibraryProblem;
 use crate::clip_animation_library::pack_reference;
+use crate::font_library::LibraryFont;
 use crate::package_import::ImportProblem;
 use crate::subtitle_style_install::{check_subtitle_style_fields, parse_subtitle_style_manifest, SubtitleKaraoke, SubtitleLayout, SUBTITLE_STYLE_TYPE};
 use crate::text_clip::default_text;
@@ -64,10 +65,11 @@ pub struct LibraryTextStyle {
 
 impl LibraryTextStyle {
     /// `current` in this style: its content stays, the size too when the style has none, and the
-    /// font when no family of the style's `font_hint` is among `families`.
-    pub fn apply(&self, current: &TextContent, families: &[String]) -> TextContent {
+    /// font when no family of the style's `font_hint` is among `families` (the system fonts) or the
+    /// fonts of the installed font packs `pack_fonts` (see [`pick_font`]).
+    pub fn apply(&self, current: &TextContent, families: &[String], pack_fonts: &[LibraryFont]) -> TextContent {
         let mut next = self.style.text(&current.content, current.size);
-        next.font = pick_font(&self.style.font_hint, families).unwrap_or_else(|| current.font.clone());
+        next.font = pick_font(&self.style.font_hint, families, pack_fonts).unwrap_or_else(|| current.font.clone());
         // A subtitle style sets the karaoke, none when it has none; a text style leaves it. Word
         // times set by hand stay either way.
         let words = current.karaoke.as_ref().map(|karaoke| karaoke.words.clone()).unwrap_or_default();
@@ -80,8 +82,8 @@ impl LibraryTextStyle {
     }
 
     /// A new text of `content` in this style.
-    pub fn new_text(&self, content: impl Into<String>, families: &[String]) -> TextContent {
-        self.apply(&default_text(content), families)
+    pub fn new_text(&self, content: impl Into<String>, families: &[String], pack_fonts: &[LibraryFont]) -> TextContent {
+        self.apply(&default_text(content), families, pack_fonts)
     }
 
     /// The animations of a clip once the style is applied: all three groups as the style sets them
@@ -91,10 +93,16 @@ impl LibraryTextStyle {
     }
 }
 
-/// The first family of `hints` installed, as the font to use, matched without regard to case.
-/// `None` when none is, or the installed fonts are not known yet.
-pub fn pick_font(hints: &[String], families: &[String]) -> Option<FontRef> {
-    hints.iter().find_map(|hint| families.iter().find(|family| family.eq_ignore_ascii_case(hint.trim()))).map(|family| FontRef::System { family: family.clone() })
+/// The first family of `hints` installed, as the font to use, matched without regard to case:
+/// among the fonts of the installed font packs `pack_fonts` and the system fonts `families`. The
+/// order of the hints comes first; for one family found in both, the pack's font wins, because a
+/// project naming it draws the same on any machine with that pack, while a system font differs
+/// from one machine to the next. `None` when none is, or the installed fonts are not known yet.
+pub fn pick_font(hints: &[String], families: &[String], pack_fonts: &[LibraryFont]) -> Option<FontRef> {
+    hints.iter().map(|hint| hint.trim()).find_map(|hint| {
+        let in_pack = pack_fonts.iter().find(|font| font.family.as_deref().is_some_and(|family| family.eq_ignore_ascii_case(hint))).map(LibraryFont::font_ref);
+        in_pack.or_else(|| families.iter().find(|family| family.eq_ignore_ascii_case(hint)).map(|family| FontRef::System { family: family.clone() }))
+    })
 }
 
 /// The place of a subtitle whose picture is `pixels` in an `output` frame: at its natural size but
@@ -278,6 +286,20 @@ mod tests {
     }
 
     #[test]
+    fn a_font_hint_picks_a_font_of_an_installed_pack_before_the_same_system_family() {
+        let pack_font = |family: Option<&str>, file: &str| LibraryFont { pack: "open-fonts".to_owned(), pack_name: "Open Fonts".to_owned(), file: file.to_owned(), name: file.to_owned(), family: family.map(str::to_owned), path: PathBuf::new() };
+        let packs = vec![pack_font(None, "broken.ttf"), pack_font(Some("Lobster"), "lobster.ttf"), pack_font(Some("Roboto"), "roboto.ttf")];
+        let hints = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
+        let system = vec!["Arial".to_owned(), "Roboto".to_owned()];
+        let in_pack = |file: &str| Some(FontRef::Pack { pack: "open-fonts".to_owned(), file: file.to_owned() });
+        assert_eq!(pick_font(&hints(&[" lobster "]), &system, &packs), in_pack("lobster.ttf"), "only in a pack, ignoring case and spaces");
+        assert_eq!(pick_font(&hints(&["Roboto"]), &system, &packs), in_pack("roboto.ttf"), "in both: the pack's");
+        assert_eq!(pick_font(&hints(&["Arial", "Lobster"]), &system, &packs), Some(FontRef::System { family: "Arial".to_owned() }), "the order of the hints comes first");
+        assert_eq!(pick_font(&hints(&["Lobster"]), &[], &packs), in_pack("lobster.ttf"), "a pack font while the system list loads");
+        assert_eq!(pick_font(&hints(&["Nope"]), &system, &packs), None);
+    }
+
+    #[test]
     fn applying_a_style_copies_its_values_and_keeps_the_content() {
         let dir = scratch("apply");
         let library = library_with_both(&dir);
@@ -288,12 +310,12 @@ mod tests {
         current.font = FontRef::System { family: "Arial".to_owned() };
 
         let families = vec!["Arial".to_owned(), "segoe ui".to_owned()];
-        let styled = neon.apply(&current, &families);
+        let styled = neon.apply(&current, &families, &[]);
         assert_eq!(styled.content, "Keep me");
         assert_eq!((styled.size, styled.weight, styled.italic, styled.align), (0.1, 700, true, TextAlign::Left));
         assert!(styled.background.is_none(), "a style is whole: what it has not is taken off");
         assert_eq!(styled.font, FontRef::System { family: "segoe ui".to_owned() }, "the first hint installed");
-        assert_eq!(neon.apply(&current, &[]).font, current.font, "no hint installed keeps the font");
+        assert_eq!(neon.apply(&current, &[], &[]).font, current.font, "no hint installed keeps the font");
 
         let animation = neon.animation_for(&ClipAnimation::default());
         assert_eq!(animation.enter.as_ref().map(|value| (value.preset.as_str(), value.duration)), Some(("fade", from_seconds(0.5))));
@@ -307,7 +329,7 @@ mod tests {
         let style = LibraryTextStyle { reference: "p/s".to_owned(), name: "S".to_owned(), category: None, preview_text: "S".to_owned(), kind: StyleKind::Text, style: PackTextStyle::default(), animation: None, layout: None, karaoke: None };
         let mut current = default_text("x");
         current.size = 0.3;
-        assert_eq!(style.apply(&current, &[]).size, 0.3);
+        assert_eq!(style.apply(&current, &[], &[]).size, 0.3);
         let animation = crate::text_clip::choose_preset(&ClipAnimation::default(), AnimationGroup::Enter, Some("fade"));
         assert_eq!(style.animation_for(&animation), animation);
     }
@@ -344,15 +366,15 @@ mod tests {
         let mut current = default_text("one two");
         let word = |start: i64, end: i64| engine::KaraokeWord { start: engine::Time::from_ticks(start), end: engine::Time::from_ticks(end), emphasis: false };
         current.karaoke = Some(engine::TextKaraoke { words: vec![word(0, 5), word(5, 9)], ..engine::TextKaraoke::default() });
-        let styled = style.apply(&current, &[]);
+        let styled = style.apply(&current, &[], &[]);
         let karaoke = styled.karaoke.expect("the style's karaoke");
         assert_eq!(karaoke.mode, engine::KaraokeMode::Color);
         assert_eq!(karaoke.active.and_then(|look| look.color), Some([255, 220, 0, 255]));
         assert_eq!(karaoke.words.len(), 2, "times set by hand stay");
         let plain_subtitle = LibraryTextStyle { karaoke: None, ..style.clone() };
-        assert_eq!(plain_subtitle.apply(&styled_text_with_karaoke(), &[]).karaoke, None, "a subtitle style without karaoke turns it off");
+        assert_eq!(plain_subtitle.apply(&styled_text_with_karaoke(), &[], &[]).karaoke, None, "a subtitle style without karaoke turns it off");
         let text_style = LibraryTextStyle { karaoke: None, kind: StyleKind::Text, ..style.clone() };
-        assert!(text_style.apply(&styled_text_with_karaoke(), &[]).karaoke.is_some(), "a text style leaves it");
+        assert!(text_style.apply(&styled_text_with_karaoke(), &[], &[]).karaoke.is_some(), "a text style leaves it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

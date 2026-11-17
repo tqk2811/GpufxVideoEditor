@@ -172,6 +172,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The editor finds a pack's font where the compositor does, before the scan of the library has
+    /// finished, so no missing-font warning flashes while the editor opens.
+    #[test]
+    fn the_editor_resolves_a_pack_font_through_the_package_roots_before_the_scan() {
+        let dir = scratch("resolve");
+        write_pack(&dir, "open-fonts", "Open Fonts", &["fonts/a.ttf"]);
+        let mut state = crate::editor::EditorState::default();
+        assert!(!state.font_library.loaded, "no scan yet");
+        state.font_paths = ProjectPaths::roots_only(Path::new(crate::editor::FONT_PATHS_FILE), vec![dir.clone()]);
+        let mut text = engine::TextContent::new("Pack", 0.1);
+        text.font = FontRef::Pack { pack: "Open-Fonts".to_owned(), file: "fonts/a.ttf".to_owned() };
+        let expected = state.font_paths.font_pack_path("open-fonts", "fonts/a.ttf").unwrap();
+        assert_eq!(state.resolved_font(&text).font, FontRef::File { path: expected.to_string_lossy().into_owned() });
+        text.font = FontRef::Pack { pack: "open-fonts".to_owned(), file: "fonts/missing.ttf".to_owned() };
+        assert_eq!(state.resolved_font(&text).font, text.font, "a font not there stays, to be named as missing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A pack made of a Windows font installs, lists its family and draws with it rather than the
     /// default. Skipped without the font, or fails then when `GPUFX_REQUIRE_FONTS=1`.
     #[test]
@@ -203,14 +221,16 @@ mod tests {
         state.font_library = library.clone();
         let mut text = engine::TextContent::new("Pack", 0.1);
         text.font = font.font_ref();
+        let mut rasterizer = gpufx_text::TextRasterizer::with_font_files(&[]);
+
+        state.font_paths = ProjectPaths::roots_only(Path::new(crate::editor::FONT_PATHS_FILE), vec![root.clone()]);
         let resolved = state.resolved_font(&text);
         assert_eq!(resolved.font, FontRef::File { path: font.path.to_string_lossy().into_owned() });
-        let mut rasterizer = gpufx_text::TextRasterizer::with_font_files(&[]);
         assert_eq!(rasterizer.missing_font(&resolved), None, "drawn with the pack's font");
         let image = rasterizer.rasterize(&resolved, 720, 1.0);
         assert!(!image.no_font && image.width > 0, "only the pack's font is loaded, and it draws");
 
-        state.font_library = FontLibrary::default();
+        state.font_paths = ProjectPaths::roots_only(Path::new(crate::editor::FONT_PATHS_FILE), Vec::new());
         assert_eq!(state.resolved_font(&text).font, text.font, "a pack not installed stays, to be named as missing");
         let _ = std::fs::remove_dir_all(&dir);
     }

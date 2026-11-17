@@ -284,6 +284,11 @@ fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, fonts: &F
                 let found = font_choices(&families, fonts, source, &search);
                 if search_box.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                     chosen = found.first().map(|choice| choice.font.clone());
+                    if chosen.is_none() {
+                        // Nothing matched: the list stays open, so the box keeps the focus for the
+                        // next try instead of leaving the typing nowhere.
+                        search_box.request_focus();
+                    }
                 }
                 if found.is_empty() && !(families.is_empty() && source != FontSource::Pack) {
                     ui.colored_label(theme::text_dim(), language.t(Message::NoFontFound));
@@ -504,5 +509,35 @@ mod tests {
         assert_eq!(names(&font_choices(&families, &library, FontSource::System, "roboto")), Vec::<&str>::new());
         let first = &font_choices(&families, &library, FontSource::All, "rob")[0];
         assert_eq!((first.font.clone(), first.pack_name.as_deref()), (FontRef::Pack { pack: "p".to_owned(), file: "Roboto.ttf".to_owned() }, Some("Open Fonts")));
+    }
+
+    #[test]
+    fn enter_on_a_search_that_finds_nothing_keeps_the_focus_in_the_search_box() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::unique("enter-test");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let library = library();
+        let mut text = TextContent::new("x", 0.1);
+        let mut frame = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let mut output = ctx.run_ui(raw, |ui| {
+                font_combo(ui, id, &mut text, &library, Language::English);
+            });
+            output.textures_delta.clear();
+        };
+        let at = egui::pos2(390.0, 10.0);
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(Vec::new());
+        frame(vec![egui::Event::PointerMoved(at), button(true)]);
+        frame(vec![button(false)]);
+        frame(Vec::new());
+        let search_id = id.with("font-search");
+        assert!(ctx.memory(|memory| memory.has_focus(search_id)), "the list opened with the search box focused");
+        frame(vec![egui::Event::Text("zzzz no such font".to_owned())]);
+        let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: Some(egui::Key::Enter), pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        frame(vec![enter]);
+        frame(Vec::new());
+        assert!(ctx.memory(|memory| memory.has_focus(search_id)), "Enter with nothing found leaves the focus in the box");
+        assert_eq!(text.font, FontRef::Default, "nothing chosen");
     }
 }

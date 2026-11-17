@@ -22,7 +22,8 @@ const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--code
     \x20           or any encoder name FFmpeg accepts. A named encoder that fails stops the render.\n\
     --hashes    write 'frame sha256-of-RGBA' lines to a file\n\
     --keyint    frames between keyframes (1 to 600); default two seconds. The editor's preview proxies use a short one
-\n    --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>\n\
+\n    --packages  directory searched for effect packages (repeatable); it holds packages/gpufx/<group>/<name>,\n\
+    \x20           and packs such as packages/font/<id>; without it, the checkout's packages and %LOCALAPPDATA%\\gpufx-editor\n\
     --progress  text (default), or json: one JSON event per stdout line, and a 'cancel' line on stdin stops the render\n\
     \x20           (see docs/plans/spec-mcp-server-vi.md)\n\
     --cancel-on-stdin-eof  with --progress json: the end of stdin stops the render, so a parent that dies stops it too\n\
@@ -50,6 +51,19 @@ struct Arguments {
     package_roots: Vec<PathBuf>,
     progress: ProgressMode,
     cancel_on_stdin_eof: bool,
+}
+
+/// The folder under `%LOCALAPPDATA%` that the editor installs the user's packs in (fonts, sounds,
+/// stickers, styles), as the editor's `project_file::user_package_root` names it.
+const USER_FOLDER: &str = "gpufx-editor";
+
+/// The roots searched without `--packages`: the packages of the submodule of a checkout, then the
+/// packs the user installed through the editor, so a project naming an installed font pack or
+/// asset renders from the command line as it does from the editor.
+fn default_package_roots(local_app_data: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    let checkout = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/FFmpegGpuFilter"));
+    let user = local_app_data.filter(|value| !value.is_empty()).map(|folder| PathBuf::from(folder).join(USER_FOLDER));
+    std::iter::once(checkout).chain(user).collect()
 }
 
 fn parse_arguments() -> Result<Arguments, String> {
@@ -88,8 +102,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         }
     }
     if package_roots.is_empty() {
-        // Running from a checkout: the packages of the submodule.
-        package_roots.push(PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../external/FFmpegGpuFilter")));
+        package_roots = default_package_roots(std::env::var_os("LOCALAPPDATA"));
     }
     if cancel_on_stdin_eof && progress != ProgressMode::Json {
         return Err("--cancel-on-stdin-eof needs --progress json".to_owned());
@@ -257,6 +270,23 @@ mod tests {
         stop_after_eof(&cancel, Duration::from_millis(1), || gave_up.set(true));
         assert!(cancel.load(Ordering::SeqCst), "the render is asked to stop first");
         assert!(gave_up.get(), "a render that did not stop is ended");
+    }
+
+    #[test]
+    fn without_packages_the_user_packs_of_the_editor_are_searched_after_the_checkout() {
+        let scratch = std::env::temp_dir().join(format!("gpufx-render-font-root-{}", std::process::id()));
+        let roots = default_package_roots(Some(scratch.clone().into()));
+        assert_eq!(roots.len(), 2, "{roots:?}");
+        assert!(roots[0].ends_with("external/FFmpegGpuFilter"), "{roots:?}");
+        assert_eq!(roots[1], scratch.join("gpufx-editor"));
+        let pack = scratch.join("gpufx-editor").join("packages").join("font").join("open-fonts");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("manifest.json"), "{}").unwrap();
+        std::fs::write(pack.join("a.ttf"), b"font").unwrap();
+        let paths = ProjectPaths::new(&scratch.join("p.json"), roots);
+        assert_eq!(paths.font_pack_path("open-fonts", "a.ttf"), Ok(pack.join("a.ttf")), "a font pack installed by the editor is found");
+        assert_eq!(default_package_roots(Some("".into())).len(), 1, "an empty variable counts as unset");
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

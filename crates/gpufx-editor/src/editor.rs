@@ -34,7 +34,7 @@ use engine::{
     add_clip, add_effect, add_track, remove_track, add_transition_report, audio_sample_count, clip_at, delete_clip, move_clip, nearest_free_start, remove_effect, remove_transition, set_effect_params, set_fades, set_gain, set_frame_rate, set_muted, set_output_size, set_placement, set_speed,
     add_text_clip, set_text, TextContent, set_track_hidden, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, AudioOutput, Clip, ClipKey, EditError, EditHistory, Effect, FrameRate, Output, Project, Time, TrackKind, Transition, SUPPORTED_VERSION,
 };
-use d3d12_backend::MediaProbe;
+use d3d12_backend::{MediaProbe, ProjectPaths};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -43,6 +43,8 @@ use std::path::{Path, PathBuf};
 use crate::layout::{PanelSizes, SplitterDrag};
 
 const UNDO_DEPTH: usize = 200;
+/// The project file of [`EditorState::font_paths`]: a font pack is found in the package roots only.
+pub const FONT_PATHS_FILE: &str = "fonts.json";
 
 /// Length given to a clip whose file states none, and to a clip added without a probe.
 pub const DEFAULT_CLIP_DURATION: Time = Time::from_ticks(900_000);
@@ -101,6 +103,9 @@ pub struct EditorState {
     pub sticker_library: StickerLibrary,
     /// The font packs installed on this machine.
     pub font_library: FontLibrary,
+    /// Where a font of a font pack is, found as the compositor finds it, so the editor measures and
+    /// warns about the same file the preview and the export draw with; the library only lists them.
+    pub font_paths: ProjectPaths,
     /// The clip animation packs installed on this machine.
     pub clip_animation_library: ClipAnimationLibrary,
     /// The text and subtitle style packs installed on this machine.
@@ -544,6 +549,7 @@ impl EditorState {
             audio_library: AudioLibrary::default(),
             sticker_library: StickerLibrary::default(),
             font_library: FontLibrary::default(),
+            font_paths: ProjectPaths::roots_only(Path::new(FONT_PATHS_FILE), Vec::new()),
             clip_animation_library: ClipAnimationLibrary::default(),
             text_style_library: TextStyleLibrary::default(),
             picker: PickerState::default(),
@@ -1431,12 +1437,16 @@ impl EditorState {
         self.text_shapes.borrow_mut().shape(&self.resolved_font(text), self.project().output.height).missing_family
     }
 
-    /// `text` with a font of an installed font pack as the file it is, as the compositor draws it.
-    /// A font pack not installed stays, so the shape names it as missing.
+    /// `text` with a font of an installed font pack as the file it is, found through
+    /// [`Self::font_paths`] as the compositor finds it, whether or not the scan of the library has
+    /// finished. A font pack not installed stays, so the shape names it as missing.
     pub fn resolved_font<'a>(&self, text: &'a TextContent) -> std::borrow::Cow<'a, TextContent> {
-        match self.font_library.find_ref(&text.font) {
-            Some(font) => std::borrow::Cow::Owned(TextContent { font: engine::FontRef::File { path: font.path.to_string_lossy().into_owned() }, ..text.clone() }),
-            None => std::borrow::Cow::Borrowed(text),
+        match &text.font {
+            engine::FontRef::Pack { pack, file } => match self.font_paths.font_pack_path(pack, file) {
+                Ok(path) => std::borrow::Cow::Owned(TextContent { font: engine::FontRef::File { path: path.to_string_lossy().into_owned() }, ..text.clone() }),
+                Err(_) => std::borrow::Cow::Borrowed(text),
+            },
+            _ => std::borrow::Cow::Borrowed(text),
         }
     }
 
@@ -1961,7 +1971,7 @@ impl EditorState {
     /// not installed.
     pub fn add_styled_text_at_playhead(&mut self, reference: &str) {
         let Some(style) = self.text_style_library.find(reference).cloned() else { return };
-        let text = style.new_text(style.preview_text.clone(), &available_families());
+        let text = style.new_text(style.preview_text.clone(), &available_families(), &self.font_library.fonts);
         let animation = Some(style.animation_for(&engine::ClipAnimation::default())).filter(|animation| !animation.is_empty());
         self.add_text_clip_at_playhead(text, animation, style.layout);
     }
@@ -2068,7 +2078,7 @@ impl EditorState {
         let Some(style) = self.text_style_library.find(reference).cloned() else { return };
         let Some(clip) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).cloned() else { return };
         let Some(current) = clip.text.as_ref() else { return };
-        let mut text = style.apply(current, &available_families());
+        let mut text = style.apply(current, &available_families(), &self.font_library.fonts);
         // A cue given a style other than its track's keeps it when its subtitle track is given
         // another; the track's own style is not a style of its own.
         text.own_style = self.history.current().tracks.get(key.track).is_some_and(|track| track.is_subtitle() && track.subtitle.as_ref().and_then(|subtitle| subtitle.style.as_deref()).is_none_or(|own| !own.eq_ignore_ascii_case(&style.reference)));
@@ -2099,7 +2109,7 @@ impl EditorState {
             .into_iter()
             .map(|span| {
                 let text = match style {
-                    Some(style) => style.new_text(span.text, &families),
+                    Some(style) => style.new_text(span.text, &families, &self.font_library.fonts),
                     None => default_text(span.text),
                 };
                 let placement = subtitle_placement(self.text_pixels(&text), output, &layout);
@@ -2129,7 +2139,7 @@ impl EditorState {
             .enumerate()
             .filter_map(|(index, clip)| {
                 let current = clip.text.as_ref().filter(|text| all || !text.own_style)?;
-                let mut text = style.apply(current, &families);
+                let mut text = style.apply(current, &families, &self.font_library.fonts);
                 text.own_style = false;
                 let keyframed = ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property));
                 let placement = if keyframed { None } else { subtitle_placement(self.text_pixels(&text), output, &layout) };
