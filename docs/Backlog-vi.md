@@ -191,13 +191,9 @@ Giải mã và ghép dùng shader gpufx, còn xuất dùng `rgba_to_nv12` ở `c
 
 `canvas` không được giải phóng trên đường lỗi (`crates/engine/src/render.rs:264-282`). `clip_graphs` không bao giờ bị loại bỏ (`crates/d3d12-backend/src/compositor.rs:186`), nên project nhiều clip giữ graph của mọi clip. Thư mục package mặc định là đường dẫn lúc build (`crates/gpufx-render/src/main.rs:68`), không chạy được khi file thực thi được chép đi. `Decoder::wait_idle` trong trait trung lập là khái niệm riêng của D3D12VA. Ghi ngày 2026-11-09.
 
-### [Vừa] Transition giữa hai clip không có thêm tiếng ngoài điểm in/out không phải crossfade thật
+### [Thấp] Crossfade tiếng dựa vào độ dài file lấy từ duration của container
 
-Trong cửa sổ transition, mỗi clip được kéo dài qua đầu hoặc đuôi của chính nó, nhưng khi nguồn không còn tiếng ngoài điểm in/out thì phần đầu và đuôi nằm ngoài nguồn là im lặng, trong khi hình giữ khung đầu hoặc khung cuối. Trường hợp thường gặp: nối hai file nguyên (`crates/engine/src/audio_schedule.rs:163-164`, `crates/engine/src/audio_mix.rs`). Nên làm vì tiếng tắt dần rồi bật lên thay vì hoà vào nhau. Ghi ngày 2026-11-09.
-
-### [Vừa] Track audio dài hơn khung hình video cuối bị cắt, project chỉ có track audio ra 0 mẫu
-
-Độ dài tiếng theo số khung hình video (`audio_sample_count` trong `crates/engine/src/audio_schedule.rs`), nên phần track audio vượt quá khung hình cuối bị cắt, và project chỉ có track audio có 0 mẫu. Nên làm vì nhạc nền dài hơn video bị mất đuôi và không xuất được project chỉ có tiếng. Ghi ngày 2026-11-09.
+Crossfade tiếng chỉ chạy trên phần cửa sổ mà cả hai clip đều có tiếng (`fitted` trong `crates/engine/src/audio_schedule.rs`). Độ dài file lấy từ duration của container (`AudioFileDecoder::length`, cache theo đường dẫn trong `AudioFiles`), nên có thể sai: AAC lệch vài chục ms, MP3 VBR không có header Xing/VBRI có thể sai nhiều. Độ dài sai chỉ làm crossfade dài hoặc ngắn hơn, hoặc rơi vào chỗ im lặng, không làm lệch sync, và preview vẫn khớp export. Hai file nguyên nối nhau thành cắt có dốc chống tách 128 mẫu ở mỗi phía (lựa chọn tạm, chưa được user chốt). Cache độ dài không biết file đổi trên đĩa trong lúc luồng phát còn sống. Nên làm nếu gặp nguồn có duration sai: đo độ dài thật bằng cách decode tới cuối, một lần cho mỗi file. Ghi ngày 2026-11-17.
 
 ### [Thấp] Hai ghi chú về chất lượng tiếng
 

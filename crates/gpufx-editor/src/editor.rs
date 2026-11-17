@@ -3645,15 +3645,25 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_audio_only_timeline_explains_why_it_does_not_play() {
+    fn an_empty_timeline_explains_why_it_does_not_play() {
         let mut state = EditorState::default();
         state.add_track(TrackKind::Audio);
-        state.add_clip_from_file(0, Path::new("music.wav"));
         state.take_transport();
         state.toggle_playback();
         assert!(!state.is_playing());
         assert!(state.take_transport().is_empty());
         assert_eq!(state.status(), &Status::Info(Message::NothingToPlay));
+    }
+
+    #[test]
+    fn an_audio_only_timeline_plays() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Audio);
+        state.add_clip_from_file(0, Path::new("music.wav"));
+        state.take_transport();
+        state.toggle_playback();
+        assert!(state.is_playing(), "music alone has a length and plays over a black picture");
+        assert_eq!(state.take_transport(), vec![TransportCommand::Play { from: Time::ZERO }]);
     }
 
     #[test]

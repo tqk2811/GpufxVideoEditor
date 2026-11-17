@@ -378,3 +378,44 @@ fn a_reversed_chunk_reads_the_same_samples_whatever_was_read_before() {
         assert!(after_lower == alone, "{name}: the chunk depends on the read before it");
     }
 }
+
+#[test]
+fn the_decoder_knows_how_long_the_file_is() {
+    for (name, path) in sources() {
+        let length = AudioFileDecoder::open(&path).expect("open the clip").length().expect("the container gives a duration");
+        assert!((length - 6 * RATE).abs() <= 2048, "{name}: {length} samples for a 6 s file");
+    }
+    assert_eq!(AudioFileDecoder::open(&video_only_clip()).expect("open the clip").length(), Some(0));
+}
+
+#[test]
+fn two_whole_files_joined_by_a_transition_keep_their_level() {
+    // Two whole 6 s files with a 1 s transition: neither has audio on the other side of the cut,
+    // so the transition must not fade either of them towards silence.
+    for (name, path) in sources() {
+        let dir = path.parent().expect("clips directory").to_path_buf();
+        let source = path.file_name().and_then(|n| n.to_str()).expect("name").to_owned();
+        let json = format!(
+            r#"{{"version":1,"output":{{"width":64,"height":64,"frame_duration":3000,"audio":{{"sample_rate":48000,"channels":2,"bitrate":128000}}}},"tracks":[
+                {{"kind":"audio","clips":[
+                  {{"source":"{source}","start":0,"source_in":0,"duration":540000}},
+                  {{"source":"{source}","start":540000,"source_in":0,"duration":540000}}],
+                  "transitions":[{{"after_clip":0,"package":"fade","duration":90000}}]}}]}}"#
+        );
+        let project = Project::from_json(&json).expect("project parses");
+        let mut files = AudioFiles::new(Arc::new(ProjectPaths::new(&dir.join("project.json"), Vec::new())));
+        let start = 5 * RATE;
+        let mut mixed = vec![0.0f32; 2 * RATE as usize * 2];
+        for (index, block) in mixed.chunks_mut(1600 * 2).enumerate() {
+            mix_audio(&project, &mut files, start + index as i64 * 1600, block).expect("mix");
+        }
+        let signal = left(&mixed);
+        let at = |sample: i64| energy(&signal[(sample - start) as usize..(sample - start + 2000) as usize]);
+        let (before, after) = (at(5 * RATE + 4000), at(7 * RATE - 6000));
+        // 3000 samples before the cut an equal-power fade over the whole window had a gain of 0.74.
+        let near_end = at(6 * RATE - 5000);
+        let near_start = at(6 * RATE + 3000);
+        assert!((near_end / before - 1.0).abs() < 0.15, "{name}: the end of the first file dips, {near_end} against {before}");
+        assert!((near_start / after - 1.0).abs() < 0.15, "{name}: the start of the second file dips, {near_start} against {after}");
+    }
+}

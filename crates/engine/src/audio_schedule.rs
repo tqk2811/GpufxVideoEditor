@@ -22,7 +22,16 @@
 //!   Inside it both clips sound, each extended past its own end with the formula above. A source
 //!   position below zero means there is no audio yet, which the mixer treats as silence.
 //! * **Crossfade.** With `i` samples of an `n` sample window elapsed, the earlier clip has gain
-//!   `cos(i / n * pi / 2)` and the later one `sin(i / n * pi / 2)` (equal power).
+//!   `cos(i / n * pi / 2)` and the later one `sin(i / n * pi / 2)` (equal power). The window is
+//!   the part of the transition window where both clips have audio: the earlier clip past its out
+//!   point while its file lasts, the later one before its in point back to the start of its file
+//!   (the length of a file comes from [`crate::AudioSource::source_len`]; unknown means audio
+//!   everywhere). Before that part the earlier clip plays at full gain and the later one is
+//!   silent, after it the other way round, so a clip without audio beyond its in or out point does
+//!   not fade towards silence. Nothing moves in time, so sync is kept. Two clips with less than
+//!   [`ANTI_CLICK_SAMPLES`] of audio in common (two whole files joined) get a cut: the earlier one
+//!   ramps down over the last `ANTI_CLICK_SAMPLES` of its audio and the later one up over the first
+//!   of its, with the same curves. Both clips are still read over the whole transition window.
 //! * **Fades.** Linear in amplitude and anchored to the clip's own start and end. `fade_in` gives
 //!   `i / n` at `i` samples after the first clip sample. `fade_out` mirrors it, so the last clip
 //!   sample has gain 0. A fade on the side of a transition is rejected by [`crate::validate`]
@@ -59,7 +68,8 @@ pub fn sample_position(t: Time) -> i64 {
 }
 
 /// Number of mixed samples per channel in the output: the position of the end of the last video
-/// frame, so audio and video end together. A project without video tracks has 0.
+/// frame, so audio and video end together. The frame count covers audio clips too (see
+/// [`frame_count`]), so the end of the last audio clip is always inside. An empty project has 0.
 pub fn audio_sample_count(project: &Project) -> i64 {
     let end = frame_time(project, frame_count(project)).unwrap_or(Time::MAX);
     sample_position(end)
@@ -106,8 +116,11 @@ impl GainEnvelope {
         }
         if let Some(window) = self.crossfade_in {
             let elapsed = sample.saturating_sub(window.start);
+            if elapsed < 0 {
+                return 0.0;
+            }
             if elapsed < window.len {
-                gain *= (elapsed.max(0) as f64 / window.len as f64 * FRAC_PI_2).sin();
+                gain *= (elapsed as f64 / window.len as f64 * FRAC_PI_2).sin();
             }
         }
         if let Some(window) = self.crossfade_out {
@@ -115,7 +128,9 @@ impl GainEnvelope {
             if elapsed >= window.len {
                 return 0.0;
             }
-            gain *= (elapsed.max(0) as f64 / window.len as f64 * FRAC_PI_2).cos();
+            if elapsed > 0 {
+                gain *= (elapsed as f64 / window.len as f64 * FRAC_PI_2).cos();
+            }
         }
         gain as f32
     }
@@ -181,6 +196,17 @@ impl VoiceFx {
 /// The segments sounding in the `len` samples from `start`, in track then clip order. Muted clips,
 /// hidden tracks and samples no clip covers produce nothing.
 pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegment<'_>> {
+    audio_segments_with(project, start, len, &mut |_, _| None)
+}
+
+/// Like [`audio_segments`], with `source_len` telling how many samples the file of a clip holds
+/// (see [`crate::AudioSource::source_len`]), so a crossfade fits the audio both clips have.
+pub fn audio_segments_with<'a>(
+    project: &'a Project,
+    start: i64,
+    len: i64,
+    source_len: &mut dyn FnMut(ClipKey, &str) -> Option<i64>,
+) -> Vec<AudioSegment<'a>> {
     let end = start.saturating_add(len.max(0));
     let mut segments = Vec::new();
     for (t, track) in project.tracks.iter().enumerate().filter(|(_, track)| !track.hidden) {
@@ -209,6 +235,9 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
             if first >= last {
                 continue;
             }
+            // The gains follow the part of each window where both clips have audio.
+            let crossfade_in = crossfade_in.map(|w| fitted(w, t, track, c - 1, source_len).1);
+            let crossfade_out = crossfade_out.map(|w| fitted(w, t, track, c, source_len).0);
             let source_base = sample_position(clip.source_in);
             let stretch = (clip.has_speed() || clip.voice.pitch_cents() != 0).then_some(Stretch {
                 clip_start,
@@ -234,6 +263,68 @@ pub fn audio_segments(project: &Project, start: i64, len: i64) -> Vec<AudioSegme
         }
     }
     segments
+}
+
+/// The file sample clip `clip` reads at timeline sample `sample`, by the rules of the module (the
+/// nominal position for a clip at another speed). Outside `0..length of the file` there is none.
+fn file_position(clip: &Clip, sample: i64) -> i64 {
+    let clip_start = sample_position(clip.media_span().0);
+    let source_base = sample_position(clip.source_in);
+    let elapsed = sample.saturating_sub(clip_start);
+    let v = if clip.has_speed() || clip.voice.pitch_cents() != 0 {
+        Stretch { clip_start, source_base, speed_milli: clip.speed_milli(), pitch_cents: clip.voice.pitch_cents() }.nominal(elapsed)
+    } else {
+        source_base.saturating_add(elapsed)
+    };
+    if clip.plays_reversed() {
+        sample_position(clip.source_in).saturating_add(sample_position(clip.source_end())).saturating_sub(1).saturating_sub(v)
+    } else {
+        v
+    }
+}
+
+/// The first sample of `lo..hi` where `holds` is true, or `hi`; `holds` turns true once and stays.
+fn first_where(mut lo: i64, mut hi: i64, holds: impl Fn(i64) -> bool) -> i64 {
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if holds(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo
+}
+
+/// Samples of the ramps of a cut without common audio, about 2.7 ms: short enough to keep the cut,
+/// long enough not to click.
+pub const ANTI_CLICK_SAMPLES: i64 = 128;
+
+/// The windows the earlier and the later clip of transition window `window`, between clip
+/// `earlier` of track `t` and the next, fade out and in over: the part where both clips have
+/// audio (see the module rules). When that part is shorter than [`ANTI_CLICK_SAMPLES`], the
+/// earlier clip ramps down over the last of its audio and the later one up over the first of its.
+fn fitted(window: Window, t: usize, track: &Track, earlier: usize, source_len: &mut dyn FnMut(ClipKey, &str) -> Option<i64>) -> (Window, Window) {
+    let (a, b) = (&track.clips[earlier], &track.clips[earlier + 1]);
+    let a_len = source_len(ClipKey { track: t, clip: earlier }, &a.source);
+    let b_len = source_len(ClipKey { track: t, clip: earlier + 1 }, &b.source);
+    let has_audio = |clip: &Clip, len: Option<i64>, sample: i64| {
+        let position = file_position(clip, sample);
+        position >= 0 && len.is_none_or(|len| position < len)
+    };
+    // The earlier clip has audio up to its own end at least; look for where it stops after that.
+    let a_clip_end = sample_position(a.media_span().1).clamp(window.start, window.end());
+    let a_end = first_where(a_clip_end, window.end(), |s| !has_audio(a, a_len, s));
+    // The later clip has audio from its own start at least; look for where it begins before that.
+    let b_clip_start = sample_position(b.media_span().0).clamp(window.start, window.end());
+    let b_start = first_where(window.start, b_clip_start, |s| has_audio(b, b_len, s));
+    if a_end - b_start >= ANTI_CLICK_SAMPLES {
+        let common = Window { start: b_start, len: a_end - b_start };
+        (common, common)
+    } else {
+        let ramp = ANTI_CLICK_SAMPLES;
+        (Window { start: a_end - ramp, len: ramp }, Window { start: b_start, len: ramp })
+    }
 }
 
 fn find_transition(track: &Track, after_clip: usize) -> Option<&Transition> {

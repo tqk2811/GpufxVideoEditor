@@ -110,6 +110,9 @@ pub struct AudioFileDecoder {
     origin: i64,
     /// Media-timeline sample of the first audio sample.
     first_sample: i64,
+    /// Source samples the file holds, from the container's duration; `Some(0)` without an audio
+    /// stream, `None` when the container does not say.
+    length: Option<i64>,
     /// Decoded interleaved samples not consumed yet.
     pending: Vec<f32>,
     /// Media-timeline sample of `pending[0]`.
@@ -152,6 +155,7 @@ impl AudioFileDecoder {
             time_base: ffi::AVRational { num: 1, den: 1 },
             origin: 0,
             first_sample: 0,
+            length: Some(0),
             pending: Vec::new(),
             pending_start: 0,
             positioned: false,
@@ -207,6 +211,13 @@ impl AudioFileDecoder {
         self.time_base = (*stream).time_base;
         self.first_sample = if (*stream).start_time == ffi::NO_PTS { 0 } else { to_mix_samples((*stream).start_time, self.time_base) };
         self.origin = self.video_origin().unwrap_or(self.first_sample);
+        self.length = if (*stream).duration != ffi::NO_PTS && (*stream).duration > 0 {
+            Some(self.first_sample + to_mix_samples((*stream).duration, self.time_base) - self.origin)
+        } else if (*self.format_context).duration > 0 {
+            Some(self.first_sample + to_mix_samples((*self.format_context).duration, ffi::AVRational { num: 1, den: 1_000_000 }) - self.origin)
+        } else {
+            None
+        };
         self.discard_other_streams(index);
 
         self.codec_context = ffi::avcodec_alloc_context3(codec);
@@ -280,6 +291,12 @@ impl AudioFileDecoder {
             }
         }
         Ok(self.deliver(target, frames, out))
+    }
+
+    /// Source samples the file holds, positions `0..n`, from the container's duration. `None` when
+    /// the container does not say.
+    pub fn length(&self) -> Option<i64> {
+        self.length.map(|length| length.max(0))
     }
 
     /// Like [`AudioFileDecoder::read`], always from a seek: the samples depend on `position` only,
@@ -555,12 +572,15 @@ pub struct AudioFiles {
     paths: Arc<ProjectPaths>,
     open: HashMap<ClipKey, (AudioFileDecoder, u64, String)>,
     uses: u64,
+    /// The length of each source asked so far, probed once with a decoder of its own so the
+    /// decoders the clips read with are neither opened nor pushed out.
+    lengths: HashMap<String, Option<i64>>,
 }
 
 impl AudioFiles {
     /// Sources are found through `paths`.
     pub fn new(paths: Arc<ProjectPaths>) -> Self {
-        Self { paths, open: HashMap::new(), uses: 0 }
+        Self { paths, open: HashMap::new(), uses: 0, lengths: HashMap::new() }
     }
 }
 
@@ -572,6 +592,16 @@ impl AudioSource for AudioFiles {
     fn read_counted(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<usize, RenderError> {
         let decoder = self.decoder(key, source)?;
         decoder.read_counted(position, out).map_err(|e| RenderError(format!("{}: {e}", decoder.path)))
+    }
+
+    fn source_len(&mut self, _key: ClipKey, source: &str) -> Option<i64> {
+        if let Some(length) = self.lengths.get(source) {
+            return *length;
+        }
+        // A file that does not open has no audio; the read that follows reports the error.
+        let length = AudioFileDecoder::open(&self.paths.source_path(source)).map_or(Some(0), |decoder| decoder.length());
+        self.lengths.insert(source.to_owned(), length);
+        length
     }
 
     fn read_fresh(&mut self, key: ClipKey, source: &str, position: i64, out: &mut [f32]) -> Result<(), RenderError> {
@@ -657,6 +687,19 @@ mod tests {
         // Deleting an earlier clip renumbers this one onto the old key.
         files.read(key, "level-half.wav", 0, &mut out).expect("read the second file");
         assert!((out[0] - 0.5).abs() < 1e-3, "{}", out[0]);
+    }
+
+    #[test]
+    fn asking_a_length_opens_no_clip_decoder() {
+        // The mixer asks the length of both clips of a transition every block; it must not open,
+        // nor push out, the decoders the clips read with.
+        let path = generated_clip("level-length.wav", &["-f", "lavfi", "-i", "aevalsrc=0.25|0.25:s=48000:d=1", "-c:a", "pcm_s16le"]);
+        let mut files = AudioFiles::new(Arc::new(ProjectPaths::new(&path.with_file_name("project.json"), Vec::new())));
+        for clip in 0..MAX_OPEN_FILES + 4 {
+            let length = files.source_len(ClipKey { track: 0, clip }, "level-length.wav").expect("a length");
+            assert!((length - 48_000).abs() <= 1, "{length}");
+        }
+        assert!(files.open.is_empty(), "{} decoders opened", files.open.len());
     }
 
     /// A scratch file generated once by the ffmpeg of third_party.

@@ -2,7 +2,7 @@
 //!
 //! This module holds no FFmpeg or device code. A backend implements [`AudioSource`].
 
-use crate::audio_schedule::{audio_segments, MIX_CHANNELS};
+use crate::audio_schedule::{audio_segments_with, MIX_CHANNELS};
 use crate::project::Project;
 use crate::render::{ClipKey, RenderError};
 use crate::stretch::StretchStates;
@@ -41,6 +41,14 @@ pub trait AudioSource {
     /// output carries state over from the read before (a decoder and resampler continuing where
     /// they stopped, instead of starting again from a seek) starts afresh for it. Reads that must
     /// match whatever order they come in, as the chunks of a reversed clip, use it.
+    /// How many source samples the file of clip `key` holds: positions `0..n` have audio. `None`
+    /// when the source cannot tell, which is taken as audio everywhere. The scheduler uses it to
+    /// fit a crossfade to the audio both clips have (see [`crate::audio_schedule`]). Preview and
+    /// export must answer alike, as they mix through the same source type.
+    fn source_len(&mut self, _key: ClipKey, _source: &str) -> Option<i64> {
+        None
+    }
+
     fn read_fresh(
         &mut self,
         key: ClipKey,
@@ -83,7 +91,7 @@ pub fn mix_audio_with<S: AudioSource + ?Sized>(
     out.fill(0.0);
     let frames = out.len() / MIX_CHANNELS;
     let mut scratch: Vec<f32> = Vec::new();
-    let segments = audio_segments(project, start, frames as i64);
+    let segments = audio_segments_with(project, start, frames as i64, &mut |key, path| source.source_len(key, path));
     stretch.retain(&segments);
     for segment in segments {
         let len = segment.len as usize;
