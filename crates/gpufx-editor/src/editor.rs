@@ -5094,6 +5094,34 @@ lines"));
     }
 
     #[test]
+    fn adding_a_layer_after_a_drag_of_another_is_its_own_undo_step() {
+        let (mut state, key) = added_text_state();
+        let before = state.project().tracks[key.track].clips[key.clip].text.clone().unwrap();
+        let mut text = before.clone();
+        text.outlines.push(engine::TextOutline { width: 0.01, paint: engine::TextPaint::solid([0, 0, 0, 255]) });
+        state.live_text(text.clone());
+        state.pointer_released();
+        // Drag the width of the outline.
+        for width in [0.02, 0.04, 0.06] {
+            text.outlines[0].width = width;
+            state.live_text(text.clone());
+        }
+        state.pointer_released();
+        let dragged = text.clone();
+        // The Add button: one more outline, committed by the release of the click.
+        text.outlines.push(engine::TextOutline { width: 0.01, paint: engine::TextPaint::solid([255, 0, 0, 255]) });
+        state.live_text(text.clone());
+        state.pointer_released();
+        let current = |state: &EditorState| state.project().tracks[key.track].clips[key.clip].text.clone().unwrap();
+        assert_eq!(current(&state), text);
+        state.undo();
+        assert_eq!(current(&state), dragged, "one undo removes only the added layer");
+        state.undo();
+        assert_eq!(current(&state).outlines.len(), 1);
+        assert_eq!(current(&state).outlines[0].width, 0.01, "the next one takes back the drag");
+    }
+
+    #[test]
     fn a_bigger_font_draws_a_bigger_text_in_one_undo_step() {
         let (mut state, key) = added_text_state();
         let before = state.project().tracks[key.track].clips[key.clip].clone();

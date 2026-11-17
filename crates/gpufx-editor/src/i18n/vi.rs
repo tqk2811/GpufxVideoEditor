@@ -339,6 +339,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::TextOutlines => "Viền".to_owned(),
         Message::TextShadows => "Bóng".to_owned(),
         Message::TextInnerShadows => "Bóng trong".to_owned(),
+        Message::TextInnerShadow => "Bóng trong".to_owned(),
         Message::TextBloom => "Toả sáng".to_owned(),
         Message::AddLayer => "Thêm".to_owned(),
         Message::MoveLayerUp => "Lên trên".to_owned(),

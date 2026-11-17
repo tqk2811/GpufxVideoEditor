@@ -363,6 +363,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::TextOutlines => "Outlines".to_owned(),
         Message::TextShadows => "Shadows".to_owned(),
         Message::TextInnerShadows => "Inner shadows".to_owned(),
+        Message::TextInnerShadow => "Inner shadow".to_owned(),
         Message::TextBloom => "Bloom".to_owned(),
         Message::AddLayer => "Add".to_owned(),
         Message::MoveLayerUp => "Move up".to_owned(),

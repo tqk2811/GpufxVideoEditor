@@ -87,7 +87,7 @@ pub(super) fn show(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, laye
             });
         });
         egui::CollapsingHeader::new(counted(&language.t(Message::TextInnerShadows), text.inner_shadows.len())).id_salt(id.with("inner-shadows")).show(ui, |ui| {
-            let title = language.t(Message::TextInnerShadows);
+            let title = language.t(Message::TextInnerShadow);
             layer_list(ui, id.with("inner-list"), &mut text.inner_shadows, MAX_TEXT_SHADOWS, default_inner_shadow, &title, language, |ui, index, shadow| {
                 percent_row(ui, &language.t(Message::FieldDistance), &mut shadow.distance, SHADOW_DISTANCE_RANGE);
                 degree_row(ui, &language.t(Message::FieldAngle), &mut shadow.angle, SHADOW_ANGLE_RANGE);
@@ -133,14 +133,48 @@ fn outline_list(ui: &mut egui::Ui, id: egui::Id, outlines: &mut Vec<TextOutline>
     });
 }
 
+/// Names the layers of one list, one stable key each, in the order of the layers. The open or folded
+/// state of a layer and the widgets inside it hang on its key, not on its index, so moving or
+/// removing a layer takes its state along instead of handing it to the layer that took its place.
+/// Kept in the egui memory, since the rows are drawn again every frame; a list that changed behind
+/// its back (an undo, a style applied) is fitted to its length, which only loses the state of
+/// layers whose identity is unknown anyway.
+#[derive(Clone, Default)]
+struct LayerKeys {
+    keys: Vec<u64>,
+    next: u64,
+}
+
+impl LayerKeys {
+    fn fit(&mut self, count: usize) {
+        self.keys.truncate(count);
+        while self.keys.len() < count {
+            self.keys.push(self.next);
+            self.next += 1;
+        }
+    }
+
+    /// The same action as on the layers, so the two lists stay in step.
+    fn apply(&mut self, action: LayerAction, max: usize) {
+        let next = &mut self.next;
+        apply_layer_action(&mut self.keys, action, max, || {
+            *next += 1;
+            *next - 1
+        });
+    }
+}
+
 /// A list of layers, each folded under a header with buttons to move it up or down and to remove
 /// it, and a button that adds one, off once the list holds `max`.
 #[allow(clippy::too_many_arguments)]
 fn layer_list<T>(ui: &mut egui::Ui, id: egui::Id, items: &mut Vec<T>, max: usize, default: fn() -> T, title: &str, language: Language, mut body: impl FnMut(&mut egui::Ui, usize, &mut T)) {
     let mut action = None;
     let count = items.len();
+    let keys_id = id.with("keys");
+    let mut keys: LayerKeys = ui.ctx().data_mut(|data| data.get_temp(keys_id)).unwrap_or_default();
+    keys.fit(count);
     for (index, item) in items.iter_mut().enumerate() {
-        let item_id = id.with(index);
+        let item_id = id.with(keys.keys[index]);
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), item_id, false)
             .show_header(ui, |ui| {
                 ui.label(format!("{title} {}", index + 1));
@@ -164,7 +198,9 @@ fn layer_list<T>(ui: &mut egui::Ui, id: egui::Id, items: &mut Vec<T>, max: usize
     }
     if let Some(action) = action {
         apply_layer_action(items, action, max, default);
+        keys.apply(action, max);
     }
+    ui.ctx().data_mut(|data| data.insert_temp(keys_id, keys));
 }
 
 /// The kind of a paint and its values: a colour, the stops and angle of a gradient, or the picture
@@ -307,7 +343,7 @@ mod tests {
         /// The centre of the first widget labelled `label`.
         fn find(&self, label: &str) -> Option<egui::Pos2> {
             let update = self.last.as_ref()?.platform_output.accesskit_update.as_ref()?;
-            let (_, node) = update.nodes.iter().find(|(_, node)| node.label() == Some(label))?;
+            let (_, node) = update.nodes.iter().find(|(_, node)| node.label() == Some(label) || node.value() == Some(label))?;
             let bounds = node.bounds()?;
             Some(egui::pos2(((bounds.x0 + bounds.x1) / 2.0) as f32, ((bounds.y0 + bounds.y1) / 2.0) as f32))
         }
@@ -375,5 +411,75 @@ mod tests {
         panel.click("\u{d7}");
         assert_eq!(panel.text.outlines.len(), MAX_TEXT_OUTLINES - 1);
         assert_eq!(panel.text.outlines[0].width, 0.01, "the first outline was removed, the moved one is first again");
+    }
+
+    fn outline_item_open(panel: &Panel, key: u64) -> bool {
+        let item_id = panel.id.with("outline-list").with(key);
+        egui::collapsing_header::CollapsingState::load(&panel.ctx, item_id).is_some_and(|state| state.is_open())
+    }
+
+    fn open_outline_item(panel: &mut Panel, key: u64) {
+        let item_id = panel.id.with("outline-list").with(key);
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(&panel.ctx, item_id, false);
+        state.set_open(true);
+        state.store(&panel.ctx);
+        panel.frame(Vec::new());
+    }
+
+    #[test]
+    fn a_layer_keeps_its_open_state_when_moved_and_the_next_one_does_not_inherit_it_when_removed() {
+        let mut text = TextContent::new("Hi", 0.1);
+        text.outlines = vec![default_outline(), default_outline(), default_outline()];
+        let mut panel = Panel::new(text);
+        panel.click("Outlines (3)");
+        // The layers are keyed 0, 1, 2 as first drawn; open the first.
+        open_outline_item(&mut panel, 0);
+        assert!(outline_item_open(&panel, 0) && !outline_item_open(&panel, 1));
+        let open_row = panel.find("Thickness").expect("the open layer shows its rows").y;
+        panel.text.outlines[0].width = 0.01;
+        panel.click("\u{2193}");
+        assert_eq!(panel.text.outlines[1].width, 0.01, "the first outline moved down");
+        // The moved layer is now second: its state moved with it, the one before it is shut.
+        let keys: LayerKeys = panel.ctx.data_mut(|data| data.get_temp(panel.id.with("outline-list").with("keys"))).unwrap();
+        assert_eq!(keys.keys, vec![1, 0, 2]);
+        assert!(outline_item_open(&panel, 0), "the open layer is still open, at its new place");
+        assert!(panel.find("Thickness").expect("its rows are still shown").y > open_row, "the rows of the open layer moved down with it");
+        panel.click("\u{d7}");
+        let keys: LayerKeys = panel.ctx.data_mut(|data| data.get_temp(panel.id.with("outline-list").with("keys"))).unwrap();
+        assert_eq!(keys.keys, vec![0, 2], "the first row (key 1) was removed with its state");
+        assert!(outline_item_open(&panel, 0));
+        assert!(!outline_item_open(&panel, 2), "the layer that took the place of a removed one is not open");
+    }
+
+    #[test]
+    fn a_layer_added_after_a_removal_gets_a_key_never_used_before() {
+        let mut keys = LayerKeys::default();
+        keys.fit(2);
+        keys.apply(LayerAction::Remove(1), 4);
+        keys.apply(LayerAction::Add, 4);
+        assert_eq!(keys.keys, vec![0, 2]);
+    }
+
+    #[test]
+    fn an_inner_shadow_layer_is_titled_in_the_singular() {
+        let mut text = TextContent::new("Hi", 0.1);
+        text.inner_shadows = vec![default_inner_shadow()];
+        let mut panel = Panel::new(text);
+        panel.click("Inner shadows (1)");
+        assert!(panel.find("Inner shadow 1").is_some());
+        assert!(panel.find("Inner shadows 1").is_none());
+    }
+
+    #[test]
+    fn the_pictures_of_subtitle_style_packs_are_offered_too() {
+        let mut library = crate::text_style_library::subtitle_library_for_test(&[]);
+        let picture = TextImageRef::Pack { pack: "s".to_owned(), file: "glow.png".to_owned(), pack_type: engine::TexturePackType::SubtitleStyle };
+        library.packs[0].styles[0].style.fill = Some(crate::text_clip::texture_paint(picture.clone()));
+        let text_picture = TextImageRef::text_style_pack("t", "gold.png");
+        let mut text_style = library.packs[0].styles[0].clone();
+        text_style.kind = crate::text_style_library::StyleKind::Text;
+        text_style.style.fill = Some(crate::text_clip::texture_paint(text_picture.clone()));
+        library.packs.push(crate::text_style_library::TextStylePack { id: "t".to_owned(), name: "T".to_owned(), kind: crate::text_style_library::StyleKind::Text, styles: vec![text_style] });
+        assert_eq!(pack_images(&library), vec![picture, text_picture]);
     }
 }
