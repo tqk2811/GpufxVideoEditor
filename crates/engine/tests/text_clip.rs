@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use engine::{add_text_clip, audio_segments, layers_at_frame, set_speed, set_text, trim_start, ClipKey, EditError, EditHistory, Time, validate, AcceptAll, Clip, FontRef, Project, TextAlign, AnimationRef, TextContent, TextOutline, TextShadow, Track, TrackKind, ValidationError, TEXT_SOURCE};
+use engine::{add_text_clip, audio_segments, layers_at_frame, set_speed, set_text, trim_start, ClipKey, EditError, EditHistory, Time, validate, AcceptAll, Clip, FontRef, Project, TextAlign, AnimationRef, TextContent, TextOutline, TextShadow, TextInnerShadow, TextPaint, GradientStop, TextTexture, TextureFit, TextImageRef, Track, TrackKind, ValidationError, TEXT_SOURCE};
 
 pub fn text_clip(content: &str, start: i64, duration: i64) -> Clip {
     Clip { source: TEXT_SOURCE.to_owned(), text: Some(TextContent::new(content, 0.08)), ..clip(TEXT_SOURCE, start, 0, duration) }
@@ -30,8 +30,8 @@ fn text_clip_round_trips_through_json() {
     let text = c.text.as_mut().unwrap();
     text.font = FontRef::System { family: "Arial".into() };
     text.align = TextAlign::Right;
-    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: 0.1 });
-    text.shadow = Some(TextShadow { color: [0, 0, 0, 128], offset: [0.05, 0.05], blur: 0.1 });
+    text.outlines = vec![TextOutline::solid([0, 0, 0, 255], 0.1)];
+    text.shadows = vec![TextShadow::solid([0, 0, 0, 128], [0.05, 0.05], 0.1)];
     c.animation.enter = Some(AnimationRef { preset: "fade".into(), duration: t(9000) });
     let p = project_with(vec![c]);
     let json = serde_json::to_string(&p).unwrap();
@@ -73,7 +73,7 @@ fn minimal_text_json_gets_defaults() {
     let loaded = Project::from_json(&json).unwrap();
     let text = loaded.tracks[0].clips[0].text.as_ref().unwrap();
     assert_eq!(text.font, FontRef::Default);
-    assert_eq!(text.color, [255, 255, 255, 255]);
+    assert_eq!(text.fill.main_color(), [255, 255, 255, 255]);
     assert_eq!(text.line_spacing, 1.0);
 }
 
@@ -107,7 +107,7 @@ fn validate_rejects_bad_weight_letter_spacing_and_glow() {
     }
     assert_eq!(validate(&project_with(vec![good]), &AcceptAll), vec![]);
 
-    let fields = |edit: &dyn Fn(&mut engine::TextContent)| -> Vec<&'static str> {
+    let fields = |edit: &dyn Fn(&mut engine::TextContent)| -> Vec<String> {
         let mut c = text_clip("Hi", 0, 9000);
         edit(c.text.as_mut().unwrap());
         validate(&project_with(vec![c]), &AcceptAll)
@@ -128,6 +128,79 @@ fn validate_rejects_bad_weight_letter_spacing_and_glow() {
     assert_eq!(fields(&|t| t.glow = Some(engine::TextGlow { falloff: f32::NAN, ..glow })), vec!["glow.falloff"]);
     let message = validate(&project_with(vec![{ let mut c = text_clip("Hi", 0, 9000); c.text.as_mut().unwrap().weight = 50; c }]), &AcceptAll)[0].to_string();
     assert!(message.contains("weight") && message.contains("100"), "{message}");
+}
+
+fn layered_text() -> TextContent {
+    let mut text = TextContent::new("Hi", 0.1);
+    text.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [255, 0, 0, 255] }, GradientStop { position: 1.0, color: [0, 0, 255, 255] }], angle: 90.0 };
+    let texture = TextTexture { image: TextImageRef::Pack { pack: "gold".into(), file: "textures/gold.png".into() }, fit: TextureFit::Tile, scale: 0.5, angle: 30.0, opacity: 0.8 };
+    text.outlines = vec![TextOutline::solid([0, 0, 0, 255], 0.05), TextOutline { width: 0.1, paint: TextPaint::Texture(texture.clone()) }];
+    let mut shadow = TextShadow::solid([20, 20, 20, 255], [0.03, 0.03], 0.0);
+    shadow.outlines = vec![TextOutline::solid([255, 255, 255, 255], 0.04)];
+    text.shadows = vec![shadow.clone(); 3];
+    text.inner_shadows = vec![TextInnerShadow { distance: 0.02, angle: -45.0, blur: 0.01, paint: TextPaint::Texture(texture) }];
+    text
+}
+
+#[test]
+fn a_layered_text_round_trips_through_json_with_tagged_paints() {
+    let mut c = text_clip("Hi", 0, 9000);
+    c.text = Some(layered_text());
+    let p = project_with(vec![c]);
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(json.contains(r#""fill":{"kind":"gradient","stops":[{"position":0.0,"color":[255,0,0,255]}"#), "{json}");
+    assert!(json.contains(r#""image":{"kind":"pack","pack":"gold","file":"textures/gold.png"},"fit":"tile""#), "{json}");
+    assert_eq!(Project::from_json(&json).unwrap(), p);
+    // Absent layers are left out and read back as none; a missing fill is white.
+    let plain = serde_json::to_string(&TextContent::new("Hi", 0.1)).unwrap();
+    assert!(!plain.contains("outlines") && !plain.contains("shadows"), "{plain}");
+    let read: TextContent = serde_json::from_str(r#"{"content":"Hi","size":0.1}"#).unwrap();
+    assert_eq!((read.fill, read.outlines.len(), read.shadows.len()), (TextPaint::solid([255, 255, 255, 255]), 0, 0));
+}
+
+#[test]
+fn a_shadow_offset_goes_to_distance_and_angle_and_back() {
+    let shadow = TextShadow::solid([0, 0, 0, 255], [0.05, 0.05], 0.0);
+    assert!((shadow.distance - 0.05f32.hypot(0.05)).abs() < 1e-6);
+    assert!((shadow.angle + 45.0).abs() < 1e-4, "down and to the right is -45 degrees: {}", shadow.angle);
+    let [x, y] = shadow.offset();
+    assert!((x - 0.05).abs() < 1e-6 && (y - 0.05).abs() < 1e-6, "{x} {y}");
+    assert_eq!(engine::offset_to_polar([0.0, 0.0]), (0.0, 0.0));
+}
+
+#[test]
+fn validate_checks_every_text_layer_and_their_limits() {
+    assert_eq!(validate(&project_with(vec![Clip { text: Some(layered_text()), ..text_clip("Hi", 0, 9000) }]), &AcceptAll), vec![]);
+    let fields = |edit: &dyn Fn(&mut TextContent)| -> Vec<String> {
+        let mut text = layered_text();
+        edit(&mut text);
+        validate(&project_with(vec![Clip { text: Some(text), ..text_clip("Hi", 0, 9000) }]), &AcceptAll)
+            .into_iter()
+            .map(|e| match e {
+                ValidationError::InvalidTextStyle { field, .. } => field,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    };
+    let outline = TextOutline::solid([0, 0, 0, 255], 0.01);
+    assert_eq!(fields(&|t| t.outlines = vec![outline.clone(); engine::MAX_TEXT_OUTLINES + 1]), vec!["outlines"]);
+    assert_eq!(fields(&|t| t.shadows[1].outlines = vec![outline.clone(); engine::MAX_TEXT_OUTLINES + 1]), vec!["shadows[1].outlines"]);
+    assert_eq!(fields(&|t| t.shadows = vec![t.shadows[0].clone(); engine::MAX_TEXT_SHADOWS]), Vec::<String>::new(), "32 shadows are allowed");
+    assert_eq!(fields(&|t| t.shadows = vec![t.shadows[0].clone(); engine::MAX_TEXT_SHADOWS + 1]), vec!["shadows"]);
+    assert_eq!(fields(&|t| t.inner_shadows = vec![t.inner_shadows[0].clone(); engine::MAX_TEXT_SHADOWS + 1]), vec!["inner_shadows"]);
+    assert_eq!(fields(&|t| t.outlines[0].width = -0.1), vec!["outlines[0].width"]);
+    assert_eq!(fields(&|t| t.outlines[0].width = engine::MAX_TEXT_OUTLINE_WIDTH + 0.01), vec!["outlines[0].width"]);
+    assert_eq!(fields(&|t| t.shadows[2].distance = f32::NAN), vec!["shadows[2].distance"]);
+    assert_eq!(fields(&|t| t.shadows[0].blur = engine::MAX_TEXT_SHADOW_BLUR * 2.0), vec!["shadows[0].blur"]);
+    assert_eq!(fields(&|t| t.inner_shadows[0].angle = f32::INFINITY), vec!["inner_shadows[0].angle"]);
+    assert_eq!(fields(&|t| t.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [0; 4] }], angle: 0.0 }), vec!["fill.stops"]);
+    assert_eq!(
+        fields(&|t| t.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.6, color: [0; 4] }, GradientStop { position: 0.4, color: [0; 4] }], angle: 0.0 }),
+        vec!["fill.stops[1].position"],
+        "stops go up"
+    );
+    assert_eq!(fields(&|t| if let TextPaint::Texture(texture) = &mut t.outlines[1].paint { texture.scale = 0.0 }), vec!["outlines[1].paint.scale"]);
+    assert_eq!(fields(&|t| if let TextPaint::Texture(texture) = &mut t.inner_shadows[0].paint { texture.opacity = 1.5 }), vec!["inner_shadows[0].paint.opacity"]);
 }
 
 #[test]

@@ -181,7 +181,7 @@ impl From<TransformParam> for engine::TextTransform {
     }
 }
 
-/// An outline around each glyph.
+/// An outline around each glyph, of one colour; it replaces every outline the text had.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[schemars(inline)]
 #[serde(deny_unknown_fields)]
@@ -205,7 +205,7 @@ pub struct BackgroundParam {
     pub radius: f32,
 }
 
-/// A drop shadow.
+/// A drop shadow of one colour; it replaces every shadow the text had.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[schemars(inline)]
 #[serde(deny_unknown_fields)]
@@ -422,9 +422,9 @@ impl TextStyleParam {
             font: self.font.map(Into::into),
             size: self.size,
             color: self.color,
-            outline: self.outline.map(|value| value.map(|v| engine::TextOutline { color: v.color, width: v.width })),
+            outline: self.outline.map(|value| value.map(|v| engine::TextOutline::solid(v.color, v.width))),
             background: self.background.map(|value| value.map(|v| engine::TextBackground { color: v.color, padding: v.padding, radius: v.radius })),
-            shadow: self.shadow.map(|value| value.map(|v| engine::TextShadow { color: v.color, offset: v.offset, blur: v.blur })),
+            shadow: self.shadow.map(|value| value.map(|v| engine::TextShadow::solid(v.color, v.offset, v.blur))),
             glow: self.glow.map(|value| value.map(|v| engine::TextGlow { color: v.color, outer_color: v.outer_color, radius: v.radius, intensity: v.intensity.unwrap_or(1.0), falloff: v.falloff.unwrap_or(2.0) })),
             align: self.align.map(Into::into),
             line_spacing: self.line_spacing,

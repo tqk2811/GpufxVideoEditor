@@ -4851,8 +4851,8 @@ second line")), "Title…");
 
         let clip = &state.project().tracks[key.track].clips[key.clip];
         let text = clip.text.as_ref().unwrap();
-        assert_eq!((text.content.as_str(), text.weight, text.color), (content.as_str(), 800, [255, 0, 0, 255]));
-        assert!(text.outline.is_some());
+        assert_eq!((text.content.as_str(), text.weight, text.fill.main_color()), (content.as_str(), 800, [255, 0, 0, 255]));
+        assert!(text.outlines.first().is_some());
         assert_eq!(clip.animation.enter.as_ref().map(|value| value.preset.as_str()), Some("pop"));
         state.undo();
         assert_eq!(*state.project(), before, "one undo step takes it all back");

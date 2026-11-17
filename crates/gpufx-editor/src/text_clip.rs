@@ -80,7 +80,7 @@ pub fn choose_preset(animation: &ClipAnimation, group: AnimationGroup, id: Optio
 
 /// The outline a text gets when it is turned on: black, a twentieth of the font size.
 pub fn default_outline() -> TextOutline {
-    TextOutline { color: [0, 0, 0, 255], width: 0.05 }
+    TextOutline::solid([0, 0, 0, 255], 0.05)
 }
 
 /// The box a text gets when it is turned on: translucent black with a little room and round corners.
@@ -90,7 +90,7 @@ pub fn default_background() -> TextBackground {
 
 /// The shadow a text gets when it is turned on: soft, down and to the right.
 pub fn default_shadow() -> TextShadow {
-    TextShadow { color: [0, 0, 0, 180], offset: [0.05, 0.05], blur: 0.05 }
+    TextShadow::solid([0, 0, 0, 180], [0.05, 0.05], 0.05)
 }
 
 /// The glow a text gets when it is turned on: a soft warm halo a third of the font size wide.
@@ -109,9 +109,9 @@ mod tests {
         assert_eq!(text.content, "Hi");
         assert_eq!(text.size, DEFAULT_TEXT_SIZE);
         assert_eq!(text.font, engine::FontRef::Default);
-        assert_eq!(text.color, [255, 255, 255, 255]);
+        assert_eq!(text.fill.main_color(), [255, 255, 255, 255]);
         assert_eq!(text.align, engine::TextAlign::Center);
-        assert!(text.outline.is_none() && text.background.is_none() && text.shadow.is_none());
+        assert!(text.outlines.first().is_none() && text.background.is_none() && text.shadows.first().is_none());
     }
 
     #[test]

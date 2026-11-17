@@ -12,7 +12,7 @@ use crate::text_clip::{default_background, default_glow, default_outline, defaul
 use crate::text_shapes::available_families;
 use crate::text_style_library::StyleKind;
 use egui::{Rect, Vec2};
-use engine::{ClipKey, FontRef, KaraokeLook, KaraokeMode, Rgba, TextAlign, TextContent, TextKaraoke, TextTransform, TEXT_WEIGHT_RANGE};
+use engine::{ClipKey, FontRef, KaraokeLook, KaraokeMode, Rgba, TextAlign, TextContent, TextKaraoke, TextPaint, TextTransform, TEXT_WEIGHT_RANGE};
 use std::ops::RangeInclusive;
 
 /// How long typing must pause before the text on screen follows, in seconds. Each pause is one
@@ -80,7 +80,10 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(size) = slider_row(ui, &language.t(Message::FieldTextSize), f64::from(text.size) * output_height, (*TEXT_SIZE_RANGE.start() * output_height)..=(*TEXT_SIZE_RANGE.end() * output_height), 0, " px") {
         next.size = (size / output_height) as f32;
     }
-    color_row(ui, &language.t(Message::FieldTextColor), &mut next.color);
+    // Only a solid fill is edited here; a gradient or texture fill stays as it is.
+    if let TextPaint::Solid { color } = &mut next.fill {
+        color_row(ui, &language.t(Message::FieldTextColor), color);
+    }
     align_row(ui, &mut next.align, language);
     if let Some(spacing) = slider_row(ui, &language.t(Message::FieldLineSpacing), f64::from(text.line_spacing), LINE_SPACING_RANGE, 2, "\u{d7}") {
         next.line_spacing = spacing as f32;
@@ -390,7 +393,7 @@ fn karaoke_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
         karaoke.mode = if on { KaraokeMode::Color } else { KaraokeMode::None };
         text.karaoke = Some(karaoke);
     }
-    let text_color = text.color;
+    let text_color = text.fill.main_color();
     let Some(karaoke) = text.karaoke.as_mut().filter(|karaoke| karaoke.is_on()) else { return };
     ui.indent("karaoke", |ui| {
         ui.horizontal(|ui| {
@@ -415,6 +418,14 @@ fn default_karaoke() -> TextKaraoke {
     TextKaraoke { mode: KaraokeMode::Color, active: Some(KaraokeLook { color: Some(DEFAULT_KARAOKE_COLOR), ..KaraokeLook::default() }), ..TextKaraoke::default() }
 }
 
+/// A checkbox that turns a list of layers on, with one default layer, or off, taking every layer.
+fn toggle_layers<T>(ui: &mut egui::Ui, label: &str, layers: &mut Vec<T>, default: fn() -> T) {
+    let mut on = !layers.is_empty();
+    if ui.checkbox(&mut on, label).changed() {
+        *layers = if on { vec![default()] } else { Vec::new() };
+    }
+}
+
 /// A checkbox that turns a style on, with its default, or off.
 fn toggle<T: Clone>(ui: &mut egui::Ui, label: &str, value: &mut Option<T>, default: fn() -> T) {
     let mut on = value.is_some();
@@ -430,10 +441,13 @@ fn percent_row(ui: &mut egui::Ui, label: &str, value: &mut f32, range: RangeIncl
 }
 
 fn outline_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
-    toggle(ui, &language.t(Message::TextOutline), &mut text.outline, default_outline);
-    if let Some(outline) = text.outline.as_mut() {
+    // Only the first outline is edited here, and only its colour when it is solid.
+    toggle_layers(ui, &language.t(Message::TextOutline), &mut text.outlines, default_outline);
+    if let Some(outline) = text.outlines.first_mut() {
         ui.indent("outline", |ui| {
-            color_row(ui, &language.t(Message::FieldColor), &mut outline.color);
+            if let TextPaint::Solid { color } = &mut outline.paint {
+                color_row(ui, &language.t(Message::FieldColor), color);
+            }
             percent_row(ui, &language.t(Message::FieldThickness), &mut outline.width, OUTLINE_RANGE);
         });
     }
@@ -471,13 +485,21 @@ fn glow_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
 }
 
 fn shadow_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
-    toggle(ui, &language.t(Message::TextShadow), &mut text.shadow, default_shadow);
-    if let Some(shadow) = text.shadow.as_mut() {
+    // Only the first shadow is edited here, and only its colour when it is solid.
+    toggle_layers(ui, &language.t(Message::TextShadow), &mut text.shadows, default_shadow);
+    if let Some(shadow) = text.shadows.first_mut() {
         ui.indent("shadow", |ui| {
-            color_row(ui, &language.t(Message::FieldColor), &mut shadow.color);
-            let offset = language.t(Message::FieldShadowOffset);
-            percent_row(ui, &format!("{offset} X"), &mut shadow.offset[0], OFFSET_RANGE);
-            percent_row(ui, &format!("{offset} Y"), &mut shadow.offset[1], OFFSET_RANGE);
+            if let TextPaint::Solid { color } = &mut shadow.paint {
+                color_row(ui, &language.t(Message::FieldColor), color);
+            }
+            let label = language.t(Message::FieldShadowOffset);
+            let mut offset = shadow.offset();
+            let before = offset;
+            percent_row(ui, &format!("{label} X"), &mut offset[0], OFFSET_RANGE);
+            percent_row(ui, &format!("{label} Y"), &mut offset[1], OFFSET_RANGE);
+            if offset != before {
+                shadow.set_offset(offset);
+            }
             percent_row(ui, &language.t(Message::FieldBlur), &mut shadow.blur, BLUR_RANGE);
         });
     }

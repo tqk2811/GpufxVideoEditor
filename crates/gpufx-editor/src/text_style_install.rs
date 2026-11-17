@@ -15,7 +15,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use d3d12_backend::is_safe_id;
-use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextContent, TextGlow, TextOutline, TextShadow, TextTransform};
+use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextContent, TextGlow, TextOutline, TextPaint, TextShadow, TextTransform};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
@@ -181,11 +181,11 @@ impl PackTextStyle {
     pub fn text(&self, content: &str, size: f32) -> TextContent {
         let mut text = TextContent::new(content, self.size.unwrap_or(size));
         if let Some(color) = self.color {
-            text.color = color;
+            text.fill = TextPaint::solid(color);
         }
-        text.outline = self.outline.map(|v| TextOutline { color: v.color, width: v.width });
+        text.outlines = self.outline.map(|v| TextOutline::solid(v.color, v.width)).into_iter().collect();
         text.background = self.background.map(|v| TextBackground { color: v.color, padding: v.padding, radius: v.radius });
-        text.shadow = self.shadow.map(|v| TextShadow { color: v.color, offset: v.offset, blur: v.blur });
+        text.shadows = self.shadow.map(|v| TextShadow::solid(v.color, v.offset, v.blur)).into_iter().collect();
         text.glow = self.glow.map(|v| {
             let mut glow = TextGlow { color: v.color, outer_color: v.outer_color, radius: v.radius, intensity: 1.0, falloff: 2.0 };
             glow.intensity = v.intensity.unwrap_or(glow.intensity);
@@ -418,7 +418,7 @@ pub(crate) mod tests {
         assert_eq!(text.size, 0.1, "the style's size");
         assert_eq!(text.align, TextAlign::Left);
         assert_eq!(text.glow.map(|glow| (glow.intensity, glow.falloff)), Some((1.0, 2.0)), "glow defaults as in a project");
-        assert!(text.background.is_none() && text.shadow.is_none());
+        assert!(text.background.is_none() && text.shadows.first().is_none());
         let plain = PackTextStyle::default().text("Hi", 0.2);
         assert_eq!(plain, TextContent::new("Hi", 0.2), "an empty style is a new text at the given size");
     }

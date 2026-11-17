@@ -1,4 +1,4 @@
-use engine::project::{FontRef, TextAlign, TextBackground, TextContent, TextOutline, TextShadow};
+use engine::project::{FontRef, TextAlign, TextBackground, TextContent};
 use gpufx_text::{TextImage, TextRasterizer, DEFAULT_FAMILY_CANDIDATES, MAX_DIMENSION, MAX_OUTLINE_RATIO, MAX_PIXELS};
 use unicode_normalization::UnicodeNormalization;
 
@@ -82,7 +82,7 @@ fn outline_covers_more_pixels() {
     let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Outline", 0.08);
     let plain = r.rasterize(&text, HEIGHT, 1.0);
-    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: 0.08 });
+    text.outlines = vec![engine::TextOutline::solid([0, 0, 0, 255], 0.08)];
     let outlined = r.rasterize(&text, HEIGHT, 1.0);
     assert!(covered(&outlined) > covered(&plain) * 5 / 4, "{} vs {}", covered(&outlined), covered(&plain));
 }
@@ -94,7 +94,7 @@ fn tiny_letters_still_get_an_outline() {
     let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("i", 8.0 / HEIGHT as f32);
     let plain = r.rasterize(&text, HEIGHT, 1.0);
-    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: MAX_OUTLINE_RATIO });
+    text.outlines = vec![engine::TextOutline::solid([0, 0, 0, 255], MAX_OUTLINE_RATIO)];
     let outlined = r.rasterize(&text, HEIGHT, 1.0);
     assert!(ink(&outlined) > ink(&plain) * 3, "{} vs {}", ink(&outlined), ink(&plain));
 }
@@ -157,7 +157,7 @@ fn background_and_shadow_are_drawn_premultiplied() {
     let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Box", 0.06);
     text.background = Some(TextBackground { color: [0, 0, 255, 128], padding: 0.3, radius: 0.2 });
-    text.shadow = Some(TextShadow { color: [0, 0, 0, 200], offset: [0.1, 0.1], blur: 0.1 });
+    text.shadows = vec![engine::TextShadow::solid([0, 0, 0, 200], [0.1, 0.1], 0.1)];
     let image = r.rasterize(&text, HEIGHT, 1.0);
     assert!(image.pixels.chunks(4).all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]));
     // The blue box covers far more than the glyphs do.
@@ -212,9 +212,9 @@ fn stacked_marks_on_a_tight_line_spacing_are_not_cut() {
 fn a_wide_outline_is_capped_and_quick() {
     let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("HI", 0.5);
-    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: MAX_OUTLINE_RATIO });
+    text.outlines = vec![engine::TextOutline::solid([0, 0, 0, 255], MAX_OUTLINE_RATIO)];
     let capped = r.rasterize(&text, HEIGHT, 1.0);
-    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: 1.0 });
+    text.outlines = vec![engine::TextOutline::solid([0, 0, 0, 255], 1.0)];
     let started = std::time::Instant::now();
     let wide = r.rasterize(&text, HEIGHT, 1.0);
     let took = started.elapsed();
@@ -235,9 +235,9 @@ fn a_wide_outline_is_capped_and_quick() {
 fn a_blur_under_a_pixel_is_no_blur() {
     let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Box", 0.06);
-    text.shadow = Some(TextShadow { color: [0, 0, 0, 200], offset: [0.1, 0.1], blur: 0.0 });
+    text.shadows = vec![engine::TextShadow::solid([0, 0, 0, 200], [0.1, 0.1], 0.0)];
     let sharp = r.rasterize(&text, HEIGHT, 1.0);
-    text.shadow = Some(TextShadow { color: [0, 0, 0, 200], offset: [0.1, 0.1], blur: 0.3 / (0.06 * HEIGHT as f32) });
+    text.shadows = vec![engine::TextShadow::solid([0, 0, 0, 200], [0.1, 0.1], 0.3 / (0.06 * HEIGHT as f32))];
     let tiny = r.rasterize(&text, HEIGHT, 1.0);
     assert_eq!((tiny.width, tiny.height), (sharp.width, sharp.height));
     assert_eq!(tiny.pixels, sharp.pixels);
@@ -546,9 +546,9 @@ fn a_glow_blends_to_its_outer_colour_and_stays_under_the_shadow_room() {
     assert!(near[0] > near[2] && far[2] > far[0], "red near, blue far: {near:?} {far:?}");
     // A shadow that reaches farther than the glow sets that side; the glow does not add to it.
     let mut both = text.clone();
-    both.shadow = Some(TextShadow { color: [0, 0, 0, 255], offset: [1.0, 0.0], blur: 0.0 });
+    both.shadows = vec![engine::TextShadow::solid([0, 0, 0, 255], [1.0, 0.0], 0.0)];
     let mut shadow_only = TextContent::new("I", 0.2);
-    shadow_only.shadow = both.shadow;
+    shadow_only.shadows = both.shadows.clone();
     let (both, shadow_only) = (r.rasterize(&both, HEIGHT, 1.0), r.rasterize(&shadow_only, HEIGHT, 1.0));
     let glow_side = (image.width - r.rasterize(&TextContent::new("I", 0.2), HEIGHT, 1.0).width) / 2;
     assert_eq!(both.width, shadow_only.width + glow_side, "right side from the shadow, left side from the glow");

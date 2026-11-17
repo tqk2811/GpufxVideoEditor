@@ -73,12 +73,12 @@ fn a_text_added_with_a_style_keeps_every_field_and_a_second_one_shares_a_free_tr
     assert_eq!(second["clip"], json!({"track": 0, "clip": 1}), "track absent: the first video track with room");
     let text = text_of(&mut session, 0, 0);
     assert_eq!(text.size, 0.12);
-    assert_eq!(text.color, [255, 0, 0, 255]);
+    assert_eq!(text.fill.main_color(), [255, 0, 0, 255]);
     assert_eq!(text.align, engine::TextAlign::Left);
     assert_eq!(text.line_spacing, 1.5);
     assert_eq!((text.weight, text.italic, text.transform, text.letter_spacing), (700, true, engine::TextTransform::Uppercase, 0.1));
-    assert_eq!(text.outline.map(|outline| outline.width), Some(0.05));
-    assert_eq!(text.shadow.map(|shadow| shadow.blur), Some(0.1));
+    assert_eq!(text.outlines.first().map(|outline| outline.width), Some(0.05));
+    assert_eq!(text.shadows.first().map(|shadow| shadow.blur), Some(0.1));
     assert_eq!(text.glow, Some(engine::TextGlow { color: [0, 255, 255, 255], outer_color: Some([0, 0, 255, 0]), radius: 0.4, intensity: 1.0, falloff: 2.0 }));
     assert_eq!(text.background, None);
     let animation = animation_of(&mut session, 0, 0);
@@ -101,7 +101,7 @@ fn text_set_recolours_and_a_bigger_size_scales_the_place_around_its_centre_and_u
 
     let recoloured = call_ok(&mut session, "text_set", json!({"expected_revision": added, "clip": {"track": 0, "clip": 0}, "color": [0, 255, 0, 255]}));
     assert_eq!(recoloured["clip"], json!({"track": 0, "clip": 0}));
-    assert_eq!(text_of(&mut session, 0, 0).color, [0, 255, 0, 255]);
+    assert_eq!(text_of(&mut session, 0, 0).fill.main_color(), [0, 255, 0, 255]);
     assert_eq!(text_of(&mut session, 0, 0).content, "Hello", "what is absent stays");
     let same = placement_of(&mut session, 0, 0);
     assert!((same.width - before.width).abs() < 1e-9 && (same.x - before.x).abs() < 1e-9 && (same.y - before.y).abs() < 1e-9, "a colour does not move the text");
@@ -123,7 +123,7 @@ fn text_set_recolours_and_a_bigger_size_scales_the_place_around_its_centre_and_u
     assert_eq!(placement_of(&mut session, 0, 0), same);
     assert_eq!(text_of(&mut session, 0, 0).size, 0.08, "the size and the place went back in one step");
     call_ok(&mut session, "undo", json!({"expected_revision": revision(&undone)}));
-    assert_eq!(text_of(&mut session, 0, 0).color, [255, 255, 255, 255]);
+    assert_eq!(text_of(&mut session, 0, 0).fill.main_color(), [255, 255, 255, 255]);
 }
 
 #[test]
@@ -134,12 +134,12 @@ fn text_set_changes_the_content_and_takes_an_outline_and_an_animation_off_with_n
     let longer = call_ok(&mut session, "text_set", json!({"expected_revision": revision(&added), "clip": {"track": 0, "clip": 0}, "content": "A much longer line"}));
     let width = |session: &mut FileSession| placement_of(session, 0, 0).width;
     assert_eq!(text_of(&mut session, 0, 0).content, "A much longer line");
-    assert!(text_of(&mut session, 0, 0).outline.is_some(), "the style stays");
+    assert!(text_of(&mut session, 0, 0).outlines.first().is_some(), "the style stays");
     let wide = width(&mut session);
     assert!(wide > 0.2, "longer content draws wider: {wide}");
     call_ok(&mut session, "text_set", json!({"expected_revision": revision(&longer), "clip": {"track": 0, "clip": 0}, "outline": null, "animation": {"out": null}}));
     let text = text_of(&mut session, 0, 0);
-    assert!(text.outline.is_none() && animation_of(&mut session, 0, 0).is_empty(), "{text:?}");
+    assert!(text.outlines.first().is_none() && animation_of(&mut session, 0, 0).is_empty(), "{text:?}");
 }
 
 #[test]
@@ -447,14 +447,14 @@ fn a_style_id_copies_the_style_and_the_other_fields_override_it() {
     let mut session = FileSession::with_roots(vec![style_root()]);
     let added = call_ok(&mut session, "text_add", json!({"expected_revision": 0, "start": 0, "duration": 2 * SECOND, "content": "Hi", "style": {"style_id": "styles/bold", "size": 0.2}}));
     let text = text_of(&mut session, 0, 0);
-    assert_eq!((text.content.as_str(), text.size, text.weight, text.color), ("Hi", 0.2, 800, [255, 0, 0, 255]), "size given overrides the style's");
-    assert!(text.outline.is_some());
+    assert_eq!((text.content.as_str(), text.size, text.weight, text.fill.main_color()), ("Hi", 0.2, 800, [255, 0, 0, 255]), "size given overrides the style's");
+    assert!(text.outlines.first().is_some());
     assert_eq!(animation_of(&mut session, 0, 0).enter.map(|value| value.preset), Some("pop".to_owned()));
 
     let set = call_ok(&mut session, "text_set", json!({"expected_revision": revision(&added), "clip": {"track": 0, "clip": 0}, "style_id": "subs/low"}));
     let text = text_of(&mut session, 0, 0);
     assert_eq!((text.content.as_str(), text.size, text.weight), ("Hi", 0.05, 400), "the whole style is copied");
-    assert!(text.outline.is_none() && text.background.is_some());
+    assert!(text.outlines.first().is_none() && text.background.is_some());
     assert_eq!(animation_of(&mut session, 0, 0).enter.map(|value| value.preset), Some("pop".to_owned()), "a style without animations keeps the clip's");
     let placement = placement_of(&mut session, 0, 0);
     // Its middle is at the anchor: it starts a little above it, centred across.

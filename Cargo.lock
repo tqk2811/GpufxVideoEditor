@@ -1546,6 +1546,7 @@ dependencies = [
  "cosmic-text",
  "engine",
  "fontdb",
+ "image",
  "unicode-normalization",
 ]
 

@@ -225,7 +225,7 @@ pub fn word_styles(text: &TextContent, words: &[KaraokeWord], states: &[WordStat
             }
             .unwrap_or_default();
             let extra = if emphasis { karaoke.emphasis.unwrap_or_default() } else { KaraokeLook::default() };
-            let mut color = extra.color.or(look.color).unwrap_or(text.color);
+            let mut color = extra.color.or(look.color).unwrap_or(text.fill.main_color());
             let opacity = extra.opacity.or(look.opacity).unwrap_or(1.0);
             if opacity.is_finite() {
                 color[3] = (f32::from(color[3]) * opacity.clamp(0.0, 1.0)).round() as u8;

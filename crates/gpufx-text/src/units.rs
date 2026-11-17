@@ -31,7 +31,8 @@ use std::sync::{Arc, OnceLock};
 
 use engine::{unit_ranges, AnimationPose, TextUnit};
 
-use super::{draw_background, draw_mask, draw_under, over, premultiplied, text_font_stamp, Layout, Mask, TextContent, TextImage, TextRasterizer, MAX_DIMENSION, MAX_PIXELS};
+use super::paint::{draw_inner_shadows, text_texture_stamps, Textures};
+use super::{draw_background, draw_under, over, text_font_stamp, Layout, Mask, TextContent, TextImage, TextRasterizer, MAX_DIMENSION, MAX_PIXELS};
 use cosmic_text::SwashContent;
 
 /// How many plans a rasterizer keeps, so a few clips moving at once do not take turns rebuilding.
@@ -67,8 +68,11 @@ pub struct UnitsPlan(Arc<Prepared>);
 
 pub(crate) struct Prepared {
     text: TextContent,
-    /// The numbers [`draw_under`] reads: font size, outline, shadow and glow reach.
+    /// The numbers [`draw_under`] reads: font size, outline, shadows, glow reach and the line
+    /// boxes the paints are laid over.
     layers: Layout,
+    /// The texture pictures the layers paint with.
+    textures: Textures,
     /// How far the glow, shadow and outline of a character reach past its coverage, in pixels.
     room: i32,
     /// The size of the still picture.
@@ -222,7 +226,9 @@ impl Prepared {
                 }
             }
             let mut under = vec![[0f32; 4]; width * height];
-            draw_under(&self.text, &self.layers, &fill, &mut under);
+            let (x, y, _, _) = sprite.under_rect(self.room);
+            let painter = self.layers.painter(&self.textures).moved(x as f32, y as f32);
+            draw_under(&self.text, &self.layers, &fill, &mut under, &painter);
             under
         })
     }
@@ -312,8 +318,10 @@ impl UnitsPlan {
                 }),
             }
         }
+        // The paints lie over the line boxes, moved with the still picture into the frame.
+        let painter = plan.layers.painter(&plan.textures).moved(-(margin_x as f32), -(margin_y as f32));
         if any_whole {
-            draw_under(&plan.text, &plan.layers, &mask, &mut canvas);
+            draw_under(&plan.text, &plan.layers, &mask, &mut canvas, &painter);
         }
         // The fading characters, each with its own layers, at its opacity.
         let fading: Vec<(&Sprite, Affine, f32)> = sprites.iter().zip(&placed).filter(|(_, (_, opacity))| *opacity > 0.0 && *opacity < 1.0).map(|(sprite, (map, opacity))| (sprite, shift.after(*map), *opacity)).collect();
@@ -327,15 +335,16 @@ impl UnitsPlan {
                 }
             });
         }
-        let fill_color = premultiplied(plan.text.color);
         if any_whole {
-            draw_mask(&mut canvas, &mask, fill_color);
+            painter.draw(&mut canvas, &mask, &plan.text.fill);
+            draw_inner_shadows(&mut canvas, &plan.text, &mask, &painter);
         }
+        // A fading character has its fill, not its inner shadows.
         for (sprite, map, opacity) in &fading {
             cover(canvas_width, canvas_height, sprite.rect(), *map, |x, y, sx, sy| {
                 let c = sample(&sprite.coverage, sprite.width, sprite.height, sx, sy, coverage_mix);
                 if c > 0 {
-                    over(&mut canvas[y * canvas_width + x], fill_color, f32::from(c) / 255.0 * opacity);
+                    over(&mut canvas[y * canvas_width + x], painter.color_at(&plan.text.fill, x, y), f32::from(c) / 255.0 * opacity);
                 }
             });
         }
@@ -384,6 +393,7 @@ impl TextRasterizer {
         output_height_px.hash(&mut hasher);
         scale.to_bits().hash(&mut hasher);
         text_font_stamp(text).hash(&mut hasher);
+        text_texture_stamps(text).hash(&mut hasher);
         let key = hasher.finish();
         if let Some(index) = self.unit_plans.iter().position(|(known, _)| *known == key) {
             let entry = self.unit_plans.remove(index);
@@ -409,9 +419,12 @@ impl TextRasterizer {
     }
 
     fn prepared(&mut self, text: &TextContent, layout: &Layout, downscaled: bool) -> Prepared {
-        let blank = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, downscaled, margin: (0, 0) };
-        let layers = Layout { font_px: layout.font_px, outline_px: layout.outline_px, shadow: layout.shadow, glow_px: layout.glow_px, ..Layout::default() };
-        let mut prepared = Prepared { text: text.clone(), layers, room: 0, width: 0, height: 0, background: None, sprites: Vec::new(), blank, bytes: 0 };
+        let blank = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, missing_texture: None, downscaled, margin: (0, 0) };
+        let layers = Layout { font_px: layout.font_px, outline_px: layout.outline_px, shadows: layout.shadows.clone(), glow_px: layout.glow_px, origin: layout.origin, text_size: layout.text_size, ..Layout::default() };
+        let (textures, missing_texture) = self.textures.textures_for(text);
+        let blank = TextImage { missing_texture, ..blank };
+        let bytes = textures.bytes();
+        let mut prepared = Prepared { text: text.clone(), layers, textures, room: 0, width: 0, height: 0, background: None, sprites: Vec::new(), blank, bytes };
         let (width, height) = (layout.width as usize, layout.height as usize);
         if width == 0 || height == 0 {
             return prepared;
@@ -440,9 +453,9 @@ impl TextRasterizer {
             entry.1 = Some(union(entry.1, (left + ink.0, top + ink.1, left + ink.2, top + ink.3)));
         }
         // Room around the ink for the glow, the outline and the shadow of a fading character.
-        let (shadow_dx, shadow_dy, shadow_blur) = layout.shadow;
-        let shadow_reach = if text.shadow.is_some() { shadow_dx.abs().max(shadow_dy.abs()) + shadow_blur * 2.0 } else { 0.0 };
-        let room = (layout.outline_px + layout.glow_px.max(shadow_reach)).ceil() as i32 + 3;
+        // A shadow is the coverage grown by its own outlines (not the text's), moved and blurred.
+        let shadow_reach = layout.shadows.iter().map(|s| s.outline_px + s.dx.abs().max(s.dy.abs()) + s.blur * 2.0).fold(0.0, f32::max);
+        let room = (layout.outline_px + layout.glow_px).max(shadow_reach).ceil() as i32 + 3;
         prepared.room = room;
         let (ox, oy) = (left as i32, top as i32);
         for ((glyphs, ink), range) in members.into_iter().zip(&graphemes) {

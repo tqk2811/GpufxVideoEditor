@@ -2,7 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::frame_rate::FrameRate;
-use crate::project::{speed_in_range, Clip, Project, TextContent, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
+use crate::project::{speed_in_range, Clip, Project, TextContent, TextOutline, TextPaint, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINES, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOWS, MAX_TEXT_SHADOW_BLUR, MAX_TEXT_SHADOW_DISTANCE, TEXT_TEXTURE_SCALE_RANGE, GLOW_FALLOFF_RANGE, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ use std::fmt;
 /// A style value of a text that is not a number or outside what it may be.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyleProblem {
-    pub field: &'static str,
+    pub field: String,
     pub value: f32,
     /// What the value may be, such as `from 100 to 900`.
     pub allowed: String,
@@ -21,11 +21,12 @@ pub struct TextStyleProblem {
 /// of styles (such as a text style pack) to make the same ones.
 pub fn text_style_problems(text: &TextContent) -> Vec<TextStyleProblem> {
     let mut problems = Vec::new();
-    let mut style = |field: &'static str, value: f32, ok: bool, allowed: String| {
+    let mut style = |field: &str, value: f32, ok: bool, allowed: String| {
         if !ok {
-            problems.push(TextStyleProblem { field, value, allowed });
+            problems.push(TextStyleProblem { field: field.to_owned(), value, allowed });
         }
     };
+    layer_problems(text, &mut style);
     style("weight", text.weight as f32, TEXT_WEIGHT_RANGE.contains(&text.weight), format!("from {} to {}", TEXT_WEIGHT_RANGE.start(), TEXT_WEIGHT_RANGE.end()));
     style("letter_spacing", text.letter_spacing, text.letter_spacing.is_finite() && text.letter_spacing.abs() <= MAX_LETTER_SPACING, format!("from -{MAX_LETTER_SPACING} to {MAX_LETTER_SPACING}"));
     if let Some(glow) = &text.glow {
@@ -34,6 +35,65 @@ pub fn text_style_problems(text: &TextContent) -> Vec<TextStyleProblem> {
         style("glow.falloff", glow.falloff, glow.falloff.is_finite() && GLOW_FALLOFF_RANGE.contains(&glow.falloff), format!("from {} to {}", GLOW_FALLOFF_RANGE.start(), GLOW_FALLOFF_RANGE.end()));
     }
     problems
+}
+
+/// The checks of the fill, outlines, shadows and inner shadows of `text`: how many there are, and
+/// each width, distance, blur, gradient and texture value.
+fn layer_problems(text: &TextContent, style: &mut dyn FnMut(&str, f32, bool, String)) {
+    fn range(style: &mut dyn FnMut(&str, f32, bool, String), field: &str, value: f32, max: f32) {
+        style(field, value, value.is_finite() && (0.0..=max).contains(&value), format!("from 0 to {max}"));
+    }
+    fn finite(style: &mut dyn FnMut(&str, f32, bool, String), field: &str, value: f32) {
+        style(field, value, value.is_finite(), "a number".to_owned());
+    }
+    fn paint(style: &mut dyn FnMut(&str, f32, bool, String), field: &str, paint: &TextPaint) {
+        match paint {
+            TextPaint::Solid { .. } => {}
+            TextPaint::Gradient { stops, angle } => {
+                let count = stops.len();
+                style(&format!("{field}.stops"), count as f32, (2..=MAX_GRADIENT_STOPS).contains(&count), format!("from 2 to {MAX_GRADIENT_STOPS} stops"));
+                let mut last = 0.0f32;
+                for (i, stop) in stops.iter().enumerate() {
+                    let ok = stop.position.is_finite() && (last..=1.0).contains(&stop.position);
+                    style(&format!("{field}.stops[{i}].position"), stop.position, ok, format!("from {last} to 1, not below the stop before"));
+                    if ok {
+                        last = stop.position;
+                    }
+                }
+                finite(style, &format!("{field}.angle"), *angle);
+            }
+            TextPaint::Texture(texture) => {
+                let scale = texture.scale;
+                style(&format!("{field}.scale"), scale, scale.is_finite() && TEXT_TEXTURE_SCALE_RANGE.contains(&scale), format!("from {} to {}", TEXT_TEXTURE_SCALE_RANGE.start(), TEXT_TEXTURE_SCALE_RANGE.end()));
+                finite(style, &format!("{field}.angle"), texture.angle);
+                range(style, &format!("{field}.opacity"), texture.opacity, 1.0);
+            }
+        }
+    }
+    fn outlines(style: &mut dyn FnMut(&str, f32, bool, String), field: &str, outlines: &[TextOutline]) {
+        style(field, outlines.len() as f32, outlines.len() <= MAX_TEXT_OUTLINES, format!("at most {MAX_TEXT_OUTLINES} outlines"));
+        for (i, outline) in outlines.iter().enumerate() {
+            range(style, &format!("{field}[{i}].width"), outline.width, MAX_TEXT_OUTLINE_WIDTH);
+            paint(style, &format!("{field}[{i}].paint"), &outline.paint);
+        }
+    }
+    paint(style, "fill", &text.fill);
+    outlines(style, "outlines", &text.outlines);
+    style("shadows", text.shadows.len() as f32, text.shadows.len() <= MAX_TEXT_SHADOWS, format!("at most {MAX_TEXT_SHADOWS} shadows"));
+    for (i, shadow) in text.shadows.iter().enumerate() {
+        range(style, &format!("shadows[{i}].distance"), shadow.distance, MAX_TEXT_SHADOW_DISTANCE);
+        finite(style, &format!("shadows[{i}].angle"), shadow.angle);
+        range(style, &format!("shadows[{i}].blur"), shadow.blur, MAX_TEXT_SHADOW_BLUR);
+        paint(style, &format!("shadows[{i}].paint"), &shadow.paint);
+        outlines(style, &format!("shadows[{i}].outlines"), &shadow.outlines);
+    }
+    style("inner_shadows", text.inner_shadows.len() as f32, text.inner_shadows.len() <= MAX_TEXT_SHADOWS, format!("at most {MAX_TEXT_SHADOWS} inner shadows"));
+    for (i, shadow) in text.inner_shadows.iter().enumerate() {
+        range(style, &format!("inner_shadows[{i}].distance"), shadow.distance, MAX_TEXT_SHADOW_DISTANCE);
+        finite(style, &format!("inner_shadows[{i}].angle"), shadow.angle);
+        range(style, &format!("inner_shadows[{i}].blur"), shadow.blur, MAX_TEXT_SHADOW_BLUR);
+        paint(style, &format!("inner_shadows[{i}].paint"), &shadow.paint);
+    }
 }
 
 /// Answers the questions validation cannot decide from the project text alone.
@@ -246,7 +306,7 @@ pub enum ValidationError {
     InvalidLineSpacing { track: usize, clip: usize, line_spacing: f32 },
     /// A text clip `weight`, `letter_spacing` or glow value (`glow.radius`, `glow.intensity`,
     /// `glow.falloff`) is not a number or outside `allowed`.
-    InvalidTextStyle { track: usize, clip: usize, field: &'static str, value: f32, allowed: String },
+    InvalidTextStyle { track: usize, clip: usize, field: String, value: f32, allowed: String },
     /// A text clip's karaoke has a look out of range, or word times that are not one per word, in
     /// order and not overlapping.
     InvalidKaraoke { track: usize, clip: usize, problem: String },

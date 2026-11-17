@@ -56,13 +56,14 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         next.size = size;
     }
     if let Some(color) = patch.color {
-        next.color = color;
+        next.fill = engine::TextPaint::solid(color);
     }
-    if let Some(outline) = patch.outline {
+    if let Some(outline) = patch.outline.clone() {
         if let Some(outline) = &outline {
             not_negative("outline.width", outline.width)?;
         }
-        next.outline = outline;
+        // One outline in place of the outlines the text had.
+        next.outlines = outline.into_iter().collect();
     }
     if let Some(background) = patch.background {
         if let Some(background) = &background {
@@ -71,14 +72,15 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         }
         next.background = background;
     }
-    if let Some(shadow) = patch.shadow {
+    if let Some(shadow) = patch.shadow.clone() {
         if let Some(shadow) = &shadow {
             not_negative("shadow.blur", shadow.blur)?;
-            if !shadow.offset.iter().all(|value| value.is_finite()) {
-                return Err(invalid("shadow.offset must be finite numbers"));
+            if !(shadow.distance.is_finite() && shadow.angle.is_finite()) {
+                return Err(invalid("shadow.distance and shadow.angle must be finite numbers"));
             }
         }
-        next.shadow = shadow;
+        // One shadow in place of the shadows the text had.
+        next.shadows = shadow.into_iter().collect();
     }
     if let Some(glow) = patch.glow {
         if let Some(glow) = &glow {
@@ -141,6 +143,9 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
     }
     if let Some(problem) = engine::karaoke_problem(&next) {
         return Err(invalid(problem));
+    }
+    if let Some(problem) = engine::text_style_problems(&next).into_iter().next() {
+        return Err(invalid(format!("{} must be {}, not {}", problem.field, problem.allowed, problem.value)));
     }
     Ok(next)
 }
