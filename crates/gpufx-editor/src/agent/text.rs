@@ -56,14 +56,21 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
         next.size = size;
     }
     if let Some(color) = patch.color {
+        // A gradient or texture fill is replaced by the colour, as the tool says.
         next.fill = engine::TextPaint::solid(color);
     }
     if let Some(outline) = patch.outline.clone() {
-        if let Some(outline) = &outline {
-            not_negative("outline.width", outline.width)?;
+        match outline {
+            // The first outline, the one the tool shows; the others stay.
+            Some(outline) => {
+                not_negative("outline.width", outline.width)?;
+                match next.outlines.first_mut() {
+                    Some(first) => *first = outline,
+                    None => next.outlines.push(outline),
+                }
+            }
+            None => next.outlines.clear(),
         }
-        // One outline in place of the outlines the text had.
-        next.outlines = outline.into_iter().collect();
     }
     if let Some(background) = patch.background {
         if let Some(background) = &background {
@@ -79,8 +86,14 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
                 return Err(invalid("shadow.distance and shadow.angle must be finite numbers"));
             }
         }
-        // One shadow in place of the shadows the text had.
-        next.shadows = shadow.into_iter().collect();
+        match shadow {
+            // The first shadow, the one the tool shows; the others stay.
+            Some(shadow) => match next.shadows.first_mut() {
+                Some(first) => *first = shadow,
+                None => next.shadows.push(shadow),
+            },
+            None => next.shadows.clear(),
+        }
     }
     if let Some(glow) = patch.glow {
         if let Some(glow) = &glow {
@@ -141,6 +154,7 @@ pub fn apply_patch(text: &TextContent, patch: &TextPatch) -> Result<TextContent,
             karaoke
         });
     }
+    check_texture_files(text, &next)?;
     if let Some(problem) = engine::karaoke_problem(&next) {
         return Err(invalid(problem));
     }
@@ -157,16 +171,26 @@ pub fn apply_animation_patch(library: &ClipAnimationLibrary, kind: AnimatedClipK
     patch.animation.as_ref().map(|animation| patched_animation(library, kind, current, animation)).transpose()
 }
 
-/// Whether `path` names a network share or a device (`\\server\share`, `//server/share`,
-/// `\\?\UNC\...`, `\\.\...`) rather than a local disk. Opening one can reach out to another
-/// machine, so an agent may not name one.
-fn is_network_or_device_path(path: &str) -> bool {
-    use std::path::{Component, Prefix};
-    if let Some(Component::Prefix(prefix)) = std::path::Path::new(path).components().next() {
-        return !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_));
+use gpufx_text::is_network_or_device_path;
+
+/// A texture file `next` paints with that `text` did not is refused when it is on a network share
+/// or a device, or relative, as a font file is (pictures the text already had stay, since the
+/// project folder resolves a relative one). The renderer leaves such a layer out as well.
+fn check_texture_files(text: &TextContent, next: &TextContent) -> Result<(), AgentError> {
+    let known = gpufx_text::text_images(text);
+    for image in gpufx_text::text_images(next) {
+        let engine::TextImageRef::File { path } = image else { continue };
+        if known.contains(&image) {
+            continue;
+        }
+        if is_network_or_device_path(path) {
+            return Err(invalid(format!("texture file path {path} is on a network share or a device; give a file on a local disk")));
+        }
+        if !std::path::Path::new(path).is_absolute() {
+            return Err(invalid(format!("texture file path {path} must be absolute")));
+        }
     }
-    // Off Windows there is no prefix, but both spellings still start a share there.
-    path.starts_with(r"\\") || path.starts_with("//")
+    Ok(())
 }
 
 /// A family the font scan has finished without is refused; while it still runs the name is taken
@@ -515,6 +539,48 @@ mod tests {
         }
         assert!(!is_network_or_device_path(r"C:\Windows\Fonts\arial.ttf"));
         assert!(!is_network_or_device_path(r"\\?\C:\Windows\Fonts\arial.ttf"), "a verbatim local path is a local disk");
+    }
+
+    #[test]
+    fn outline_and_shadow_change_only_the_first_layer() {
+        let mut text = crate::text_clip::default_text("Hi");
+        let gold = engine::TextPaint::Gradient { stops: vec![engine::GradientStop { position: 0.0, color: [255, 200, 0, 255] }, engine::GradientStop { position: 1.0, color: [120, 60, 0, 255] }], angle: 90.0 };
+        text.outlines = vec![engine::TextOutline::solid([0, 0, 0, 255], 0.05), engine::TextOutline { width: 0.1, paint: gold.clone() }];
+        text.shadows = vec![engine::TextShadow::solid([0, 0, 0, 128], [0.05, 0.05], 0.0), engine::TextShadow::solid([0, 0, 0, 64], [0.1, 0.1], 0.0)];
+        let outline = engine::TextOutline::solid([255, 0, 0, 255], 0.08);
+        let next = apply_patch(&text, &TextPatch { outline: Some(Some(outline.clone())), ..TextPatch::default() }).unwrap();
+        assert_eq!(next.outlines, vec![outline.clone(), text.outlines[1].clone()]);
+        let shadow = engine::TextShadow::solid([0, 0, 255, 255], [0.02, 0.02], 0.01);
+        let next = apply_patch(&text, &TextPatch { shadow: Some(Some(shadow.clone())), ..TextPatch::default() }).unwrap();
+        assert_eq!(next.shadows, vec![shadow.clone(), text.shadows[1].clone()]);
+        // An empty list gains the one given; null still takes them all off.
+        let bare = crate::text_clip::default_text("Hi");
+        let next = apply_patch(&bare, &TextPatch { outline: Some(Some(outline.clone())), shadow: Some(Some(shadow.clone())), ..TextPatch::default() }).unwrap();
+        assert_eq!((next.outlines, next.shadows), (vec![outline], vec![shadow]));
+        let next = apply_patch(&text, &TextPatch { outline: Some(None), shadow: Some(None), ..TextPatch::default() }).unwrap();
+        assert!(next.outlines.is_empty() && next.shadows.is_empty());
+        // color turns a gradient fill into that colour.
+        text.fill = gold;
+        assert_eq!(apply_patch(&text, &TextPatch { color: Some([1, 2, 3, 255]), ..TextPatch::default() }).unwrap().fill, engine::TextPaint::solid([1, 2, 3, 255]));
+    }
+
+    #[test]
+    fn a_new_texture_file_on_a_network_share_or_relative_is_refused() {
+        let text = crate::text_clip::default_text("Hi");
+        let with = |path: &str| {
+            let mut next = text.clone();
+            next.fill = engine::TextPaint::Texture(engine::TextTexture { image: engine::TextImageRef::File { path: path.to_owned() }, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 });
+            next
+        };
+        for path in [r"\\server\share\a.png", "//server/share/a.png", r"\\?\UNC\server\share\a.png"] {
+            let error = check_texture_files(&text, &with(path)).expect_err(path);
+            assert!(error.code == "invalid_params" && error.message.contains("network share"), "{path}: {}", error.message);
+        }
+        let error = check_texture_files(&text, &with("textures/a.png")).expect_err("relative");
+        assert!(error.message.contains("absolute"), "{}", error.message);
+        assert!(check_texture_files(&text, &with(r"C:\pictures\a.png")).is_ok());
+        let kept = with("textures/a.png");
+        assert!(check_texture_files(&kept, &kept).is_ok(), "a picture the text had stays");
     }
 
     #[test]

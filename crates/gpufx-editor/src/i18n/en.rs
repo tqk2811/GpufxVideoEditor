@@ -328,6 +328,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FontSourcePack => "Packs".to_owned(),
         Message::NoFontFound => "No font found".to_owned(),
         Message::FontMissing(family) => format!("The font \"{family}\" is not installed or cannot be read; the default font draws this text."),
+        Message::TextureMissing(picture) => format!("The texture picture \"{picture}\" cannot be read; the layers painted with it are left out."),
         Message::FieldTextSize => "Size".to_owned(),
         Message::FieldTextColor => "Color".to_owned(),
         Message::TextOutline => "Outline".to_owned(),

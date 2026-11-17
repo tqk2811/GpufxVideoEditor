@@ -181,7 +181,8 @@ impl From<TransformParam> for engine::TextTransform {
     }
 }
 
-/// An outline around each glyph, of one colour; it replaces every outline the text had.
+/// An outline around each glyph, of one colour; it replaces the text's first outline (adding one
+/// when it has none) and leaves the others.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[schemars(inline)]
 #[serde(deny_unknown_fields)]
@@ -205,7 +206,8 @@ pub struct BackgroundParam {
     pub radius: f32,
 }
 
-/// A drop shadow of one colour; it replaces every shadow the text had.
+/// A drop shadow of one colour; it replaces the text's first shadow (adding one when it has none)
+/// and leaves the others.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[schemars(inline)]
 #[serde(deny_unknown_fields)]
@@ -380,15 +382,16 @@ pub struct TextStyleParam {
     pub font: Option<FontParam>,
     /// Font size in parts of the output height (a new text has 0.08), above 0.
     pub size: Option<f32>,
-    /// [r, g, b, a], each 0 to 255; white by default.
+    /// [r, g, b, a], each 0 to 255; white by default. Fills the text with this one colour, in place
+    /// of a gradient or texture fill it had.
     pub color: Option<[u8; 4]>,
-    /// null takes the outline off.
+    /// The first outline; null takes every outline off.
     #[serde(default, deserialize_with = "double_option")]
     pub outline: Option<Option<OutlineParam>>,
     /// null takes the box off.
     #[serde(default, deserialize_with = "double_option")]
     pub background: Option<Option<BackgroundParam>>,
-    /// null takes the shadow off.
+    /// The first shadow; null takes every shadow off.
     #[serde(default, deserialize_with = "double_option")]
     pub shadow: Option<Option<ShadowParam>>,
     /// null takes the glow off.
@@ -770,7 +773,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("track_set_hidden", "Hides or shows a track in picture and sound.", TrackHiddenParams, |p| edit(p.expected_revision, AgentEdit::TrackSetHidden { track: p.track, hidden: p.hidden })),
         tool!("clip_add", "Adds a source file, a still image (png, jpg, webp, on a video or sticker track), or a file of an installed pack as asset:<type>/<id>/<file> (type sfx, music or sticker; a sticker goes on a sticker track only), as a clip at start (ticks). duration defaults to what the stream the track plays still holds at that speed, and to 5 seconds for an image, whose end can be set freely. speed defaults to 1, between 0.1 and 10, and does not apply to an image. Returns the new clip.", ClipAddParams, |p| edit(p.expected_revision, AgentEdit::ClipAdd { track: p.track, source: p.source, start: ticks(p.start), source_in: p.source_in.map(ticks), duration: p.duration.map(ticks), speed: p.speed })),
         tool!("text_add", "Adds a text clip of content at start (ticks) for duration, on track, which must be a text track, or, when track is absent, on the first text track with room or a new one. style sets any of font, size (parts of the output height, 0.08 by default), color, outline, background, shadow, glow, align, line_spacing, weight, italic, transform, letter_spacing and animation; what is absent is as the Text tab's new text: white, centred, in the default font (the system UI font, such as Segoe UI). It is placed at its natural size in the middle of the frame, which clip_set_transform can change. Returns the new clip.", TextAddParams, text_add),
-        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow, glow, karaoke or an animation group off. karaoke sets how the spoken word is marked (mode none, color, box or scale; looks for active, spoken, upcoming and emphasis words) and may give each word its time in source ticks; without times the words share the cue by their characters. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
+        tool!("text_set", "Changes a text clip: give content and any style field of text_add; what is absent stays, and null takes an outline, background, shadow, glow, karaoke or an animation group off. outline and shadow change only the first outline or shadow of a text with several (null takes them all off); color fills the text with one colour, replacing a gradient or texture fill. karaoke sets how the spoken word is marked (mode none, color, box or scale; looks for active, spoken, upcoming and emphasis words) and may give each word its time in source ticks; without times the words share the cue by their characters. Where the text is placed keeps the scale it was given around the same centre, so a bigger size or longer content draws bigger. Refused with not_text for a clip that is not text.", TextSetParams, text_set),
         tool!("font_list", "The fonts a text can name, each as the font value to give: the default font first (the system UI font, such as Segoe UI), then the installed families, then the fonts of the installed font packs (kind pack, with their name and pack_name). state is loading while the installed fonts are still being read; ask again then.", NoParams, |_| Ok(AgentRequest::FontList)),
         tool!("clip_animation_list", "The preset animations a clip with a picture (video, image, sticker or text) can name: each with its id, its group (in, out or loop) and default_duration in ticks (for loop, one cycle); a pack preset also has its name, pack and applies_to, and effect: null or {package, available}, the gpufx effect it runs while it plays and whether that package is installed (a missing one is left out and the preset plays only its motion). per_unit: true marks a preset that moves the characters, words or lines of a text one by one, such as typewriter; it is for text clips only. Only an id of the group is accepted there.", NoParams, |_| Ok(AgentRequest::ClipAnimationList)),
         tool!("asset_list", "The items of the installed music, sfx and sticker packs, filtered by type (music, sfx or sticker; all when absent) and by filter (every word must be in the name, category or a tag). Each has its type, the source to give clip_add (music and sfx go on an audio track, a sticker on a sticker track), name, category and tags; a sound also has duration in ticks (from its pack, may be absent) and loop, a sticker its size in pixels. state is loading while the packs are still being read.", AssetListParams, |p| Ok(AgentRequest::AssetList { kind: p.r#type, filter: p.filter })),

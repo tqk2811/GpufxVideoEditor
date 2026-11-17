@@ -304,6 +304,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FontSourcePack => "Gói".to_owned(),
         Message::NoFontFound => "Không tìm thấy font".to_owned(),
         Message::FontMissing(family) => format!("Không có hoặc không đọc được font \"{family}\", chữ đang vẽ bằng font mặc định."),
+        Message::TextureMissing(picture) => format!("Không đọc được ảnh texture \"{picture}\", các lớp tô bằng ảnh này bị bỏ qua."),
         Message::FieldTextSize => "Cỡ chữ".to_owned(),
         Message::FieldTextColor => "Màu chữ".to_owned(),
         Message::TextOutline => "Viền".to_owned(),

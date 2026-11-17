@@ -51,6 +51,9 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(family) = state.missing_font(key) {
         missing_font_warning(ui, &language.t(Message::FontMissing(family)));
     }
+    if let Some(picture) = state.missing_texture(key) {
+        missing_font_warning(ui, &language.t(Message::TextureMissing(picture)));
+    }
     let mut next = text.clone();
     if state.project().tracks.get(key.track).is_some_and(|track| track.is_subtitle()) {
         match subtitle_section(ui, id, state, key.track, text, language) {

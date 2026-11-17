@@ -18,7 +18,7 @@
 mod paint;
 mod units;
 
-pub use paint::{text_images, text_texture_stamps, MAX_TEXTURE_DIMENSION, MAX_TEXTURE_FILE_BYTES};
+pub use paint::{is_network_or_device_path, is_readable_texture_path, text_images, text_texture_stamps, MAX_TEXTURE_CACHE_BYTES, MAX_TEXTURE_DIMENSION, MAX_TEXTURE_FILE_BYTES};
 pub use units::{UnitsPlan, MAX_UNIT_PLANS, UNIT_PLAN_BYTES};
 use paint::{outline_px, Painter, ShadowPx, TextureCache, Textures};
 

@@ -1470,6 +1470,13 @@ impl EditorState {
         self.text_shapes.borrow_mut().shape(&self.resolved_font(text), self.project().output.height).missing_family
     }
 
+    /// The first texture picture text clip `key` paints with that cannot be drawn, so its layer is
+    /// left out; for a warning. `None` for a media clip or when every picture is there.
+    pub fn missing_texture(&self, key: ClipKey) -> Option<String> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        missing_texture(&self.font_paths, clip.text.as_ref()?)
+    }
+
     /// `text` with a font of an installed font pack as the file it is, found through
     /// [`Self::font_paths`] as the compositor finds it, whether or not the scan of the library has
     /// finished. A font pack not installed stays, so the shape names it as missing.
@@ -2697,8 +2704,44 @@ pub fn decode_subtitle_bytes(bytes: Vec<u8>) -> Result<String, String> {
 
 const NOT_UNICODE: &str = "the file is not UTF-8 or UTF-16 text: save it as UTF-8 and try again";
 
+/// The first picture `text` paints with that is not a readable file (a missing file, one on a
+/// network share or left relative) or not in an installed text style pack, found through `paths`
+/// as the compositor finds it. Only whether the file is there is checked, not that it decodes.
+fn missing_texture(paths: &ProjectPaths, text: &TextContent) -> Option<String> {
+    gpufx_text::text_images(text).into_iter().find_map(|image| {
+        let present = match image {
+            engine::TextImageRef::File { path } => gpufx_text::is_readable_texture_path(path) && Path::new(path).is_file(),
+            engine::TextImageRef::Pack { pack, file } => paths.texture_pack_path(pack, file).is_ok_and(|path| path.is_file()),
+        };
+        (!present).then(|| image.label())
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_texture_that_cannot_be_read_is_named_for_the_warning() {
+        let dir = std::env::temp_dir().join(format!("gpufx-editor-missing-texture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = dir.join("a.png");
+        std::fs::write(&picture, b"png").unwrap();
+        let paths = ProjectPaths::roots_only(&dir.join("p.json"), Vec::new());
+        let mut text = engine::TextContent::new("Hi", 0.1);
+        assert_eq!(super::missing_texture(&paths, &text), None, "no texture");
+        let texture = |image: engine::TextImageRef| engine::TextPaint::Texture(engine::TextTexture { image, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 });
+        let file = |path: &str| engine::TextImageRef::File { path: path.to_owned() };
+        text.fill = texture(file(&picture.to_string_lossy()));
+        assert_eq!(super::missing_texture(&paths, &text), None);
+        let gone = dir.join("gone.png").to_string_lossy().into_owned();
+        for path in [gone.as_str(), r"\\server\share\a.png", "a.png"] {
+            text.outlines = vec![engine::TextOutline { width: 0.1, paint: texture(file(path)) }];
+            assert_eq!(super::missing_texture(&paths, &text).as_deref(), Some(path));
+        }
+        text.outlines = vec![engine::TextOutline { width: 0.1, paint: texture(engine::TextImageRef::Pack { pack: "nope".into(), file: "a.png".into() }) }];
+        assert_eq!(super::missing_texture(&paths, &text).as_deref(), Some("nope/a.png"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
     use crate::timeline::drag::{ClipDrag, DragKind, EditCommand};
     use engine::{Project, TICKS_PER_SECOND};

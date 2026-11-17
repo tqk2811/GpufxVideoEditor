@@ -45,6 +45,14 @@ fn absolute_project(project: &Project, paths: &ProjectPaths) -> Project {
                 let found = paths.source_path(path);
                 *path = std::path::absolute(&found).unwrap_or(found).to_string_lossy().into_owned();
             }
+            for paint in clip.text.as_mut().map(|text| text.paints_mut()).unwrap_or_default() {
+                if let engine::TextPaint::Texture(engine::TextTexture { image: engine::TextImageRef::File { path }, .. }) = paint {
+                    if Path::new(path.as_str()).is_relative() && !gpufx_text::is_network_or_device_path(path) {
+                        let found = paths.source_path(path);
+                        *path = std::path::absolute(&found).unwrap_or(found).to_string_lossy().into_owned();
+                    }
+                }
+            }
             if !clip.is_text() && paths.asset_problem(&clip.source).is_none() {
                 let source = paths.source_path(&clip.source);
                 clip.source = std::path::absolute(&source).unwrap_or(source).to_string_lossy().into_owned();

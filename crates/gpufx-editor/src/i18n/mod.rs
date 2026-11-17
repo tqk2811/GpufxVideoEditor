@@ -314,6 +314,8 @@ pub enum Message {
     NoFontFound,
     /// The font a text asks for is not installed and the default one draws it.
     FontMissing(String),
+    /// A texture picture a text paints with cannot be read, so its layer is left out.
+    TextureMissing(String),
     /// The project changed while the font file dialog was up, so the file chosen is not used.
     FontTargetChanged,
     /// The button that imports an SRT file as a subtitle track.
@@ -675,6 +677,7 @@ mod tests {
             Message::FontSourcePack,
             Message::NoFontFound,
             Message::FontMissing(name()),
+            Message::TextureMissing(name()),
             Message::FontTargetChanged,
             Message::ImportSubtitles,
             Message::FilterSubtitles,

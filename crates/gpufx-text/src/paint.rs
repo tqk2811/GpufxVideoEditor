@@ -16,14 +16,18 @@ use super::{font_file_stamp, over, premultiplied, FontFileStamp, Mask};
 
 /// The largest texture picture file read, in bytes.
 pub const MAX_TEXTURE_FILE_BYTES: u64 = 32 * 1024 * 1024;
-/// The widest or tallest texture picture used; a larger one is not drawn.
-pub const MAX_TEXTURE_DIMENSION: u32 = 4096;
+/// The widest or tallest texture picture used; a larger one is not drawn. 2048 is sharp enough
+/// for a texture filling glyphs (a text box rarely spans more than a 1080p frame) and keeps one
+/// picture at 16 MiB of RGBA8.
+pub const MAX_TEXTURE_DIMENSION: u32 = 2048;
+/// The most bytes of decoded texture pictures kept; past it the least recently used are dropped.
+pub const MAX_TEXTURE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
-/// A decoded texture picture, premultiplied, 0 to 1.
+/// A decoded texture picture, straight RGBA8; premultiplied when sampled.
 pub(crate) struct Picture {
     width: usize,
     height: usize,
-    pixels: Vec<[f32; 4]>,
+    pixels: Vec<[u8; 4]>,
 }
 
 impl Picture {
@@ -40,8 +44,13 @@ impl Picture {
             return None;
         }
         let decoded = image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()?.decode().ok()?.into_rgba8();
-        let pixels = decoded.pixels().map(|p| premultiplied(p.0)).collect();
+        let pixels = decoded.pixels().map(|p| p.0).collect();
         Some(Picture { width: decoded.width() as usize, height: decoded.height() as usize, pixels })
+    }
+
+    /// The bytes the decoded pixels take.
+    pub(crate) fn bytes(&self) -> usize {
+        self.pixels.len() * std::mem::size_of::<[u8; 4]>()
     }
 
     /// The colour at `(u, v)` in picture pixels, bilinear, with the picture repeated (mirrored
@@ -61,7 +70,7 @@ impl Picture {
         let (x0, y0) = (x.floor(), y.floor());
         let (fx, fy) = (x - x0, y - y0);
         let (x0, y0) = (x0 as i64, y0 as i64);
-        let at = |i: i64, j: i64| self.pixels[wrap(j, self.height) * self.width + wrap(i, self.width)];
+        let at = |i: i64, j: i64| premultiplied(self.pixels[wrap(j, self.height) * self.width + wrap(i, self.width)]);
         let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
         std::array::from_fn(|k| (a[k] * (1.0 - fx) + b[k] * fx) * (1.0 - fy) + (c[k] * (1.0 - fx) + d[k] * fx) * fy)
     }
@@ -77,7 +86,7 @@ impl Textures {
     }
 
     pub(crate) fn bytes(&self) -> usize {
-        self.0.iter().map(|(_, picture)| picture.pixels.len() * 16).sum()
+        self.0.iter().map(|(_, picture)| picture.bytes()).sum()
     }
 }
 
@@ -99,6 +108,25 @@ pub fn text_images(text: &TextContent) -> Vec<&TextImageRef> {
     images
 }
 
+/// Whether `path` names a network share or a device (`\\server\share`, `//server/share`,
+/// `\\?\UNC\...`, `\\.\...`) rather than a local disk. Opening one can reach out to another
+/// machine, so such a file is neither read for a texture nor accepted from an agent.
+pub fn is_network_or_device_path(path: &str) -> bool {
+    use std::path::{Component, Prefix};
+    if let Some(Component::Prefix(prefix)) = Path::new(path).components().next() {
+        return !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_));
+    }
+    // Off Windows there is no prefix, but both spellings still start a share there.
+    path.starts_with(r"\\") || path.starts_with("//")
+}
+
+/// Whether a texture file named `path` may be read: an absolute path on a local disk. A relative
+/// path is resolved against the project folder before it gets here, so one left relative is not
+/// read against the working folder.
+pub fn is_readable_texture_path(path: &str) -> bool {
+    !is_network_or_device_path(path) && Path::new(path).is_absolute()
+}
+
 /// The stamps of the texture files `text` paints with (`None` for a picture that is not a file or
 /// cannot be read), in the order of [`text_images`]. Goes into the keys of cached pictures, so a
 /// changed file is drawn again.
@@ -106,20 +134,27 @@ pub fn text_texture_stamps(text: &TextContent) -> Vec<Option<FontFileStamp>> {
     text_images(text)
         .into_iter()
         .map(|image| match image {
-            TextImageRef::File { path } => font_file_stamp(Path::new(path)),
-            TextImageRef::Pack { .. } => None,
+            TextImageRef::File { path } if is_readable_texture_path(path) => font_file_stamp(Path::new(path)),
+            _ => None,
         })
         .collect()
 }
 
-/// Decoded texture pictures by path, with the stamp of the file they were read from; `None` for a
-/// file that is not a picture.
+/// Decoded texture pictures by path, with the stamp of the file they were read from (`None` for a
+/// file that is not a picture) and when each was last used.
 #[derive(Default)]
 pub(crate) struct TextureCache {
-    files: HashMap<PathBuf, (Option<FontFileStamp>, Option<Arc<Picture>>)>,
+    files: HashMap<PathBuf, CachedTexture>,
+    clock: u64,
 }
 
-/// The most texture files kept decoded.
+struct CachedTexture {
+    stamp: Option<FontFileStamp>,
+    picture: Option<Arc<Picture>>,
+    used: u64,
+}
+
+/// The most texture files kept known, pictures or not.
 const MAX_CACHED_TEXTURES: usize = 64;
 
 impl TextureCache {
@@ -130,8 +165,8 @@ impl TextureCache {
         let mut missing = None;
         for image in text_images(text) {
             let picture = match image {
-                TextImageRef::File { path } => self.load(Path::new(path)),
-                TextImageRef::Pack { .. } => None,
+                TextImageRef::File { path } if is_readable_texture_path(path) => self.load(Path::new(path)),
+                _ => None,
             };
             match (picture, image) {
                 (Some(picture), TextImageRef::File { path }) => textures.0.push((path.clone(), picture)),
@@ -144,18 +179,34 @@ impl TextureCache {
     }
 
     fn load(&mut self, path: &Path) -> Option<Arc<Picture>> {
+        self.clock += 1;
         let stamp = font_file_stamp(path);
-        if let Some((known, picture)) = self.files.get(path) {
-            if *known == stamp {
-                return picture.clone();
+        if let Some(known) = self.files.get_mut(path) {
+            if known.stamp == stamp {
+                known.used = self.clock;
+                return known.picture.clone();
             }
         }
-        if self.files.len() >= MAX_CACHED_TEXTURES {
-            self.files.clear();
-        }
         let picture = stamp.and_then(|_| Picture::load(path)).map(Arc::new);
-        self.files.insert(path.to_owned(), (stamp, picture.clone()));
+        self.files.insert(path.to_owned(), CachedTexture { stamp, picture: picture.clone(), used: self.clock });
+        self.evict(path);
         picture
+    }
+
+    /// The bytes of the pictures kept.
+    pub(crate) fn bytes(&self) -> usize {
+        self.files.values().filter_map(|entry| entry.picture.as_ref()).map(|picture| picture.bytes()).sum()
+    }
+
+    /// Drops the least recently used entries, never `keep`, until the cache fits its limits.
+    fn evict(&mut self, keep: &Path) {
+        let mut total = self.bytes();
+        while self.files.len() > MAX_CACHED_TEXTURES || total > MAX_TEXTURE_CACHE_BYTES {
+            let Some(oldest) = self.files.iter().filter(|(path, _)| path.as_path() != keep).min_by_key(|(_, entry)| entry.used).map(|(path, _)| path.clone()) else { break };
+            if let Some(gone) = self.files.remove(&oldest) {
+                total -= gone.picture.map_or(0, |picture| picture.bytes());
+            }
+        }
     }
 }
 
@@ -366,5 +417,82 @@ fn blur_colors(layer: &mut [[f32; 4]], width: usize, height: usize, radius: f32)
         for (v, p) in channel.data.iter().zip(layer.iter_mut()) {
             p[c] = *v;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_png(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
+        let path = dir.join(name);
+        image::RgbaImage::from_pixel(width, height, image::Rgba([200, 100, 50, 255])).save(&path).unwrap();
+        path
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gpufx-text-paint-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn texture_files_on_a_network_share_or_relative_are_not_read() {
+        let dir = temp_dir("paths");
+        let local = write_png(&dir, "a.png", 4, 4);
+        let mut text = TextContent::new("Hi", 0.1);
+        let texture = |path: &str| TextPaint::Texture(TextTexture { image: TextImageRef::File { path: path.to_owned() }, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 });
+        let mut cache = TextureCache::default();
+        text.fill = texture(&local.to_string_lossy());
+        assert_eq!(cache.textures_for(&text).1, None);
+        for path in [r"\\server\share\a.png", "//server/share/a.png", r"\\?\UNC\server\share\a.png", r"\\.\pipe\a", "textures/a.png"] {
+            text.fill = texture(path);
+            assert_eq!(cache.textures_for(&text).1.as_deref(), Some(path), "{path}");
+            assert_eq!(text_texture_stamps(&text), vec![None], "{path}");
+        }
+        // A picture that is there, named relative to the working folder, is still not read.
+        let relative = format!("gpufx-text-paint-relative-{}.png", std::process::id());
+        write_png(&std::env::current_dir().unwrap(), &relative, 4, 4);
+        text.fill = texture(&relative);
+        let (missing, stamps) = (cache.textures_for(&text).1, text_texture_stamps(&text));
+        std::fs::remove_file(&relative).ok();
+        assert_eq!((missing.as_deref(), stamps), (Some(relative.as_str()), vec![None]));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pictures_are_kept_as_rgba8() {
+        let dir = temp_dir("rgba8");
+        let picture = Picture::load(&write_png(&dir, "a.png", 8, 4)).unwrap();
+        assert_eq!(picture.bytes(), 8 * 4 * 4);
+        let color = picture.sample(2.5, 1.5, false);
+        assert!((color[0] - 200.0 / 255.0).abs() < 1e-4 && (color[3] - 1.0).abs() < 1e-6);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pictures_wider_than_the_texture_limit_are_not_drawn() {
+        let dir = temp_dir("limit");
+        assert!(Picture::load(&write_png(&dir, "edge.png", MAX_TEXTURE_DIMENSION, 1)).is_some());
+        assert!(Picture::load(&write_png(&dir, "wide.png", 3000, 1)).is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_cache_drops_the_least_recently_used_pictures_past_its_byte_limit() {
+        let dir = temp_dir("lru");
+        // Each picture is 16 MiB; the limit holds four.
+        let paths: Vec<PathBuf> = (0..6).map(|i| write_png(&dir, &format!("{i}.png"), 2048, 2048)).collect();
+        let mut cache = TextureCache::default();
+        for path in &paths[..4] {
+            assert!(cache.load(path).is_some());
+        }
+        assert!(cache.load(&paths[0]).is_some()); // 0 is now the most recent, 1 the oldest
+        assert!(cache.load(&paths[4]).is_some());
+        assert!(cache.bytes() <= MAX_TEXTURE_CACHE_BYTES);
+        assert!(cache.files.contains_key(&paths[0]) && !cache.files.contains_key(&paths[1]));
+        assert!(cache.load(&paths[5]).is_some());
+        assert!(cache.bytes() <= MAX_TEXTURE_CACHE_BYTES && !cache.files.contains_key(&paths[2]));
+        std::fs::remove_dir_all(dir).ok();
     }
 }
