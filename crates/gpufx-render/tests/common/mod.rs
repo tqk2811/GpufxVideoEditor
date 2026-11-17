@@ -144,6 +144,67 @@ pub fn longer_gop_clip() -> PathBuf {
     .clone()
 }
 
+/// Frames of each part of [`resolution_change_clip`].
+pub const RESIZED_PART_FRAMES: i64 = 90;
+/// The size of the second part of [`resolution_change_clip`]: 4:3 where the first part is 16:9.
+pub const RESIZED_WIDTH: u32 = 480;
+pub const RESIZED_HEIGHT: u32 = 360;
+
+/// One H.264 stream whose size changes midway: [`RESIZED_PART_FRAMES`] frames of clip A
+/// (640x360, frame-numbered, grey A) and as many of flat grey B at 480x360, joined without
+/// re-encoding so the second part starts with new stream headers, which the parts (MPEG-TS) carry
+/// in band and MP4 keeps in the packets.
+pub fn resolution_change_clip() -> PathBuf {
+    static CLIP: OnceLock<PathBuf> = OnceLock::new();
+    CLIP.get_or_init(|| {
+        let dir = clips_dir();
+        std::fs::create_dir_all(&dir).expect("create the clips directory");
+        let (tool, codec, mut options) = encoder_tool();
+        // One keyframe per part: a GOP longer than a reversed decoder's ring, so its cache is used.
+        for pair in options.chunks_exact_mut(2) {
+            if pair[0] == "-g" {
+                pair[1] = RESIZED_PART_FRAMES.to_string();
+            }
+        }
+        let path = dir.join(format!("resolution-change-g{RESIZED_PART_FRAMES}-{codec}.mp4"));
+        if path.is_file() {
+            return path;
+        }
+        let seconds = RESIZED_PART_FRAMES / 30;
+        let parts = [
+            (dir.join(format!("resolution-change-1-{codec}.ts")), format!("color=c=0x{GREY_A:02x}{GREY_A:02x}{GREY_A:02x}:s={CLIP_WIDTH}x{CLIP_HEIGHT}:r=30:d={seconds}"), bar_filter()),
+            (dir.join(format!("resolution-change-2-{codec}.ts")), format!("color=c=0x{GREY_B:02x}{GREY_B:02x}{GREY_B:02x}:s={RESIZED_WIDTH}x{RESIZED_HEIGHT}:r=30:d={seconds}"), "format=yuv420p".to_owned()),
+        ];
+        for (part, source, filter) in &parts {
+            let status = Command::new(&tool)
+                .args(["-hide_banner", "-y", "-v", "error", "-f", "lavfi", "-i", source, "-vf", filter, "-c:v", codec, "-pix_fmt", "yuv420p"])
+                .args(&options)
+                .arg(part)
+                .status()
+                .expect("ffmpeg runs");
+            assert!(status.success(), "generating {} failed", part.display());
+        }
+        let list = dir.join(format!("resolution-change-{codec}.txt"));
+        let lines: String = parts.iter().map(|(part, _, _)| format!("file '{}'\n", json_path(part))).collect();
+        std::fs::write(&list, lines).expect("write the concat list");
+        let temporary = dir.join(format!("resolution-change-{codec}.{}.tmp.mp4", std::process::id()));
+        let status = Command::new(third_party_tool("ffmpeg.exe"))
+            .args(["-hide_banner", "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i"])
+            .arg(&list)
+            .args(["-c", "copy"])
+            .arg(&temporary)
+            .status()
+            .expect("ffmpeg runs");
+        assert!(status.success(), "joining the parts of {} failed", path.display());
+        if std::fs::rename(&temporary, &path).is_err() {
+            let _ = std::fs::remove_file(&temporary);
+            assert!(path.is_file(), "publishing {} failed", path.display());
+        }
+        path
+    })
+    .clone()
+}
+
 /// A copy of clip A whose H.264 headers carry a non-zero left crop.
 pub fn cropped_clip() -> PathBuf {
     let (a, _) = test_clips();

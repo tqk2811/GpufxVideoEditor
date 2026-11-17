@@ -1,5 +1,11 @@
-//! Sequential video decoding (H.264, HEVC, AV1..., 8 or 10 bits 4:2:0) with D3D12VA through libav*. Same approach as the POC's decoder,
-//! reduced to what the renderer needs; there is deliberately no software path.
+//! Sequential video decoding with D3D12VA through libav*. Same approach as the POC's decoder,
+//! reduced to what the renderer needs. Streams D3D12VA cannot decode (H.264 4:2:2, ProRes...) and
+//! surfaces in layouts other than NV12 or P010 go through [`software`], which converts and
+//! uploads them, so every frame reaches the renderer as an NV12 or P010 D3D12 surface.
+//!
+//! A frame carries its own size: a source whose size changes midway (FFmpeg makes a new pool
+//! when the stream's headers change) gives frames of the new size, which the renderer places by
+//! their own shape.
 //!
 //! [`SequentialDecoder::frame_at`] walks forward, and seeks when the time asked for cannot be reached
 //! going forward or is far enough ahead that decoding everything in between would stall. Times
@@ -22,6 +28,7 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12Device, ID3D12Fence};
 use crate::ffi::{self, check, describe_error};
 
 mod reverse;
+mod software;
 pub use reverse::ReverseDecoder;
 
 /// Frames the consumer may hold on top of what the decoder needs for references.
@@ -129,6 +136,9 @@ fn forward_retry_point(landing: Option<i64>, target: i64, point: i64, origin: i6
     Some(target.saturating_sub(retreat).max(origin))
 }
 
+/// `FF_THREAD_SLICE` of libavcodec/avcodec.h.
+const FF_THREAD_SLICE: i32 = 2;
+
 /// `AVERROR(ENOSYS)` with the MSVC C runtime, where ENOSYS is 40.
 const AVERROR_ENOSYS: i32 = -40;
 
@@ -141,24 +151,61 @@ fn decode_error(native_av1: bool, what: &str, status: i32) -> String {
     format!("{what} failed: {}", describe_error(status))
 }
 
+/// D3D12 when the decoder offers it, else the first software format: the stream then decodes in
+/// software and [`software::FrameConverter`] uploads its pictures. FFmpeg calls this again without
+/// D3D12 when the GPU turns the stream's profile down.
 unsafe extern "C" fn choose_d3d12_format(_context: *mut ffi::AVCodecContext, formats: *const ffi::AVPixelFormat) -> ffi::AVPixelFormat {
+    let mut offered = Vec::new();
     let mut current = formats;
     while *current != ffi::AV_PIX_FMT_NONE {
-        if *current == ffi::AV_PIX_FMT_D3D12 {
-            return ffi::AV_PIX_FMT_D3D12;
-        }
+        offered.push(*current);
         current = current.add(1);
     }
-    ffi::AV_PIX_FMT_NONE
+    pick_format(&offered, |format| {
+        let descriptor = ffi::av_pix_fmt_desc_get(format);
+        !descriptor.is_null() && (*descriptor).flags & ffi::AV_PIX_FMT_FLAG_HWACCEL != 0
+    })
 }
 
-/// Keeps a reference to the frame the decoder started last, so its fence can be waited for.
+/// D3D12 when `offered` has it, else the first format that `is_hardware` does not call a
+/// hardware surface; `AV_PIX_FMT_NONE` when there is neither.
+fn pick_format(offered: &[ffi::AVPixelFormat], is_hardware: impl Fn(ffi::AVPixelFormat) -> bool) -> ffi::AVPixelFormat {
+    if offered.contains(&ffi::AV_PIX_FMT_D3D12) {
+        return ffi::AV_PIX_FMT_D3D12;
+    }
+    offered.iter().copied().find(|format| !is_hardware(*format)).unwrap_or(ffi::AV_PIX_FMT_NONE)
+}
+
+/// Whether a stream whose header says `format` is likely decoded by D3D12VA as NV12 or P010:
+/// 4:2:0 in 8 or 10 bits. Others most likely decode in software, which wants threads.
+fn likely_hardware(format: ffi::AVPixelFormat) -> bool {
+    matches!(format, ffi::AV_PIX_FMT_YUV420P | ffi::AV_PIX_FMT_YUVJ420P | ffi::AV_PIX_FMT_YUV420P10LE | ffi::AV_PIX_FMT_NV12 | ffi::AV_PIX_FMT_P010LE | ffi::AV_PIX_FMT_NONE)
+}
+
+/// Waits until the GPU no longer uses the D3D12 surface of `frame`, freshly taken from a pool: it
+/// may still be read by work on its last picture, which FFmpeg's upload does not wait for.
+///
+/// # Safety
+/// `frame` must be a valid D3D12 frame.
+pub(crate) unsafe fn wait_for_surface(frame: *const ffi::AVFrame) -> Result<(), String> {
+    let sync = &(*((*frame).data[0] as *const ffi::AVD3D12VAFrame)).sync_ctx;
+    let raw = sync.fence.cast::<c_void>();
+    if let Some(fence) = ID3D12Fence::from_raw_borrowed(&raw) {
+        fence.SetEventOnCompletion(sync.fence_value, HANDLE::default()).map_err(|e| format!("waiting for a pool surface failed: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Keeps a reference to the D3D12 frame the decoder started last, so its fence can be waited for.
+/// A frame decoded in software has no fence: its data are the samples.
 unsafe extern "C" fn track_started_frame(context: *mut ffi::AVCodecContext, frame: *mut ffi::AVFrame, flags: std::ffi::c_int) -> std::ffi::c_int {
     let status = ffi::avcodec_default_get_buffer2(context, frame, flags);
     if status >= 0 {
         let slot = (*context).opaque.cast::<*mut ffi::AVFrame>();
         ffi::av_frame_free(slot);
-        *slot = ffi::av_frame_clone(frame);
+        if (*frame).format == ffi::AV_PIX_FMT_D3D12 {
+            *slot = ffi::av_frame_clone(frame);
+        }
     }
     status
 }
@@ -401,6 +448,8 @@ pub struct SequentialDecoder {
     native_av1: bool,
     /// Set when this file is the preview proxy of another: the original's shape and frame times.
     proxy: Option<crate::ProxyFile>,
+    /// Made at the first frame that is not an NV12 or P010 D3D12 surface.
+    converter: Option<software::FrameConverter>,
 }
 
 /// The step between two frames in `time_base` units for the first of the frame rates that is valid; 0 if none.
@@ -454,6 +503,7 @@ impl SequentialDecoder {
             turns: 0,
             native_av1: false,
             proxy: None,
+            converter: None,
         };
         // SAFETY: on error, Drop releases whatever has been created so far.
         unsafe { decoder.initialize(&c_path, device, &mut |size| EXTRA_HW_FRAMES + held(size)) }.map_err(|e| format!("{path_text}: {e}"))?;
@@ -509,8 +559,11 @@ impl SequentialDecoder {
         let descriptor = ffi::av_pix_fmt_desc_get(parameters.format);
         let ten_bit = !descriptor.is_null() && (*descriptor).comp[0].depth > 8;
         (*self.codec_context).extra_hw_frames = extra_hw_frames(PictureSize { width: parameters.width, height: parameters.height, ten_bit });
-        // Frame threading adds latency and does nothing for hardware decoding.
-        (*self.codec_context).thread_count = 1;
+        // Frame threading adds latency and does nothing for hardware decoding; a stream that will
+        // most likely decode in software gets FFmpeg's choice of slice threads. Not frame threads:
+        // they would call `track_started_frame` from several threads.
+        (*self.codec_context).thread_count = if likely_hardware(parameters.format) { 1 } else { 0 };
+        (*self.codec_context).thread_type = FF_THREAD_SLICE;
         check(ffi::avcodec_open2(self.codec_context, codec, ptr::null_mut()), "avcodec_open2")?;
 
         self.packet = ffi::av_packet_alloc();
@@ -560,32 +613,29 @@ impl SequentialDecoder {
             }
             match self.receive_into(frame) {
                 Ok(true) => {
-                    if (*frame).format != ffi::AV_PIX_FMT_D3D12 {
-                        let format = (*frame).format;
-                        ffi::av_frame_free(&mut frame);
-                        return Err(format!("the decoder returned pixel format {format}, not a D3D12 frame"));
-                    }
-                    // Frame cropping offsets a D3D12 frame cannot express: only right and bottom
-                    // padding is supported, as gpufx reads the top-left region.
-                    let (crop_top, crop_left) = ((*frame).crop_top, (*frame).crop_left);
-                    if crop_top != 0 || crop_left != 0 {
-                        ffi::av_frame_free(&mut frame);
-                        return Err(format!("the stream has a crop offset (top {crop_top}, left {crop_left}); only frames whose picture starts at the top-left corner are supported"));
-                    }
-                    let frames_context = (*(*frame).hw_frames_ctx).data as *const ffi::AVHWFramesContext;
-                    let format = match (*frames_context).sw_format {
-                        ffi::AV_PIX_FMT_NV12 => PixelFormat::Nv12,
-                        ffi::AV_PIX_FMT_P010LE => PixelFormat::P010,
-                        other => {
-                            ffi::av_frame_free(&mut frame);
-                            return Err(format!("the stream decodes to pixel format {other}; only 4:2:0 in 8 bits (NV12) or 10 bits (P010) is supported"));
-                        }
-                    };
                     let pts = if (*frame).best_effort_timestamp != ffi::NO_PTS { (*frame).best_effort_timestamp } else { (*frame).pts };
                     if pts == ffi::NO_PTS {
                         ffi::av_frame_free(&mut frame);
                         return Err("the decoded frame has neither a best-effort timestamp nor a pts; frames cannot be placed on the timeline".to_owned());
                     }
+                    let format = match self.surface_format(frame) {
+                        Ok(Some(format)) => format,
+                        Ok(None) => match self.convert(frame) {
+                            Ok((converted, format)) => {
+                                ffi::av_frame_free(&mut frame);
+                                frame = converted;
+                                format
+                            }
+                            Err(message) => {
+                                ffi::av_frame_free(&mut frame);
+                                return Err(message);
+                            }
+                        },
+                        Err(message) => {
+                            ffi::av_frame_free(&mut frame);
+                            return Err(message);
+                        }
+                    };
                     Ok(Some(DecodedFrame { frame, pts, format, turns: self.turns, aspect: self.proxy.as_ref().and_then(|proxy| proxy.display_aspect), origin: None }))
                 }
                 Ok(false) => {
@@ -598,6 +648,40 @@ impl SequentialDecoder {
                 }
             }
         }
+    }
+
+    /// The format of `frame` when the renderer can take it as it is, an NV12 or P010 D3D12
+    /// surface; `None` when it must go through [`Self::convert`].
+    ///
+    /// # Safety
+    /// `frame` must be a valid decoded frame.
+    unsafe fn surface_format(&self, frame: *const ffi::AVFrame) -> Result<Option<PixelFormat>, String> {
+        if (*frame).format != ffi::AV_PIX_FMT_D3D12 {
+            return Ok(None);
+        }
+        // Frame cropping offsets a D3D12 frame cannot express: only right and bottom padding is
+        // supported, as gpufx reads the top-left region. (Software frames come cropped.)
+        let (crop_top, crop_left) = ((*frame).crop_top, (*frame).crop_left);
+        if crop_top != 0 || crop_left != 0 {
+            return Err(format!("the stream has a crop offset (top {crop_top}, left {crop_left}); only frames whose picture starts at the top-left corner are supported"));
+        }
+        let frames_context = (*(*frame).hw_frames_ctx).data as *const ffi::AVHWFramesContext;
+        Ok(match (*frames_context).sw_format {
+            ffi::AV_PIX_FMT_NV12 => Some(PixelFormat::Nv12),
+            ffi::AV_PIX_FMT_P010LE => Some(PixelFormat::P010),
+            _ => None,
+        })
+    }
+
+    /// `frame` converted to NV12 or P010 and uploaded into a D3D12 surface: a new frame.
+    ///
+    /// # Safety
+    /// `frame` must be a valid decoded frame.
+    unsafe fn convert(&mut self, frame: *const ffi::AVFrame) -> Result<(*mut ffi::AVFrame, PixelFormat), String> {
+        if self.converter.is_none() {
+            self.converter = Some(software::FrameConverter::new((*self.codec_context).hw_device_ctx)?);
+        }
+        self.converter.as_mut().expect("made above").convert(frame)
     }
 
     fn decode_error(&self, what: &str, status: i32) -> String {
@@ -840,6 +924,7 @@ impl Drop for SequentialDecoder {
     fn drop(&mut self) {
         self.held = None;
         self.lookahead = None;
+        self.converter = None;
         // SAFETY: each pointer is null or owned by self, and these calls accept null.
         unsafe {
             ffi::av_frame_free(&mut *self.latest_started);
@@ -855,6 +940,22 @@ mod tests {
     use super::*;
 
     const THRESHOLD: i64 = 2000;
+
+    #[test]
+    fn d3d12_is_chosen_when_offered_and_software_otherwise() {
+        let hardware = |format| format == ffi::AV_PIX_FMT_D3D12 || format == 1000;
+        assert_eq!(pick_format(&[1000, ffi::AV_PIX_FMT_D3D12, ffi::AV_PIX_FMT_YUV420P], hardware), ffi::AV_PIX_FMT_D3D12);
+        // H.264 4:2:2 offers no hardware format: before, nothing was chosen and decoding failed.
+        assert_eq!(pick_format(&[ffi::AV_PIX_FMT_YUV422P10LE], hardware), ffi::AV_PIX_FMT_YUV422P10LE);
+        assert_eq!(pick_format(&[1000, ffi::AV_PIX_FMT_YUV444P], hardware), ffi::AV_PIX_FMT_YUV444P);
+        assert_eq!(pick_format(&[1000], hardware), ffi::AV_PIX_FMT_NONE);
+    }
+
+    #[test]
+    fn only_420_streams_are_expected_to_decode_in_hardware() {
+        assert!(likely_hardware(ffi::AV_PIX_FMT_YUV420P) && likely_hardware(ffi::AV_PIX_FMT_YUV420P10LE));
+        assert!(!likely_hardware(ffi::AV_PIX_FMT_YUV422P10LE) && !likely_hardware(ffi::AV_PIX_FMT_YUV444P));
+    }
 
     #[test]
     fn av1_without_a_gpu_decoder_says_so() {

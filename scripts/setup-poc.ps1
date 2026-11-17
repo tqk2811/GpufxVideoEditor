@@ -174,6 +174,57 @@ function New-TestClip {
     Write-Host "Generated $output"
 }
 
+function New-FormatClip {
+    # A short clip in a layout D3D12VA may not decode (4:2:2, 4:4:4, a size change midway), to check
+    # the software fallback of crates/d3d12-backend/src/decoder/software.rs by eye in the editor.
+    param(
+        [string]$Name,
+        [string[]]$Encoder,
+        [string]$PixelFormat
+    )
+
+    $output = Join-Path $clipsDir $Name
+    if ((Test-Path $output) -and -not $Force) {
+        Write-Host "Clip already present: $output"
+        return
+    }
+    # Only for looking at by eye: an ffmpeg without the encoder skips the clip instead of failing.
+    $encoders = & ffmpeg -hide_banner -encoders 2>$null
+    if (-not ($encoders | Select-String -SimpleMatch " $($Encoder[0]) ")) {
+        Write-Warning "Skipping ${Name}: the ffmpeg on PATH has no $($Encoder[0]) encoder"
+        return
+    }
+    & ffmpeg -hide_banner -loglevel warning -y -f lavfi -i 'smptehdbars=size=1280x720:rate=30:duration=3' `
+        -vf "format=$PixelFormat" -an -c:v @Encoder -pix_fmt $PixelFormat `
+        -colorspace bt709 -color_primaries bt709 -color_trc bt709 $output
+    if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for $Name ($LASTEXITCODE)" }
+    Write-Host "Generated $output"
+}
+
+function New-ResolutionChangeClip {
+    # Two seconds at 1280x720 then two at 960x720, one H.264 stream joined without re-encoding.
+    $output = Join-Path $clipsDir 'resolution-change.mp4'
+    if ((Test-Path $output) -and -not $Force) {
+        Write-Host "Clip already present: $output"
+        return
+    }
+    $parts = @(
+        @{ Path = (Join-Path $clipsDir 'resolution-change-1.ts'); Source = 'testsrc2=size=1280x720:rate=30:duration=2' },
+        @{ Path = (Join-Path $clipsDir 'resolution-change-2.ts'); Source = 'smptehdbars=size=960x720:rate=30:duration=2' }
+    )
+    foreach ($part in $parts) {
+        & ffmpeg -hide_banner -loglevel warning -y -f lavfi -i $part.Source -an -c:v libx264 -preset veryfast -pix_fmt yuv420p -g 30 $part.Path
+        if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for $($part.Path) ($LASTEXITCODE)" }
+    }
+    $list = Join-Path $clipsDir 'resolution-change.txt'
+    $parts | ForEach-Object { "file '$($_.Path -replace '\\', '/')'" } | Set-Content -Encoding ascii $list
+    & ffmpeg -hide_banner -loglevel warning -y -f concat -safe 0 -i $list -c copy $output
+    if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed for resolution-change.mp4 ($LASTEXITCODE)" }
+    $parts | ForEach-Object { Remove-Item $_.Path }
+    Remove-Item $list
+    Write-Host "Generated $output"
+}
+
 Initialize-Submodules
 Install-FFmpeg
 Install-GplFFmpeg
@@ -187,3 +238,8 @@ New-TestClip -Name 'clip-c.mp4' -Source 'mandelbrot=size=1920x1080:rate=30'
 New-TestClip -Name 'gop250-a.mp4' -Source 'testsrc2=size=1920x1080:rate=30' -Gop 250
 New-TestClip -Name 'gop250-b.mp4' -Source 'smptehdbars=size=1920x1080:rate=30,hue=H=2*PI*t/10' -Gop 250
 New-TestClip -Name 'gop250-c.mp4' -Source 'mandelbrot=size=1920x1080:rate=30' -Gop 250
+# Sources outside the plain D3D12VA path (see crates/gpufx-render/tests/source_formats.rs).
+New-FormatClip -Name 'prores-422-10.mov' -Encoder 'prores_ks', '-profile:v', '3' -PixelFormat 'yuv422p10le'
+New-FormatClip -Name 'h264-422-10.mp4' -Encoder 'libx264', '-crf', '16' -PixelFormat 'yuv422p10le'
+New-FormatClip -Name 'hevc-444-8.mp4' -Encoder 'libx265', '-crf', '16', '-x265-params', 'log-level=error' -PixelFormat 'yuv444p'
+New-ResolutionChangeClip
