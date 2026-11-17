@@ -328,11 +328,24 @@ pub(crate) fn outline_px(width: f32, font_px: f32) -> f32 {
 
 /// Draws `outlines` of the coverage `fill` (squared distances `squared`) over `canvas`, widest
 /// first.
+///
+/// As in CapCut, an outline is a ring around the glyphs, from their edge out to its width: it never
+/// covers the inside of the glyphs, which shows the paint drawn there next (the fill of the text,
+/// the paint of a shadow) or, when that paint is transparent, whatever lies under the layer. So a
+/// shadow at distance 0 with a transparent paint and outlines draws only rings, as CapCut packs
+/// often use it. The rings are drawn so that the paint of the glyphs, put over them next with the
+/// coverage `fill`, meets them without a seam along the anti-aliased edge.
 pub(crate) fn draw_outlines(canvas: &mut [[f32; 4]], fill: &Mask, squared: &[f64], outlines: &[TextOutline], painter: &Painter) {
     let mut sorted: Vec<(f32, &TextPaint)> = outlines.iter().map(|outline| (outline_px(outline.width, painter.font_px), &outline.paint)).filter(|(width, _)| *width > 0.0).collect();
     sorted.sort_by(|a, b| b.0.total_cmp(&a.0));
     for (width, paint) in sorted {
-        painter.draw(canvas, &fill.dilated(squared, width), paint);
+        let mut ring = fill.dilated(squared, width);
+        // Coverage of the ring alone is `grown - f`; dividing by `1 - f` makes the fill drawn over
+        // it with coverage `f` add up to `grown` at the edge, as two shapes side by side would.
+        for (r, &f) in ring.data.iter_mut().zip(&fill.data) {
+            *r = if f >= 1.0 { 0.0 } else { ((*r - f) / (1.0 - f)).clamp(0.0, 1.0) };
+        }
+        painter.draw(canvas, &ring, paint);
     }
 }
 
@@ -384,8 +397,9 @@ pub(crate) fn draw_shadows(canvas: &mut [[f32; 4]], text: &TextContent, shadows:
     }
 }
 
-/// Draws the inner shadows of `text` over `canvas`, the last first: the outside of the coverage
-/// `fill`, moved and blurred, kept where the glyphs are.
+/// Draws the inner shadows of `text` over `canvas`, the last first: as in CapCut, the paint covers
+/// the glyphs where they overlap themselves moved by the shadow's offset (and blurred), so a rim of
+/// the fill stays bare along the edge facing away from the offset, as if lit from that side.
 pub(crate) fn draw_inner_shadows(canvas: &mut [[f32; 4]], text: &TextContent, fill: &Mask, painter: &Painter) {
     let font_px = painter.font_px;
     for shadow in text.inner_shadows.iter().rev() {
@@ -397,7 +411,7 @@ pub(crate) fn draw_inner_shadows(canvas: &mut [[f32; 4]], text: &TextContent, fi
         let mut mask = fill.shifted(dx, dy);
         mask.blur(blur);
         for (v, &a) in mask.data.iter_mut().zip(&fill.data) {
-            *v = (1.0 - *v) * a;
+            *v *= a;
         }
         painter.draw(canvas, &mask, &shadow.paint);
     }

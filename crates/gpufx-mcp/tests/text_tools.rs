@@ -583,7 +583,7 @@ fn layers_no_text_can_have_are_refused_and_change_nothing() {
         (json!({"fill": solid, "color": [1, 2, 3, 255]}), "color with fill"),
         (json!({"outlines": [outline], "outline": {"color": [0, 0, 0, 255], "width": 0.1}}), "outline with outlines"),
         (json!({"outlines": [outline, outline, outline, outline, outline]}), "five outlines"),
-        (json!({"outlines": [{"width": 0.5, "paint": solid}]}), "an outline too wide"),
+        (json!({"outlines": [{"width": 0.6, "paint": solid}]}), "an outline too wide"),
         (json!({"fill": {"kind": "gradient", "stops": [{"position": 0.0, "color": [0, 0, 0, 255]}]}}), "a gradient of one stop"),
         (json!({"fill": {"kind": "gradient", "stops": [{"position": 0.8, "color": [0, 0, 0, 255]}, {"position": 0.2, "color": [0, 0, 0, 255]}]}}), "stops going back"),
         (json!({"fill": {"kind": "texture", "image": {"kind": "file", "path": "pictures/a.png"}}}), "a relative texture file"),
@@ -601,7 +601,7 @@ fn layers_no_text_can_have_are_refused_and_change_nothing() {
         }
         assert_eq!(call_err(&mut session, "text_set", call).code, "invalid_params", "{why}");
     }
-    let error = call_err(&mut session, "text_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}, "outlines": [{"width": 0.5, "paint": solid}]}));
+    let error = call_err(&mut session, "text_set", json!({"expected_revision": current, "clip": {"track": 0, "clip": 0}, "outlines": [{"width": 0.6, "paint": solid}]}));
     assert!(error.message.contains("outlines[0].width"), "names the field: {}", error.message);
     assert_eq!(project_of(&mut session), known, "a refusal changes nothing");
     // text_add takes the layers in its style.

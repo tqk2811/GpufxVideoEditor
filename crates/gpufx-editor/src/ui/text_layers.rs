@@ -15,7 +15,7 @@ use std::cell::OnceCell;
 use std::ops::RangeInclusive;
 
 /// Outline width, in percent of the font size ([`engine::MAX_TEXT_OUTLINE_WIDTH`]).
-const OUTLINE_WIDTH_RANGE: RangeInclusive<f64> = 0.0..=25.0;
+const OUTLINE_WIDTH_RANGE: RangeInclusive<f64> = 0.0..=50.0;
 /// Shadow distance and blur, in percent of the font size ([`engine::MAX_TEXT_SHADOW_DISTANCE`],
 /// [`engine::MAX_TEXT_SHADOW_BLUR`]).
 const SHADOW_DISTANCE_RANGE: RangeInclusive<f64> = 0.0..=400.0;

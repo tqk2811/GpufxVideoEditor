@@ -75,6 +75,42 @@ fn shadows_lie_under_outlines_and_outlines_widest_first_under_the_fill() {
 }
 
 #[test]
+fn outlines_are_rings_that_leave_the_inside_of_the_glyphs_to_the_layer_paint() {
+    let Some(mut r) = rasterizer() else { return };
+    let font_px = SIZE * HEIGHT as f32;
+    let step = |parts: f32| (parts * font_px).round() as i32;
+    // A transparent fill with an outline: only the ring, the inside stays clear.
+    let mut text = TextContent::new("I", SIZE);
+    text.fill = TextPaint::solid([255, 255, 255, 0]);
+    text.outlines = vec![TextOutline::solid([0, 0, 0, 255], 0.03)];
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let y = image.height as i32 / 2;
+    let (left, right) = stem(&image, y, |p| p[3] == 255);
+    let (inner_left, inner_right) = (left + step(0.03), right - step(0.03));
+    assert!(inner_right - inner_left > 4, "the stem is wider than its rings");
+    assert_eq!(pixel(&image, (inner_left + inner_right) / 2, y)[3], 0, "the inside of the glyph is not painted");
+    assert_eq!(pixel(&image, left + 1, y), [0, 0, 0, 255], "the ring");
+    // A shadow at distance 0, transparent, with an outline: a ring over the red shadow under it,
+    // which shows through the inside.
+    let mut text = TextContent::new("I", SIZE);
+    text.fill = TextPaint::solid([255, 255, 255, 0]);
+    let mut rings = TextShadow::solid([0, 0, 0, 0], [0.0, 0.0], 0.0);
+    rings.outlines = vec![TextOutline::solid([0, 0, 0, 255], 0.03)];
+    text.shadows = vec![rings, TextShadow::solid([255, 0, 0, 255], [0.0, 0.0], 0.0)];
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let (left, right) = stem(&image, y, red);
+    assert_eq!(pixel(&image, (left + right) / 2, y), [255, 0, 0, 255], "the lower shadow inside the glyph");
+    assert_eq!(pixel(&image, left - step(0.015), y), [0, 0, 0, 255], "the ring of the upper shadow around it");
+    // An opaque fill meets its outline without a lighter seam along the anti-aliased edge.
+    let mut text = TextContent::new("I", SIZE);
+    text.fill = TextPaint::solid([0, 0, 0, 255]);
+    text.outlines = vec![TextOutline::solid([0, 0, 0, 255], 0.03)];
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let (left, right) = stem(&image, y, |p| p[3] == 255);
+    assert!((left..=right).all(|x| pixel(&image, x, y) == [0, 0, 0, 255]), "no seam between the ring and the fill");
+}
+
+#[test]
 fn a_stack_of_shadows_reads_as_depth_and_is_drawn_from_one_picture() {
     let Some(mut r) = rasterizer() else { return };
     let font_px = SIZE * HEIGHT as f32;
@@ -117,7 +153,7 @@ fn a_gradient_runs_across_the_whole_text_at_its_angle() {
 }
 
 #[test]
-fn an_inner_shadow_darkens_the_edge_it_comes_from() {
+fn an_inner_shadow_covers_the_glyphs_but_a_rim_facing_away_from_its_offset() {
     let Some(mut r) = rasterizer() else { return };
     let font_px = SIZE * HEIGHT as f32;
     let mut text = TextContent::new("I", SIZE);
@@ -126,8 +162,10 @@ fn an_inner_shadow_darkens_the_edge_it_comes_from() {
     let y = image.height as i32 / 2;
     let (left, right) = stem(&image, y, |p| p[3] == 255);
     let inset = (0.02 * font_px) as i32;
-    assert_eq!(pixel(&image, left + inset, y), [0, 0, 0, 255], "shadow along the left edge, for a shadow cast to the right");
-    assert_eq!(pixel(&image, right - inset, y), [255, 255, 255, 255], "none along the right edge");
+    // As in CapCut: the glyph moved right overlaps itself everywhere but a rim on the left.
+    assert_eq!(pixel(&image, left + inset, y), [255, 255, 255, 255], "the fill bare along the left edge, for a shadow cast to the right");
+    assert_eq!(pixel(&image, right - inset, y), [0, 0, 0, 255], "the paint along the right edge");
+    assert_eq!(pixel(&image, (left + right) / 2 + inset, y), [0, 0, 0, 255], "and over the middle");
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {

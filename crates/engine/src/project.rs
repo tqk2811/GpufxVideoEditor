@@ -537,7 +537,7 @@ pub const MAX_TEXT_SHADOWS: usize = 32;
 /// The most colour stops a gradient may have.
 pub const MAX_GRADIENT_STOPS: usize = 16;
 /// The widest an outline may be, as a part of the font size.
-pub const MAX_TEXT_OUTLINE_WIDTH: f32 = 0.25;
+pub const MAX_TEXT_OUTLINE_WIDTH: f32 = 0.5;
 /// The farthest a shadow may lie from the text, as a part of the font size.
 pub const MAX_TEXT_SHADOW_DISTANCE: f32 = 4.0;
 /// The most a shadow may blur, as a part of the font size.
@@ -705,7 +705,10 @@ impl TexturePackType {
     }
 }
 
-/// An outline around each glyph.
+/// An outline around each glyph: a ring from the glyph edge out to `width`, as CapCut draws a
+/// stroke. It never covers the inside of the glyphs; that shows the paint of the layer the outline
+/// belongs to (the text's fill, or a shadow's paint) or, where that paint is transparent, what lies
+/// under the layer. Several outlines of one layer are drawn widest first, so each shows as a band.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextOutline {
     /// Width past the glyph edge, in parts of the font size, 0 to [`MAX_TEXT_OUTLINE_WIDTH`].
@@ -749,10 +752,12 @@ pub struct TextShadow {
     /// Blur radius, in parts of the font size, 0 to [`MAX_TEXT_SHADOW_BLUR`].
     #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub blur: f32,
-    /// What the shadow itself (inside its outlines) is painted with.
+    /// What the shadow's glyphs (inside its outline rings) are painted with. Transparent leaves
+    /// only the rings, so a shadow at distance 0 with outlines adds strokes around the text.
     pub paint: TextPaint,
-    /// Outlines of the shadow, measured from the glyph edge and drawn widest first like the
-    /// text's; at most [`MAX_TEXT_OUTLINES`].
+    /// Outlines of the shadow: rings measured from the glyph edge, drawn widest first like the
+    /// text's and under nothing of the shadow itself (they lie outside its glyphs); at most
+    /// [`MAX_TEXT_OUTLINES`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outlines: Vec<TextOutline>,
 }
@@ -776,8 +781,10 @@ impl TextShadow {
     }
 }
 
-/// A shadow inside the glyphs: dark where the glyph edge on the side it comes from would cast one
-/// over the fill. Units as for [`TextShadow`].
+/// A shadow inside the glyphs, as CapCut draws it: the paint covers the glyphs where they overlap
+/// themselves moved by the offset (`distance` towards `angle`, then blurred), so the fill stays
+/// bare in a rim along the edges facing the other way, as if lit from there. Units as for
+/// [`TextShadow`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextInnerShadow {
     /// In parts of the font size, 0 to [`MAX_TEXT_SHADOW_DISTANCE`].

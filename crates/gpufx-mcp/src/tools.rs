@@ -354,8 +354,9 @@ impl From<PaintParam> for engine::TextPaint {
 #[schemars(inline)]
 #[serde(deny_unknown_fields)]
 pub struct LayerOutlineParam {
-    /// Width past the glyph edge, in parts of the font size, 0 to 0.25. Each outline is measured
-    /// from the glyph edge, and the widest is drawn first.
+    /// Width past the glyph edge, in parts of the font size, 0 to 0.5. Each outline is a ring
+    /// measured from the glyph edge (the inside of the glyphs shows the layer's paint), and the
+    /// widest is drawn first.
     pub width: f32,
     pub paint: PaintParam,
 }
