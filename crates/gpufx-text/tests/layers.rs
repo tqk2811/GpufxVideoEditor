@@ -464,10 +464,11 @@ fn per_glyph_paints_follow_glyphs_that_move() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A picture `size` pixels square, red in the middle third (each way) and transparent around.
+/// Two cells side by side, each `size` pixels square, red in their middle third (each way) and
+/// transparent around.
 fn red_middle(dir: &std::path::Path, size: u32) -> TextImageRef {
     let path = dir.join("middle.png");
-    image::RgbaImage::from_fn(size, size, |x, y| if (size / 3..2 * size / 3).contains(&x) && (size / 3..2 * size / 3).contains(&y) { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 0, 0]) }).save(&path).unwrap();
+    image::RgbaImage::from_fn(2 * size, size, |x, y| if (size / 3..2 * size / 3).contains(&(x % size)) && (size / 3..2 * size / 3).contains(&y) { image::Rgba([255, 0, 0, 255]) } else { image::Rgba([0, 0, 0, 0]) }).save(&path).unwrap();
     TextImageRef::File { path: path.to_string_lossy().into_owned() }
 }
 
@@ -480,7 +481,7 @@ fn a_glyph_cell_is_as_tall_as_its_glyph_whatever_the_glyph_width() {
     let mut text = TextContent::new("WI", SIZE);
     text.fill = TextPaint::solid([0, 0, 0, 0]);
     // The ring around each glyph shows the swatch, so its height can be measured outside the ink.
-    text.outlines = vec![TextOutline { width: 0.3, paint: TextPaint::Texture(TextTexture { fit: TextureFit::Glyph, ..TextTexture::new(red_middle(&dir, 30)) }) }];
+    text.outlines = vec![TextOutline { width: 0.3, paint: TextPaint::Texture(TextTexture { fit: TextureFit::Glyph, cells: 2, ..TextTexture::new(red_middle(&dir, 30)) }) }];
     let image = r.rasterize(&text, HEIGHT, 1.0);
     let y = image.height as i32 / 2;
     let swatches = runs(&image, y, red);
@@ -554,5 +555,36 @@ fn a_texture_opacity_fades_the_picture_and_its_base_as_one() {
     text.fill = TextPaint::Texture(TextTexture { opacity: 0.5, base, ..TextTexture::new(red_picture) });
     let p = middle(&mut r, &text);
     assert!(p[1] < 5 && (p[3] as i32 - 128).abs() <= 2, "{p:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_glyph_texture_of_one_cell_covers_a_wide_glyph_without_repeating() {
+    let Some(mut r) = rasterizer() else { return };
+    let dir = scratch("one-cell");
+    // A glyph much wider than tall.
+    let mut text = TextContent::new("m", SIZE);
+    // Red on the left half, blue on the right: once across the glyph, one change of colour.
+    text.fill = TextPaint::Texture(TextTexture { fit: TextureFit::Glyph, ..TextTexture::new(picture(&dir, "wide.png", &[[255, 0, 0, 255], [0, 0, 255, 255]])) });
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let y = (0..image.height as i32).filter(|&y| runs(&image, y, |p| p[3] == 255).len() == 3).nth(5).expect("a row through the three stems of the m");
+    let reds = runs(&image, y, |p| p[3] == 255 && p[0] > p[2]).len();
+    let blues = runs(&image, y, |p| p[3] == 255 && p[2] > p[0]);
+    let first_blue = blues.first().map_or(i32::MAX, |b| b.0);
+    let last_red = runs(&image, y, |p| p[3] == 255 && p[0] > p[2]).last().map_or(i32::MIN, |r| r.1);
+    assert!(reds > 0 && !blues.is_empty() && last_red < first_blue, "red then blue only, not repeated: {reds} red runs, blue {blues:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_texture_mix_without_a_base_leaves_the_picture_whole() {
+    let Some(mut r) = rasterizer() else { return };
+    let dir = scratch("mix-no-base");
+    let mut text = TextContent::new("I", SIZE);
+    text.fill = TextPaint::Texture(TextTexture { mix: 0.3, ..TextTexture::new(picture(&dir, "red.png", &[[255, 0, 0, 255]])) });
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let y = image.height as i32 / 2;
+    let (left, right) = stem(&image, y, |p| p[3] > 0);
+    assert_eq!(pixel(&image, (left + right) / 2, y), [255, 0, 0, 255]);
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -449,9 +449,10 @@ impl<'a> Painter<'a> {
         let TextImageRef::File { path } = &texture.image else { return [0.0; 4] };
         let Some(picture) = self.textures.get(path) else { return [0.0; 4] };
         let scale = if texture.scale.is_finite() { texture.scale.clamp(*engine::TEXT_TEXTURE_SCALE_RANGE.start(), *engine::TEXT_TEXTURE_SCALE_RANGE.end()) } else { 1.0 };
-        let opacity = if texture.mix.is_finite() { texture.mix.clamp(0.0, 1.0) } else { 1.0 };
+        // The mix only says how much of the picture covers a base; with none it is ignored.
+        let opacity = if texture.base.is_none() { 1.0 } else if texture.mix.is_finite() { texture.mix.clamp(0.0, 1.0) } else { 1.0 };
         if texture.fit == TextureFit::Glyph {
-            // One cell per glyph, in turn, centred on the glyph's box. The cell is taken as a square
+            // One cell per glyph, in turn, centred on the glyph's box. With more than one cell, the cell is taken as a square
             // as wide as the cell, from the middle of the picture, whose side spans the height of the
             // glyph's box: so every glyph of a line gets a swatch of the same size, whatever its
             // width, and swatches of neighbouring glyphs meet as one band. Measured on the CapCut
@@ -463,7 +464,9 @@ impl<'a> Painter<'a> {
             let cell_width = (picture.width / cells).max(1);
             let cell = number % cells;
             let (cw, ih) = (cell_width as f32, picture.height as f32);
-            let zoom = ((y1 - y0) / cw).max(1e-3) * scale;
+            // A picture of one cell keeps covering the whole box, as a cell of any shape would
+            // need; the square read is only for pictures cut into cells.
+            let zoom = if cells > 1 { (y1 - y0) / cw } else { ((x1 - x0) / cw).max((y1 - y0) / ih) }.max(1e-3) * scale;
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
             let (qx, qy) = turned(texture.angle, (cx, cy), px, py);
             let mut u = (qx - cx) / zoom + cw / 2.0;
@@ -592,17 +595,14 @@ pub(crate) fn draw_shadows(canvas: &mut [[f32; 4]], text: &TextContent, shadows:
     let (width, height) = (fill.width, fill.height);
     // The picture of the shadow last drawn, unmoved, with the index of the shadow it was drawn for.
     let mut kept: Option<(usize, Vec<[f32; 4]>)> = None;
+    // The glyphs grown by the spread last asked for, made only when a shadow draws with them.
+    let mut grown: Option<(f32, Mask)> = None;
     for (index, (shadow, px)) in text.shadows.iter().zip(shadows).enumerate().rev() {
         let (dx, dy) = (px.dx.round() as i32, px.dy.round() as i32);
-        // The glyphs the shadow's paint covers: grown by its spread.
-        let grown = match squared.filter(|_| px.spread > 0.0) {
-            Some(squared) => std::borrow::Cow::Owned(fill.dilated(squared, px.spread)),
-            None => std::borrow::Cow::Borrowed(fill),
-        };
         let solid = shadow.paint.solid_color().filter(|_| shadow.outlines.iter().all(|outline| outline_px(outline.width, painter.font_px) <= 0.0));
         if let Some(color) = solid {
             // A plain shadow needs only its coverage.
-            let mut mask = grown.shifted(dx, dy);
+            let mut mask = grown_by(&mut grown, fill, squared, px.spread).shifted(dx, dy);
             mask.blur(px.blur);
             painter.draw(canvas, &mask, &TextPaint::solid(color));
             continue;
@@ -616,13 +616,19 @@ pub(crate) fn draw_shadows(canvas: &mut [[f32; 4]], text: &TextContent, shadows:
             if let Some(squared) = squared {
                 draw_outlines(&mut layer, fill, squared, &shadow.outlines, painter);
             }
-            // The glyphs are blurred on their own and laid over the rings, which stay sharp.
-            let mut body = vec![[0f32; 4]; width * height];
-            painter.grown(px.spread).draw(&mut body, &grown, &shadow.paint);
-            blur_colors(&mut body, width, height, px.blur);
-            for (dst, color) in layer.iter_mut().zip(&body) {
-                if color[3] > 0.0 {
-                    over(dst, *color, 1.0);
+            // The glyphs are blurred on their own and laid over the rings, which stay sharp; with no
+            // blur they are painted straight over the rings.
+            let mask = grown_by(&mut grown, fill, squared, px.spread);
+            if super::blur_half(px.blur) == 0 {
+                painter.grown(px.spread).draw(&mut layer, mask, &shadow.paint);
+            } else {
+                let mut body = vec![[0f32; 4]; width * height];
+                painter.grown(px.spread).draw(&mut body, mask, &shadow.paint);
+                blur_colors(&mut body, width, height, px.blur);
+                for (dst, color) in layer.iter_mut().zip(&body) {
+                    if color[3] > 0.0 {
+                        over(dst, *color, 1.0);
+                    }
                 }
             }
             kept = Some((index, layer));
@@ -644,6 +650,16 @@ pub(crate) fn draw_shadows(canvas: &mut [[f32; 4]], text: &TextContent, shadows:
             }
         }
     }
+}
+
+/// The coverage `fill` grown by `spread` pixels, kept in `cache` for the next shadow of the same
+/// spread; `fill` itself with no spread (or no distances to grow it by).
+fn grown_by<'a>(cache: &'a mut Option<(f32, Mask)>, fill: &'a Mask, squared: Option<&[f64]>, spread: f32) -> &'a Mask {
+    let Some(squared) = squared.filter(|_| spread > 0.0) else { return fill };
+    if cache.as_ref().is_none_or(|(at, _)| *at != spread) {
+        *cache = Some((spread, fill.dilated(squared, spread)));
+    }
+    &cache.as_ref().expect("just made").1
 }
 
 /// Draws the inner shadows of `text` over `canvas`, the last first: as in CapCut, the paint covers
