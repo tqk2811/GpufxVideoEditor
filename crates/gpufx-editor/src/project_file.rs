@@ -86,6 +86,18 @@ fn is_relative_source(source: &str) -> bool {
     !Path::new(source).has_root() && !matches!(Path::new(source).components().next(), Some(Component::Prefix(_)))
 }
 
+/// The paths of the texture files the text of `clip` paints with, each as often as a layer names it.
+fn texture_files(clip: &mut engine::Clip) -> Vec<&mut String> {
+    let Some(text) = clip.text.as_mut() else { return Vec::new() };
+    text.paints_mut()
+        .into_iter()
+        .filter_map(|paint| match paint {
+            engine::TextPaint::Texture(engine::TextTexture { image: engine::TextImageRef::File { path }, .. }) => Some(path),
+            _ => None,
+        })
+        .collect()
+}
+
 /// `project` as stored in `file`: sources under its folder become relative. An `asset:` source is
 /// no path, and is kept as it is both ways, so a project holds no absolute path to a pack.
 pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
@@ -93,6 +105,11 @@ pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
     let mut stored = project.clone();
     for clip in stored.tracks.iter_mut().flat_map(|track| &mut track.clips) {
         if let Some(engine::FontRef::File { path }) = clip.text.as_mut().map(|text| &mut text.font) {
+            if let Some(relative) = relative_under(folder, Path::new(path.as_str())) {
+                *path = relative;
+            }
+        }
+        for path in texture_files(clip) {
             if let Some(relative) = relative_under(folder, Path::new(path.as_str())) {
                 *path = relative;
             }
@@ -113,6 +130,12 @@ pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
     for clip in project.tracks.iter_mut().flat_map(|track| &mut track.clips) {
         if let Some(engine::FontRef::File { path }) = clip.text.as_mut().map(|text| &mut text.font) {
             if Path::new(path.as_str()).is_relative() {
+                let joined = folder.join(path.as_str());
+                *path = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
+            }
+        }
+        for path in texture_files(clip) {
+            if Path::new(path.as_str()).is_relative() && !gpufx_text::is_network_or_device_path(path) {
                 let joined = folder.join(path.as_str());
                 *path = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
             }
@@ -276,6 +299,26 @@ mod tests {
         let opened = with_absolute_sources(with_font(["fonts/a.ttf", r"E:\fonts\b.ttf"]), file);
         assert_eq!(font(&opened, 0), file_font(r"D:\Work\fonts\a.ttf"));
         assert_eq!(font(&opened, 1), file_font(r"E:\fonts\b.ttf"));
+    }
+
+    #[test]
+    fn a_texture_file_is_relative_inside_the_folder_when_saved_and_absolute_when_opened() {
+        let file = Path::new(r"D:\Work\p.json");
+        let image = |path: &str| engine::TextImageRef::File { path: path.to_owned() };
+        let paint = |path: &str| engine::TextPaint::Texture(engine::TextTexture { image: image(path), fit: engine::TextureFit::Tile, scale: 1.0, angle: 0.0, opacity: 1.0 });
+        let with_textures = |fill: &str, outline: &str| {
+            let mut project = project(vec!["text:".to_owned()]);
+            let mut text = engine::TextContent::new("Hi", 0.1);
+            text.fill = paint(fill);
+            text.outlines = vec![engine::TextOutline { width: 0.1, paint: paint(outline) }];
+            project.tracks[0].clips[0].text = Some(text);
+            project
+        };
+        let images = |project: &Project| gpufx_text::text_images(project.tracks[0].clips[0].text.as_ref().unwrap()).into_iter().cloned().collect::<Vec<_>>();
+        let stored = with_relative_sources(&with_textures(r"D:\Work\pictures\a.png", r"E:\pictures\b.png"), file);
+        assert_eq!(images(&stored), vec![image("pictures/a.png"), image(r"E:\pictures\b.png")]);
+        let opened = with_absolute_sources(with_textures("pictures/a.png", r"\\server\share\c.png"), file);
+        assert_eq!(images(&opened), vec![image(r"D:\Work\pictures\a.png"), image(r"\\server\share\c.png")]);
     }
 
     #[test]

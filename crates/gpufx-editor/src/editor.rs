@@ -294,6 +294,9 @@ pub enum LeftTab {
 pub struct UiState {
     /// The text clip whose font file the inspector asked to choose; the window opens the dialog.
     pub font_file_request: Option<ClipKey>,
+    /// The text clip and the paint of it whose texture picture the inspector asked to choose; the
+    /// window opens the dialog.
+    pub texture_file_request: Option<(ClipKey, crate::text_clip::PaintSlot)>,
     /// The subtitle track the inspector asked to export; the window opens the Save dialog.
     pub subtitle_export_request: Option<usize>,
     /// The matting model the inspector asked to import from a zip; the window opens the dialog.
@@ -1105,6 +1108,7 @@ impl EditorState {
             other => other,
         };
         self.ui.font_file_request = None;
+        self.ui.texture_file_request = None;
         self.ui.subtitle_export_request = None;
         self.ui.matte_import_request = None;
         self.ui.matte_fetch_request = None;
@@ -1472,6 +1476,13 @@ impl EditorState {
         let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
         let text = clip.text.as_ref()?;
         self.text_shapes.borrow_mut().shape(&self.resolved_font(text), self.project().output.height).missing_family
+    }
+
+    /// The first texture picture text clip `key` paints with that cannot be drawn, so its layer is
+    /// left out; for a warning. `None` for a media clip or when every picture is there.
+    pub fn missing_texture(&self, key: ClipKey) -> Option<String> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        missing_texture(&self.font_paths, clip.text.as_ref()?)
     }
 
     /// `text` with a font of an installed font pack as the file it is, found through
@@ -2105,6 +2116,20 @@ impl EditorState {
         });
     }
 
+    /// Paints the layer `slot` of text clip `key` with the picture file `path`, as one undo step. A
+    /// texture keeps how it covered the text; another paint becomes a texture at its natural size.
+    /// Nothing when the clip or the layer is gone.
+    pub fn set_text_texture_file(&mut self, key: ClipKey, slot: crate::text_clip::PaintSlot, path: String) {
+        let Some(mut text) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.text.clone()) else { return };
+        let Some(paint) = slot.paint_mut(&mut text) else { return };
+        let image = engine::TextImageRef::File { path };
+        match paint {
+            engine::TextPaint::Texture(texture) => texture.image = image,
+            other => *other = crate::text_clip::texture_paint(image),
+        }
+        self.run(|project| set_text(project, key, text));
+    }
+
     /// Gives text clip `key` the style `reference` of the library as one undo step: the style's
     /// values are copied into the text, which keeps its content (see
     /// [`crate::text_style_library::LibraryTextStyle::apply`]); its animations replace the clip's
@@ -2701,8 +2726,44 @@ pub fn decode_subtitle_bytes(bytes: Vec<u8>) -> Result<String, String> {
 
 const NOT_UNICODE: &str = "the file is not UTF-8 or UTF-16 text: save it as UTF-8 and try again";
 
+/// The first picture `text` paints with that is not a readable file (a missing file, one on a
+/// network share or left relative) or not in an installed text style pack, found through `paths`
+/// as the compositor finds it. Only whether the file is there is checked, not that it decodes.
+fn missing_texture(paths: &ProjectPaths, text: &TextContent) -> Option<String> {
+    gpufx_text::text_images(text).into_iter().find_map(|image| {
+        let present = match image {
+            engine::TextImageRef::File { path } => gpufx_text::is_readable_texture_path(path) && Path::new(path).is_file(),
+            engine::TextImageRef::Pack { pack, file, pack_type } => paths.texture_pack_path(pack_type.name(), pack, file).is_ok_and(|path| path.is_file()),
+        };
+        (!present).then(|| image.label())
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_texture_that_cannot_be_read_is_named_for_the_warning() {
+        let dir = std::env::temp_dir().join(format!("gpufx-editor-missing-texture-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = dir.join("a.png");
+        std::fs::write(&picture, b"png").unwrap();
+        let paths = ProjectPaths::roots_only(&dir.join("p.json"), Vec::new());
+        let mut text = engine::TextContent::new("Hi", 0.1);
+        assert_eq!(super::missing_texture(&paths, &text), None, "no texture");
+        let texture = |image: engine::TextImageRef| engine::TextPaint::Texture(engine::TextTexture { image, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 });
+        let file = |path: &str| engine::TextImageRef::File { path: path.to_owned() };
+        text.fill = texture(file(&picture.to_string_lossy()));
+        assert_eq!(super::missing_texture(&paths, &text), None);
+        let gone = dir.join("gone.png").to_string_lossy().into_owned();
+        for path in [gone.as_str(), r"\\server\share\a.png", "a.png"] {
+            text.outlines = vec![engine::TextOutline { width: 0.1, paint: texture(file(path)) }];
+            assert_eq!(super::missing_texture(&paths, &text).as_deref(), Some(path));
+        }
+        text.outlines = vec![engine::TextOutline { width: 0.1, paint: texture(engine::TextImageRef::text_style_pack("nope", "a.png")) }];
+        assert_eq!(super::missing_texture(&paths, &text).as_deref(), Some("nope/a.png"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
     use crate::timeline::drag::{ClipDrag, DragKind, EditCommand};
     use engine::{Project, TICKS_PER_SECOND};
@@ -4855,8 +4916,8 @@ second line")), "Title…");
 
         let clip = &state.project().tracks[key.track].clips[key.clip];
         let text = clip.text.as_ref().unwrap();
-        assert_eq!((text.content.as_str(), text.weight, text.color), (content.as_str(), 800, [255, 0, 0, 255]));
-        assert!(text.outline.is_some());
+        assert_eq!((text.content.as_str(), text.weight, text.fill.main_color()), (content.as_str(), 800, [255, 0, 0, 255]));
+        assert!(text.outlines.first().is_some());
         assert_eq!(clip.animation.enter.as_ref().map(|value| value.preset.as_str()), Some("pop"));
         state.undo();
         assert_eq!(*state.project(), before, "one undo step takes it all back");
@@ -4938,6 +4999,32 @@ second line")), "Title…");
     }
 
     #[test]
+    fn a_layered_subtitle_style_gives_the_cues_of_its_track_their_layers_bloom_and_pictures() {
+        let mut state = EditorState::default();
+        let mut library = style_library();
+        let texture = engine::TextImageRef::Pack { pack: "s".into(), file: "glow.png".into(), pack_type: engine::TexturePackType::SubtitleStyle };
+        let fill = engine::TextPaint::Texture(engine::TextTexture { image: texture, fit: engine::TextureFit::Tile, scale: 1.0, angle: 0.0, opacity: 1.0 });
+        let bloom = engine::TextBloom { color: [255, 255, 0, 255], strength: 0.7, range: 0.3, dir_x: 0.0, dir_y: 0.2 };
+        let mut layered = library.packs[1].styles[0].clone();
+        layered.reference = "s/glow".to_owned();
+        layered.style = crate::text_style_install::PackTextStyle { fill: Some(fill.clone()), shadows: Some(vec![engine::TextShadow::solid([0, 0, 0, 255], [0.02, 0.02], 0.0)]), bloom: Some(bloom), ..Default::default() };
+        library.packs[1].styles.push(layered);
+        state.text_style_library = library;
+        let (track, _) = state.import_subtitles(SRT, None).unwrap();
+        state.apply_text_style(ClipKey { track, clip: 0 }, "p/bold");
+        let own = state.project().tracks[track].clips[0].clone();
+
+        state.set_subtitle_style(track, "s/glow");
+
+        let clips = &state.project().tracks[track].clips;
+        assert_eq!(clips[0], own, "the cue with its own style stays");
+        let cue = clips[1].text.as_ref().unwrap();
+        assert_eq!((&cue.fill, cue.shadows.len(), cue.bloom, cue.content.as_str()), (&fill, 1, Some(bloom), "Two
+lines"));
+        assert!(!cue.own_style);
+    }
+
+    #[test]
     fn the_style_of_the_track_given_to_a_cue_is_not_a_style_of_its_own() {
         let mut state = EditorState::default();
         state.text_style_library = style_library();
@@ -5008,6 +5095,34 @@ second line")), "Title…");
         let (x, y) = centre_of(&state, &clip);
         assert!((x - 0.5).abs() < 1e-6 && (y - 0.5).abs() < 1e-6, "{x} {y}");
         assert_eq!(state.status, Status::Info(Message::TextAdded));
+    }
+
+    #[test]
+    fn adding_a_layer_after_a_drag_of_another_is_its_own_undo_step() {
+        let (mut state, key) = added_text_state();
+        let before = state.project().tracks[key.track].clips[key.clip].text.clone().unwrap();
+        let mut text = before.clone();
+        text.outlines.push(engine::TextOutline { width: 0.01, paint: engine::TextPaint::solid([0, 0, 0, 255]) });
+        state.live_text(text.clone());
+        state.pointer_released();
+        // Drag the width of the outline.
+        for width in [0.02, 0.04, 0.06] {
+            text.outlines[0].width = width;
+            state.live_text(text.clone());
+        }
+        state.pointer_released();
+        let dragged = text.clone();
+        // The Add button: one more outline, committed by the release of the click.
+        text.outlines.push(engine::TextOutline { width: 0.01, paint: engine::TextPaint::solid([255, 0, 0, 255]) });
+        state.live_text(text.clone());
+        state.pointer_released();
+        let current = |state: &EditorState| state.project().tracks[key.track].clips[key.clip].text.clone().unwrap();
+        assert_eq!(current(&state), text);
+        state.undo();
+        assert_eq!(current(&state), dragged, "one undo removes only the added layer");
+        state.undo();
+        assert_eq!(current(&state).outlines.len(), 1);
+        assert_eq!(current(&state).outlines[0].width, 0.01, "the next one takes back the drag");
     }
 
     #[test]

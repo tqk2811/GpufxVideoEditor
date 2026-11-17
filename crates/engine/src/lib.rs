@@ -56,7 +56,7 @@ pub use project::{
     ClipPlacement, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH,
     Beat, ClipBeats, Marker, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipDenoise, ClipMatte, MatteModel, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, ClipVoice, DenoiseMode, VoiceEffect, VoicePreset, MAX_PITCH_SEMITONES, ROBOT_HZ,
     AudioOutput, Clip, Effect, LoadError, Output, Project, SubtitleTrack, Track, TrackKind, Transition,
-    FontRef, Rgba, TextAlign, ClipAnimation, AnimationRef, TextBackground, TextContent, TextOutline, TextShadow, TextGlow, MAX_GLOW_INTENSITY, GLOW_FALLOFF_RANGE, TextTransform, NORMAL_WEIGHT, TEXT_WEIGHT_RANGE, MAX_LETTER_SPACING, MAX_GLOW_RADIUS, TEXT_SOURCE, text_raster_scale, text_step_up, MAX_TEXT_SCALE, MIN_TEXT_SCALE,
+    FontRef, Rgba, TextAlign, ClipAnimation, AnimationRef, TextBackground, TextContent, TextOutline, TextShadow, TextInnerShadow, TextPaint, GradientStop, TextTexture, TextureFit, TextImageRef, TexturePackType, polar_to_offset, offset_to_polar, MAX_TEXT_OUTLINES, MAX_TEXT_SHADOWS, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOW_DISTANCE, MAX_TEXT_SHADOW_BLUR, TEXT_TEXTURE_SCALE_RANGE, TextGlow, TextBloom, MAX_BLOOM_RADIUS, MAX_BLOOM_DIR, MAX_GLOW_INTENSITY, GLOW_FALLOFF_RANGE, TextTransform, NORMAL_WEIGHT, TEXT_WEIGHT_RANGE, MAX_LETTER_SPACING, MAX_GLOW_RADIUS, TEXT_SOURCE, text_raster_scale, text_step_up, MAX_TEXT_SCALE, MIN_TEXT_SCALE,
     is_image_source, is_sticker_source, STICKER_SOURCE_PREFIX, speed_in_range, speed_milli, IMAGE_EXTENSIONS, MAX_SPEED, MIN_SPEED, SPEED_SCALE, SUPPORTED_VERSION,
 };
 pub use render::{ClipKey, DecoderSpec, RenderError};

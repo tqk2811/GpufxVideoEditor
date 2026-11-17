@@ -285,21 +285,31 @@ pub struct TextContent {
     pub font: FontRef,
     /// Font size, in parts of the output height. Must be above 0.
     pub size: f32,
-    /// Fill colour.
-    #[serde(default = "white")]
-    pub color: Rgba,
-    /// Outline around each glyph.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outline: Option<TextOutline>,
+    /// What fills the glyphs.
+    #[serde(default)]
+    pub fill: TextPaint,
+    /// Outlines around each glyph, each measured from the glyph edge (not from the outline inside
+    /// it). They are drawn widest first, so a narrower one shows on top of a wider one; at most
+    /// [`MAX_TEXT_OUTLINES`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outlines: Vec<TextOutline>,
     /// Box drawn behind the text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<TextBackground>,
-    /// Drop shadow.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shadow: Option<TextShadow>,
-    /// Glow around the glyphs, under the shadow.
+    /// Drop shadows, under the outlines. The first is drawn on top and the last at the bottom, so
+    /// a stack of shadows moving away step by step reads as the depth of a 3D text; at most
+    /// [`MAX_TEXT_SHADOWS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadows: Vec<TextShadow>,
+    /// Shadows inside the glyphs, over the fill, the first on top; at most [`MAX_TEXT_SHADOWS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inner_shadows: Vec<TextInnerShadow>,
+    /// Glow around the glyphs, under the shadows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glow: Option<TextGlow>,
+    /// Soft light spread from the whole text, under everything else of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloom: Option<TextBloom>,
     /// Horizontal alignment of the lines.
     #[serde(default)]
     pub align: TextAlign,
@@ -334,11 +344,13 @@ impl TextContent {
             content: content.into(),
             font: FontRef::Default,
             size,
-            color: white(),
-            outline: None,
+            fill: TextPaint::default(),
+            outlines: Vec::new(),
             background: None,
-            shadow: None,
+            shadows: Vec::new(),
+            inner_shadows: Vec::new(),
             glow: None,
+            bloom: None,
             align: TextAlign::Center,
             line_spacing: 1.0,
             weight: NORMAL_WEIGHT,
@@ -348,6 +360,19 @@ impl TextContent {
             own_style: false,
             karaoke: None,
         }
+    }
+
+    /// Every paint of the layers: the fill, the outlines, each shadow and its outlines, the inner
+    /// shadows.
+    pub fn paints_mut(&mut self) -> Vec<&mut TextPaint> {
+        let mut paints = vec![&mut self.fill];
+        paints.extend(self.outlines.iter_mut().map(|outline| &mut outline.paint));
+        for shadow in &mut self.shadows {
+            paints.push(&mut shadow.paint);
+            paints.extend(shadow.outlines.iter_mut().map(|outline| &mut outline.paint));
+        }
+        paints.extend(self.inner_shadows.iter_mut().map(|shadow| &mut shadow.paint));
+        paints
     }
 
     /// The content as it is shaped, with [`Self::transform`] applied.
@@ -505,12 +530,197 @@ pub enum TextAlign {
     Right,
 }
 
-/// An outline around each glyph.
+/// The most outlines a text, or one of its shadows, may have.
+pub const MAX_TEXT_OUTLINES: usize = 4;
+/// The most shadows a text may have, and the most inner shadows.
+pub const MAX_TEXT_SHADOWS: usize = 32;
+/// The most colour stops a gradient may have.
+pub const MAX_GRADIENT_STOPS: usize = 16;
+/// The widest an outline may be, as a part of the font size.
+pub const MAX_TEXT_OUTLINE_WIDTH: f32 = 0.5;
+/// The farthest a shadow may lie from the text, as a part of the font size.
+pub const MAX_TEXT_SHADOW_DISTANCE: f32 = 4.0;
+/// The most a shadow may blur, as a part of the font size.
+pub const MAX_TEXT_SHADOW_BLUR: f32 = 2.0;
+/// The least and most a texture may be scaled.
+pub const TEXT_TEXTURE_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.01..=100.0;
+
+/// What a text layer (the fill, an outline, a shadow) is painted with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum TextPaint {
+    /// One colour.
+    Solid { color: Rgba },
+    /// Colours blending along a line across the box of the whole text (the line boxes of all its
+    /// lines), from the first stop to the last.
+    Gradient {
+        /// At least 2 and at most [`MAX_GRADIENT_STOPS`], positions rising from 0 to 1.
+        stops: Vec<GradientStop>,
+        /// Direction the colours run in, in degrees clockwise on screen from left to right: 0 runs
+        /// left to right and 90 top to bottom. (Assumed to match the gradient `angle` of a CapCut
+        /// text effect, where 90 puts the first colour at the top; not compared with CapCut.)
+        #[serde(default)]
+        angle: f32,
+    },
+    /// A picture laid over the text.
+    Texture(TextTexture),
+}
+
+impl Default for TextPaint {
+    fn default() -> TextPaint {
+        TextPaint::Solid { color: white() }
+    }
+}
+
+impl TextPaint {
+    pub fn solid(color: Rgba) -> TextPaint {
+        TextPaint::Solid { color }
+    }
+
+    /// The colour of a solid paint.
+    pub fn solid_color(&self) -> Option<Rgba> {
+        match self {
+            TextPaint::Solid { color } => Some(*color),
+            _ => None,
+        }
+    }
+
+    /// A colour that stands for the paint where only one can be shown (a swatch, a karaoke
+    /// colour): the solid colour, the first stop of a gradient, white for a texture.
+    pub fn main_color(&self) -> Rgba {
+        match self {
+            TextPaint::Solid { color } => *color,
+            TextPaint::Gradient { stops, .. } => stops.first().map_or(white(), |stop| stop.color),
+            TextPaint::Texture(_) => white(),
+        }
+    }
+
+    /// The picture a texture paint draws.
+    pub fn texture_image(&self) -> Option<&TextImageRef> {
+        match self {
+            TextPaint::Texture(texture) => Some(&texture.image),
+            _ => None,
+        }
+    }
+}
+
+/// A colour stop of a [`TextPaint::Gradient`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct TextOutline {
+pub struct GradientStop {
+    /// Where the colour is, 0 at the start of the gradient and 1 at its end.
+    pub position: f32,
     pub color: Rgba,
-    /// Width, in parts of the font size.
+}
+
+/// A picture painting a text layer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextTexture {
+    pub image: TextImageRef,
+    /// How the picture covers the text.
+    #[serde(default)]
+    pub fit: TextureFit,
+    /// The picture's size: with [`TextureFit::Tile`] one copy is `scale` font sizes tall; with
+    /// [`TextureFit::Stretch`] it multiplies the size that covers the text. Within
+    /// [`TEXT_TEXTURE_SCALE_RANGE`]. (CapCut's texture `scale` is taken as the same with
+    /// `stretch`; a guess.)
+    #[serde(default = "unit_f32")]
+    pub scale: f32,
+    /// Turn of the picture, in degrees clockwise.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub angle: f32,
+    /// Opacity of the picture, 0 to 1.
+    #[serde(default = "unit_f32")]
+    pub opacity: f32,
+}
+
+/// How a texture covers the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextureFit {
+    /// Stretched to cover the box of the whole text, keeping its shape (CapCut `stretchMode:
+    /// fit`, assumed); repeats past its edges.
+    #[default]
+    Stretch,
+    /// Repeated from the top left corner of the text box (CapCut `wrapMode: repeat`).
+    Tile,
+    /// Like `Tile`, every other copy mirrored so the copies join without a seam.
+    Mirror,
+}
+
+/// The picture file of a [`TextTexture`]: PNG or JPEG.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum TextImageRef {
+    /// A picture file. The editor keeps it absolute in memory; a project file may store it relative
+    /// to the project folder.
+    File { path: String },
+    /// The picture `file` (a path with forward slashes inside the pack) of the installed style
+    /// pack `pack` of type `pack_type`, found under `<root>/packages/<pack_type>/<pack>` of the
+    /// package roots.
+    Pack {
+        pack: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "TexturePackType::is_text_style")]
+        pack_type: TexturePackType,
+    },
+}
+
+impl TextImageRef {
+    /// The picture `file` of the text style pack `pack`.
+    pub fn text_style_pack(pack: impl Into<String>, file: impl Into<String>) -> TextImageRef {
+        TextImageRef::Pack { pack: pack.into(), file: file.into(), pack_type: TexturePackType::TextStyle }
+    }
+
+    /// How a missing picture is named in a warning: the path, `<pack>/<file>` for a text style
+    /// pack, or `<pack type>/<pack>/<file>`.
+    pub fn label(&self) -> String {
+        match self {
+            TextImageRef::File { path } => path.clone(),
+            TextImageRef::Pack { pack, file, pack_type: TexturePackType::TextStyle } => format!("{pack}/{file}"),
+            TextImageRef::Pack { pack, file, pack_type } => format!("{}/{pack}/{file}", pack_type.name()),
+        }
+    }
+}
+
+/// Which type of style pack holds a texture picture: a text style pack, or a subtitle style pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TexturePackType {
+    #[default]
+    TextStyle,
+    SubtitleStyle,
+}
+
+impl TexturePackType {
+    /// The pack type, as a pack's `type` and its folder name say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::TextStyle => "text-style",
+            Self::SubtitleStyle => "subtitle-style",
+        }
+    }
+
+    fn is_text_style(&self) -> bool {
+        *self == Self::TextStyle
+    }
+}
+
+/// An outline around each glyph: a ring from the glyph edge out to `width`, as CapCut draws a
+/// stroke. It never covers the inside of the glyphs; that shows the paint of the layer the outline
+/// belongs to (the text's fill, or a shadow's paint) or, where that paint is transparent, what lies
+/// under the layer. Several outlines of one layer are drawn widest first, so each shows as a band.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextOutline {
+    /// Width past the glyph edge, in parts of the font size, 0 to [`MAX_TEXT_OUTLINE_WIDTH`].
+    /// (CapCut's stroke `width` is taken as the same unit; a guess to check against CapCut.)
     pub width: f32,
+    pub paint: TextPaint,
+}
+
+impl TextOutline {
+    pub fn solid(color: Rgba, width: f32) -> TextOutline {
+        TextOutline { width, paint: TextPaint::solid(color) }
+    }
 }
 
 /// A box behind the text.
@@ -523,14 +733,90 @@ pub struct TextBackground {
     pub radius: f32,
 }
 
-/// A drop shadow.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// A drop shadow: the glyphs, grown by the shadow's own outlines, moved and blurred.
+///
+/// Units, assumed for CapCut text effects and not yet compared with CapCut: its `distance` is
+/// taken as hundredths of the font size (divide by 100 for [`Self::distance`]), its `angle` as
+/// degrees counter-clockwise from the right (so -45 lies down and to the right, as here), and its
+/// `diffuse` as the blur in parts of the font size.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextShadow {
-    pub color: Rgba,
-    /// Offset `[x, y]`, in parts of the font size.
-    pub offset: [f32; 2],
-    /// Blur radius, in parts of the font size.
+    /// How far the shadow lies from the text, in parts of the font size, 0 to
+    /// [`MAX_TEXT_SHADOW_DISTANCE`].
+    #[serde(default)]
+    pub distance: f32,
+    /// Which way it lies, in degrees counter-clockwise from the right: 0 right, 90 up, -45 down
+    /// and to the right.
+    #[serde(default)]
+    pub angle: f32,
+    /// Blur radius, in parts of the font size, 0 to [`MAX_TEXT_SHADOW_BLUR`].
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
     pub blur: f32,
+    /// What the shadow's glyphs (inside its outline rings) are painted with. Transparent leaves
+    /// only the rings, so a shadow at distance 0 with outlines adds strokes around the text.
+    pub paint: TextPaint,
+    /// Outlines of the shadow: rings measured from the glyph edge, drawn widest first like the
+    /// text's and under nothing of the shadow itself (they lie outside its glyphs); at most
+    /// [`MAX_TEXT_OUTLINES`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outlines: Vec<TextOutline>,
+}
+
+impl TextShadow {
+    /// A plain shadow of one colour, moved by `offset` (`[x, y]`, y down, in parts of the font
+    /// size).
+    pub fn solid(color: Rgba, offset: [f32; 2], blur: f32) -> TextShadow {
+        let (distance, angle) = offset_to_polar(offset);
+        TextShadow { distance, angle, blur, paint: TextPaint::solid(color), outlines: Vec::new() }
+    }
+
+    /// The offset `[x, y]`, y down, in parts of the font size.
+    pub fn offset(&self) -> [f32; 2] {
+        polar_to_offset(self.distance, self.angle)
+    }
+
+    /// Sets the offset `[x, y]`, y down, in parts of the font size.
+    pub fn set_offset(&mut self, offset: [f32; 2]) {
+        (self.distance, self.angle) = offset_to_polar(offset);
+    }
+}
+
+/// A shadow inside the glyphs, as CapCut draws it: the paint covers the glyphs where they overlap
+/// themselves moved by the offset (`distance` towards `angle`, then blurred), so the fill stays
+/// bare in a rim along the edges facing the other way, as if lit from there. Units as for
+/// [`TextShadow`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextInnerShadow {
+    /// In parts of the font size, 0 to [`MAX_TEXT_SHADOW_DISTANCE`].
+    #[serde(default)]
+    pub distance: f32,
+    /// In degrees counter-clockwise from the right.
+    #[serde(default)]
+    pub angle: f32,
+    /// In parts of the font size, 0 to [`MAX_TEXT_SHADOW_BLUR`].
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub blur: f32,
+    pub paint: TextPaint,
+}
+
+impl TextInnerShadow {
+    /// The offset `[x, y]`, y down, in parts of the font size.
+    pub fn offset(&self) -> [f32; 2] {
+        polar_to_offset(self.distance, self.angle)
+    }
+}
+
+/// `[x, y]` (y down) of `distance` towards `angle` degrees counter-clockwise from the right.
+pub fn polar_to_offset(distance: f32, angle: f32) -> [f32; 2] {
+    let radians = angle.to_radians();
+    [distance * radians.cos(), -distance * radians.sin()]
+}
+
+/// The distance and angle (degrees counter-clockwise from the right) of `[x, y]`, y down.
+pub fn offset_to_polar(offset: [f32; 2]) -> (f32, f32) {
+    let distance = offset[0].hypot(offset[1]);
+    let angle = if distance == 0.0 { 0.0 } else { (-offset[1]).atan2(offset[0]).to_degrees() };
+    (distance, angle)
 }
 
 /// A glow around the glyphs (or around the outline when there is one), drawn from how far each
@@ -561,6 +847,40 @@ pub const GLOW_FALLOFF_RANGE: std::ops::RangeInclusive<f32> = 0.1..=8.0;
 
 fn default_glow_falloff() -> f32 {
     2.0
+}
+
+/// A bloom: the glyph coverage blurred into a soft light of `color` under the text, as a lit sign
+/// spreads light around it. Unlike [`TextGlow`], which follows the distance to the ink, it is a
+/// blur of the whole text, so letters close together light each other and add up.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TextBloom {
+    /// Colour of the light.
+    pub color: Rgba,
+    /// How bright the light is, 0 to 1.
+    #[serde(default = "default_bloom_strength")]
+    pub strength: f32,
+    /// How far the light spreads, 0 to 1; 1 blurs it by [`MAX_BLOOM_RADIUS`] font sizes.
+    #[serde(default = "default_bloom_range")]
+    pub range: f32,
+    /// Moves the light across, -1 to 1, in parts of its spread; positive to the right.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub dir_x: f32,
+    /// Moves the light down, -1 to 1, in parts of its spread; positive downwards.
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub dir_y: f32,
+}
+
+/// The blur radius of a bloom at range 1, as a part of the font size.
+pub const MAX_BLOOM_RADIUS: f32 = 1.0;
+/// The most a bloom may be moved either way along each axis, in parts of its spread.
+pub const MAX_BLOOM_DIR: f32 = 1.0;
+
+fn default_bloom_strength() -> f32 {
+    0.5
+}
+
+fn default_bloom_range() -> f32 {
+    0.4
 }
 
 /// The preset animations of a clip: one to enter, one to leave and one that repeats.

@@ -8,6 +8,7 @@ publish = false
 engine = { path = "../engine" }
 cosmic-text = "=0.19.0"
 fontdb = { version = "0.23", default-features = false, features = ["std", "fs"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
 unicode-normalization = "0.1"

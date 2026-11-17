@@ -1237,22 +1237,46 @@ impl D3d12Compositor {
 
     /// `text` with a font file named relative to the project read from the project folder, and a
     /// font of an installed font pack as the file it is. A font pack that cannot be resolved stays
-    /// as it is, so the rasterizer draws with the default font and names it as missing.
+    /// as it is, so the rasterizer draws with the default font and names it as missing. Texture
+    /// pictures are resolved the same way, from text style packs; one that cannot be resolved stays,
+    /// so its layer is left out and named.
     fn resolved_text<'a>(&self, text: &'a TextContent) -> std::borrow::Cow<'a, TextContent> {
-        let file = |path: PathBuf| std::borrow::Cow::Owned(TextContent { font: engine::FontRef::File { path: path.to_string_lossy().into_owned() }, ..text.clone() });
-        match &text.font {
-            engine::FontRef::File { path } if Path::new(path).is_relative() => file(self.paths.source_path(path)),
-            engine::FontRef::Pack { pack, file: name } => self.paths.font_pack_path(pack, name).map_or(std::borrow::Cow::Borrowed(text), file),
-            _ => std::borrow::Cow::Borrowed(text),
+        let file = |path: PathBuf| path.to_string_lossy().into_owned();
+        let font = match &text.font {
+            engine::FontRef::File { path } if Path::new(path).is_relative() => Some(file(self.paths.source_path(path))),
+            engine::FontRef::Pack { pack, file: name } => self.paths.font_pack_path(pack, name).ok().map(file),
+            _ => None,
+        };
+        let texture = |image: &engine::TextImageRef| match image {
+            engine::TextImageRef::File { path } if Path::new(path).is_relative() => Some(file(self.paths.source_path(path))),
+            engine::TextImageRef::Pack { pack, file: name, pack_type } => self.paths.texture_pack_path(pack_type.name(), pack, name).ok().map(file),
+            _ => None,
+        };
+        let resolves_texture = gpufx_text::text_images(text).into_iter().any(|image| texture(image).is_some());
+        if font.is_none() && !resolves_texture {
+            return std::borrow::Cow::Borrowed(text);
         }
+        let mut resolved = text.clone();
+        if let Some(path) = font {
+            resolved.font = engine::FontRef::File { path };
+        }
+        for paint in resolved.paints_mut() {
+            if let engine::TextPaint::Texture(picture) = paint {
+                if let Some(path) = texture(&picture.image) {
+                    picture.image = engine::TextImageRef::File { path };
+                }
+            }
+        }
+        std::borrow::Cow::Owned(resolved)
     }
 
     /// The digest of `text` (resolved) and its font file, and the scale it is rasterized at for
     /// `clip` (see [`Self::load_text`]).
     fn text_digest_and_scale(&mut self, clip: &Clip, text: &TextContent) -> Result<([u8; 32], f32), String> {
         let json = serde_json::to_string(text).map_err(|e| format!("text: {e}"))?;
-        // The font file's stamp is part of the key, so a changed file is drawn again.
-        let stamp = format!("{:?}", gpufx_text::text_font_stamp(text));
+        // The stamps of the font file and the texture files are part of the key, so a changed file
+        // is drawn again.
+        let stamp = format!("{:?} {:?}", gpufx_text::text_font_stamp(text), gpufx_text::text_texture_stamps(text));
         let digest: [u8; 32] = Sha256::new().chain_update(json.as_bytes()).chain_update(stamp.as_bytes()).finalize().into();
         let size_key = (digest, self.height);
         let (width, height) = match self.text_sizes.get(&size_key) {

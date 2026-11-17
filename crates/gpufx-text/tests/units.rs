@@ -1,4 +1,4 @@
-use engine::project::{TextContent, TextGlow, TextOutline, TextShadow};
+use engine::project::{TextContent, TextGlow};
 use engine::{AnimationPose, TextUnit};
 use gpufx_text::{TextImage, TextRasterizer, DEFAULT_FAMILY_CANDIDATES};
 
@@ -52,7 +52,7 @@ fn the_first_characters_show_before_the_last() {
 fn poses_at_rest_give_the_still_picture_exactly() {
     let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("Hi there", 0.1);
-    text.outline = Some(TextOutline { color: [0, 0, 0, 255], width: 0.08 });
+    text.outlines = vec![engine::TextOutline::solid([0, 0, 0, 255], 0.08)];
     let still = r.rasterize(&text, HEIGHT, 1.0);
     assert_eq!(r.rasterize_units(&text, HEIGHT, 1.0, &shown(&[1.0; 7])), still);
     assert_eq!(r.rasterize_units(&text, HEIGHT, 1.0, &[]), still);
@@ -62,8 +62,8 @@ fn poses_at_rest_give_the_still_picture_exactly() {
 fn each_character_keeps_its_outline_and_shadow() {
     let Some(mut r) = rasterizer() else { return };
     let mut text = TextContent::new("H H", 0.1);
-    text.outline = Some(TextOutline { color: [0, 0, 255, 255], width: 0.06 });
-    text.shadow = Some(TextShadow { color: [0, 0, 0, 200], offset: [0.04, 0.04], blur: 0.03 });
+    text.outlines = vec![engine::TextOutline::solid([0, 0, 255, 255], 0.06)];
+    text.shadows = vec![engine::TextShadow::solid([0, 0, 0, 200], [0.04, 0.04], 0.03)];
     let still = r.rasterize(&text, HEIGHT, 1.0);
     // A move too small to see sends the text through the characters' own pictures.
     let nudged = vec![(TextUnit::Char, vec![AnimationPose { dx: 1e-7, ..AnimationPose::IDENTITY }; 2])];
@@ -117,8 +117,8 @@ fn a_line_separator_does_not_break_the_line() {
 /// A text with every layer under its fill, for the timing and the frame before rest.
 fn decorated(content: &str) -> TextContent {
     let mut text = TextContent::new(content, 0.1);
-    text.outline = Some(TextOutline { color: [0, 0, 255, 255], width: 0.05 });
-    text.shadow = Some(TextShadow { color: [0, 0, 0, 160], offset: [0.04, 0.04], blur: 0.05 });
+    text.outlines = vec![engine::TextOutline::solid([0, 0, 255, 255], 0.05)];
+    text.shadows = vec![engine::TextShadow::solid([0, 0, 0, 160], [0.04, 0.04], 0.05)];
     text.glow = Some(TextGlow { color: [255, 200, 0, 255], outer_color: None, radius: 0.15, intensity: 0.8, falloff: 2.0 });
     text
 }

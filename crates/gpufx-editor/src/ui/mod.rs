@@ -10,6 +10,7 @@ mod param_widgets;
 mod placement;
 mod animation_inspector;
 mod text_inspector;
+mod text_layers;
 mod player;
 mod recovery_dialog;
 pub mod theme;

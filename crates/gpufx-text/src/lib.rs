@@ -1,21 +1,26 @@
 //! Rasterizes the text of a text clip into a premultiplied RGBA picture on the CPU.
 //!
 //! Shaping, bidi and font fallback come from `cosmic-text`, glyph pictures from its swash cache.
-//! Outline, background box, glow and drop shadow are drawn here on alpha masks.
+//! Outlines, background box, bloom, glow, shadows and inner shadows are drawn here on alpha masks, each
+//! painted with a colour, a gradient or a texture picture (see the `paint` module).
 //!
-//! Layers, bottom to top: background box, glow, shadow, outline, fill. The outline and the glow
-//! both come from one squared distance field of the glyph coverage, computed once per picture into
-//! one buffer; the glow is blended straight into the picture from it, so it costs no mask of its
-//! own and the picture grows only by the glow's reach.
+//! Layers, bottom to top: background box, bloom (the glyph coverage blurred), glow, shadows (the last at the bottom, each with its own
+//! outlines), outlines (widest first), fill, inner shadows. The outlines and the glow all come from
+//! one squared distance field of the glyph coverage, computed once per picture into one buffer; the
+//! glow is blended straight into the picture from it, so it costs no mask of its own and the
+//! picture grows only by the glow's reach.
 //!
 //! A text whose characters move one by one (see [`TextRasterizer::rasterize_units`]) is drawn from
 //! the coverage of each character, made once and kept, each put in place with its own move, turn,
 //! scale and opacity into one mask that is then drawn as a still picture's glyphs (see the `units`
 //! module).
 
+mod paint;
 mod units;
 
+pub use paint::{is_network_or_device_path, is_readable_texture_path, text_images, text_texture_stamps, MAX_TEXTURE_CACHE_BYTES, MAX_TEXTURE_DIMENSION, MAX_TEXTURE_FILE_BYTES};
 pub use units::{UnitsPlan, MAX_UNIT_PLANS, UNIT_PLAN_BYTES};
+use paint::{outline_px, Painter, ShadowPx, TextureCache, Textures};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -84,7 +89,7 @@ pub const MAX_DIMENSION: u32 = 8192;
 pub const MAX_PIXELS: u64 = 16 * 1024 * 1024;
 /// The widest an outline may be, as a part of the font size. Wider would bury the letters, and
 /// the room around the text grows with it.
-pub const MAX_OUTLINE_RATIO: f32 = 0.25;
+pub const MAX_OUTLINE_RATIO: f32 = engine::MAX_TEXT_OUTLINE_WIDTH;
 /// The farthest a glow may reach past the ink, as a part of the font size.
 pub const MAX_GLOW_RATIO: f32 = engine::MAX_GLOW_RADIUS;
 /// The most letter spacing, either way, as a part of the font size.
@@ -105,6 +110,9 @@ pub struct TextImage {
     pub no_font: bool,
     /// How many glyphs no loaded font could draw (shown as the font's "missing" box).
     pub missing_glyphs: usize,
+    /// The first texture picture (its path, or `<pack>/<file>` of a pack picture the caller did
+    /// not resolve to its file) that is missing or not a picture, so its layer was left out.
+    pub missing_texture: Option<String>,
     /// Whether the text was drawn smaller than asked to stay within [`MAX_DIMENSION`] and
     /// [`MAX_PIXELS`].
     pub downscaled: bool,
@@ -129,6 +137,8 @@ pub struct TextRasterizer {
     unit_plans: Vec<(u64, UnitsPlan)>,
     /// How many plans were made, for tests.
     unit_plan_builds: u64,
+    /// Texture pictures read, by path.
+    textures: TextureCache,
 }
 
 /// A font file as loaded: the stamp it had, its faces and its family (`None` when not a font).
@@ -209,7 +219,7 @@ impl TextRasterizer {
             None => eprintln!("gpufx-text: no font is installed; text cannot be drawn"),
         }
         let locale = sys_locale();
-        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0, unit_plans: Vec::new(), unit_plan_builds: 0 }
+        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0, unit_plans: Vec::new(), unit_plan_builds: 0, textures: TextureCache::default() }
     }
 
     /// The installed family [`FontRef::Default`] draws with: the first of
@@ -488,28 +498,51 @@ impl TextRasterizer {
             }
         }
 
-        // Room around the text for the outline, the box and the shadow.
-        let outline_px = text.outline.map(|o| (o.width * font_px).clamp(0.0, font_px * MAX_OUTLINE_RATIO)).unwrap_or(0.0);
+        // Room around the text for the outlines, the box and the shadows.
+        let widest = |outlines: &[engine::TextOutline]| outlines.iter().map(|o| outline_px(o.width, font_px)).fold(0.0, f32::max);
+        let outline_px = widest(&text.outlines);
         let pad_px = text.background.map(|b| (b.padding * font_px).clamp(0.0, font_px * 4.0)).unwrap_or(0.0);
         // Room for the box behind the active word, kept at every step.
         let pad_px = if karaoke.is_some_and(|karaoke| karaoke.draws_box()) { pad_px.max(KARAOKE_BOX_PADDING * font_px) } else { pad_px };
-        let (shadow_dx, shadow_dy, shadow_blur) = text.shadow.map(|s| ((s.offset[0] * font_px).clamp(-font_px * 4.0, font_px * 4.0), (s.offset[1] * font_px).clamp(-font_px * 4.0, font_px * 4.0), (s.blur * font_px).clamp(0.0, font_px * 2.0))).unwrap_or((0.0, 0.0, 0.0));
-        // A blur too small to move a pixel is no blur, and needs no room.
-        let shadow_blur = if blur_half(shadow_blur) == 0 { 0.0 } else { shadow_blur };
-        let blur_room = if text.shadow.is_some() { shadow_blur.ceil() * 2.0 } else { 0.0 };
+        let reach = font_px * engine::MAX_TEXT_SHADOW_DISTANCE;
+        let shadows: Vec<ShadowPx> = text
+            .shadows
+            .iter()
+            .map(|s| {
+                let [ox, oy] = s.offset();
+                let (dx, dy) = if ox.is_finite() && oy.is_finite() { ((ox * font_px).clamp(-reach, reach), (oy * font_px).clamp(-reach, reach)) } else { (0.0, 0.0) };
+                let blur = if s.blur.is_finite() { (s.blur * font_px).clamp(0.0, font_px * engine::MAX_TEXT_SHADOW_BLUR) } else { 0.0 };
+                // A blur too small to move a pixel is no blur, and needs no room.
+                let blur = if blur_half(blur) == 0 { 0.0 } else { blur };
+                ShadowPx { dx, dy, blur, outline_px: widest(&s.outlines) }
+            })
+            .collect();
         let mut glow_px = glow_reach(text, font_px);
+        let bloom = bloom_px(text, font_px);
         let (x0, y0, x1, y1) = (x0.floor(), y0.floor(), x1.ceil(), y1.ceil());
         let base = outline_px.max(pad_px).ceil() + 1.0;
+        // How far the shadows reach past the ink on each side (left, right, top, bottom): their
+        // outlines, offset and blur.
+        let mut shadow_room = [0f32; 4];
+        for s in &shadows {
+            let grown = s.outline_px.ceil() + 1.0 + s.blur.ceil() * 2.0;
+            for (room, offset) in shadow_room.iter_mut().zip([-s.dx, s.dx, -s.dy, s.dy]) {
+                *room = room.max(grown + offset.max(0.0).ceil());
+            }
+        }
+        // The bloom spreads past the ink by its blur, more on the side it is moved to.
+        if let Some(bloom) = bloom {
+            let spread = bloom.spread().ceil() + 1.0;
+            for (room, offset) in shadow_room.iter_mut().zip([-bloom.dx, bloom.dx, -bloom.dy, bloom.dy]) {
+                *room = room.max(spread + offset.max(0.0).ceil());
+            }
+        }
         // The picture's margins for a glow reaching `glow` pixels. The glow spreads evenly past the
-        // outline, the shadow to one side: each side takes the larger of the two.
+        // outline, the shadows to their sides: each side takes the largest.
         let margins = |glow: f32| {
-            let glow_room = (outline_px + glow).ceil() + 1.0 - base;
-            (
-                base + ((-shadow_dx).max(0.0).ceil() + blur_room).max(glow_room),
-                base + (shadow_dx.max(0.0).ceil() + blur_room).max(glow_room),
-                base + ((-shadow_dy).max(0.0).ceil() + blur_room).max(glow_room),
-                base + (shadow_dy.max(0.0).ceil() + blur_room).max(glow_room),
-            )
+            let glow_room = (outline_px + glow).ceil() + 1.0;
+            let side = |room: f32| base.max(glow_room).max(room);
+            (side(shadow_room[0]), side(shadow_room[1]), side(shadow_room[2]), side(shadow_room[3]))
         };
         let size = |glow: f32| {
             let (left, right, top, bottom) = margins(glow);
@@ -539,8 +572,9 @@ impl TextRasterizer {
         layout.text_size = (text_w, text_h);
         layout.outline_px = outline_px;
         layout.pad_px = pad_px;
-        layout.shadow = (shadow_dx, shadow_dy, shadow_blur);
+        layout.shadows = shadows;
         layout.glow_px = glow_px;
+        layout.bloom = bloom;
         layout
     }
 
@@ -595,7 +629,7 @@ impl TextRasterizer {
 
     /// Draws a layout from [`Self::layout`]. One over the limits draws nothing.
     fn draw(&mut self, text: &TextContent, layout: &Layout, styles: &[WordStyle]) -> TextImage {
-        let mut image = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, downscaled: false, margin: (0, 0) };
+        let mut image = TextImage { width: layout.width, height: layout.height, pixels: Vec::new(), missing_family: layout.missing_family.clone(), no_font: layout.no_font, missing_glyphs: layout.missing_glyphs, missing_texture: None, downscaled: false, margin: (0, 0) };
         let (width, height) = (layout.width as usize, layout.height as usize);
         if width == 0 || height == 0 {
             return image;
@@ -614,7 +648,7 @@ impl TextRasterizer {
         let mut tinted: Vec<(Rgba, Mask)> = Vec::new();
         let (ox, oy) = (left as i32, top as i32);
         for (number, glyph) in layout.glyphs.iter().enumerate() {
-            let color = layout.glyph_words.get(number).copied().flatten().and_then(|word| styles.get(word)).map(|style| style.color).filter(|color| *color != text.color);
+            let color = layout.glyph_words.get(number).copied().flatten().and_then(|word| styles.get(word)).map(|style| style.color).filter(|color| *color != text.fill.main_color());
             let group = color.map(|color| match tinted.iter().position(|(known, _)| *known == color) {
                 Some(group) => group,
                 None => {
@@ -661,20 +695,24 @@ impl TextRasterizer {
                 }
             }
         }
-        draw_under(text, layout, &fill, &mut canvas);
+        let (textures, missing_texture) = self.textures.textures_for(text);
+        image.missing_texture = missing_texture;
+        let painter = layout.painter(&textures);
+        draw_under(text, layout, &fill, &mut canvas, &painter);
         if tinted.is_empty() {
-            draw_mask(&mut canvas, &fill, premultiplied(text.color));
+            painter.draw(&mut canvas, &fill, &text.fill);
         } else {
-            // The text colour fills what no tinted word covers; each tinted word its own colour.
-            let mut plain = fill;
+            // The text's fill paints what no tinted word covers; each tinted word its own colour.
+            let mut plain = fill.clone();
             for (_, mask) in &tinted {
                 plain.subtract(mask);
             }
-            draw_mask(&mut canvas, &plain, premultiplied(text.color));
+            painter.draw(&mut canvas, &plain, &text.fill);
             for (color, mask) in &tinted {
                 draw_mask(&mut canvas, mask, premultiplied(*color));
             }
         }
+        paint::draw_inner_shadows(&mut canvas, text, &fill, &painter);
 
         image.pixels = canvas.iter().flat_map(|p| p.map(|c| (c * 255.0 + 0.5).clamp(0.0, 255.0) as u8)).collect();
         image
@@ -700,28 +738,22 @@ fn draw_background(text: &TextContent, layout: &Layout, canvas: &mut [[f32; 4]])
 }
 
 /// Draws what lies under the fill of the glyph coverage `fill` into `canvas` of the same size: the
-/// glow, the shadow and the outline, in that order.
-fn draw_under(text: &TextContent, layout: &Layout, fill: &Mask, canvas: &mut [[f32; 4]]) {
+/// bloom, the glow, the shadows and the outlines, in that order, painted as `painter` lays the paints.
+fn draw_under(text: &TextContent, layout: &Layout, fill: &Mask, canvas: &mut [[f32; 4]], painter: &Painter) {
     let outline_px = layout.outline_px;
-    let (shadow_dx, shadow_dy, shadow_blur) = layout.shadow;
-    // One squared distance field serves the outline and the glow.
+    // One squared distance field serves the outlines, the shadows' outlines and the glow.
     let glow = text.glow.filter(|_| layout.glow_px > 0.0);
-    let wants_outline = text.outline.is_some() && outline_px > 0.0;
+    let wants_outline = outline_px > 0.0 || layout.shadows.iter().any(|s| s.outline_px > 0.0);
+    if let (Some(px), Some(bloom)) = (layout.bloom, text.bloom) {
+        draw_bloom(canvas, fill, bloom.color, px);
+    }
     let squared = (wants_outline || glow.is_some()).then(|| fill.squared_distances());
-    let outline = text.outline.filter(|_| wants_outline).zip(squared.as_deref()).map(|(o, squared)| (o.color, fill.dilated(squared, outline_px)));
-    let silhouette = outline.as_ref().map(|(_, m)| m).unwrap_or(fill);
     if let (Some(glow), Some(squared)) = (glow, squared.as_deref()) {
-        draw_glow(canvas, squared, &glow, if outline.is_some() { outline_px } else { 0.0 }, layout.glow_px);
+        draw_glow(canvas, squared, &glow, outline_px, layout.glow_px);
     }
-    if let Some(shadow) = text.shadow {
-        let mut mask = silhouette.shifted(shadow_dx.round() as i32, shadow_dy.round() as i32);
-        if shadow_blur > 0.0 {
-            mask.blur(shadow_blur);
-        }
-        draw_mask(canvas, &mask, premultiplied(shadow.color));
-    }
-    if let Some((color, mask)) = &outline {
-        draw_mask(canvas, mask, premultiplied(*color));
+    paint::draw_shadows(canvas, text, &layout.shadows, fill, squared.as_deref(), painter);
+    if let Some(squared) = squared.as_deref().filter(|_| outline_px > 0.0) {
+        paint::draw_outlines(canvas, fill, squared, &text.outlines, painter);
     }
 }
 
@@ -748,13 +780,24 @@ struct Layout {
     text_size: (f32, f32),
     outline_px: f32,
     pad_px: f32,
-    /// Shadow offset x, y and blur, in pixels.
-    shadow: (f32, f32, f32),
+    /// Each shadow in pixels.
+    shadows: Vec<ShadowPx>,
     /// How far the glow reaches past the outline, in pixels; 0 for no glow.
     glow_px: f32,
+    /// The bloom in pixels; `None` for none.
+    bloom: Option<BloomPx>,
     missing_family: Option<String>,
     no_font: bool,
     missing_glyphs: usize,
+}
+
+impl Layout {
+    /// The paints laid over the line boxes of this layout's picture.
+    fn painter<'a>(&self, textures: &'a Textures) -> Painter<'a> {
+        let (left, top) = self.origin;
+        let (text_w, text_h) = self.text_size;
+        Painter { textures, rect: (left, top, left + text_w, top + text_h), font_px: self.font_px }
+    }
 }
 
 fn sorted_families(db: &fontdb::Database) -> Vec<String> {
@@ -831,6 +874,67 @@ fn draw_glow(canvas: &mut [[f32; 4]], squared: &[f64], glow: &engine::project::T
             None => core,
         };
         over(dst, color, alpha);
+    }
+}
+
+/// A bloom in pixels: its blur radius, its brightness and how far it is moved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct BloomPx {
+    radius: f32,
+    strength: f32,
+    dx: f32,
+    dy: f32,
+}
+
+impl BloomPx {
+    /// How far the blur spreads the ink: three box blurs of half width `blur_half` each.
+    fn spread(&self) -> f32 {
+        (blur_half(self.radius) * 3) as f32
+    }
+
+    /// How far it reaches past the ink, moved, the farthest way.
+    fn reach(&self) -> f32 {
+        self.spread() + self.dx.abs().max(self.dy.abs())
+    }
+}
+
+/// The bloom of `text` at `font_px`: `None` when there is none or it would not show (no strength,
+/// or a blur too small to move a pixel).
+fn bloom_px(text: &TextContent, font_px: f32) -> Option<BloomPx> {
+    let bloom = text.bloom?;
+    let clamp = |value: f32, max: f32| if value.is_finite() { value.clamp(-max, max) } else { 0.0 };
+    let strength = clamp(bloom.strength, 1.0).max(0.0);
+    let radius = clamp(bloom.range, 1.0).max(0.0) * engine::MAX_BLOOM_RADIUS * font_px;
+    if strength <= 0.0 || blur_half(radius) == 0 {
+        return None;
+    }
+    let dir = engine::MAX_BLOOM_DIR;
+    Some(BloomPx { radius, strength, dx: (clamp(bloom.dir_x, dir) * radius).round(), dy: (clamp(bloom.dir_y, dir) * radius).round() })
+}
+
+/// Lays a bloom of `color` into `canvas`: the glyph coverage `fill` blurred, moved and brightened.
+/// Twice the strength makes a strength of 0.5 give the blurred coverage as it is, so the light is
+/// as strong as the ink where letters crowd and fades away from them.
+fn draw_bloom(canvas: &mut [[f32; 4]], fill: &Mask, color: engine::Rgba, bloom: BloomPx) {
+    let mut light = fill.clone();
+    light.blur(bloom.radius);
+    let color = premultiplied(color);
+    let gain = bloom.strength * 2.0;
+    let (width, height) = (fill.width as i64, fill.height as i64);
+    let (dx, dy) = (bloom.dx as i64, bloom.dy as i64);
+    for y in 0..height {
+        let sy = y - dy;
+        if !(0..height).contains(&sy) {
+            continue;
+        }
+        for x in 0..width {
+            let sx = x - dx;
+            if !(0..width).contains(&sx) {
+                continue;
+            }
+            let a = (light.data[(sy * width + sx) as usize] * gain).min(1.0);
+            over(&mut canvas[(y * width + x) as usize], color, a);
+        }
     }
 }
 

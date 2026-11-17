@@ -5,6 +5,10 @@
 //! [`crate::text_style_install`]) with a `layout`, where the subtitle sits, and an optional
 //! `karaoke`, how the spoken word is marked. The karaoke part is read and checked but not used yet.
 //!
+//! The formats follow those of the text style pack: format 2 adds the layers, the bloom and the
+//! PNG and JPEG pictures its layers are painted with, named by a [`engine::TextImageRef::Pack`] of
+//! type [`TexturePackType::SubtitleStyle`]. A pack of format 1 using one of these is refused.
+//!
 //! A shared text-pack module for text and subtitle styles was considered; the user chose one module
 //! per pack type.
 
@@ -17,7 +21,8 @@ use zip::ZipArchive;
 
 use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, Unpacked, MANIFEST};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem};
-use crate::text_style_install::{check_style_item_parts, no_media, PackStyleAnimation, PackTextStyle, STYLE_PACK_EXTRACT, STYLE_PACK_LIMITS};
+use crate::text_style_install::{check_layer_format, check_style_item_parts, header_format, own_textures, style_media, PackStyleAnimation, PackTextStyle, STYLE_PACK_EXTRACT, STYLE_PACK_LIMITS};
+use engine::TexturePackType;
 
 /// What the `type` of a subtitle style pack says, and the folder it goes to.
 pub const SUBTITLE_STYLE_TYPE: &str = "subtitle-style";
@@ -140,7 +145,8 @@ pub fn check_subtitle_style_fields(manifest: &SubtitleStyleManifest) -> Result<(
     if manifest.kind != SUBTITLE_STYLE_TYPE {
         return Err(ImportProblem::UnknownType(manifest.kind.clone()));
     }
-    check_pack_header(manifest.format, &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "styles")?;
+    check_pack_header(header_format(manifest.format), &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "styles")?;
+    check_layer_format(manifest.format, manifest.items.iter().map(|item| (item.id.as_str(), &item.style)))?;
     check_item_ids(manifest.items.iter().map(|item| (item.id.as_str(), item.name.as_str())))?;
     for item in &manifest.items {
         check_style_item_parts(&item.id, &item.name, item.category.as_deref(), item.preview_text.as_deref(), &item.style, item.animation.as_ref())?;
@@ -173,10 +179,14 @@ pub fn install_subtitle_style_pack(source: &Path, user_root: &Path, overwrite: b
     let mut zip = ZipArchive::new(BufReader::new(file)).map_err(|e| ImportProblem::NotAZip(e.to_string()))?;
     let entries = entries_of(&mut zip, STYLE_PACK_LIMITS)?;
     validate_entries(&entries, STYLE_PACK_LIMITS)?;
-    check_entry_extensions(&entries, no_media)?;
     let manifest = parse_subtitle_style_manifest(&read_manifest(&mut zip)?)?;
     check_subtitle_style_fields(&manifest)?;
-    check_named_files(&manifest.license.files, std::iter::empty(), &entries, no_media, "media")?;
+    // Only a pack of format 2 may hold pictures, and every picture of its own a style names must be
+    // in it.
+    let media = style_media(manifest.format);
+    check_entry_extensions(&entries, media)?;
+    let textures = own_textures(manifest.items.iter().map(|item| &item.style), &manifest.id, TexturePackType::SubtitleStyle);
+    check_named_files(&manifest.license.files, textures.into_iter(), &entries, media, "a PNG or JPEG picture")?;
 
     let id = manifest.id.to_ascii_lowercase();
     let check_unpacked = |temporary: &Path| {
@@ -198,7 +208,7 @@ pub fn install_subtitle_style_pack(source: &Path, user_root: &Path, overwrite: b
 pub(crate) mod tests {
     use super::*;
     use crate::package_import::install_zip;
-    use crate::text_style_install::tests::{pack, scratch, written};
+    use crate::text_style_install::tests::{pack, scratch, written, zip_of};
 
     pub(crate) const ITEM_JSON: &str = r#"{"id":"tiktok","name":"TikTok","style":{"size":0.06,"color":[255,255,255,255],"outline":{"color":[0,0,0,255],"width":0.08},"weight":800},"animation":{"in":{"preset":"pop","duration":0.3}},"layout":{"anchor_y":0.8,"max_width":0.8,"max_lines":2},"karaoke":{"mode":"color","active":{"color":[255,220,0,255],"scale":1.1},"upcoming":{"opacity":0.6}}}"#;
 
@@ -241,6 +251,60 @@ pub(crate) mod tests {
             assert!(!dir.join("root/packages/subtitle-style").exists(), "{name}: nothing installed");
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    /// The style of the item with layers of format 2: a fill with a picture of its own pack, a
+    /// shadow and a bloom.
+    const LAYERED_STYLE: &str = r#""fill":{"kind":"texture","image":{"kind":"pack","pack":"Avs-Subs","file":"textures/glow.png","pack_type":"subtitle-style"},"fit":"tile","scale":0.5},"shadows":[{"distance":0.02,"angle":-45,"paint":{"kind":"solid","color":[0,0,0,255]}}],"bloom":{"color":[255,255,0,255],"strength":0.8},"#;
+
+    fn layered_manifest(format: u32, style: &str) -> String {
+        manifest_json().replacen(r#""format":1"#, &format!(r#""format":{format}"#), 1).replace(r#""color":[255,255,255,255],"outline":{"color":[0,0,0,255],"width":0.08},"#, style)
+    }
+
+    fn layered_pack(manifest: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut all: Vec<(&str, &[u8])> = vec![("manifest.json", manifest.as_bytes()), ("LICENSE.txt", b"license")];
+        all.extend_from_slice(files);
+        zip_of(&all)
+    }
+
+    #[test]
+    fn a_format_2_pack_holds_its_pictures_and_its_styles_give_layers_and_a_bloom() {
+        let dir = scratch("subtitle-layered");
+        let root = dir.join("root");
+        let manifest = layered_manifest(2, LAYERED_STYLE);
+        let outcome = install_zip(&written(&dir, &layered_pack(&manifest, &[("textures/glow.png", b"png")])), &root, false).unwrap();
+        assert!(matches!(outcome, ImportOutcome::SubtitleStyleInstalled(_)), "{outcome:?}");
+        assert!(root.join("packages/subtitle-style/avs-subs/textures/glow.png").is_file());
+        let manifest = parse_subtitle_style_manifest(manifest.as_bytes()).unwrap();
+        let text = manifest.items[0].style.text("Hi", 0.06);
+        assert_eq!(text.fill.texture_image(), Some(&engine::TextImageRef::Pack { pack: "Avs-Subs".to_owned(), file: "textures/glow.png".to_owned(), pack_type: TexturePackType::SubtitleStyle }));
+        assert_eq!((text.shadows.len(), text.bloom.map(|bloom| (bloom.strength, bloom.range))), (1, Some((0.8, 0.4))));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pack_is_refused_for_layers_or_pictures_its_format_does_not_allow() {
+        let png: &[(&str, &[u8])] = &[("textures/glow.png", b"png")];
+        let text_style_picture = LAYERED_STYLE.replace(r#","pack_type":"subtitle-style""#, "");
+        for (name, manifest, files, wanted) in [
+            ("layers in format 1", layered_manifest(1, LAYERED_STYLE), png, "BadManifest"),
+            ("a bloom alone in format 1", layered_manifest(1, r#""bloom":{"color":[255,255,255,255]},"#), &[][..], "BadManifest"),
+            ("a picture in a format 1 pack", manifest_json(), png, "Entry"),
+            ("its own picture missing", layered_manifest(2, LAYERED_STYLE), &[][..], "BadManifest"),
+            ("a picture that is not PNG or JPEG", layered_manifest(2, &LAYERED_STYLE.replace("glow.png", "glow.gif")), &[("textures/glow.gif", &b"gif"[..])][..], "BadManifest"),
+            ("format 3", layered_manifest(3, LAYERED_STYLE), png, "BadManifest"),
+        ] {
+            let dir = scratch("subtitle-layered-bad");
+            let error = install_zip(&written(&dir, &layered_pack(&manifest, files)), &dir.join("root"), false).unwrap_err();
+            assert!(format!("{error:?}").starts_with(wanted), "{name}: {error:?}");
+            assert!(!dir.join("root/packages/subtitle-style").exists(), "{name}: nothing installed");
+            let _ = fs::remove_dir_all(&dir);
+        }
+        // A picture of a text style pack, even of the same id, is another pack's and need not be in
+        // the zip.
+        let dir = scratch("subtitle-layered-other");
+        assert!(install_zip(&written(&dir, &layered_pack(&layered_manifest(2, &text_style_picture), &[])), &dir.join("root"), false).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

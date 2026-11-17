@@ -733,6 +733,9 @@ impl Session {
         if let Some(clip) = self.state.ui.font_file_request.take() {
             self.begin_task(Request::PickFont { clip });
         }
+        if let Some((clip, slot)) = self.state.ui.texture_file_request.take() {
+            self.begin_task(Request::PickTexture { clip, slot });
+        }
         if let Some(model) = self.state.ui.matte_import_request.take() {
             self.begin_task(Request::ImportMatteModel { model });
         }
@@ -970,6 +973,7 @@ impl Session {
             FileDialog::ImportPackage => base().add_filter(language.t(Message::FilterPackage), &["zip"]),
             FileDialog::ImportMatteModel { .. } => base().add_filter(language.t(Message::FilterMatteModel), &["zip"]),
             FileDialog::PickFont { .. } => base().add_filter(language.t(Message::FilterFont), &["ttf", "otf", "ttc"]),
+            FileDialog::PickTexture { .. } => base().add_filter(language.t(Message::FilterPicture), &["png", "jpg", "jpeg"]),
             FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
             FileDialog::SaveProject => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
@@ -978,7 +982,7 @@ impl Session {
         };
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
-                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::ImportMatteModel { .. } | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
+                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::PickTexture { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::ImportMatteModel { .. } | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
                 FileDialog::SaveProject | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
