@@ -152,7 +152,7 @@ impl PaintKind {
 
 /// A texture painting with `image`, at its natural size, straight and opaque.
 pub fn texture_paint(image: TextImageRef) -> TextPaint {
-    TextPaint::Texture(TextTexture { image, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None })
+    TextPaint::Texture(TextTexture { image, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, mix: 1.0, cells: 1, flip_x: false, flip_y: false, base: None })
 }
 
 /// `paint` turned into a paint of `kind`. `remembered` is the paint of that kind this one was last

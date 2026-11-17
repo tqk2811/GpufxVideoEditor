@@ -25,7 +25,7 @@ use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextBloom, TextCon
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO, SUPPORTED_FORMAT};
+use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, checked_manifest_path, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO, SUPPORTED_FORMAT};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem, Limits, MIB};
 use crate::text_clip::TEXT_SIZE_RANGE;
 
@@ -78,6 +78,10 @@ pub struct TextStyleManifestItem {
     /// What the style is shown on in the library; the name when absent.
     #[serde(default)]
     pub preview_text: Option<String>,
+    /// A picture of the pack (PNG or JPEG, format 2 only) the library shows the style as, in place
+    /// of its preview text: a cover made by the pack's author, such as the CapCut cover icons.
+    #[serde(default)]
+    pub cover: Option<String>,
     pub style: PackTextStyle,
     #[serde(default)]
     pub animation: Option<PackStyleAnimation>,
@@ -373,7 +377,33 @@ pub fn check_text_style_fields(manifest: &TextStyleManifest) -> Result<(), Impor
     check_pack_header(header_format(manifest.format), &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "styles")?;
     check_layer_format(manifest.format, manifest.items.iter().map(|item| (item.id.as_str(), &item.style)))?;
     check_item_ids(manifest.items.iter().map(|item| (item.id.as_str(), item.name.as_str())))?;
-    manifest.items.iter().try_for_each(|item| check_style_item_parts(&item.id, &item.name, item.category.as_deref(), item.preview_text.as_deref(), &item.style, item.animation.as_ref()))
+    manifest.items.iter().try_for_each(|item| check_style_item_parts(&item.id, &item.name, item.category.as_deref(), item.preview_text.as_deref(), &item.style, item.animation.as_ref()))?;
+    for item in &manifest.items {
+        if let Some(cover) = &item.cover {
+            check_cover(manifest.format, cover).map_err(|message| ImportProblem::BadManifest(format!("the item \"{}\": {message}", item.id)))?;
+        }
+    }
+    Ok(())
+}
+
+/// Checks the cover `file` an item of a pack of `format` names: a PNG or JPEG path inside the pack,
+/// in a pack of format 2 (the first that holds pictures).
+fn check_cover(format: u32, file: &str) -> Result<(), String> {
+    if format != LAYERED_STYLE_FORMAT {
+        return Err(format!("a cover needs format {LAYERED_STYLE_FORMAT}"));
+    }
+    if checked_manifest_path(file).is_err() {
+        return Err(format!("the cover \"{file}\" is not a path inside the pack"));
+    }
+    if !is_texture(file) {
+        return Err(format!("the cover \"{file}\" is not a PNG or JPEG picture"));
+    }
+    Ok(())
+}
+
+/// The cover pictures the items of `manifest` name.
+pub(crate) fn covers(manifest: &TextStyleManifest) -> impl Iterator<Item = &str> {
+    manifest.items.iter().filter_map(|item| item.cover.as_deref())
 }
 
 /// The format whose header a style pack of `format` has: format 2 has the header of format 1.
@@ -471,7 +501,7 @@ pub fn install_text_style_pack(source: &Path, user_root: &Path, overwrite: bool)
     let media = style_media(manifest.format);
     check_entry_extensions(&entries, media)?;
     let textures = own_textures(manifest.items.iter().map(|item| &item.style), &manifest.id, TexturePackType::TextStyle);
-    check_named_files(&manifest.license.files, textures.into_iter(), &entries, media, "a PNG or JPEG picture")?;
+    check_named_files(&manifest.license.files, textures.into_iter().chain(covers(&manifest)), &entries, media, "a PNG or JPEG picture")?;
 
     let id = manifest.id.to_ascii_lowercase();
     let check_unpacked = |temporary: &Path| {
@@ -653,6 +683,40 @@ pub(crate) mod tests {
         let other = layered_manifest(&LAYERED_STYLE.replace(r#""pack":"Avs-Text""#, r#""pack":"metal""#));
         assert!(install_zip(&written(&dir, &layered_pack(&other, &[])), &dir.join("root"), false).is_ok());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `manifest` with `"cover": <cover>` on its item.
+    fn with_cover(manifest: &str, cover: &str) -> String {
+        manifest.replacen(r#""preview_text":"Hello","#, &format!(r#""preview_text":"Hello","cover":{cover},"#), 1)
+    }
+
+    #[test]
+    fn a_cover_is_a_picture_of_a_format_2_pack_and_the_library_finds_it() {
+        let png: &[(&str, &[u8])] = &[("textures/gold.png", b"png")];
+        let dir = scratch("cover");
+        let root = dir.join("root");
+        let manifest = with_cover(&layered_manifest(LAYERED_STYLE), r#""covers/neon.png""#);
+        let files: &[(&str, &[u8])] = &[("textures/gold.png", b"png"), ("covers/neon.png", b"png")];
+        let outcome = install_zip(&written(&dir, &layered_pack(&manifest, files)), &root, false).unwrap();
+        assert!(matches!(outcome, ImportOutcome::TextStyleInstalled(_)), "{outcome:?}");
+        assert_eq!(parse_text_style_manifest(manifest.as_bytes()).unwrap().items[0].cover.as_deref(), Some("covers/neon.png"));
+        let library = crate::text_style_library::scan_text_style_packs(&[root.clone()]);
+        let style = library.find("avs-text/neon").expect("the style is listed");
+        assert_eq!(style.cover.as_deref(), Some(root.join("packages/text-style/avs-text").join("covers/neon.png").as_path()));
+        let _ = fs::remove_dir_all(&dir);
+
+        for (name, manifest, files) in [
+            ("a cover missing from the zip", with_cover(&layered_manifest(LAYERED_STYLE), r#""covers/neon.png""#), png),
+            ("a cover that is not PNG or JPEG", with_cover(&layered_manifest(LAYERED_STYLE), r#""covers/neon.gif""#), &[("textures/gold.png", &b"png"[..]), ("covers/neon.gif", &b"gif"[..])][..]),
+            ("a cover leaving the pack", with_cover(&layered_manifest(LAYERED_STYLE), r#""../neon.png""#), png),
+            ("a cover in a format 1 pack", with_cover(&manifest_json(), r#""neon.png""#), &[][..]),
+        ] {
+            let dir = scratch("cover-bad");
+            let error = install_zip(&written(&dir, &layered_pack(&manifest, files)), &dir.join("root"), false).unwrap_err();
+            assert!(format!("{error:?}").starts_with("BadManifest"), "{name}: {error:?}");
+            assert!(!dir.join("root/packages/text-style").exists(), "{name}: nothing installed");
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

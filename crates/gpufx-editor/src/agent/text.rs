@@ -589,7 +589,7 @@ mod tests {
         let text = crate::text_clip::default_text("Hi");
         let with = |path: &str| {
             let mut next = text.clone();
-            next.fill = engine::TextPaint::Texture(engine::TextTexture { image: engine::TextImageRef::File { path: path.to_owned() }, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
+            next.fill = engine::TextPaint::Texture(engine::TextTexture { image: engine::TextImageRef::File { path: path.to_owned() }, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, mix: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
             next
         };
         for path in [r"\\server\share\a.png", "//server/share/a.png", r"\\?\UNC\server\share\a.png"] {

@@ -2750,7 +2750,7 @@ mod tests {
         let paths = ProjectPaths::roots_only(&dir.join("p.json"), Vec::new());
         let mut text = engine::TextContent::new("Hi", 0.1);
         assert_eq!(super::missing_texture(&paths, &text), None, "no texture");
-        let texture = |image: engine::TextImageRef| engine::TextPaint::Texture(engine::TextTexture { image, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
+        let texture = |image: engine::TextImageRef| engine::TextPaint::Texture(engine::TextTexture { image, fit: engine::TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0, mix: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
         let file = |path: &str| engine::TextImageRef::File { path: path.to_owned() };
         text.fill = texture(file(&picture.to_string_lossy()));
         assert_eq!(super::missing_texture(&paths, &text), None);
@@ -4896,6 +4896,7 @@ second line")), "Title…");
             animation: Some(crate::text_clip::choose_preset(&engine::ClipAnimation::default(), engine::AnimationGroup::Enter, Some("pop"))),
             layout: None,
             karaoke: None,
+            cover: None,
         };
         let subtitle = LibraryTextStyle { reference: "s/low".to_owned(), name: "Low".to_owned(), kind: StyleKind::Subtitle, animation: None, layout: Some(SubtitleLayout { anchor_y: 0.85, max_width: 0.9, max_lines: 2 }), ..bold.clone() };
         crate::text_style_library::TextStyleLibrary {
@@ -5003,7 +5004,7 @@ second line")), "Title…");
         let mut state = EditorState::default();
         let mut library = style_library();
         let texture = engine::TextImageRef::Pack { pack: "s".into(), file: "glow.png".into(), pack_type: engine::TexturePackType::SubtitleStyle };
-        let fill = engine::TextPaint::Texture(engine::TextTexture { image: texture, fit: engine::TextureFit::Tile, scale: 1.0, angle: 0.0, opacity: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
+        let fill = engine::TextPaint::Texture(engine::TextTexture { image: texture, fit: engine::TextureFit::Tile, scale: 1.0, angle: 0.0, opacity: 1.0, mix: 1.0, cells: 1, flip_x: false, flip_y: false, base: None });
         let bloom = engine::TextBloom { color: [255, 255, 0, 255], strength: 0.7, range: 0.3, dir_x: 0.0, dir_y: 0.2 };
         let mut layered = library.packs[1].styles[0].clone();
         layered.reference = "s/glow".to_owned();

@@ -20,7 +20,7 @@ mod units;
 
 pub use paint::{is_network_or_device_path, is_readable_texture_path, text_images, text_texture_stamps, MAX_TEXTURE_CACHE_BYTES, MAX_TEXTURE_DIMENSION, MAX_TEXTURE_FILE_BYTES};
 pub use units::{UnitsPlan, MAX_UNIT_PLANS, UNIT_PLAN_BYTES};
-use paint::{outline_px, wants_glyph_map, GlyphEntry, GlyphMap, GlyphMapBuilder, Painter, ShadowPx, TextureCache, Textures};
+use paint::{outline_px, outline_px as outline_px_of, wants_glyph_map, GlyphEntry, GlyphMap, GlyphMapBuilder, Painter, ShadowPx, TextureCache, Textures};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -515,7 +515,8 @@ impl TextRasterizer {
                 let blur = if s.blur.is_finite() { (s.blur * font_px).clamp(0.0, font_px * engine::MAX_TEXT_SHADOW_BLUR) } else { 0.0 };
                 // A blur too small to move a pixel is no blur, and needs no room.
                 let blur = if blur_half(blur) == 0 { 0.0 } else { blur };
-                ShadowPx { dx, dy, blur, outline_px: widest(&s.outlines) }
+                let spread = outline_px_of(s.spread, font_px);
+                ShadowPx { dx, dy, blur, outline_px: widest(&s.outlines), spread }
             })
             .collect();
         let mut glow_px = glow_reach(text, font_px);
@@ -526,7 +527,7 @@ impl TextRasterizer {
         // outlines, offset and blur.
         let mut shadow_room = [0f32; 4];
         for s in &shadows {
-            let grown = s.outline_px.ceil() + 1.0 + s.blur.ceil() * 2.0;
+            let grown = s.outline_px.max(s.spread).ceil() + 1.0 + s.blur.ceil() * 2.0;
             for (room, offset) in shadow_room.iter_mut().zip([-s.dx, s.dx, -s.dy, s.dy]) {
                 *room = room.max(grown + offset.max(0.0).ceil());
             }
@@ -751,7 +752,7 @@ fn draw_under(text: &TextContent, layout: &Layout, fill: &Mask, canvas: &mut [[f
     let outline_px = layout.outline_px;
     // One squared distance field serves the outlines, the shadows' outlines and the glow.
     let glow = text.glow.filter(|_| layout.glow_px > 0.0);
-    let wants_outline = outline_px > 0.0 || layout.shadows.iter().any(|s| s.outline_px > 0.0);
+    let wants_outline = outline_px > 0.0 || layout.shadows.iter().any(|s| s.outline_px > 0.0 || s.spread > 0.0);
     if let (Some(px), Some(bloom)) = (layout.bloom, text.bloom) {
         draw_bloom(canvas, fill, bloom.color, px);
     }
