@@ -97,8 +97,9 @@ pub struct TextImage {
     pub height: u32,
     /// `width * height` pixels, row by row from the top, as premultiplied RGBA.
     pub pixels: Vec<u8>,
-    /// The system font family, or the path of a font file, that was asked for and not found or
-    /// not readable, so the default font drew it.
+    /// The system font family, the path of a font file, or `<pack>/<file>` of a font pack the
+    /// caller did not resolve to its file (see [`FontRef::label`]), that was asked for and not
+    /// found or not readable, so the default font drew it.
     pub missing_family: Option<String>,
     /// No font is loaded at all, so nothing could be drawn and the picture is empty.
     pub no_font: bool,
@@ -290,6 +291,8 @@ impl TextRasterizer {
             FontRef::Default => None,
             FontRef::System { family } => (!self.has_family(family)).then(|| family.clone()),
             FontRef::File { path } => self.file_family(Path::new(path)).is_none().then(|| path.clone()),
+            // The caller turns a font pack it found into its file; one left is missing.
+            FontRef::Pack { .. } => text.font.label(),
         }
     }
 
@@ -377,6 +380,10 @@ impl TextRasterizer {
                     layout.missing_family = Some(path.clone());
                 }
                 face
+            }
+            FontRef::Pack { .. } => {
+                layout.missing_family = text.font.label();
+                None
             }
         };
         let Some(face) = asked.or_else(|| self.default_family.clone().map(FaceChoice::family)) else {

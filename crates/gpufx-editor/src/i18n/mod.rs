@@ -271,6 +271,7 @@ pub enum Message {
     StickerLibraryEmpty,
     StickerAddHint,
     StickerPackInstalled { name: String, replaced: bool },
+    FontPackInstalled { name: String, replaced: bool },
     ClipAnimationPackInstalled { name: String, replaced: bool },
     TextStylePackInstalled { name: String, replaced: bool },
     /// The Sticker tab has not finished reading the installed packs.
@@ -306,6 +307,11 @@ pub enum Message {
     FilterFont,
     /// The font list is not read yet.
     LoadingFonts,
+    SearchFonts,
+    FontSourceAll,
+    FontSourceSystem,
+    FontSourcePack,
+    NoFontFound,
     /// The font a text asks for is not installed and the default one draws it.
     FontMissing(String),
     /// The project changed while the font file dialog was up, so the file chosen is not used.
@@ -633,6 +639,7 @@ mod tests {
             Message::StickerLibraryEmpty,
             Message::StickerAddHint,
             Message::StickerPackInstalled { name: name(), replaced: true },
+            Message::FontPackInstalled { name: name(), replaced: false },
             Message::ClipAnimationPackInstalled { name: name(), replaced: false },
             Message::TextStylePackInstalled { name: name(), replaced: true },
             Message::ReadingStickerPacks,
@@ -662,6 +669,11 @@ mod tests {
             Message::ChooseFontFile,
             Message::FilterFont,
             Message::LoadingFonts,
+            Message::SearchFonts,
+            Message::FontSourceAll,
+            Message::FontSourceSystem,
+            Message::FontSourcePack,
+            Message::NoFontFound,
             Message::FontMissing(name()),
             Message::FontTargetChanged,
             Message::ImportSubtitles,

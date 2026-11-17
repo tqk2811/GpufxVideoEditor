@@ -302,6 +302,19 @@ fn a_missing_or_broken_font_file_falls_back_to_the_default_and_names_the_file() 
 }
 
 #[test]
+fn a_font_pack_left_unresolved_falls_back_to_the_default_and_names_the_pack_and_file() {
+    let Some(mut r) = rasterizer() else { return };
+    let mut text = TextContent::new("Fallback", 0.06);
+    let default = r.rasterize(&text, HEIGHT, 1.0);
+    text.font = FontRef::Pack { pack: "open-fonts".to_owned(), file: "fonts/Sans.ttf".to_owned() };
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    assert_eq!(image.missing_family.as_deref(), Some("open-fonts/fonts/Sans.ttf"));
+    assert_eq!(image.pixels, default.pixels);
+    assert_eq!(r.missing_font(&text).as_deref(), Some("open-fonts/fonts/Sans.ttf"));
+    assert_eq!(gpufx_text::text_font_stamp(&text), None);
+}
+
+#[test]
 fn a_font_file_that_changes_is_read_again() {
     let Some(mut r) = rasterizer() else { return };
     let (Some(times), Some(arial)) = (windows_font("times.ttf"), windows_font("arial.ttf")) else { return };

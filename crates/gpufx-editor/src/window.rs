@@ -20,6 +20,7 @@ use crate::agent::gateway::{pipe_name, AgentGateway};
 use crate::agent::{check_export, execute, AgentError, AgentHost};
 use crate::audio_library::{scan_audio_packs, AudioLibrary};
 use crate::sticker_library::{scan_sticker_packs, StickerLibrary};
+use crate::font_library::{scan_font_packs, FontLibrary};
 use crate::clip_animation_library::{scan_clip_animation_packs, ClipAnimationLibrary};
 use crate::text_style_library::{scan_text_style_packs, TextStyleLibrary};
 use crate::asset_install::recover_interrupted_install;
@@ -157,6 +158,7 @@ struct Session {
     catalog: Option<Receiver<Catalog>>,
     audio_library: Option<Receiver<AudioLibrary>>,
     sticker_library: Option<Receiver<StickerLibrary>>,
+    font_library: Option<Receiver<FontLibrary>>,
     /// The encoder list once each encoder has been tried, until it is taken.
     encoder_probe: Option<Receiver<Vec<EncoderOption>>>,
     clip_animation_library: Option<Receiver<(ClipAnimationLibrary, engine::PackPresets)>>,
@@ -234,12 +236,14 @@ impl Session {
         let proxies = ProxyManager::start(ChildProxyMaker { tool: sibling_render_exe(), package_roots: package_roots.clone() }, proxy_folder(), proxy_mode, Some(Arc::new(move || proxies_window.request_redraw())));
         let paths = Arc::new(project_paths(None, &package_roots));
         state.visuals.get_mut().set_paths(paths.clone());
+        state.font_paths = ProjectPaths::roots_only(Path::new(crate::editor::FONT_PATHS_FILE), package_roots.clone());
         let visuals_window = session_window.clone();
         state.visuals.get_mut().set_waker(Arc::new(move || visuals_window.request_redraw()));
         let previews_window = session_window.clone();
         state.previews.get_mut().start_for_editor(package_roots.clone(), Arc::new(move || previews_window.request_redraw()));
         let audio_library = spawn_audio_scan(package_roots.clone(), window_for_scan.clone());
         let sticker_library = spawn_sticker_scan(package_roots.clone(), window_for_scan.clone());
+        let font_library = spawn_font_scan(package_roots.clone(), window_for_scan.clone());
         let clip_animation_library = spawn_clip_animation_scan(package_roots.clone(), window_for_scan.clone());
         let text_style_library = spawn_text_style_scan(package_roots.clone(), window_for_scan.clone());
         let encoder_probe = spawn_encoder_probe(window_for_scan.clone());
@@ -282,6 +286,7 @@ impl Session {
             catalog: Some(catalog),
             audio_library: Some(audio_library),
             sticker_library: Some(sticker_library),
+            font_library: Some(font_library),
             encoder_probe: Some(encoder_probe),
             clip_animation_library: Some(clip_animation_library),
             text_style_library: Some(text_style_library),
@@ -394,6 +399,18 @@ impl Session {
             self.state.clip_animation_library = library;
             self.clip_animation_library = None;
             // Frames drawn without the new curves must be drawn again.
+            self.tracker = RequestTracker::default();
+            self.shown = None;
+        }
+    }
+
+    /// Takes the installed font packs once their scan has finished.
+    fn collect_font_library(&mut self) {
+        if let Some(Ok(library)) = self.font_library.as_ref().map(Receiver::try_recv) {
+            self.state.font_library = library;
+            self.font_library = None;
+            // Frames drawn before the packs were known are drawn again; a text's shape is keyed by
+            // the stamp of its font file, so it follows the file on its own.
             self.tracker = RequestTracker::default();
             self.shown = None;
         }
@@ -682,6 +699,7 @@ impl Session {
         self.collect_catalog();
         self.collect_audio_library();
         self.collect_sticker_library();
+        self.collect_font_library();
         self.collect_encoder_probe();
         self.collect_clip_animation_library();
         self.collect_text_style_library();
@@ -1025,6 +1043,7 @@ impl Session {
             Action::PackageInstalled { package } => self.package_installed(&package),
             Action::AudioPackInstalled => self.audio_pack_installed(),
             Action::StickerPackInstalled => self.sticker_pack_installed(),
+            Action::FontPackInstalled => self.font_pack_installed(),
             Action::ClipAnimationPackInstalled => self.clip_animation_library = Some(spawn_clip_animation_scan(self.package_roots.clone(), self.window.clone())),
             Action::TextStylePackInstalled => self.text_style_library = Some(spawn_text_style_scan(self.package_roots.clone(), self.window.clone())),
             Action::SaveTo(path) => self.save_project(path),
@@ -1115,6 +1134,14 @@ impl Session {
         self.audio_library = Some(spawn_audio_scan(self.package_roots.clone(), self.window.clone()));
         self.build_paths();
         self.state.visuals.get_mut().set_paths(self.paths.clone());
+        self.tracker = RequestTracker::default();
+        self.shown = None;
+    }
+
+    /// Reads the installed font packs again, and draws again the texts that waited for one.
+    fn font_pack_installed(&mut self) {
+        self.font_library = Some(spawn_font_scan(self.package_roots.clone(), self.window.clone()));
+        self.build_paths();
         self.tracker = RequestTracker::default();
         self.shown = None;
     }
@@ -1346,6 +1373,19 @@ fn spawn_text_style_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<T
     });
     if let Err(e) = scanner {
         eprintln!("gpufx-editor: the text style pack scan could not start: {e}");
+    }
+    receiver
+}
+
+/// Reads the manifests and fonts of the installed font packs away from the UI thread.
+fn spawn_font_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<FontLibrary> {
+    let (sender, receiver) = channel();
+    let scanner = std::thread::Builder::new().name("font-packs".to_owned()).spawn(move || {
+        let _ = sender.send(scan_font_packs(&roots));
+        window.request_redraw();
+    });
+    if let Err(e) = scanner {
+        eprintln!("gpufx-editor: the font pack scan could not start: {e}");
     }
     receiver
 }

@@ -13,6 +13,7 @@ use gpufx_editor::agent::gateway::{self, pipe_name};
 use gpufx_editor::agent::{check_export, execute, prepare, AgentError, AgentHost, AgentRequest, AgentResult, Step};
 use gpufx_editor::clip_animation_library::scan_clip_animation_packs;
 use gpufx_editor::text_style_library::scan_text_style_packs;
+use gpufx_editor::font_library::scan_font_packs;
 use gpufx_editor::audio_library::scan_audio_packs;
 use gpufx_editor::sticker_library::scan_sticker_packs;
 use gpufx_editor::editor::{EditorState, Status};
@@ -155,6 +156,8 @@ impl FileSession {
         let mut state = EditorState::default();
         state.clip_animation_library = scan_clip_animation_packs(&roots);
         state.text_style_library = scan_text_style_packs(&roots);
+        state.font_library = scan_font_packs(&roots);
+        state.font_paths = ProjectPaths::roots_only(std::path::Path::new(gpufx_editor::editor::FONT_PATHS_FILE), roots.clone());
         state.audio_library = scan_audio_packs(&roots);
         state.sticker_library = scan_sticker_packs(&roots);
         Self { host: FileHost { state, roots: roots.clone(), gpu: None, rig: None, export: None }, roots }

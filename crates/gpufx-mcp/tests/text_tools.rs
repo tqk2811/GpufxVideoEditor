@@ -251,7 +251,7 @@ fn font_list_puts_the_default_font_first_and_says_while_the_fonts_are_still_bein
         std::thread::sleep(Duration::from_millis(100));
     };
     let fonts = list["fonts"].as_array().unwrap();
-    assert!(fonts[1..].iter().all(|font| font["kind"] == "system" && font["family"].is_string()), "{list}");
+    assert!(fonts[1..].iter().all(|font| (font["kind"] == "system" && font["family"].is_string()) || (font["kind"] == "pack" && font["file"].is_string())), "{list}");
     if let Some(font) = fonts.get(1) {
         // What the list names is what a text can use.
         let family = font["family"].as_str().unwrap();

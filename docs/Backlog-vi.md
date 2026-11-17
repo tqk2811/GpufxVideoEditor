@@ -582,10 +582,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/gpufx-text/src/lib.rs` (`draw`, `self.cache.get_image`) giữ ảnh glyph theo cỡ chữ mãi mãi; đổi cỡ chữ hay scale (mỗi bậc 2^(1/4)) thêm một bộ glyph, chữ lớn mỗi glyph tới vài MB. Nên dọn `image_cache` khi vượt một ngưỡng byte, hoặc dùng `get_image_uncached` cho cỡ lớn. Ghi ngày 2026-11-11.
 
-### [Thấp] Combo font trong inspector chưa có ô tìm kiếm
-
-`crates/gpufx-editor/src/ui/text_inspector.rs` liệt kê mọi family font của hệ thống trong một combo cuộn, mà máy thường có vài trăm family nên tìm một font phải cuộn dài. Nên thêm ô gõ để lọc danh sách theo tên (không phân biệt hoa thường) ngay trong combo. Ghi ngày 2026-11-11.
-
 ### [Thấp] Chưa kéo thả clip chữ từ thư viện lên timeline
 
 Clip chữ chỉ thêm bằng nút "Thêm chữ" ở tab Chữ (`EditorState::add_text_at_playhead`, `crates/gpufx-editor/src/editor.rs`), đặt ở playhead; ảnh, nhạc và sticker thì kéo thả được lên track (`drop_media`). Nên cho kéo mục chữ mặc định từ tab Chữ thả lên track hoặc vùng trống của timeline, dùng chung đường thêm chữ với nút (chọn track, vị trí đặt theo chỗ thả). Ghi ngày 2026-11-11.

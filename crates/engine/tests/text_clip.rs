@@ -50,6 +50,10 @@ fn a_font_file_and_a_system_font_round_trip() {
     let system: FontRef = serde_json::from_str(r#"{"kind":"system","family":"Arial"}"#).unwrap();
     assert_eq!(system, FontRef::System { family: "Arial".into() });
     assert_eq!(serde_json::from_str::<FontRef>(r#"{"kind":"default"}"#).unwrap(), FontRef::Default);
+    let pack = FontRef::Pack { pack: "open-fonts".into(), file: "fonts/Sans.ttf".into() };
+    assert_eq!(serde_json::to_string(&pack).unwrap(), r#"{"kind":"pack","pack":"open-fonts","file":"fonts/Sans.ttf"}"#);
+    assert_eq!(serde_json::from_str::<FontRef>(r#"{"kind":"pack","pack":"open-fonts","file":"fonts/Sans.ttf"}"#).unwrap(), pack);
+    assert_eq!(pack.label().as_deref(), Some("open-fonts/fonts/Sans.ttf"));
 }
 
 #[test]

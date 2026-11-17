@@ -6,6 +6,7 @@ use super::icons::{self, Icon};
 use super::numeric::{self, drag_field};
 use super::theme;
 use crate::editor::EditorState;
+use crate::font_library::FontLibrary;
 use crate::i18n::{Language, Message};
 use crate::text_clip::{default_background, default_glow, default_outline, default_shadow, TEXT_SIZE_RANGE};
 use crate::text_shapes::available_families;
@@ -72,7 +73,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(content) = content_box(ui, id, text, language) {
         next.set_content(content);
     }
-    if font_combo(ui, id, &mut next, language) {
+    if font_combo(ui, id, &mut next, &state.font_library, language) {
         state.ui.font_file_request = Some(key);
     }
     let output_height = f64::from(state.project().output.height.max(1));
@@ -196,35 +197,131 @@ fn content_box(ui: &mut egui::Ui, id: egui::Id, text: &TextContent, language: La
     applied
 }
 
-/// The font combo; true when "Choose a font file..." was clicked, which the window answers with
-/// the file dialog.
-fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, language: Language) -> bool {
+/// Which fonts the font list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum FontSource {
+    #[default]
+    All,
+    /// The families installed on the system.
+    System,
+    /// The fonts of the installed font packs.
+    Pack,
+}
+
+/// One font of the font list: what it sets, its name and, for a font of a pack, the pack's name.
+#[derive(Debug, Clone, PartialEq)]
+struct FontChoice {
+    font: FontRef,
+    name: String,
+    pack_name: Option<String>,
+}
+
+/// The fonts `source` shows whose name or pack name holds `search`, ignoring case: the fonts of
+/// the packs first, then the system families, each in its own order.
+fn font_choices(families: &[String], fonts: &FontLibrary, source: FontSource, search: &str) -> Vec<FontChoice> {
+    let search = search.trim().to_lowercase();
+    let matches = |text: &str| text.to_lowercase().contains(&search);
+    let packs = fonts.fonts.iter().filter(|_| source != FontSource::System).filter(|font| search.is_empty() || matches(&font.name) || matches(&font.pack_name)).map(|font| FontChoice { font: font.font_ref(), name: font.name.clone(), pack_name: Some(font.pack_name.clone()) });
+    let system = families.iter().filter(|_| source != FontSource::Pack).filter(|family| search.is_empty() || matches(family)).map(|family| FontChoice { font: FontRef::System { family: family.clone() }, name: family.clone(), pack_name: None });
+    packs.chain(system).collect()
+}
+
+/// The font combo: a search box, which fonts to show, the default font, the font file in use,
+/// "Choose a font file..." and the fonts found, of which only the rows in view are drawn. Enter in
+/// the search box picks the first font found. True when "Choose a font file..." was clicked, which
+/// the window answers with the file dialog.
+fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, fonts: &FontLibrary, language: Language) -> bool {
     let default_name = language.t(Message::DefaultFont);
     let mut choose_file = false;
     let shown = match &text.font {
         FontRef::Default => default_name.clone(),
         FontRef::System { family } => family.clone(),
         FontRef::File { path } => font_file_label(path),
+        FontRef::Pack { pack, file } => fonts.find(pack, file).map_or_else(|| format!("{pack}/{file}"), |font| format!("{} ({})", font.name, font.pack_name)),
     };
+    let (search_id, source_id, opened_id) = (id.with("font-search"), id.with("font-source"), id.with("font-opened"));
     ui.horizontal(|ui| {
         ui.colored_label(theme::text_dim(), language.t(Message::FieldFont));
-        egui::ComboBox::from_id_salt(id.with("font")).selected_text(shown).width(ui.available_width()).height(FONT_LIST_HEIGHT).show_ui(ui, |ui| {
-            ui.selectable_value(&mut text.font, FontRef::Default, default_name);
-            if let FontRef::File { path } = &text.font {
-                let _ = ui.selectable_label(true, font_file_label(path));
-            }
-            if ui.selectable_label(false, language.t(Message::ChooseFontFile)).clicked() {
-                choose_file = true;
-            }
-            let families = available_families();
-            if families.is_empty() {
-                ui.colored_label(theme::text_dim(), language.t(Message::LoadingFonts));
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
-            }
-            for family in families.iter() {
-                ui.selectable_value(&mut text.font, FontRef::System { family: family.clone() }, family);
-            }
-        });
+        let combo_salt = id.with("font");
+        let popup_id = ui.make_persistent_id(combo_salt).with("popup");
+        let shown_list = egui::ComboBox::from_id_salt(combo_salt)
+            .selected_text(shown)
+            .width(ui.available_width())
+            .height(f32::INFINITY)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show_ui(ui, |ui| {
+                let mut chosen: Option<FontRef> = None;
+                let mut search: String = ui.data(|data| data.get_temp(search_id)).unwrap_or_default();
+                let mut source: FontSource = ui.data(|data| data.get_temp(source_id)).unwrap_or_default();
+                let search_box = ui.add(egui::TextEdit::singleline(&mut search).id(search_id).hint_text(language.t(Message::SearchFonts)).desired_width(f32::INFINITY));
+                // Focus the box once each time the list opens, so typing filters straight away.
+                if !ui.data(|data| data.get_temp::<bool>(opened_id).unwrap_or(false)) {
+                    search_box.request_focus();
+                    ui.data_mut(|data| data.insert_temp(opened_id, true));
+                }
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut source, FontSource::All, language.t(Message::FontSourceAll));
+                    ui.selectable_value(&mut source, FontSource::System, language.t(Message::FontSourceSystem));
+                    ui.selectable_value(&mut source, FontSource::Pack, language.t(Message::FontSourcePack));
+                });
+                ui.separator();
+                if ui.selectable_label(text.font == FontRef::Default, default_name.as_str()).clicked() {
+                    chosen = Some(FontRef::Default);
+                }
+                if let FontRef::File { path } = &text.font {
+                    let _ = ui.selectable_label(true, font_file_label(path));
+                }
+                if ui.selectable_label(false, language.t(Message::ChooseFontFile)).clicked() {
+                    choose_file = true;
+                    egui::Popup::close_id(ui.ctx(), popup_id);
+                }
+                ui.separator();
+                let families = available_families();
+                if families.is_empty() && source != FontSource::Pack {
+                    ui.colored_label(theme::text_dim(), language.t(Message::LoadingFonts));
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+                }
+                let found = font_choices(&families, fonts, source, &search);
+                if search_box.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    chosen = found.first().map(|choice| choice.font.clone());
+                    if chosen.is_none() {
+                        // Nothing matched: the list stays open, so the box keeps the focus for the
+                        // next try instead of leaving the typing nowhere.
+                        search_box.request_focus();
+                    }
+                }
+                if found.is_empty() && !(families.is_empty() && source != FontSource::Pack) {
+                    ui.colored_label(theme::text_dim(), language.t(Message::NoFontFound));
+                }
+                let row_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button));
+                egui::ScrollArea::vertical().id_salt(id.with("font-list")).max_height(FONT_LIST_HEIGHT).auto_shrink([false, true]).show_rows(ui, row_height, found.len(), |ui, rows| {
+                    for choice in &found[rows] {
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(text.font == choice.font, choice.name.as_str()).clicked() {
+                                chosen = Some(choice.font.clone());
+                            }
+                            if let Some(pack_name) = &choice.pack_name {
+                                ui.colored_label(theme::text_dim(), pack_name.as_str());
+                            }
+                        });
+                    }
+                });
+                ui.data_mut(|data| {
+                    data.insert_temp(search_id, search);
+                    data.insert_temp(source_id, source);
+                });
+                if let Some(font) = chosen {
+                    text.font = font;
+                    egui::Popup::close_id(ui.ctx(), popup_id);
+                }
+            });
+        if shown_list.inner.is_none() {
+            // Closed: the next opening focuses the search box again and starts with an empty search.
+            ui.data_mut(|data| {
+                data.remove::<bool>(opened_id);
+                data.remove::<String>(search_id);
+            });
+        }
     });
     choose_file
 }
@@ -383,5 +480,64 @@ fn shadow_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
             percent_row(ui, &format!("{offset} Y"), &mut shadow.offset[1], OFFSET_RANGE);
             percent_row(ui, &language.t(Message::FieldBlur), &mut shadow.blur, BLUR_RANGE);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::font_library::LibraryFont;
+
+    fn library() -> FontLibrary {
+        let font = |name: &str, pack_name: &str| LibraryFont { pack: "p".to_owned(), pack_name: pack_name.to_owned(), file: format!("{name}.ttf"), name: name.to_owned(), family: None, path: std::path::PathBuf::new() };
+        FontLibrary { fonts: vec![font("Roboto", "Open Fonts"), font("Lobster", "Script Pack")], problems: Vec::new(), loaded: true }
+    }
+
+    fn names(choices: &[FontChoice]) -> Vec<&str> {
+        choices.iter().map(|choice| choice.name.as_str()).collect()
+    }
+
+    #[test]
+    fn the_font_list_filters_by_source_and_by_name_or_pack_ignoring_case() {
+        let families = vec!["Arial".to_owned(), "Segoe UI".to_owned()];
+        let library = library();
+        assert_eq!(names(&font_choices(&families, &library, FontSource::All, "")), vec!["Roboto", "Lobster", "Arial", "Segoe UI"]);
+        assert_eq!(names(&font_choices(&families, &library, FontSource::System, "")), vec!["Arial", "Segoe UI"]);
+        assert_eq!(names(&font_choices(&families, &library, FontSource::Pack, "")), vec!["Roboto", "Lobster"]);
+        assert_eq!(names(&font_choices(&families, &library, FontSource::All, " sEgOe ")), vec!["Segoe UI"], "trimmed, ignoring case");
+        assert_eq!(names(&font_choices(&families, &library, FontSource::All, "script")), vec!["Lobster"], "a pack's name finds its fonts");
+        assert_eq!(names(&font_choices(&families, &library, FontSource::System, "roboto")), Vec::<&str>::new());
+        let first = &font_choices(&families, &library, FontSource::All, "rob")[0];
+        assert_eq!((first.font.clone(), first.pack_name.as_deref()), (FontRef::Pack { pack: "p".to_owned(), file: "Roboto.ttf".to_owned() }, Some("Open Fonts")));
+    }
+
+    #[test]
+    fn enter_on_a_search_that_finds_nothing_keeps_the_focus_in_the_search_box() {
+        let ctx = egui::Context::default();
+        let id = egui::Id::unique("enter-test");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0));
+        let library = library();
+        let mut text = TextContent::new("x", 0.1);
+        let mut frame = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let mut output = ctx.run_ui(raw, |ui| {
+                font_combo(ui, id, &mut text, &library, Language::English);
+            });
+            output.textures_delta.clear();
+        };
+        let at = egui::pos2(390.0, 10.0);
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(Vec::new());
+        frame(vec![egui::Event::PointerMoved(at), button(true)]);
+        frame(vec![button(false)]);
+        frame(Vec::new());
+        let search_id = id.with("font-search");
+        assert!(ctx.memory(|memory| memory.has_focus(search_id)), "the list opened with the search box focused");
+        frame(vec![egui::Event::Text("zzzz no such font".to_owned())]);
+        let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: Some(egui::Key::Enter), pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        frame(vec![enter]);
+        frame(Vec::new());
+        assert!(ctx.memory(|memory| memory.has_focus(search_id)), "Enter with nothing found leaves the focus in the box");
+        assert_eq!(text.font, FontRef::Default, "nothing chosen");
     }
 }

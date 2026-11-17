@@ -4,6 +4,8 @@
 use engine::{AnimationGroup, FontRef, ClipAnimation, AnimationRef, TextContent, ANIMATION_PRESETS};
 
 use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary};
+use crate::font_library::FontLibrary;
+use d3d12_backend::ProjectPaths;
 use crate::subtitle_style_install::SubtitleLayout;
 use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStyleLibrary};
 use serde_json::{json, Value};
@@ -193,6 +195,18 @@ fn check_font(font: &FontRef) -> Result<(), AgentError> {
     }
 }
 
+/// A font of a font pack must be a font file (.ttf, .otf or .ttc) of an installed pack, found
+/// through `paths` as the compositor finds it, so nothing hangs on the scan of the font library and
+/// a reference that names no place inside a pack is never written to the project. Every other font
+/// is checked by [`apply_patch`].
+pub fn check_font_pack(paths: &ProjectPaths, font: Option<&FontRef>) -> Result<(), AgentError> {
+    let Some(FontRef::Pack { pack, file }) = font else { return Ok(()) };
+    match paths.font_pack_path(pack, file) {
+        Ok(_) => Ok(()),
+        Err(problem) => Err(invalid(format!("no font {file} in an installed font pack {pack} ({problem}): font_list names the fonts of the packs"))),
+    }
+}
+
 pub fn patched_animation(library: &ClipAnimationLibrary, kind: AnimatedClipKind, current: &ClipAnimation, patch: &TextAnimationPatch) -> Result<ClipAnimation, AgentError> {
     let mut next = current.clone();
     for (group, change, slot) in [(AnimationGroup::Enter, &patch.enter, &mut next.enter), (AnimationGroup::Exit, &patch.exit, &mut next.exit), (AnimationGroup::Repeat, &patch.repeat, &mut next.repeat)] {
@@ -250,11 +264,11 @@ pub struct StyledBase {
 /// names fonts in its `font_hint` while `families` (the installed fonts) is empty is said to be
 /// loading too: the scan of the fonts is still running, and applying it now would silently skip the
 /// font.
-pub fn styled_base(library: &TextStyleLibrary, families: &[String], style_id: Option<&str>, text: &TextContent, animation: &ClipAnimation) -> Result<StyledBase, AgentError> {
+pub fn styled_base(library: &TextStyleLibrary, families: &[String], pack_fonts: &[crate::font_library::LibraryFont], style_id: Option<&str>, text: &TextContent, animation: &ClipAnimation) -> Result<StyledBase, AgentError> {
     let Some(style_id) = style_id else { return Ok(StyledBase { text: text.clone(), animation: animation.clone(), layout: None }) };
     match library.find(style_id) {
         Some(style) if families.is_empty() && !style.style.font_hint.is_empty() => Err(invalid(format!("'{style_id}' names fonts, but the list of fonts is still loading; try again in a moment"))),
-        Some(style) => Ok(StyledBase { text: style.apply(text, families), animation: style.animation_for(animation), layout: style.layout }),
+        Some(style) => Ok(StyledBase { text: style.apply(text, families, pack_fonts), animation: style.animation_for(animation), layout: style.layout }),
         None if !library.loaded => Err(invalid(format!("'{style_id}' may be a style of an installed pack, but the packs are still loading; try again in a moment"))),
         None => Err(invalid(format!("no style '{style_id}': text_style_list names the installed styles"))),
     }
@@ -293,16 +307,20 @@ pub fn text_style_list(library: &TextStyleLibrary, kind: Option<&str>) -> Result
     Ok(json!({"state": if library.loaded { "ready" } else { "loading" }, "styles": styles, "problems": problems}))
 }
 
-/// The fonts a text can name, each as the `font` value to use: the system default first. While the
-/// scan of the installed fonts has not finished only that one is listed, and the state says so.
-pub fn font_list() -> Value {
+/// The fonts a text can name, each as the `font` value to use: the system default first, then the
+/// installed families, then the fonts of the installed font packs with their names. While a scan
+/// of the installed fonts or of the packs has not finished, what it finds is missing and the state
+/// says so.
+pub fn font_list(library: &FontLibrary) -> Value {
     let families = available_families();
     if families.is_empty() {
         warm_up_shared();
     }
     let system = families.iter().map(|family| json!({"kind": "system", "family": family}));
-    let fonts: Vec<Value> = std::iter::once(json!({"kind": "default"})).chain(system).collect();
-    json!({"state": if families.is_empty() { "loading" } else { "ready" }, "fonts": fonts})
+    let packs = library.fonts.iter().map(|font| json!({"kind": "pack", "pack": font.pack, "file": font.file, "name": font.name, "pack_name": font.pack_name, "family": font.family}));
+    let fonts: Vec<Value> = std::iter::once(json!({"kind": "default"})).chain(system).chain(packs).collect();
+    let ready = !families.is_empty() && library.loaded;
+    json!({"state": if ready { "ready" } else { "loading" }, "fonts": fonts})
 }
 
 /// Every preset animation: its id, the name of its group in a project (`in`, `out` or `loop`) and
@@ -331,6 +349,27 @@ pub fn animation_list(library: &ClipAnimationLibrary) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Without a scan of the font library to lean on, a font of a pack is still checked: a reference
+    /// that is no font file inside an installed pack is refused instead of written to the project.
+    #[test]
+    fn a_pack_font_is_checked_on_disk_whether_or_not_the_library_was_scanned() {
+        let root = std::env::temp_dir().join(format!("gpufx-agent-font-pack-{}", std::process::id()));
+        let pack = root.join("packages/font/open-fonts");
+        std::fs::create_dir_all(pack.join("fonts")).unwrap();
+        std::fs::write(pack.join("manifest.json"), "{}").unwrap();
+        std::fs::write(pack.join("fonts/a.ttf"), b"font").unwrap();
+        std::fs::write(pack.join("OFL.txt"), b"licence").unwrap();
+        let paths = ProjectPaths::roots_only(std::path::Path::new("agent.json"), vec![root.clone()]);
+        let font = |pack: &str, file: &str| FontRef::Pack { pack: pack.to_owned(), file: file.to_owned() };
+        assert!(check_font_pack(&paths, Some(&font("Open-Fonts", "fonts/a.ttf"))).is_ok());
+        assert!(check_font_pack(&paths, None).is_ok());
+        assert!(check_font_pack(&paths, Some(&FontRef::Default)).is_ok());
+        for (pack, file) in [("open-fonts", "../../x.ttf"), ("open-fonts", "fonts\\a.ttf"), ("open-fonts", "/fonts/a.ttf"), ("open-fonts", "OFL.txt"), ("open fonts", "fonts/a.ttf"), ("..", "a.ttf"), ("", "a.ttf"), ("open-fonts", "fonts/b.ttf"), ("other", "fonts/a.ttf")] {
+            assert!(check_font_pack(&paths, Some(&font(pack, file))).is_err(), "{pack}/{file}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn karaoke_is_patched_checked_and_taken_off_with_null() {
@@ -452,14 +491,14 @@ mod tests {
         let text = crate::text_clip::default_text("Hi");
         let animation = ClipAnimation::default();
         let hinted = crate::text_style_library::subtitle_library_for_test(&["Segoe UI"]);
-        let error = styled_base(&hinted, &[], Some("s/low"), &text, &animation).map(|_| ()).unwrap_err();
+        let error = styled_base(&hinted, &[], &[], Some("s/low"), &text, &animation).map(|_| ()).unwrap_err();
         assert!(error.message.contains("still loading") && error.message.contains("fonts"), "{}", error.message);
         let families = vec!["Segoe UI".to_owned()];
-        let styled = styled_base(&hinted, &families, Some("s/low"), &text, &animation).unwrap();
+        let styled = styled_base(&hinted, &families, &[], Some("s/low"), &text, &animation).unwrap();
         assert_eq!(styled.text.font, FontRef::System { family: "Segoe UI".to_owned() });
         let plain = crate::text_style_library::subtitle_library_for_test(&[]);
-        assert!(styled_base(&plain, &[], Some("s/low"), &text, &animation).is_ok(), "a style without a font_hint needs no fonts");
-        assert!(styled_base(&hinted, &[], None, &text, &animation).is_ok(), "no style, no wait");
+        assert!(styled_base(&plain, &[], &[], Some("s/low"), &text, &animation).is_ok(), "a style without a font_hint needs no fonts");
+        assert!(styled_base(&hinted, &[], &[], None, &text, &animation).is_ok(), "no style, no wait");
     }
 
     #[test]
