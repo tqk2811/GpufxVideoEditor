@@ -35,7 +35,7 @@ use crate::matte::{find_matting_model, matte_texture, MatteCache, MatteKey, Matt
 use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
 use crate::rotated_place::rotated_place_effect;
-use crate::still::{aligned_rows, premultiplied_still, read_still, StillPicture};
+use crate::still::{aligned_rows, premultiplied_still, read_animation, read_still, AnimatedPicture, StillPicture};
 use gpufx_text::TextRasterizer;
 use sha2::{Digest, Sha256};
 
@@ -450,6 +450,19 @@ pub enum SourceFrame {
     /// A frame of a text whose characters move one by one, not drawn yet; drawn with the poses of
     /// its units at the clip's clock (see [`D3d12Compositor::resolve_frame`]).
     Units(Arc<MovingText>),
+    /// A frame of an animated picture not uploaded yet (see [`D3d12Compositor::resolve_frame`]).
+    Animated { animation: Arc<AnimatedStill>, index: usize },
+}
+
+/// An animated picture, such as an animated WebP sticker. Its decoded frames are on the CPU,
+/// shared by every clip of the file while one is open; a frame goes to the GPU when it is shown
+/// and never into the still cache, where a frame each few hundredths of a second would push out
+/// the pictures of other clips. The last one uploaded is kept for the frames that still show it.
+pub struct AnimatedStill {
+    picture: Arc<AnimatedPicture>,
+    /// The file and its size and time, as [`StillImage::origin`] has for a still.
+    origin: Arc<str>,
+    shown: Mutex<Option<(usize, Arc<StillImage>)>>,
 }
 
 /// A text whose characters move one by one. Its frames never go into the still cache: each would
@@ -480,6 +493,7 @@ impl SourceFrame {
             Self::Still(still) => Ok(still.input()),
             Self::Step { .. } => Err("a karaoke step was read before it was drawn".to_owned()),
             Self::Units(_) => Err("a text frame was read before it was drawn".to_owned()),
+            Self::Animated { .. } => Err("an animated frame was read before it was uploaded".to_owned()),
         }
     }
 
@@ -488,6 +502,7 @@ impl SourceFrame {
             Self::Video(frame) => frame.display_aspect(),
             Self::Still(still) => still.aspect,
             Self::Step { .. } | Self::Units(_) => 1.0,
+            Self::Animated { animation, .. } => animation.picture.frames[0].aspect(),
         }
     }
 
@@ -513,7 +528,7 @@ impl SourceFrame {
             Self::Still(still) => {
                 still.fence_value.fetch_max(value, Ordering::Relaxed);
             }
-            Self::Step { .. } | Self::Units(_) => {}
+            Self::Step { .. } | Self::Units(_) | Self::Animated { .. } => {}
         }
     }
 
@@ -523,7 +538,7 @@ impl SourceFrame {
     }
 
     fn is_still(&self) -> bool {
-        matches!(self, Self::Still(_) | Self::Step { .. } | Self::Units(_))
+        matches!(self, Self::Still(_) | Self::Step { .. } | Self::Units(_) | Self::Animated { .. })
     }
 }
 
@@ -537,6 +552,8 @@ pub enum SourceDecoder {
     Steps(Arc<KaraokeSteps>),
     /// A text whose characters move one by one, a picture per frame while they move.
     Units(Arc<MovingText>),
+    /// An animated picture, a frame chosen by the time in the clip, looping.
+    Animated(Arc<AnimatedStill>),
 }
 
 impl Decoder for SourceDecoder {
@@ -561,6 +578,11 @@ impl Decoder for SourceDecoder {
                 Ok(shown.map_or_else(|| SourceFrame::Step { steps: steps.clone(), step }, SourceFrame::Still))
             }
             Self::Units(moving) => Ok(SourceFrame::Units(moving.clone())),
+            Self::Animated(animation) => {
+                let index = animation.picture.frame_index_at(time.ticks());
+                let shown = animation.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().filter(|(shown, _)| *shown == index).map(|(_, still)| still.clone());
+                Ok(shown.map_or_else(|| SourceFrame::Animated { animation: animation.clone(), index }, SourceFrame::Still))
+            }
         }
     }
 
@@ -568,7 +590,7 @@ impl Decoder for SourceDecoder {
         match self {
             Self::Video(decoder) => decoder.wait_idle(),
             Self::Reversed(decoder) => decoder.wait_idle(),
-            Self::Still(_) | Self::Steps(_) | Self::Units(_) => Ok(()),
+            Self::Still(_) | Self::Steps(_) | Self::Units(_) | Self::Animated(_) => Ok(()),
         }
     }
 }
@@ -790,6 +812,9 @@ pub struct D3d12Compositor {
     transparent: Option<ImageId>,
     stills: HashMap<StillKey, CachedStill>,
     stills_used: u64,
+    /// The decoded frames of each animated file a clip has open, by its absolute path, while the
+    /// file stays the same; let go with the last clip that shows it.
+    animations: HashMap<PathBuf, ((u64, Option<SystemTime>), Weak<AnimatedPicture>)>,
     /// Draws text clips. The shared system one unless set, taken the first time text is drawn.
     text_rasterizer: Option<Arc<Mutex<TextRasterizer>>>,
     /// The size each text has at scale 1 before any shrinking, by the digest of its JSON and the
@@ -869,7 +894,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
+        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, animations: HashMap::new(), text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
     }
 
     /// Why matting models could not be used, once per model: missing or failing to load. A clip
@@ -1151,6 +1176,31 @@ impl D3d12Compositor {
         Ok(())
     }
 
+    /// The decoder of an image file: an animated WebP plays its frames, any other picture is a still.
+    fn open_image(&mut self, path: &Path) -> Result<SourceDecoder, String> {
+        let metadata = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let stamp = (metadata.len(), metadata.modified().ok());
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        if self.stills.get(&StillKey::File(absolute.clone())).is_some_and(|cached| cached.stamp == stamp) {
+            return self.load_still(path).map(SourceDecoder::Still);
+        }
+        let shared = self.animations.get(&absolute).filter(|(seen, _)| *seen == stamp).and_then(|(_, picture)| picture.upgrade());
+        let picture = match shared {
+            Some(picture) => picture,
+            None => match read_animation(path)? {
+                Some(picture) => {
+                    let picture = Arc::new(picture);
+                    self.animations.retain(|_, (_, picture)| picture.strong_count() > 0);
+                    self.animations.insert(absolute.clone(), (stamp, Arc::downgrade(&picture)));
+                    picture
+                }
+                None => return self.load_still(path).map(SourceDecoder::Still),
+            },
+        };
+        let origin = Arc::from(format!("{}|{}|{:?}", absolute.display(), stamp.0, stamp.1));
+        Ok(SourceDecoder::Animated(Arc::new(AnimatedStill { picture, origin, shown: Mutex::new(None) })))
+    }
+
     /// The still of `path`, decoded once and kept on the GPU while the file stays the same.
     fn load_still(&mut self, path: &Path) -> Result<Arc<StillImage>, String> {
         let metadata = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -1329,6 +1379,17 @@ impl D3d12Compositor {
     /// A text whose characters move is drawn with the poses of its units at `clock`, outside the
     /// still cache (see [`MovingText`]); once they rest it is the still text, from the cache.
     fn resolve_frame(&mut self, frame: &mut SourceFrame, clock: ClipClock) -> Result<(), String> {
+        if let SourceFrame::Animated { animation, index } = frame {
+            let (animation, index) = (animation.clone(), *index);
+            let picture = &animation.picture.frames[index];
+            let image = Image::upload(&self.gpu, picture)?;
+            // Each frame names its own picture in the matte cache.
+            let origin = Some(Arc::from(format!("{}#{index}", animation.origin)));
+            let still = Arc::new(StillImage { origin, aspect: picture.aspect(), has_alpha: picture.has_alpha, fence_value: AtomicU64::new(image.fence_value), image, margin: (0.0, 0.0) });
+            *animation.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((index, still.clone()));
+            *frame = SourceFrame::Still(still);
+            return Ok(());
+        }
         if let SourceFrame::Units(moving) = frame {
             let moving = moving.clone();
             let text = moving.clip.text.as_ref().ok_or("a moving text of a clip without text")?;
@@ -1677,7 +1738,7 @@ impl Compositor for D3d12Compositor {
         let source = clip.source.as_str();
         if is_image_source(source) {
             let path = self.paths.source_path(source);
-            return self.load_still(&path).map(SourceDecoder::Still).map_err(RenderError);
+            return self.open_image(&path).map_err(RenderError);
         }
         if clip.plays_reversed() {
             return self.open_reverse_decoder(source).map(SourceDecoder::Reversed);
@@ -2221,6 +2282,38 @@ mod tests {
         let SourceFrame::Still(still) = &frame else { panic!("a still once drawn") };
         assert_eq!(still.margin, (0.0, 0.0));
         assert_eq!(compositor.stills.len(), 1, "at rest it is the still text, kept like an image");
+    }
+
+    #[test]
+    fn an_animated_webp_plays_its_frames_looping_and_keeps_them_out_of_the_still_cache() {
+        let Some((gpu, _)) = overlay_on_hardware() else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        let mut compositor = D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), 320, 180).expect("a compositor");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/animated.webp");
+        let mut clip = engine::edit::text_clip(Time::ZERO, Time::from_ticks(270_000), TextContent::new("x", 0.1));
+        clip.text = None;
+        clip.source = fixture.to_string_lossy().into_owned();
+        let mut decoder = compositor.open_decoder(&clip).expect("a decoder");
+        let mut second = compositor.open_decoder(&clip).expect("a second decoder");
+        let (SourceDecoder::Animated(first), SourceDecoder::Animated(other)) = (&decoder, &second) else { panic!("an animated decoder") };
+        assert!(Arc::ptr_eq(&first.picture, &other.picture), "two clips of a file share its decoded frames");
+        let clock = ClipClock { elapsed: Time::ZERO, duration: Time::from_ticks(270_000) };
+        let mut origins = Vec::new();
+        // 0, 150, 400 and 650 ms: frames 0, 1, 2, then 0 again once the 600 ms loop repeats.
+        for ms in [0, 150, 400, 650] {
+            let mut frame = decoder.frame_at(Time::from_ticks(ms * 90)).expect("a frame");
+            assert!(matches!(frame, SourceFrame::Animated { .. }), "a new frame is uploaded when shown, at {ms} ms");
+            compositor.resolve_frame(&mut frame, clock).expect("an uploaded frame");
+            let SourceFrame::Still(still) = &frame else { panic!("a still once uploaded") };
+            assert!(still.has_alpha);
+            origins.push(still.origin.clone().expect("an origin"));
+        }
+        assert!(origins[0].ends_with("#0") && origins[1].ends_with("#1") && origins[2].ends_with("#2") && origins[3].ends_with("#0"), "{origins:?}");
+        assert!(matches!(decoder.frame_at(Time::from_ticks(660 * 90)).expect("a frame"), SourceFrame::Still(_)), "the frame just shown is not uploaded again");
+        assert_eq!(compositor.stills.len(), 0, "no animated frame went into the still cache");
+        let _ = second.wait_idle();
+        drop((decoder, second));
+        assert!(compositor.animations.values().all(|(_, picture)| picture.strong_count() == 0), "the frames go with the last clip");
     }
 
     #[test]
