@@ -196,6 +196,8 @@ pub enum AgentRequest {
     ProjectSave { path: Option<PathBuf>, overwrite: bool },
     ProjectGet,
     PackagesList { filter: Option<String> },
+    /// The installed packs of every kind, or of `kind`, as the package manager lists them. Read only.
+    InstalledPacks { kind: Option<String> },
     /// The font families a text can name.
     FontList,
     /// The preset animations a clip with a picture can name: id, group and default duration.

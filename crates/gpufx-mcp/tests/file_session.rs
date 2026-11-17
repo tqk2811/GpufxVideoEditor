@@ -385,3 +385,15 @@ fn bad_arguments_are_a_parameter_error_and_packages_can_be_listed() {
     assert!(listed["transitions"].as_array().unwrap().iter().any(|entry| entry["package"].as_str().unwrap().contains("xfade")), "{listed}");
 }
 
+#[test]
+fn installed_packs_are_listed_read_only_by_kind() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let listed = call_ok(&mut session, "list_packages", json!({"kind": "transition"}));
+    let packs = listed["packs"].as_array().unwrap();
+    assert!(packs.iter().any(|pack| pack["key"].as_str().unwrap().starts_with("gpufx/") && pack["name"].is_string()), "{listed}");
+    assert!(packs.iter().all(|pack| pack["kind"] == "transition" && pack["source"] == "shipped" && pack["enabled"] == true));
+    let all = call_ok(&mut session, "list_packages", json!({}));
+    assert!(all["packs"].as_array().unwrap().len() > packs.len());
+    assert_eq!(call_err(&mut session, "list_packages", json!({"kind": "shader"})).code, "invalid_kind");
+}
+

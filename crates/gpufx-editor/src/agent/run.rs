@@ -22,6 +22,7 @@ use crate::editor::{even_side, new_clip, AgentExport, MAX_OUTPUT_SIDE, EditorSta
 use crate::export::{export_blocker, ExportOutcome};
 use crate::i18n::Language;
 use crate::media::{choose_track, TrackChoice};
+use crate::package_manager::{PackSource, PackTab};
 use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
 use crate::text_clip::{default_text, natural_placement};
 use crate::text_shapes::available_families;
@@ -99,6 +100,7 @@ pub fn prepare(request: AgentRequest, package_roots: &[PathBuf]) -> Prepared {
     match &prepared.request {
         AgentRequest::ProjectOpen { path, .. } => prepared.loaded = Some(load(path, package_roots)),
         AgentRequest::PackagesList { filter } => prepared.package_list = Some(package_list(package_roots, filter.as_deref())),
+        AgentRequest::InstalledPacks { kind } => prepared.package_list = Some(installed_packs(package_roots, kind.as_deref())),
         AgentRequest::Edit { edit: AgentEdit::ClipAdd { source, .. }, .. } => prepared.probe = Some(probe(source, package_roots)),
         AgentRequest::Edit { edit: AgentEdit::EffectAdd { package, .. } | AgentEdit::TransitionAdd { package, .. }, .. } => prepared.packages_problem = package_problem(package, package_roots),
         _ => {}
@@ -139,6 +141,36 @@ fn package_list(package_roots: &[PathBuf], filter: Option<&str>) -> Value {
     let filter = filter.unwrap_or("");
     let list = |kind| filter_entries(catalog.entries(kind), filter).iter().map(entry_json).collect::<Vec<_>>();
     json!({"effects": list(PackageKind::Effect), "transitions": list(PackageKind::Transition)})
+}
+
+/// The installed packs, turned off or not, of `kind` or of every kind.
+fn installed_packs(package_roots: &[PathBuf], kind: Option<&str>) -> Value {
+    let user_root = crate::project_file::user_package_root();
+    let tab = kind.and_then(PackTab::from_code);
+    if kind.is_some() && tab.is_none() {
+        return Value::Null;
+    }
+    let packs: Vec<Value> = crate::package_manager::list_installed(package_roots, user_root.as_deref())
+        .into_iter()
+        .filter(|pack| tab.is_none_or(|tab| pack.tab == tab))
+        .map(|pack| {
+            json!({
+                "kind": pack.tab.code(),
+                "key": pack.key,
+                "id": pack.id,
+                "name": pack.name,
+                "version": pack.version,
+                "source": match pack.source { PackSource::Shipped => "shipped", PackSource::User => "user" },
+                "items": pack.items,
+                "bytes": pack.bytes,
+                "enabled": pack.enabled,
+                "hidden": pack.hidden,
+                "shadowed": pack.shadowed,
+                "problem": pack.problem,
+            })
+        })
+        .collect();
+    json!({"packs": packs})
 }
 
 fn busy(reason: &str) -> AgentError {
@@ -895,6 +927,10 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::ProjectSave { path, overwrite } => project_save(host, path.as_deref(), overwrite),
         AgentRequest::ProjectGet => Ok(project_summary(host.state().project())),
         AgentRequest::PackagesList { .. } => Ok(package_list.unwrap_or_default()),
+        AgentRequest::InstalledPacks { kind } => match kind.as_deref().filter(|kind| PackTab::from_code(kind).is_none()) {
+            Some(kind) => Err(AgentError::new("invalid_kind", format!("no pack kind {kind}; use one of {}", PackTab::ALL.map(PackTab::code).join(", ")))),
+            None => Ok(package_list.unwrap_or_default()),
+        },
         AgentRequest::FontList => Ok(font_list(&host.state().font_library)),
         AgentRequest::ClipAnimationList => Ok(animation_list(&host.state().clip_animation_library)),
         AgentRequest::TextStyleList { kind } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref()),
