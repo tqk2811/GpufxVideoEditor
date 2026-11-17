@@ -20,6 +20,9 @@ pub enum FileDialog {
     /// A font file for the text clip, while the project is still at `revision`: a clip key names
     /// a clip of one project only, so a change while the dialog is up drops the choice.
     PickFont { clip: ClipKey, revision: u64 },
+    /// A texture picture for the paint `slot` of the text clip, while the project is still at
+    /// `revision`, like [`Self::PickFont`].
+    PickTexture { clip: ClipKey, slot: crate::text_clip::PaintSlot, revision: u64 },
     ImportMedia { audio_only: bool },
     ImportPackage,
     OpenProject,
@@ -78,6 +81,8 @@ pub enum Request {
     Export,
     /// A font file for the text clip, through the file dialog.
     PickFont { clip: ClipKey },
+    /// A texture picture for a paint of the text clip, through the file dialog.
+    PickTexture { clip: ClipKey, slot: crate::text_clip::PaintSlot },
     ImportSubtitles,
     ExportSubtitles { track: usize },
     /// The zip of a matting model, through the file dialog.
@@ -278,6 +283,7 @@ impl Tasks {
             Request::ImportPackage => self.start_dialog(FileDialog::ImportPackage),
             Request::Export => self.start_dialog(FileDialog::Export),
             Request::PickFont { clip } => self.start_dialog(FileDialog::PickFont { clip, revision: state.revision() }),
+            Request::PickTexture { clip, slot } => self.start_dialog(FileDialog::PickTexture { clip, slot, revision: state.revision() }),
             Request::ImportSubtitles => self.start_dialog(FileDialog::ImportSubtitles),
             Request::ExportSubtitles { track } => self.start_dialog(FileDialog::ExportSubtitles { track, revision: state.revision() }),
             Request::ImportMatteModel { model } => self.start_dialog(FileDialog::ImportMatteModel { model }),
@@ -373,6 +379,14 @@ impl Tasks {
                     }
                     FileDialog::PickFont { clip, .. } => {
                         state.set_text_font(clip, engine::FontRef::File { path: path.to_string_lossy().into_owned() });
+                        Action::Nothing
+                    }
+                    FileDialog::PickTexture { revision, .. } if revision != state.revision() => {
+                        state.report_info(Message::TextureTargetChanged);
+                        Action::Nothing
+                    }
+                    FileDialog::PickTexture { clip, slot, .. } => {
+                        state.set_text_texture_file(clip, slot, path.to_string_lossy().into_owned());
                         Action::Nothing
                     }
                     FileDialog::ImportPackage if state.is_exporting() => {
@@ -1274,5 +1288,28 @@ mod tests {
         assert_eq!(state.project(), &before, "nothing is changed");
         assert_eq!(state.status(), &Status::Info(Message::FontTargetChanged));
         assert!(tasks.is_idle());
+    }
+
+    #[test]
+    fn a_texture_picture_chosen_paints_the_layer_unless_the_project_changed() {
+        use crate::text_clip::PaintSlot;
+        let (mut state, key) = with_text_clip();
+        let mut tasks = Tasks::default();
+        let fill = |state: &EditorState| state.project().tracks[key.track].clips[key.clip].text.as_ref().unwrap().fill.clone();
+        let dialog = FileDialog::PickTexture { clip: key, slot: PaintSlot::Fill, revision: state.revision() };
+        assert_eq!(tasks.begin(&mut state, Request::PickTexture { clip: key, slot: PaintSlot::Fill }), Action::ShowFileDialog(dialog));
+        assert_eq!(tasks.on_arrival(&mut state, picked(dialog, "C:/pictures/gold.png")), Action::Nothing);
+        assert_eq!(fill(&state).texture_image(), Some(&engine::TextImageRef::File { path: "C:/pictures/gold.png".to_owned() }));
+        // A layer that is gone is left alone.
+        let Action::ShowFileDialog(dialog) = tasks.begin(&mut state, Request::PickTexture { clip: key, slot: PaintSlot::Outline(3) }) else { panic!("no dialog") };
+        let before = state.project().clone();
+        assert_eq!(tasks.on_arrival(&mut state, picked(dialog, "C:/pictures/b.png")), Action::Nothing);
+        assert_eq!(state.project(), &before);
+        let Action::ShowFileDialog(dialog) = tasks.begin(&mut state, Request::PickTexture { clip: key, slot: PaintSlot::Fill }) else { panic!("no dialog") };
+        state.add_track(TrackKind::Video);
+        let before = state.project().clone();
+        assert_eq!(tasks.on_arrival(&mut state, picked(dialog, "C:/pictures/c.png")), Action::Nothing);
+        assert_eq!(state.project(), &before, "nothing is changed");
+        assert_eq!(state.status(), &Status::Info(Message::TextureTargetChanged));
     }
 }

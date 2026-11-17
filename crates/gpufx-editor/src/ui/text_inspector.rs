@@ -8,11 +8,11 @@ use super::theme;
 use crate::editor::EditorState;
 use crate::font_library::FontLibrary;
 use crate::i18n::{Language, Message};
-use crate::text_clip::{default_background, default_glow, default_outline, default_shadow, TEXT_SIZE_RANGE};
+use crate::text_clip::{default_background, default_glow, TEXT_SIZE_RANGE};
 use crate::text_shapes::available_families;
 use crate::text_style_library::StyleKind;
 use egui::{Rect, Vec2};
-use engine::{ClipKey, FontRef, KaraokeLook, KaraokeMode, Rgba, TextAlign, TextContent, TextKaraoke, TextPaint, TextTransform, TEXT_WEIGHT_RANGE};
+use engine::{ClipKey, FontRef, KaraokeLook, KaraokeMode, Rgba, TextAlign, TextContent, TextKaraoke, TextTransform, TEXT_WEIGHT_RANGE};
 use std::ops::RangeInclusive;
 
 /// How long typing must pause before the text on screen follows, in seconds. Each pause is one
@@ -25,12 +25,9 @@ const LINE_SPACING_RANGE: RangeInclusive<f64> = 0.5..=3.0;
 const LETTER_SPACING_RANGE: RangeInclusive<f64> = -20.0..=100.0;
 /// Font weights go in steps of a hundred, as fonts name them.
 const WEIGHT_STEP: f64 = 100.0;
-/// Outline, padding, radius, offset and blur, in parts of the font size, shown in percent.
-const OUTLINE_RANGE: RangeInclusive<f64> = 0.0..=30.0;
+/// Padding and radius, in parts of the font size, shown in percent.
 const PADDING_RANGE: RangeInclusive<f64> = 0.0..=100.0;
 const RADIUS_RANGE: RangeInclusive<f64> = 0.0..=100.0;
-const OFFSET_RANGE: RangeInclusive<f64> = -50.0..=50.0;
-const BLUR_RANGE: RangeInclusive<f64> = 0.0..=50.0;
 /// Glow reach in percent of the font size, intensity in percent, and falloff as the exponent.
 const GLOW_RADIUS_RANGE: RangeInclusive<f64> = 0.0..=200.0;
 const GLOW_INTENSITY_RANGE: RangeInclusive<f64> = 0.0..=400.0;
@@ -83,10 +80,6 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(size) = slider_row(ui, &language.t(Message::FieldTextSize), f64::from(text.size) * output_height, (*TEXT_SIZE_RANGE.start() * output_height)..=(*TEXT_SIZE_RANGE.end() * output_height), 0, " px") {
         next.size = (size / output_height) as f32;
     }
-    // Only a solid fill is edited here; a gradient or texture fill stays as it is.
-    if let TextPaint::Solid { color } = &mut next.fill {
-        color_row(ui, &language.t(Message::FieldTextColor), color);
-    }
     align_row(ui, &mut next.align, language);
     if let Some(spacing) = slider_row(ui, &language.t(Message::FieldLineSpacing), f64::from(text.line_spacing), LINE_SPACING_RANGE, 2, "\u{d7}") {
         next.line_spacing = spacing as f32;
@@ -96,12 +89,17 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
         next.set_transform(next.transform);
     }
     ui.separator();
-    outline_rows(ui, &mut next, language);
+    // The fill and the lists of layers fold away in a section of their own (see text_layers).
+    let mut layers = super::text_layers::Layers::new(language, &state.text_style_library);
+    super::text_layers::show(ui, id, &mut next, &mut layers);
+    let texture_request = layers.file_request;
     background_rows(ui, &mut next, language);
     glow_rows(ui, &mut next, language);
-    shadow_rows(ui, &mut next, language);
     if next != *text {
         state.live_text(next);
+    }
+    if let Some(slot) = texture_request {
+        state.ui.texture_file_request = Some((key, slot));
     }
 }
 
@@ -338,7 +336,7 @@ fn font_file_label(path: &str) -> String {
 }
 
 /// A slider with a number beside it; the new value when either changed.
-fn slider_row(ui: &mut egui::Ui, label: &str, value: f64, range: RangeInclusive<f64>, decimals: usize, suffix: &str) -> Option<f64> {
+pub(super) fn slider_row(ui: &mut egui::Ui, label: &str, value: f64, range: RangeInclusive<f64>, decimals: usize, suffix: &str) -> Option<f64> {
     ui.colored_label(theme::text_dim(), label);
     let mut value = value;
     let changed = ui.horizontal(|ui| {
@@ -351,7 +349,7 @@ fn slider_row(ui: &mut egui::Ui, label: &str, value: f64, range: RangeInclusive<
     changed.inner.then_some(value)
 }
 
-fn color_row(ui: &mut egui::Ui, label: &str, color: &mut Rgba) {
+pub(super) fn color_row(ui: &mut egui::Ui, label: &str, color: &mut Rgba) {
     ui.horizontal(|ui| {
         ui.colored_label(theme::text_dim(), label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.color_edit_button_srgba_unmultiplied(color));
@@ -421,38 +419,17 @@ fn default_karaoke() -> TextKaraoke {
     TextKaraoke { mode: KaraokeMode::Color, active: Some(KaraokeLook { color: Some(DEFAULT_KARAOKE_COLOR), ..KaraokeLook::default() }), ..TextKaraoke::default() }
 }
 
-/// A checkbox that turns a list of layers on, with one default layer, or off, taking every layer.
-fn toggle_layers<T>(ui: &mut egui::Ui, label: &str, layers: &mut Vec<T>, default: fn() -> T) {
-    let mut on = !layers.is_empty();
-    if ui.checkbox(&mut on, label).changed() {
-        *layers = if on { vec![default()] } else { Vec::new() };
-    }
-}
-
 /// A checkbox that turns a style on, with its default, or off.
-fn toggle<T: Clone>(ui: &mut egui::Ui, label: &str, value: &mut Option<T>, default: fn() -> T) {
+pub(super) fn toggle<T: Clone>(ui: &mut egui::Ui, label: &str, value: &mut Option<T>, default: fn() -> T) {
     let mut on = value.is_some();
     if ui.checkbox(&mut on, label).changed() {
         *value = on.then(default);
     }
 }
 
-fn percent_row(ui: &mut egui::Ui, label: &str, value: &mut f32, range: RangeInclusive<f64>) {
+pub(super) fn percent_row(ui: &mut egui::Ui, label: &str, value: &mut f32, range: RangeInclusive<f64>) {
     if let Some(new) = slider_row(ui, label, f64::from(*value) * PERCENT, range, 0, " %") {
         *value = (new / PERCENT) as f32;
-    }
-}
-
-fn outline_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
-    // Only the first outline is edited here, and only its colour when it is solid.
-    toggle_layers(ui, &language.t(Message::TextOutline), &mut text.outlines, default_outline);
-    if let Some(outline) = text.outlines.first_mut() {
-        ui.indent("outline", |ui| {
-            if let TextPaint::Solid { color } = &mut outline.paint {
-                color_row(ui, &language.t(Message::FieldColor), color);
-            }
-            percent_row(ui, &language.t(Message::FieldThickness), &mut outline.width, OUTLINE_RANGE);
-        });
     }
 }
 
@@ -483,27 +460,6 @@ fn glow_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
             if let Some(falloff) = slider_row(ui, &language.t(Message::FieldFalloff), f64::from(glow.falloff), GLOW_FALLOFF_RANGE, 1, "") {
                 glow.falloff = falloff as f32;
             }
-        });
-    }
-}
-
-fn shadow_rows(ui: &mut egui::Ui, text: &mut TextContent, language: Language) {
-    // Only the first shadow is edited here, and only its colour when it is solid.
-    toggle_layers(ui, &language.t(Message::TextShadow), &mut text.shadows, default_shadow);
-    if let Some(shadow) = text.shadows.first_mut() {
-        ui.indent("shadow", |ui| {
-            if let TextPaint::Solid { color } = &mut shadow.paint {
-                color_row(ui, &language.t(Message::FieldColor), color);
-            }
-            let label = language.t(Message::FieldShadowOffset);
-            let mut offset = shadow.offset();
-            let before = offset;
-            percent_row(ui, &format!("{label} X"), &mut offset[0], OFFSET_RANGE);
-            percent_row(ui, &format!("{label} Y"), &mut offset[1], OFFSET_RANGE);
-            if offset != before {
-                shadow.set_offset(offset);
-            }
-            percent_row(ui, &language.t(Message::FieldBlur), &mut shadow.blur, BLUR_RANGE);
         });
     }
 }

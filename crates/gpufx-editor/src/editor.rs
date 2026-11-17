@@ -294,6 +294,9 @@ pub enum LeftTab {
 pub struct UiState {
     /// The text clip whose font file the inspector asked to choose; the window opens the dialog.
     pub font_file_request: Option<ClipKey>,
+    /// The text clip and the paint of it whose texture picture the inspector asked to choose; the
+    /// window opens the dialog.
+    pub texture_file_request: Option<(ClipKey, crate::text_clip::PaintSlot)>,
     /// The subtitle track the inspector asked to export; the window opens the Save dialog.
     pub subtitle_export_request: Option<usize>,
     /// The matting model the inspector asked to import from a zip; the window opens the dialog.
@@ -1101,6 +1104,7 @@ impl EditorState {
             other => other,
         };
         self.ui.font_file_request = None;
+        self.ui.texture_file_request = None;
         self.ui.subtitle_export_request = None;
         self.ui.matte_import_request = None;
         self.ui.matte_fetch_request = None;
@@ -2106,6 +2110,20 @@ impl EditorState {
                 None => Ok(next),
             }
         });
+    }
+
+    /// Paints the layer `slot` of text clip `key` with the picture file `path`, as one undo step. A
+    /// texture keeps how it covered the text; another paint becomes a texture at its natural size.
+    /// Nothing when the clip or the layer is gone.
+    pub fn set_text_texture_file(&mut self, key: ClipKey, slot: crate::text_clip::PaintSlot, path: String) {
+        let Some(mut text) = self.history.current().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.text.clone()) else { return };
+        let Some(paint) = slot.paint_mut(&mut text) else { return };
+        let image = engine::TextImageRef::File { path };
+        match paint {
+            engine::TextPaint::Texture(texture) => texture.image = image,
+            other => *other = crate::text_clip::texture_paint(image),
+        }
+        self.run(|project| set_text(project, key, text));
     }
 
     /// Gives text clip `key` the style `reference` of the library as one undo step: the style's
