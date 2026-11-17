@@ -193,6 +193,14 @@ impl Session {
         let producer_gpu = gpu.clone();
         let window_for_scan = window.clone();
         let session_window = window.clone();
+        let download_window = window.clone();
+        crate::matting_models::downloads().set_waker(move || download_window.request_redraw());
+        // What a killed editor left in the models folder.
+        std::thread::spawn(|| {
+            if let Some(folder) = crate::matting_models::install_dir() {
+                crate::matting_models::clean_stale_files(&folder, crate::matting_models::STALE_AFTER);
+            }
+        });
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
         crate::text_shapes::warm_up_shared();
         let mut state = EditorState::default();
@@ -705,8 +713,10 @@ impl Session {
             self.begin_task(Request::ImportMatteModel { model });
         }
         if let Some(model) = self.state.ui.matte_fetch_request.take() {
-            self.begin_task(Request::FetchMatteModel { model });
+            // Runs on its own thread, outside the load slot; a second click while it runs does nothing.
+            crate::matting_models::start_download(model);
         }
+        self.matte_downloads_finished();
         if let Some(track) = self.state.ui.subtitle_export_request.take() {
             self.begin_task(Request::ExportSubtitles { track });
         }
@@ -1000,9 +1010,6 @@ impl Session {
                 });
             }
             Action::InstallMatteModel { load, model, path } => {
-                if path.is_none() {
-                    self.state.report_info(Message::MatteFetching);
-                }
                 self.spawn_task("matte-model-install", TaskId::Load(load), move || {
                     let result = crate::matting_models::install(model, path.as_deref());
                     Arrival::MatteModelInstalled { load, result }
@@ -1030,6 +1037,22 @@ impl Session {
                 self.exit_accepted = true;
                 self.autosave.finish_clean();
             }
+        }
+    }
+
+    /// Handles the model downloads that ended: an installed model is used at once, a failure stays
+    /// shown in the inspector with a retry.
+    fn matte_downloads_finished(&mut self) {
+        for (_, outcome) in crate::matting_models::downloads().take_finished() {
+            match outcome {
+                crate::matting_models::DownloadOutcome::Installed(_) => {
+                    self.state.report_info(Message::MatteImported);
+                    self.perform(Action::MatteModelInstalled);
+                }
+                crate::matting_models::DownloadOutcome::Failed(problem) => self.state.report_error(Message::MatteImportFailed(problem)),
+                crate::matting_models::DownloadOutcome::Cancelled => {}
+            }
+            self.window.request_redraw();
         }
     }
 
