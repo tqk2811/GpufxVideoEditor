@@ -465,7 +465,7 @@ fn unit_f32() -> f32 {
     1.0
 }
 
-/// Which font a text clip uses. More kinds, such as a font from an installed package, may follow.
+/// Which font a text clip uses.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum FontRef {
@@ -477,6 +477,22 @@ pub enum FontRef {
     /// The first face of a font file (.ttf, .otf, .ttc). The editor keeps it absolute in memory;
     /// a project file stores it relative to the project folder when it lies under it.
     File { path: String },
+    /// The first face of font file `file` (a path with forward slashes inside the pack) of the
+    /// installed font pack `pack`, found under `<root>/packages/font/<pack>` of the package roots
+    /// as an `asset:font/<pack>/<file>` source would be.
+    Pack { pack: String, file: String },
+}
+
+impl FontRef {
+    /// How a missing font is named in a warning: the family, the path, or `<pack>/<file>`.
+    pub fn label(&self) -> Option<String> {
+        match self {
+            FontRef::Default => None,
+            FontRef::System { family } => Some(family.clone()),
+            FontRef::File { path } => Some(path.clone()),
+            FontRef::Pack { pack, file } => Some(format!("{pack}/{file}")),
+        }
+    }
 }
 
 /// Horizontal alignment of text lines.

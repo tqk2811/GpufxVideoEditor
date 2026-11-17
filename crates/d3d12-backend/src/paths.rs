@@ -89,6 +89,11 @@ pub const STICKER_ASSET_TYPE: &str = "sticker";
 pub const ASSET_AUDIO_EXTENSIONS: [&str; 2] = ["flac", "mp3"];
 /// The extensions of the files of a sticker pack a clip may show.
 pub const ASSET_IMAGE_EXTENSIONS: [&str; 4] = engine::IMAGE_EXTENSIONS;
+/// The pack type whose files are fonts a text clip may draw with (see [`ProjectPaths::font_pack_path`]).
+/// It is not one of [`ASSET_TYPES`]: no clip source names a font.
+pub const FONT_ASSET_TYPE: &str = "font";
+/// The extensions of the files of a font pack a text may draw with.
+pub const ASSET_FONT_EXTENSIONS: [&str; 3] = ["ttf", "otf", "ttc"];
 /// The longest pack id, which is also a folder name.
 pub const MAX_ASSET_ID_LENGTH: usize = 128;
 /// What an asset source that cannot be resolved turns into: no file can have this name on Windows.
@@ -154,6 +159,8 @@ pub enum AssetProblem {
     NotAudio { source: String },
     /// The file is not a picture a clip may show.
     NotImage { source: String },
+    /// The file is not a font a text may draw with.
+    NotFont { source: String },
     /// No package root holds the pack.
     PackMissing { kind: String, id: String },
     FileMissing { kind: String, id: String, file: String },
@@ -168,6 +175,7 @@ impl fmt::Display for AssetProblem {
             Self::UnknownType { source, kind } => write!(f, "'{source}' names the unknown pack type '{kind}'"),
             Self::NotAudio { source } => write!(f, "'{source}' is not an audio file of a pack"),
             Self::NotImage { source } => write!(f, "'{source}' is not an image of a pack"),
+            Self::NotFont { source } => write!(f, "'{source}' is not a font of a pack"),
             Self::PackMissing { kind, id } => write!(f, "the {kind} pack '{id}' is not installed"),
             Self::FileMissing { kind, id, file } => write!(f, "the {kind} pack '{id}' has no file '{file}'"),
             Self::Escapes { source } => write!(f, "'{source}' leads out of its pack"),
@@ -197,14 +205,10 @@ pub fn parse_asset_source(source: &str) -> Result<AssetRef, AssetProblem> {
     if !ASSET_TYPES.contains(&kind) {
         return Err(AssetProblem::UnknownType { source: source.to_owned(), kind: kind.to_owned() });
     }
-    if !is_safe_id(id) {
+    if !is_safe_pack_file(id, file) {
         return Err(invalid());
     }
-    let unsafe_part = |part: &str| part.is_empty() || part == "." || part == ".." || check_path_part(part).is_err();
-    if file.split('/').any(unsafe_part) {
-        return Err(invalid());
-    }
-    let extension = Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let extension = file_extension(file);
     if kind == STICKER_ASSET_TYPE {
         if !ASSET_IMAGE_EXTENSIONS.contains(&extension.as_str()) {
             return Err(AssetProblem::NotImage { source: source.to_owned() });
@@ -213,6 +217,16 @@ pub fn parse_asset_source(source: &str) -> Result<AssetRef, AssetProblem> {
         return Err(AssetProblem::NotAudio { source: source.to_owned() });
     }
     Ok(AssetRef { kind: kind.to_owned(), id: id.to_ascii_lowercase(), file: file.to_owned() })
+}
+
+/// Whether `id` and `file` (forward slashes) name a place inside a pack and nowhere else.
+fn is_safe_pack_file(id: &str, file: &str) -> bool {
+    let unsafe_part = |part: &str| part.is_empty() || part == "." || part == ".." || check_path_part(part).is_err();
+    is_safe_id(id) && !file.contains('\\') &&!file.split('/').any(unsafe_part)
+}
+
+fn file_extension(file: &str) -> String {
+    Path::new(file).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase()
 }
 
 /// The parts of `path`, lower-cased as Windows compares them.
@@ -330,6 +344,24 @@ impl ProjectPaths {
     /// The file an `asset:` source names, in the first root holding its pack.
     pub fn asset_path(&self, source: &str) -> Result<PathBuf, AssetProblem> {
         let asset = parse_asset_source(source)?;
+        self.pack_file(asset, source)
+    }
+
+    /// The font file `file` of the font pack `pack`, in the first root holding the pack, checked as
+    /// an `asset:` source is.
+    pub fn font_pack_path(&self, pack: &str, file: &str) -> Result<PathBuf, AssetProblem> {
+        let source = asset_source(FONT_ASSET_TYPE, pack, file);
+        if !is_safe_pack_file(pack, file) {
+            return Err(AssetProblem::Invalid { source });
+        }
+        if !ASSET_FONT_EXTENSIONS.contains(&file_extension(file).as_str()) {
+            return Err(AssetProblem::NotFont { source });
+        }
+        self.pack_file(AssetRef { kind: FONT_ASSET_TYPE.to_owned(), id: pack.to_ascii_lowercase(), file: file.to_owned() }, &source)
+    }
+
+    /// `asset` looked for in the roots, in order.
+    fn pack_file(&self, asset: AssetRef, source: &str) -> Result<PathBuf, AssetProblem> {
         for root in &self.package_roots {
             let type_folder = root.join("packages").join(&asset.kind);
             let pack = type_folder.join(&asset.id);
@@ -495,6 +527,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&scratch);
         std::fs::create_dir_all(&scratch).unwrap();
         scratch
+    }
+
+    #[test]
+    fn a_font_of_a_font_pack_resolves_inside_its_pack_and_nothing_else_does() {
+        let scratch = asset_scratch("font");
+        let pack = pack_in(&scratch, "font", "open-fonts", &["a.ttf", "LICENSE.txt"]);
+        let paths = ProjectPaths::new(&scratch.join("p.json"), vec![scratch.clone()]);
+        assert_eq!(paths.font_pack_path("Open-Fonts", "a.ttf"), Ok(pack.join("a.ttf")), "the id is case-insensitive");
+        assert!(matches!(paths.font_pack_path("open-fonts", "LICENSE.txt"), Err(AssetProblem::NotFont { .. })));
+        assert!(matches!(paths.font_pack_path("open-fonts", "b.ttf"), Err(AssetProblem::FileMissing { .. })));
+        assert!(matches!(paths.font_pack_path("other", "a.ttf"), Err(AssetProblem::PackMissing { .. })));
+        for (pack, file) in [("open-fonts", "../open-fonts/a.ttf"), ("open-fonts", r"fonts\a.ttf"), ("..", "a.ttf"), ("open-fonts", "fonts/a.ttf:x.ttf")] {
+            assert!(matches!(paths.font_pack_path(pack, file), Err(AssetProblem::Invalid { .. })), "{pack}/{file}");
+        }
+        assert!(matches!(parse_asset_source("asset:font/open-fonts/fonts/a.ttf"), Err(AssetProblem::UnknownType { .. })), "no clip source names a font");
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

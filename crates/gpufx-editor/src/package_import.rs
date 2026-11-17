@@ -18,6 +18,7 @@ use zip::ZipArchive;
 
 use crate::clip_animation_install::{install_clip_animation_pack, is_clip_animation_type, InstalledClipAnimationPack};
 use crate::asset_install::{install_audio_pack, AudioPackKind, InstalledAudioPack};
+use crate::font_install::{install_font_pack, InstalledFontPack, FONT_TYPE};
 use crate::packages::{classify, PackageKind};
 use crate::sticker_install::{install_sticker_pack, InstalledStickerPack, STICKER_TYPE};
 use crate::subtitle_style_install::{install_subtitle_style_pack, InstalledSubtitleStylePack, SUBTITLE_STYLE_TYPE};
@@ -34,7 +35,7 @@ const MAX_ARCHIVE_BYTES: u64 = 2048 * MIB;
 /// A shader zip is read whole: its files, within [`SHADER_LIMITS`], and the zip's own headers.
 const MAX_SHADER_ARCHIVE_BYTES: u64 = 264 * MIB;
 /// The types of the packages the editor cannot use yet.
-const NON_SHADER_TYPES: [&str; 1] = ["font"];
+const NON_SHADER_TYPES: [&str; 0] = [];
 
 /// What a zip may declare. Sizes are as declared: what is really read is counted where it is read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,7 @@ pub enum ImportOutcome {
     ClipAnimationInstalled(InstalledClipAnimationPack),
     TextStyleInstalled(InstalledTextStylePack),
     SubtitleStyleInstalled(InstalledSubtitleStylePack),
+    FontInstalled(InstalledFontPack),
     /// A package with this name is there, and overwriting was not allowed.
     AlreadyInstalled { name: String },
 }
@@ -217,6 +219,7 @@ enum Declared {
     ClipAnimation,
     TextStyle,
     SubtitleStyle,
+    Font,
 }
 
 /// What the manifest declares. A `type` the editor cannot use is an error here, so that it is
@@ -231,6 +234,7 @@ fn declared_package(manifest: &[u8]) -> Result<Declared, ImportProblem> {
         Some(Value::String(kind)) if is_clip_animation_type(kind) => Ok(Declared::ClipAnimation),
         Some(Value::String(kind)) if kind == TEXT_STYLE_TYPE => Ok(Declared::TextStyle),
         Some(Value::String(kind)) if kind == SUBTITLE_STYLE_TYPE => Ok(Declared::SubtitleStyle),
+        Some(Value::String(kind)) if kind == FONT_TYPE => Ok(Declared::Font),
         Some(Value::String(kind)) if NON_SHADER_TYPES.contains(&kind.as_str()) => Err(ImportProblem::NotSupportedYet(kind.clone())),
         Some(Value::String(kind)) => Err(ImportProblem::UnknownType(kind.clone())),
         Some(_) => Err(ImportProblem::BadManifest("`type` is not a string".to_owned())),
@@ -326,6 +330,7 @@ pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<I
         Declared::ClipAnimation => return install_clip_animation_pack(source, user_root, overwrite),
         Declared::TextStyle => return install_text_style_pack(source, user_root, overwrite),
         Declared::SubtitleStyle => return install_subtitle_style_pack(source, user_root, overwrite),
+        Declared::Font => return install_font_pack(source, user_root, overwrite),
         Declared::Shader(_) => {}
     }
     let bytes = read_bounded(source, MAX_SHADER_ARCHIVE_BYTES)?;
@@ -457,6 +462,7 @@ mod tests {
         assert_eq!(declared_package(br#"{"type":"clip-animation"}"#), Ok(Declared::ClipAnimation));
         assert_eq!(declared_package(br#"{"type":"text-style"}"#), Ok(Declared::TextStyle));
         assert_eq!(declared_package(br#"{"type":"subtitle-style"}"#), Ok(Declared::SubtitleStyle));
+        assert_eq!(declared_package(br#"{"type":"font"}"#), Ok(Declared::Font));
         assert_eq!(declared_package(br#"{"type":"music"}"#), Ok(Declared::Audio(AudioPackKind::Music)));
         assert_eq!(declared_package(br#"{"type":"effect"}"#), Err(ImportProblem::UnknownType("effect".to_owned())), "a shader package has no type");
         assert!(matches!(declared_package(br#"{"type":3}"#), Err(ImportProblem::BadManifest(_))));
@@ -603,11 +609,11 @@ mod tests {
     }
 
     #[test]
-    fn a_known_but_unsupported_type_installs_nothing_and_a_bad_zip_says_so() {
+    fn a_pack_with_a_loose_manifest_installs_nothing_and_a_bad_zip_says_so() {
         let dir = scratch("unsupported");
         let root = dir.join("root");
         let font = zip_bytes(&[("manifest.json", br#"{"type":"font","name":"Sans"}"#), ("sans.ttf", b"x")]);
-        assert_eq!(install_zip(&written(&dir, &font), &root, false), Err(ImportProblem::NotSupportedYet("font".to_owned())));
+        assert!(matches!(install_zip(&written(&dir, &font), &root, false), Err(ImportProblem::BadManifest(_))), "a font pack goes to its own, stricter reader");
         let sticker = zip_bytes(&[("manifest.json", br#"{"type":"sticker","name":"Smile"}"#), ("smile.png", b"x")]);
         assert!(matches!(install_zip(&written(&dir, &sticker), &root, false), Err(ImportProblem::BadManifest(_))), "a sticker pack goes to its own, stricter reader");
         let audio = zip_bytes(&[("manifest.json", br#"{"type":"sfx","name":"Bells"}"#), ("bell.flac", b"x")]);

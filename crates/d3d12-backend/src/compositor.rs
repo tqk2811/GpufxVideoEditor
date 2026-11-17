@@ -1235,10 +1235,14 @@ impl D3d12Compositor {
         self.insert_still(key, (0, None), picture)
     }
 
-    /// `text` with a font file named relative to the project read from the project folder.
+    /// `text` with a font file named relative to the project read from the project folder, and a
+    /// font of an installed font pack as the file it is. A font pack that cannot be resolved stays
+    /// as it is, so the rasterizer draws with the default font and names it as missing.
     fn resolved_text<'a>(&self, text: &'a TextContent) -> std::borrow::Cow<'a, TextContent> {
+        let file = |path: PathBuf| std::borrow::Cow::Owned(TextContent { font: engine::FontRef::File { path: path.to_string_lossy().into_owned() }, ..text.clone() });
         match &text.font {
-            engine::FontRef::File { path } if Path::new(path).is_relative() => std::borrow::Cow::Owned(TextContent { font: engine::FontRef::File { path: self.paths.source_path(path).to_string_lossy().into_owned() }, ..text.clone() }),
+            engine::FontRef::File { path } if Path::new(path).is_relative() => file(self.paths.source_path(path)),
+            engine::FontRef::Pack { pack, file: name } => self.paths.font_pack_path(pack, name).map_or(std::borrow::Cow::Borrowed(text), file),
             _ => std::borrow::Cow::Borrowed(text),
         }
     }

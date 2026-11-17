@@ -6,6 +6,7 @@ use super::icons::{self, Icon};
 use super::numeric::{self, drag_field};
 use super::theme;
 use crate::editor::EditorState;
+use crate::font_library::FontLibrary;
 use crate::i18n::{Language, Message};
 use crate::text_clip::{default_background, default_glow, default_outline, default_shadow, TEXT_SIZE_RANGE};
 use crate::text_shapes::available_families;
@@ -72,7 +73,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, id:
     if let Some(content) = content_box(ui, id, text, language) {
         next.set_content(content);
     }
-    if font_combo(ui, id, &mut next, language) {
+    if font_combo(ui, id, &mut next, &state.font_library, language) {
         state.ui.font_file_request = Some(key);
     }
     let output_height = f64::from(state.project().output.height.max(1));
@@ -198,13 +199,14 @@ fn content_box(ui: &mut egui::Ui, id: egui::Id, text: &TextContent, language: La
 
 /// The font combo; true when "Choose a font file..." was clicked, which the window answers with
 /// the file dialog.
-fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, language: Language) -> bool {
+fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, fonts: &FontLibrary, language: Language) -> bool {
     let default_name = language.t(Message::DefaultFont);
     let mut choose_file = false;
     let shown = match &text.font {
         FontRef::Default => default_name.clone(),
         FontRef::System { family } => family.clone(),
         FontRef::File { path } => font_file_label(path),
+        FontRef::Pack { pack, file } => fonts.find(pack, file).map_or_else(|| format!("{pack}/{file}"), |font| format!("{} ({})", font.name, font.pack_name)),
     };
     ui.horizontal(|ui| {
         ui.colored_label(theme::text_dim(), language.t(Message::FieldFont));
@@ -220,6 +222,9 @@ fn font_combo(ui: &mut egui::Ui, id: egui::Id, text: &mut TextContent, language:
             if families.is_empty() {
                 ui.colored_label(theme::text_dim(), language.t(Message::LoadingFonts));
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            for font in &fonts.fonts {
+                ui.selectable_value(&mut text.font, font.font_ref(), format!("{} ({})", font.name, font.pack_name));
             }
             for family in families.iter() {
                 ui.selectable_value(&mut text.font, FontRef::System { family: family.clone() }, family);

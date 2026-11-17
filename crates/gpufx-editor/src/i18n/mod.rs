@@ -271,6 +271,7 @@ pub enum Message {
     StickerLibraryEmpty,
     StickerAddHint,
     StickerPackInstalled { name: String, replaced: bool },
+    FontPackInstalled { name: String, replaced: bool },
     ClipAnimationPackInstalled { name: String, replaced: bool },
     TextStylePackInstalled { name: String, replaced: bool },
     /// The Sticker tab has not finished reading the installed packs.
@@ -629,6 +630,7 @@ mod tests {
             Message::StickerLibraryEmpty,
             Message::StickerAddHint,
             Message::StickerPackInstalled { name: name(), replaced: true },
+            Message::FontPackInstalled { name: name(), replaced: false },
             Message::ClipAnimationPackInstalled { name: name(), replaced: false },
             Message::TextStylePackInstalled { name: name(), replaced: true },
             Message::ReadingStickerPacks,

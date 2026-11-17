@@ -273,6 +273,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::StickerLibraryEmpty => "No stickers yet. Import a pack (.zip).".to_owned(),
         Message::StickerAddHint => "Double-click to add a sticker at the playhead, or drag it onto a video track or the player.".to_owned(),
         Message::StickerPackInstalled { name, replaced } => format!("{} \"{name}\" in Stickers.", if *replaced { "Replaced" } else { "Installed" }),
+        Message::FontPackInstalled { name, replaced } => format!("{} the font pack \"{name}\"; its fonts are in the font list.", if *replaced { "Replaced" } else { "Installed" }),
         Message::TextStylePackInstalled { name, replaced } => format!("{} \"{name}\": its styles are in the Text tab.", if *replaced { "Replaced" } else { "Installed" }),
         Message::ClipAnimationPackInstalled { name, replaced } => format!("{} \"{name}\": its animations are in the Animation part of the inspector.", if *replaced { "Replaced" } else { "Installed" }),
         Message::ReadingStickerPacks => "Reading the installed sticker packs...".to_owned(),

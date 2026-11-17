@@ -4,6 +4,7 @@
 use engine::{AnimationGroup, FontRef, ClipAnimation, AnimationRef, TextContent, ANIMATION_PRESETS};
 
 use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary};
+use crate::font_library::FontLibrary;
 use crate::subtitle_style_install::SubtitleLayout;
 use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStyleLibrary};
 use serde_json::{json, Value};
@@ -193,6 +194,17 @@ fn check_font(font: &FontRef) -> Result<(), AgentError> {
     }
 }
 
+/// A font of a font pack must be one of `library` once its scan has finished; while it still runs
+/// the font is taken as given. Every other font is checked by [`apply_patch`].
+pub fn check_font_pack(library: &FontLibrary, font: Option<&FontRef>) -> Result<(), AgentError> {
+    let Some(FontRef::Pack { pack, file }) = font else { return Ok(()) };
+    if !library.loaded || library.find(pack, file).is_some() {
+        Ok(())
+    } else {
+        Err(invalid(format!("no font {file} in an installed font pack {pack}: font_list names the fonts of the packs")))
+    }
+}
+
 pub fn patched_animation(library: &ClipAnimationLibrary, kind: AnimatedClipKind, current: &ClipAnimation, patch: &TextAnimationPatch) -> Result<ClipAnimation, AgentError> {
     let mut next = current.clone();
     for (group, change, slot) in [(AnimationGroup::Enter, &patch.enter, &mut next.enter), (AnimationGroup::Exit, &patch.exit, &mut next.exit), (AnimationGroup::Repeat, &patch.repeat, &mut next.repeat)] {
@@ -293,16 +305,20 @@ pub fn text_style_list(library: &TextStyleLibrary, kind: Option<&str>) -> Result
     Ok(json!({"state": if library.loaded { "ready" } else { "loading" }, "styles": styles, "problems": problems}))
 }
 
-/// The fonts a text can name, each as the `font` value to use: the system default first. While the
-/// scan of the installed fonts has not finished only that one is listed, and the state says so.
-pub fn font_list() -> Value {
+/// The fonts a text can name, each as the `font` value to use: the system default first, then the
+/// installed families, then the fonts of the installed font packs with their names. While a scan
+/// of the installed fonts or of the packs has not finished, what it finds is missing and the state
+/// says so.
+pub fn font_list(library: &FontLibrary) -> Value {
     let families = available_families();
     if families.is_empty() {
         warm_up_shared();
     }
     let system = families.iter().map(|family| json!({"kind": "system", "family": family}));
-    let fonts: Vec<Value> = std::iter::once(json!({"kind": "default"})).chain(system).collect();
-    json!({"state": if families.is_empty() { "loading" } else { "ready" }, "fonts": fonts})
+    let packs = library.fonts.iter().map(|font| json!({"kind": "pack", "pack": font.pack, "file": font.file, "name": font.name, "pack_name": font.pack_name, "family": font.family}));
+    let fonts: Vec<Value> = std::iter::once(json!({"kind": "default"})).chain(system).chain(packs).collect();
+    let ready = !families.is_empty() && library.loaded;
+    json!({"state": if ready { "ready" } else { "loading" }, "fonts": fonts})
 }
 
 /// Every preset animation: its id, the name of its group in a project (`in`, `out` or `loop`) and

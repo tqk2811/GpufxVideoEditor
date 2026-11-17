@@ -22,6 +22,8 @@ use crate::subtitle_track::{cue_spans, track_srt, CueNote, DEFAULT_SUBTITLE_LAYO
 use crate::text_style_library::{subtitle_placement, LibraryTextStyle, TextStyleLibrary};
 use crate::sticker_install::InstalledStickerPack;
 use crate::sticker_library::StickerLibrary;
+use crate::font_install::InstalledFontPack;
+use crate::font_library::FontLibrary;
 use crate::effect_previews::PreviewManager;
 use crate::visuals::{ClipVisuals, SourceView};
 use crate::text_shapes::TextShapes;
@@ -97,6 +99,8 @@ pub struct EditorState {
     /// The audio packs installed on this machine.
     pub audio_library: AudioLibrary,
     pub sticker_library: StickerLibrary,
+    /// The font packs installed on this machine.
+    pub font_library: FontLibrary,
     /// The clip animation packs installed on this machine.
     pub clip_animation_library: ClipAnimationLibrary,
     /// The text and subtitle style packs installed on this machine.
@@ -539,6 +543,7 @@ impl EditorState {
             catalog: Catalog::default(),
             audio_library: AudioLibrary::default(),
             sticker_library: StickerLibrary::default(),
+            font_library: FontLibrary::default(),
             clip_animation_library: ClipAnimationLibrary::default(),
             text_style_library: TextStyleLibrary::default(),
             picker: PickerState::default(),
@@ -1413,7 +1418,7 @@ impl EditorState {
     /// else that of its source.
     pub fn clip_aspect(&self, clip: &Clip) -> f64 {
         match &clip.text {
-            Some(text) => self.text_shapes.borrow_mut().shape(text, self.project().output.height).aspect,
+            Some(text) => self.text_shapes.borrow_mut().shape(&self.resolved_font(text), self.project().output.height).aspect,
             None => self.source_aspect(&clip.source),
         }
     }
@@ -1423,7 +1428,16 @@ impl EditorState {
     pub fn missing_font(&self, key: ClipKey) -> Option<String> {
         let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
         let text = clip.text.as_ref()?;
-        self.text_shapes.borrow_mut().shape(text, self.project().output.height).missing_family
+        self.text_shapes.borrow_mut().shape(&self.resolved_font(text), self.project().output.height).missing_family
+    }
+
+    /// `text` with a font of an installed font pack as the file it is, as the compositor draws it.
+    /// A font pack not installed stays, so the shape names it as missing.
+    pub fn resolved_font<'a>(&self, text: &'a TextContent) -> std::borrow::Cow<'a, TextContent> {
+        match self.font_library.find_ref(&text.font) {
+            Some(font) => std::borrow::Cow::Owned(TextContent { font: engine::FontRef::File { path: font.path.to_string_lossy().into_owned() }, ..text.clone() }),
+            None => std::borrow::Cow::Borrowed(text),
+        }
     }
 
     /// Whether the shape of the picture of `clip` is known: always for text, which is measured on
@@ -1926,7 +1940,7 @@ impl EditorState {
 
     /// Width and height in pixels of the picture of `text` at its natural size in the output.
     pub fn text_pixels(&self, text: &TextContent) -> (u32, u32) {
-        self.text_shapes.borrow_mut().shape(text, self.project().output.height).pixels
+        self.text_shapes.borrow_mut().shape(&self.resolved_font(text), self.project().output.height).pixels
     }
 
     pub(crate) fn output_pixels(&self) -> (u32, u32) {
@@ -2384,6 +2398,11 @@ impl EditorState {
     pub fn show_installed_text_style_pack(&mut self, name: &str, replaced: bool) {
         self.report_info(Message::TextStylePackInstalled { name: name.to_owned(), replaced });
         self.ui.left_tab = LeftTab::Text;
+    }
+
+    /// Says that a font pack is there; its fonts are in the font list of the text inspector.
+    pub fn show_installed_font_pack(&mut self, installed: &InstalledFontPack) {
+        self.report_info(Message::FontPackInstalled { name: installed.name.clone(), replaced: installed.replaced });
     }
 
     /// Says that a sticker pack is there and shows the Sticker tab.

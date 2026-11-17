@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 
 use super::image::encode_png;
 use super::protocol::{AgentEdit, AgentError, AgentRequest, AgentResult, CaptureTarget, ClipRef};
-use super::text::{animation_list, apply_animation_patch, apply_patch, font_list, patched_animation, styled_base, subtitle_style};
+use super::text::{animation_list, apply_animation_patch, apply_patch, check_font_pack, font_list, patched_animation, styled_base, subtitle_style};
 use crate::beats::BeatStatus;
 use crate::editor::read_subtitle_file;
 use crate::subtitle_track::track_srt;
@@ -303,6 +303,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             }
             let patch = super::protocol::TextPatch { content: Some(content), ..style };
             let styled = styled_base(&state.text_style_library, &available_families(), patch.style_id.as_deref(), &default_text(String::new()), &engine::ClipAnimation::default())?;
+            check_font_pack(&state.font_library, patch.font.as_ref())?;
             let text = apply_patch(&styled.text, &patch)?;
             let animation = apply_animation_patch(&state.clip_animation_library, AnimatedClipKind::Text, &styled.animation, &patch)?.unwrap_or(styled.animation);
             let animation = Some(animation).filter(|animation| !animation.is_empty());
@@ -342,6 +343,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             let found = state.project().tracks.get(clip.track).ok_or(engine::EditError::TrackNotFound { track: clip.track }).and_then(|track| track.clips.get(clip.clip).ok_or(engine::EditError::ClipNotFound { key })).map_err(|error| AgentError::from_edit(&error))?;
             let Some(old) = found.text.as_ref() else { return Err(AgentError::from_edit(&engine::EditError::NotText { key })) };
             let styled = styled_base(&state.text_style_library, &available_families(), patch.style_id.as_deref(), old, &found.animation)?;
+            check_font_pack(&state.font_library, patch.font.as_ref())?;
             let mut text = apply_patch(&styled.text, &patch)?;
             // A cue of a subtitle track given a style of its own keeps it when the track's changes.
             // The track's own style is not a style of its own.
@@ -893,7 +895,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::ProjectSave { path, overwrite } => project_save(host, path.as_deref(), overwrite),
         AgentRequest::ProjectGet => Ok(project_summary(host.state().project())),
         AgentRequest::PackagesList { .. } => Ok(package_list.unwrap_or_default()),
-        AgentRequest::FontList => Ok(font_list()),
+        AgentRequest::FontList => Ok(font_list(&host.state().font_library)),
         AgentRequest::ClipAnimationList => Ok(animation_list(&host.state().clip_animation_library)),
         AgentRequest::TextStyleList { kind } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref()),
         AgentRequest::AssetList { kind, filter } => asset_list(host.state(), kind.as_deref(), filter.as_deref().unwrap_or("")),
