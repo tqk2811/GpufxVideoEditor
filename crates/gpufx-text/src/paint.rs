@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use engine::project::{GradientStop, TextContent, TextImageRef, TextOutline, TextPaint, TextTexture, TextureFit};
+use engine::project::{GradientStop, TextContent, TextImageRef, TextOutline, TextPaint, TextShadow, TextTexture, TextureFit};
 
 use super::{font_file_stamp, over, premultiplied, FontFileStamp, Mask};
 
@@ -619,11 +619,12 @@ pub(crate) fn draw_shadows(canvas: &mut [[f32; 4]], text: &TextContent, shadows:
             // The glyphs are blurred on their own and laid over the rings, which stay sharp; with no
             // blur they are painted straight over the rings.
             let mask = grown_by(&mut grown, fill, squared, px.spread);
+            let body_grow = body_grow(shadow, px.spread, painter.font_px);
             if super::blur_half(px.blur) == 0 {
-                painter.grown(px.spread).draw(&mut layer, mask, &shadow.paint);
+                painter.grown(body_grow).draw(&mut layer, mask, &shadow.paint);
             } else {
                 let mut body = vec![[0f32; 4]; width * height];
-                painter.grown(px.spread).draw(&mut body, mask, &shadow.paint);
+                painter.grown(body_grow).draw(&mut body, mask, &shadow.paint);
                 blur_colors(&mut body, width, height, px.blur);
                 for (dst, color) in layer.iter_mut().zip(&body) {
                     if color[3] > 0.0 {
@@ -650,6 +651,23 @@ pub(crate) fn draw_shadows(canvas: &mut [[f32; 4]], text: &TextContent, shadows:
             }
         }
     }
+}
+
+/// How far the glyph boxes are grown, in pixels, when the body of `shadow` (its glyphs grown by
+/// `spread` pixels) is painted. Usually the spread; but when the body is painted per glyph with the
+/// same picture as one of the shadow's outlines, the widest such outline's width, so the body and
+/// the ring lay that picture over the same box and it reads as one picture over the whole grown
+/// shape. Assumed from the CapCut snow style (a shadow and its outline 0.4 font sizes wide painted
+/// with one picture holding a single snowflake per glyph cell), whose cover shows each flake whole
+/// across the glyph and its ring; laid over two boxes it came out in two sizes, cut where they met.
+/// Only a per-glyph picture shared with an outline is concerned: other bodies keep the spread.
+fn body_grow(shadow: &TextShadow, spread: f32, font_px: f32) -> f32 {
+    let TextPaint::Texture(body) = &shadow.paint else { return spread };
+    if body.fit != TextureFit::Glyph {
+        return spread;
+    }
+    let shared = shadow.outlines.iter().filter(|outline| matches!(&outline.paint, TextPaint::Texture(ring) if ring.fit == TextureFit::Glyph && ring.image == body.image));
+    shared.map(|outline| outline_px(outline.width, font_px)).fold(spread, f32::max)
 }
 
 /// The coverage `fill` grown by `spread` pixels, kept in `cache` for the next shadow of the same

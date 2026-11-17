@@ -494,6 +494,34 @@ fn a_glyph_cell_is_as_tall_as_its_glyph_whatever_the_glyph_width() {
 }
 
 #[test]
+fn a_shadow_body_and_its_outline_painted_with_one_picture_line_up() {
+    // CapCut snow style: a shadow and its wide outline both painted with one picture of a single
+    // snowflake per glyph cell; the body laid the picture over the bare glyph box and the ring over
+    // the grown one, so the flake came out in two sizes and looked cut where they met.
+    let Some(mut r) = rasterizer() else { return };
+    let dir = scratch("shadow-picture");
+    let mut text = TextContent::new("I", SIZE);
+    text.fill = TextPaint::solid([0, 0, 0, 0]);
+    let paint = TextPaint::Texture(TextTexture { fit: TextureFit::Glyph, cells: 2, ..TextTexture::new(red_middle(&dir, 30)) });
+    let mut shadow = TextShadow::solid([0, 0, 0, 0], [0.0, 0.0], 0.0);
+    shadow.paint = paint.clone();
+    shadow.outlines = vec![TextOutline { width: 0.3, paint }];
+    text.shadows = vec![shadow];
+    let image = r.rasterize(&text, HEIGHT, 1.0);
+    let y = image.height as i32 / 2;
+    let swatch = runs(&image, y, red);
+    assert_eq!(swatch.len(), 1, "one red square across the glyph and its ring: {swatch:?}");
+    let (left, right) = swatch[0];
+    let font_px = SIZE * HEIGHT as f32;
+    let centre = (left + right) / 2;
+    // The red rows in the middle of the glyph (the body) and beside it (the ring) are the same.
+    let height = |x: i32| (0..image.height as i32).filter(|&y| red(pixel(&image, x, y))).count() as i32;
+    let (body, ring) = (height(centre), height(centre + (font_px * 0.15) as i32));
+    assert!(ring > 0 && (body - ring).abs() <= 2, "red {body} px tall over the glyph, {ring} px over the ring");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_spread_keeps_a_soft_shadow_strong_at_the_glyph_edge() {
     let Some(mut r) = rasterizer() else { return };
     let font_px = SIZE * HEIGHT as f32;
