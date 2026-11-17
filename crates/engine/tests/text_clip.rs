@@ -133,7 +133,7 @@ fn validate_rejects_bad_weight_letter_spacing_and_glow() {
 fn layered_text() -> TextContent {
     let mut text = TextContent::new("Hi", 0.1);
     text.fill = TextPaint::Gradient { stops: vec![GradientStop { position: 0.0, color: [255, 0, 0, 255] }, GradientStop { position: 1.0, color: [0, 0, 255, 255] }], angle: 90.0 };
-    let texture = TextTexture { image: TextImageRef::Pack { pack: "gold".into(), file: "textures/gold.png".into() }, fit: TextureFit::Tile, scale: 0.5, angle: 30.0, opacity: 0.8 };
+    let texture = TextTexture { image: TextImageRef::text_style_pack("gold", "textures/gold.png"), fit: TextureFit::Tile, scale: 0.5, angle: 30.0, opacity: 0.8 };
     text.outlines = vec![TextOutline::solid([0, 0, 0, 255], 0.05), TextOutline { width: 0.1, paint: TextPaint::Texture(texture.clone()) }];
     let mut shadow = TextShadow::solid([20, 20, 20, 255], [0.03, 0.03], 0.0);
     shadow.outlines = vec![TextOutline::solid([255, 255, 255, 255], 0.04)];

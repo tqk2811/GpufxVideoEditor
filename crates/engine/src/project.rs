@@ -654,18 +654,54 @@ pub enum TextImageRef {
     /// A picture file. The editor keeps it absolute in memory; a project file may store it relative
     /// to the project folder.
     File { path: String },
-    /// The picture `file` (a path with forward slashes inside the pack) of the installed text
-    /// style pack `pack`, found under `<root>/packages/text-style/<pack>` of the package roots.
-    Pack { pack: String, file: String },
+    /// The picture `file` (a path with forward slashes inside the pack) of the installed style
+    /// pack `pack` of type `pack_type`, found under `<root>/packages/<pack_type>/<pack>` of the
+    /// package roots.
+    Pack {
+        pack: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "TexturePackType::is_text_style")]
+        pack_type: TexturePackType,
+    },
 }
 
 impl TextImageRef {
-    /// How a missing picture is named in a warning: the path or `<pack>/<file>`.
+    /// The picture `file` of the text style pack `pack`.
+    pub fn text_style_pack(pack: impl Into<String>, file: impl Into<String>) -> TextImageRef {
+        TextImageRef::Pack { pack: pack.into(), file: file.into(), pack_type: TexturePackType::TextStyle }
+    }
+
+    /// How a missing picture is named in a warning: the path, `<pack>/<file>` for a text style
+    /// pack, or `<pack type>/<pack>/<file>`.
     pub fn label(&self) -> String {
         match self {
             TextImageRef::File { path } => path.clone(),
-            TextImageRef::Pack { pack, file } => format!("{pack}/{file}"),
+            TextImageRef::Pack { pack, file, pack_type: TexturePackType::TextStyle } => format!("{pack}/{file}"),
+            TextImageRef::Pack { pack, file, pack_type } => format!("{}/{pack}/{file}", pack_type.name()),
         }
+    }
+}
+
+/// Which type of style pack holds a texture picture: a text style pack, or a subtitle style pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TexturePackType {
+    #[default]
+    TextStyle,
+    SubtitleStyle,
+}
+
+impl TexturePackType {
+    /// The pack type, as a pack's `type` and its folder name say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::TextStyle => "text-style",
+            Self::SubtitleStyle => "subtitle-style",
+        }
+    }
+
+    fn is_text_style(&self) -> bool {
+        *self == Self::TextStyle
     }
 }
 

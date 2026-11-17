@@ -21,7 +21,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use d3d12_backend::is_safe_id;
-use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextBloom, TextContent, TextGlow, TextImageRef, TextInnerShadow, TextOutline, TextPaint, TextShadow, TextTransform};
+use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextBloom, TextContent, TextGlow, TextImageRef, TextInnerShadow, TextOutline, TextPaint, TextShadow, TextTransform, TexturePackType};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
@@ -305,7 +305,7 @@ pub fn check_pack_style(style: &PackTextStyle) -> Result<(), String> {
         let Some(image) = paint.texture_image() else { continue };
         match image {
             TextImageRef::File { path } => return Err(format!("the texture \"{path}\" must name a picture of a text style pack, not a file")),
-            TextImageRef::Pack { pack, file } => {
+            TextImageRef::Pack { pack, file, .. } => {
                 if !(d3d12_backend::is_safe_pack_file(pack, file) && is_texture(file)) {
                     return Err(format!("the texture \"{pack}/{file}\" is not a PNG or JPEG picture of a pack"));
                 }
@@ -370,14 +370,40 @@ pub fn check_text_style_fields(manifest: &TextStyleManifest) -> Result<(), Impor
     if manifest.kind != TEXT_STYLE_TYPE {
         return Err(ImportProblem::UnknownType(manifest.kind.clone()));
     }
-    // Format 2 has the header of format 1.
-    let layered = manifest.format == LAYERED_STYLE_FORMAT;
-    check_pack_header(if layered { SUPPORTED_FORMAT } else { manifest.format }, &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "styles")?;
-    if let Some(item) = manifest.items.iter().find(|item| !layered && item.style.has_layers()) {
-        return Err(ImportProblem::BadManifest(format!("the item \"{}\": fill, outlines, shadows, inner_shadows and bloom need format {LAYERED_STYLE_FORMAT}", item.id)));
-    }
+    check_pack_header(header_format(manifest.format), &manifest.id, &manifest.name, &manifest.version, &manifest.license, manifest.items.len(), "styles")?;
+    check_layer_format(manifest.format, manifest.items.iter().map(|item| (item.id.as_str(), &item.style)))?;
     check_item_ids(manifest.items.iter().map(|item| (item.id.as_str(), item.name.as_str())))?;
     manifest.items.iter().try_for_each(|item| check_style_item_parts(&item.id, &item.name, item.category.as_deref(), item.preview_text.as_deref(), &item.style, item.animation.as_ref()))
+}
+
+/// The format whose header a style pack of `format` has: format 2 has the header of format 1.
+pub(crate) fn header_format(format: u32) -> u32 {
+    if format == LAYERED_STYLE_FORMAT {
+        SUPPORTED_FORMAT
+    } else {
+        format
+    }
+}
+
+/// Refuses a style (`(item id, style)`) of a pack of `format` below 2 that uses a field of format 2.
+pub(crate) fn check_layer_format<'a>(format: u32, mut styles: impl Iterator<Item = (&'a str, &'a PackTextStyle)>) -> Result<(), ImportProblem> {
+    if format == LAYERED_STYLE_FORMAT {
+        return Ok(());
+    }
+    match styles.find(|(_, style)| style.has_layers()) {
+        Some((id, _)) => Err(ImportProblem::BadManifest(format!("the item \"{id}\": fill, outlines, shadows, inner_shadows and bloom need format {LAYERED_STYLE_FORMAT}"))),
+        None => Ok(()),
+    }
+}
+
+/// The pictures a pack of format `format` may hold: those of format 2 hold texture pictures, others
+/// no media.
+pub(crate) fn style_media(format: u32) -> fn(&str) -> bool {
+    if format == LAYERED_STYLE_FORMAT {
+        is_texture
+    } else {
+        no_media
+    }
 }
 
 /// A pack holds no media file.
@@ -391,11 +417,11 @@ pub(crate) fn is_texture(file: &str) -> bool {
     d3d12_backend::ASSET_TEXTURE_EXTENSIONS.contains(&extension.as_str())
 }
 
-/// The pictures of its own pack that the styles of `manifest` paint with, each once.
-fn own_textures(manifest: &TextStyleManifest) -> Vec<&str> {
+/// The pictures of its own pack (the pack `id` of type `pack_type`) that `styles` paint with, each
+/// once.
+pub(crate) fn own_textures<'a>(styles: impl Iterator<Item = &'a PackTextStyle>, id: &str, pack_type: TexturePackType) -> Vec<&'a str> {
     let mut files: Vec<&str> = Vec::new();
-    for item in &manifest.items {
-        let style = &item.style;
+    for style in styles {
         let mut paints: Vec<&TextPaint> = style.fill.iter().collect();
         for outline in style.outlines.iter().flatten() {
             paints.push(&outline.paint);
@@ -406,8 +432,8 @@ fn own_textures(manifest: &TextStyleManifest) -> Vec<&str> {
         }
         paints.extend(style.inner_shadows.iter().flatten().map(|shadow| &shadow.paint));
         for image in paints.into_iter().filter_map(TextPaint::texture_image) {
-            if let TextImageRef::Pack { pack, file } = image {
-                if pack.eq_ignore_ascii_case(&manifest.id) && !files.contains(&file.as_str()) {
+            if let TextImageRef::Pack { pack, file, pack_type: kind } = image {
+                if *kind == pack_type && pack.eq_ignore_ascii_case(id) && !files.contains(&file.as_str()) {
                     files.push(file);
                 }
             }
@@ -433,9 +459,10 @@ pub fn install_text_style_pack(source: &Path, user_root: &Path, overwrite: bool)
     check_text_style_fields(&manifest)?;
     // Only a pack of format 2 may hold pictures, and every picture of its own a style names must be
     // in it.
-    let media: fn(&str) -> bool = if manifest.format == LAYERED_STYLE_FORMAT { is_texture } else { no_media };
+    let media = style_media(manifest.format);
     check_entry_extensions(&entries, media)?;
-    check_named_files(&manifest.license.files, own_textures(&manifest).into_iter(), &entries, media, "a PNG or JPEG picture")?;
+    let textures = own_textures(manifest.items.iter().map(|item| &item.style), &manifest.id, TexturePackType::TextStyle);
+    check_named_files(&manifest.license.files, textures.into_iter(), &entries, media, "a PNG or JPEG picture")?;
 
     let id = manifest.id.to_ascii_lowercase();
     let check_unpacked = |temporary: &Path| {
@@ -584,7 +611,7 @@ pub(crate) mod tests {
         assert!(root.join("packages/text-style/avs-text/textures/gold.png").is_file());
         let manifest = parse_text_style_manifest(manifest.as_bytes()).unwrap();
         let text = manifest.items[0].style.text("Hi", 0.2);
-        assert_eq!(text.fill.texture_image(), Some(&TextImageRef::Pack { pack: "Avs-Text".to_owned(), file: "textures/gold.png".to_owned() }));
+        assert_eq!(text.fill.texture_image(), Some(&TextImageRef::text_style_pack("Avs-Text", "textures/gold.png")));
         assert_eq!((text.outlines.len(), text.shadows.len(), text.shadows[1].outlines.len(), text.inner_shadows.len()), (1, 2, 1, 1));
         assert!(matches!(text.outlines[0].paint, TextPaint::Gradient { .. }));
         assert_eq!(text.bloom, Some(TextBloom { color: [255, 255, 0, 255], strength: 0.8, range: 0.4, dir_x: 0.0, dir_y: 0.5 }));

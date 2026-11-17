@@ -1249,7 +1249,7 @@ impl D3d12Compositor {
         };
         let texture = |image: &engine::TextImageRef| match image {
             engine::TextImageRef::File { path } if Path::new(path).is_relative() => Some(file(self.paths.source_path(path))),
-            engine::TextImageRef::Pack { pack, file: name } => self.paths.texture_pack_path(pack, name).ok().map(file),
+            engine::TextImageRef::Pack { pack, file: name, pack_type } => self.paths.texture_pack_path(pack_type.name(), pack, name).ok().map(file),
             _ => None,
         };
         let resolves_texture = gpufx_text::text_images(text).into_iter().any(|image| texture(image).is_some());

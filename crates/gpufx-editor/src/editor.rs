@@ -2711,7 +2711,7 @@ fn missing_texture(paths: &ProjectPaths, text: &TextContent) -> Option<String> {
     gpufx_text::text_images(text).into_iter().find_map(|image| {
         let present = match image {
             engine::TextImageRef::File { path } => gpufx_text::is_readable_texture_path(path) && Path::new(path).is_file(),
-            engine::TextImageRef::Pack { pack, file } => paths.texture_pack_path(pack, file).is_ok_and(|path| path.is_file()),
+            engine::TextImageRef::Pack { pack, file, pack_type } => paths.texture_pack_path(pack_type.name(), pack, file).is_ok_and(|path| path.is_file()),
         };
         (!present).then(|| image.label())
     })
@@ -2737,7 +2737,7 @@ mod tests {
             text.outlines = vec![engine::TextOutline { width: 0.1, paint: texture(file(path)) }];
             assert_eq!(super::missing_texture(&paths, &text).as_deref(), Some(path));
         }
-        text.outlines = vec![engine::TextOutline { width: 0.1, paint: texture(engine::TextImageRef::Pack { pack: "nope".into(), file: "a.png".into() }) }];
+        text.outlines = vec![engine::TextOutline { width: 0.1, paint: texture(engine::TextImageRef::text_style_pack("nope", "a.png")) }];
         assert_eq!(super::missing_texture(&paths, &text).as_deref(), Some("nope/a.png"));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4974,6 +4974,32 @@ second line")), "Title…");
         let all = state.subtitle_restyle(track, state.text_style_library.find("s/low").unwrap(), true).unwrap();
         assert_eq!(all.len(), 2, "all: the cue with its own style takes the track's too");
         assert!(all.iter().all(|change| !change.text.own_style));
+    }
+
+    #[test]
+    fn a_layered_subtitle_style_gives_the_cues_of_its_track_their_layers_bloom_and_pictures() {
+        let mut state = EditorState::default();
+        let mut library = style_library();
+        let texture = engine::TextImageRef::Pack { pack: "s".into(), file: "glow.png".into(), pack_type: engine::TexturePackType::SubtitleStyle };
+        let fill = engine::TextPaint::Texture(engine::TextTexture { image: texture, fit: engine::TextureFit::Tile, scale: 1.0, angle: 0.0, opacity: 1.0 });
+        let bloom = engine::TextBloom { color: [255, 255, 0, 255], strength: 0.7, range: 0.3, dir_x: 0.0, dir_y: 0.2 };
+        let mut layered = library.packs[1].styles[0].clone();
+        layered.reference = "s/glow".to_owned();
+        layered.style = crate::text_style_install::PackTextStyle { fill: Some(fill.clone()), shadows: Some(vec![engine::TextShadow::solid([0, 0, 0, 255], [0.02, 0.02], 0.0)]), bloom: Some(bloom), ..Default::default() };
+        library.packs[1].styles.push(layered);
+        state.text_style_library = library;
+        let (track, _) = state.import_subtitles(SRT, None).unwrap();
+        state.apply_text_style(ClipKey { track, clip: 0 }, "p/bold");
+        let own = state.project().tracks[track].clips[0].clone();
+
+        state.set_subtitle_style(track, "s/glow");
+
+        let clips = &state.project().tracks[track].clips;
+        assert_eq!(clips[0], own, "the cue with its own style stays");
+        let cue = clips[1].text.as_ref().unwrap();
+        assert_eq!((&cue.fill, cue.shadows.len(), cue.bloom, cue.content.as_str()), (&fill, 1, Some(bloom), "Two
+lines"));
+        assert!(!cue.own_style);
     }
 
     #[test]

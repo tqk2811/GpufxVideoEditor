@@ -97,6 +97,8 @@ pub const ASSET_FONT_EXTENSIONS: [&str; 3] = ["ttf", "otf", "ttc"];
 /// The pack type whose pictures paint text layers (see [`ProjectPaths::texture_pack_path`]). It is
 /// not one of [`ASSET_TYPES`]: no clip source names a texture.
 pub const TEXT_STYLE_ASSET_TYPE: &str = "text-style";
+/// The other pack type whose pictures may paint text layers, those of its subtitle styles.
+pub const SUBTITLE_STYLE_ASSET_TYPE: &str = "subtitle-style";
 /// The extensions of the pictures of a text style pack a text layer may be painted with.
 pub const ASSET_TEXTURE_EXTENSIONS: [&str; 3] = ["png", "jpg", "jpeg"];
 /// The longest pack id, which is also a folder name.
@@ -368,17 +370,18 @@ impl ProjectPaths {
         self.pack_file(AssetRef { kind: FONT_ASSET_TYPE.to_owned(), id: pack.to_ascii_lowercase(), file: file.to_owned() }, &source)
     }
 
-    /// The picture `file` of the text style pack `pack`, in the first root holding the pack, checked
-    /// as an `asset:` source is.
-    pub fn texture_pack_path(&self, pack: &str, file: &str) -> Result<PathBuf, AssetProblem> {
-        let source = asset_source(TEXT_STYLE_ASSET_TYPE, pack, file);
-        if !is_safe_pack_file(pack, file) {
+    /// The picture `file` of the style pack `pack` of type `kind` ([`TEXT_STYLE_ASSET_TYPE`] or
+    /// [`SUBTITLE_STYLE_ASSET_TYPE`]), in the first root holding the pack, checked as an `asset:`
+    /// source is.
+    pub fn texture_pack_path(&self, kind: &str, pack: &str, file: &str) -> Result<PathBuf, AssetProblem> {
+        let source = asset_source(kind, pack, file);
+        if ![TEXT_STYLE_ASSET_TYPE, SUBTITLE_STYLE_ASSET_TYPE].contains(&kind) || !is_safe_pack_file(pack, file) {
             return Err(AssetProblem::Invalid { source });
         }
         if !ASSET_TEXTURE_EXTENSIONS.contains(&file_extension(file).as_str()) {
             return Err(AssetProblem::NotTexture { source });
         }
-        self.pack_file(AssetRef { kind: TEXT_STYLE_ASSET_TYPE.to_owned(), id: pack.to_ascii_lowercase(), file: file.to_owned() }, &source)
+        self.pack_file(AssetRef { kind: kind.to_owned(), id: pack.to_ascii_lowercase(), file: file.to_owned() }, &source)
     }
 
     /// `asset` looked for in the roots, in order.
@@ -556,11 +559,16 @@ mod tests {
         std::fs::create_dir_all(scratch.join("packages/text-style/gold/textures")).unwrap();
         let pack = pack_in(&scratch, "text-style", "gold", &["textures/a.png", "b.JPG", "manifest.json"]);
         let paths = ProjectPaths::new(&scratch.join("p.json"), vec![scratch.clone()]);
-        assert_eq!(paths.texture_pack_path("Gold", "textures/a.png"), Ok(pack.join("textures/a.png")));
-        assert_eq!(paths.texture_pack_path("gold", "b.JPG"), Ok(pack.join("b.JPG")));
-        assert!(matches!(paths.texture_pack_path("gold", "manifest.json"), Err(AssetProblem::NotTexture { .. })));
-        assert!(matches!(paths.texture_pack_path("gold", "c.png"), Err(AssetProblem::FileMissing { .. })));
-        assert!(matches!(paths.texture_pack_path("gold", "../gold/b.JPG"), Err(AssetProblem::Invalid { .. })));
+        assert_eq!(paths.texture_pack_path(TEXT_STYLE_ASSET_TYPE, "Gold", "textures/a.png"), Ok(pack.join("textures/a.png")));
+        assert_eq!(paths.texture_pack_path(TEXT_STYLE_ASSET_TYPE, "gold", "b.JPG"), Ok(pack.join("b.JPG")));
+        assert!(matches!(paths.texture_pack_path(TEXT_STYLE_ASSET_TYPE, "gold", "manifest.json"), Err(AssetProblem::NotTexture { .. })));
+        assert!(matches!(paths.texture_pack_path(TEXT_STYLE_ASSET_TYPE, "gold", "c.png"), Err(AssetProblem::FileMissing { .. })));
+        assert!(matches!(paths.texture_pack_path(TEXT_STYLE_ASSET_TYPE, "gold", "../gold/b.JPG"), Err(AssetProblem::Invalid { .. })));
+        // A subtitle style pack holds pictures too, in its own type folder; no other type does.
+        let subs = pack_in(&scratch, "subtitle-style", "subs", &["glow.png", "manifest.json"]);
+        assert_eq!(paths.texture_pack_path(SUBTITLE_STYLE_ASSET_TYPE, "Subs", "glow.png"), Ok(subs.join("glow.png")));
+        assert!(matches!(paths.texture_pack_path(TEXT_STYLE_ASSET_TYPE, "subs", "glow.png"), Err(AssetProblem::PackMissing { .. })));
+        assert!(matches!(paths.texture_pack_path("font", "subs", "glow.png"), Err(AssetProblem::Invalid { .. })));
         let _ = std::fs::remove_dir_all(&scratch);
     }
 

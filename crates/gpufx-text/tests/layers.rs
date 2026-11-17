@@ -173,7 +173,7 @@ fn a_texture_covers_the_text_and_a_missing_one_is_named() {
     assert_eq!(image.missing_texture.as_deref(), Some(gone.as_str()));
     assert!(image.pixels.chunks(4).all(|p| p[3] == 0));
     // A pack picture the caller did not resolve is named as `<pack>/<file>`.
-    text.fill = TextPaint::Texture(TextTexture { image: TextImageRef::Pack { pack: "gold".into(), file: "a.png".into() }, fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 });
+    text.fill = TextPaint::Texture(TextTexture { image: TextImageRef::text_style_pack("gold", "a.png"), fit: TextureFit::Stretch, scale: 1.0, angle: 0.0, opacity: 1.0 });
     assert_eq!(r.rasterize(&text, HEIGHT, 1.0).missing_texture.as_deref(), Some("gold/a.png"));
     let _ = std::fs::remove_dir_all(&dir);
 }
