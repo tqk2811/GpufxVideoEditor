@@ -61,6 +61,9 @@ pub struct LibraryTextStyle {
     pub layout: Option<SubtitleLayout>,
     /// How a subtitle style marks the spoken word; copied into the text when applied.
     pub karaoke: Option<SubtitleKaraoke>,
+    /// The cover picture of the pack the library shows in place of the preview text, when the item
+    /// names one (see [`crate::text_style_install::TextStyleManifestItem::cover`]).
+    pub cover: Option<PathBuf>,
 }
 
 impl LibraryTextStyle {
@@ -166,7 +169,7 @@ fn read_pack(folder: &Path, label: &str, kind: StyleKind) -> Result<TextStylePac
             let styles = manifest
                 .items
                 .into_iter()
-                .map(|item| LibraryTextStyle { reference: pack_reference(&id, &item.id), preview_text: item.preview_text.unwrap_or_else(|| item.name.clone()), name: item.name, category: item.category, kind, animation: item.animation.as_ref().map(clip_animation), style: item.style, layout: None, karaoke: None })
+                .map(|item| LibraryTextStyle { reference: pack_reference(&id, &item.id), preview_text: item.preview_text.unwrap_or_else(|| item.name.clone()), name: item.name, category: item.category, kind, animation: item.animation.as_ref().map(clip_animation), cover: item.cover.as_deref().map(|file| folder.join(file)), style: item.style, layout: None, karaoke: None })
                 .collect();
             (manifest.id, manifest.name, styles)
         }
@@ -177,7 +180,7 @@ fn read_pack(folder: &Path, label: &str, kind: StyleKind) -> Result<TextStylePac
             let styles = manifest
                 .items
                 .into_iter()
-                .map(|item| LibraryTextStyle { reference: pack_reference(&id, &item.id), preview_text: item.preview_text.unwrap_or_else(|| item.name.clone()), name: item.name, category: item.category, kind, animation: item.animation.as_ref().map(clip_animation), style: item.style, layout: Some(item.layout), karaoke: item.karaoke })
+                .map(|item| LibraryTextStyle { reference: pack_reference(&id, &item.id), preview_text: item.preview_text.unwrap_or_else(|| item.name.clone()), name: item.name, category: item.category, kind, animation: item.animation.as_ref().map(clip_animation), style: item.style, layout: Some(item.layout), karaoke: item.karaoke, cover: None })
                 .collect();
             (manifest.id, manifest.name, styles)
         }
@@ -233,6 +236,7 @@ pub(crate) fn subtitle_library_for_test(font_hint: &[&str]) -> TextStyleLibrary 
         animation: None,
         layout: Some(SubtitleLayout { anchor_y: 0.85, max_width: 0.9, max_lines: 2 }),
         karaoke: None,
+        cover: None,
     };
     TextStyleLibrary { packs: vec![TextStylePack { id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![style] }], problems: Vec::new(), loaded: true }
 }
@@ -327,7 +331,7 @@ mod tests {
 
     #[test]
     fn a_style_without_animation_or_size_keeps_the_clips() {
-        let style = LibraryTextStyle { reference: "p/s".to_owned(), name: "S".to_owned(), category: None, preview_text: "S".to_owned(), kind: StyleKind::Text, style: PackTextStyle::default(), animation: None, layout: None, karaoke: None };
+        let style = LibraryTextStyle { reference: "p/s".to_owned(), name: "S".to_owned(), category: None, preview_text: "S".to_owned(), kind: StyleKind::Text, style: PackTextStyle::default(), animation: None, layout: None, karaoke: None, cover: None };
         let mut current = default_text("x");
         current.size = 0.3;
         assert_eq!(style.apply(&current, &[], &[]).size, 0.3);

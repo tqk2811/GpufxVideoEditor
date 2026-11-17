@@ -4896,6 +4896,7 @@ second line")), "Title…");
             animation: Some(crate::text_clip::choose_preset(&engine::ClipAnimation::default(), engine::AnimationGroup::Enter, Some("pop"))),
             layout: None,
             karaoke: None,
+            cover: None,
         };
         let subtitle = LibraryTextStyle { reference: "s/low".to_owned(), name: "Low".to_owned(), kind: StyleKind::Subtitle, animation: None, layout: Some(SubtitleLayout { anchor_y: 0.85, max_width: 0.9, max_lines: 2 }), ..bold.clone() };
         crate::text_style_library::TextStyleLibrary {

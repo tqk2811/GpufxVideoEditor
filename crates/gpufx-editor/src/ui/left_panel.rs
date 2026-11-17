@@ -22,6 +22,8 @@ use std::time::Duration;
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
 
 const RAIL_WIDTH: f32 = 68.0;
+/// The side of a text style tile that shows the style's cover picture.
+const COVER_TILE_SIDE: f32 = 72.0;
 const RAIL_CELL_HEIGHT: f32 = 56.0;
 const TAB_FONT: f32 = 12.0;
 const TAB_FONT_MIN: f32 = 9.5;
@@ -223,7 +225,7 @@ fn text_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
         ui.label(egui::RichText::new(language.t(title)).strong());
         ui.horizontal_wrapped(|ui| {
             for (pack, style) in state.text_style_library.styles(Some(kind)) {
-                if style_tile(ui, pack, style).clicked() {
+                if style_tile(ui, state, pack, style).clicked() {
                     chosen = Some(style.reference.clone());
                 }
             }
@@ -242,9 +244,9 @@ fn text_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     }
 }
 
-/// One style of the Text tab: its preview text in its colour, outline as a frame, its box as the
-/// fill. Its name and pack show on hover.
-fn style_tile(ui: &mut egui::Ui, pack: &TextStylePack, style: &LibraryTextStyle) -> egui::Response {
+/// One style of the Text tab: its cover picture when the pack has one, else its preview text in its
+/// colour, outline as a frame, its box as the fill. Its name and pack show on hover.
+fn style_tile(ui: &mut egui::Ui, state: &EditorState, pack: &TextStylePack, style: &LibraryTextStyle) -> egui::Response {
     let rgba = |color: engine::Rgba| Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
     let text = style.style.color.map_or(Color32::WHITE, rgba);
     let mut preview = egui::RichText::new(&style.preview_text).color(text).size(15.0);
@@ -260,6 +262,27 @@ fn style_tile(ui: &mut egui::Ui, pack: &TextStylePack, style: &LibraryTextStyle)
         Some(category) => format!("{} · {} ({category})", style.name, pack.name),
         None => format!("{} · {}", style.name, pack.name),
     };
+    if let Some(cover) = &style.cover {
+        let side = Vec2::splat(COVER_TILE_SIDE);
+        let (rect, response) = ui.allocate_exact_size(side, Sense::click());
+        let painter = ui.painter_at(rect);
+        let radius = CornerRadius::same(theme::CONTROL_RADIUS);
+        painter.rect_filled(rect, radius, theme::thumb_bg());
+        // As for stickers, only a tile in view asks for its picture, made off the UI thread.
+        let poster = ui.is_rect_visible(rect).then(|| state.visuals.borrow_mut().poster(&cover.to_string_lossy(), None)).flatten();
+        match poster {
+            Some((texture, aspect)) => {
+                let fitted = Rect::from_center_size(rect.center(), fit_size(rect.shrink(3.0).size(), aspect));
+                painter.image(texture, fitted, Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            None => {
+                painter.text(rect.center(), Align2::CENTER_CENTER, &style.preview_text, FontId::proportional(13.0), text);
+            }
+        }
+        let stroke = if response.hovered() { Stroke::new(1.0, theme::accent()) } else { Stroke::new(1.0, theme::border()) };
+        painter.rect_stroke(rect, radius, stroke, StrokeKind::Inside);
+        return response.on_hover_text(hover);
+    }
     ui.add(egui::Button::new(preview).fill(fill).stroke(stroke).min_size(Vec2::new(72.0, 36.0))).on_hover_text(hover)
 }
 

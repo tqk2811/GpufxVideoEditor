@@ -173,7 +173,7 @@ pub fn check_manifest_fields(manifest: &AudioManifest) -> Result<AudioPackKind, 
 }
 
 /// `name` when it is a path a manifest may use: forward slashes and only safe parts.
-fn checked_manifest_path(name: &str) -> Result<(), ImportProblem> {
+pub(crate) fn checked_manifest_path(name: &str) -> Result<(), ImportProblem> {
     if name.contains('\\') {
         return Err(ImportProblem::BadManifest(format!("\"{name}\" uses a backslash")));
     }
