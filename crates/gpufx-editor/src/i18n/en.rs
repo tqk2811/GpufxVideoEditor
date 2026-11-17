@@ -352,6 +352,8 @@ pub(super) fn text(message: &Message) -> String {
         Message::FieldLetterSpacing => "Letter spacing".to_owned(),
         Message::TabAnimation => "Animation".to_owned(),
         Message::ClipTabProperties => "Properties".to_owned(),
+        Message::ClipTabPicture => "Picture".to_owned(),
+        Message::ClipTabGeneral => "General".to_owned(),
         Message::HoldRemovedTransition => "The transition on that cut was removed: a still hold and a transition cannot share a cut".to_owned(),
         Message::TransitionReleasedHold => "The still hold on that cut became a plain animation: a transition and a still hold cannot share a cut".to_owned(),
         Message::AnimationHoldNote(seconds) => format!("Still frame for {seconds} s: the clip is that much longer"),

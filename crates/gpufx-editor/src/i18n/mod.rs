@@ -367,6 +367,10 @@ pub enum Message {
     FieldLetterSpacing,
     /// The tab of the clip card with everything but the animations.
     ClipTabProperties,
+    /// The clip tab of the clip's picture: place, motion, animations, effects.
+    ClipTabPicture,
+    /// The general clip tab of a sound clip, whose sound tab is named after what it is.
+    ClipTabGeneral,
     TabAnimation,
     /// A hold was set on a cut that had a transition, so the transition went.
     HoldRemovedTransition,
@@ -708,6 +712,8 @@ mod tests {
             Message::FieldLetterSpacing,
             Message::TabAnimation,
             Message::ClipTabProperties,
+            Message::ClipTabPicture,
+            Message::ClipTabGeneral,
             Message::HoldRemovedTransition,
             Message::TransitionReleasedHold,
             Message::AnimationHoldNote("0.5".to_owned()),

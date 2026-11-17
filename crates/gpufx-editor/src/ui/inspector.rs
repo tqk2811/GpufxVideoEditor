@@ -3,8 +3,8 @@
 use super::icons::{self, Icon};
 use super::numeric::{self, drag_field, speed_field};
 use super::param_widgets;
-use super::theme;
-use crate::editor::{clip_name, speed_limits, tempo_text, transition_duration_limits, ClipField, ClipTab, EditorState};
+use super::{theme, UiRequest};
+use crate::editor::{clip_name, speed_limits, tempo_text, transition_duration_limits, ClipField, ClipTab, EditorState, PictureTab};
 use crate::i18n::{Language, Message};
 use crate::packages::short_name;
 use crate::timecode::{aspect_label, format_fps, format_timecode, from_seconds, to_seconds};
@@ -25,7 +25,7 @@ const SPEED_SNAP_RATIO: f64 = 1.04;
 /// How far the pointer must go from where it was pressed before the slider counts as dragged.
 const SLIDER_MOVE_POINTS: f32 = 2.0;
 
-pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
+pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let rect = ui.max_rect();
     let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEADER_HEIGHT.min(rect.height())));
     let key = state.selection().filter(|key| clip_of(state, *key).is_some());
@@ -44,7 +44,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState) {
     if body.width() < 1.0 || body.height() < 1.0 {
         return;
     }
+    let effects_tab = key.filter(|key| shows_effects_tab(state, *key));
+    if effects_tab.is_none() {
+        state.ui.effect_tile_hover.clear();
+    }
     ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
+        // The Effects tab scrolls its own lists: its grid fills the height that is left.
+        if let Some(key) = effects_tab {
+            clip_header(ui, state, key);
+            effects_tab_contents(ui, state, key, requests);
+            return;
+        }
         egui::ScrollArea::vertical().id_salt("inspector").auto_shrink([false, false]).show(ui, |ui| match (key, transition) {
             (Some(key), _) => clip_inspector(ui, state, key),
             (None, Some(transition)) => transition_inspector(ui, state, transition),
@@ -116,94 +126,173 @@ fn project_summary(ui: &mut egui::Ui, state: &EditorState) {
     ui.add(egui::Label::new(egui::RichText::new(language.t(Message::SelectClipHint)).color(theme::text_dim())).wrap());
 }
 
-fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
+/// The tabs `clip` on a track of `kind` has: the general one, the picture one when it shows a
+/// picture and the sound one when it has a sound.
+fn clip_tabs(kind: engine::TrackKind, clip: &engine::Clip) -> Vec<ClipTab> {
+    let mut tabs = vec![ClipTab::General];
+    if super::animation_inspector::shows_animation(kind) {
+        tabs.push(ClipTab::Picture);
+    }
+    // A still, an image or text, has no sound.
+    if !clip.is_still() {
+        tabs.push(ClipTab::Sound);
+    }
+    tabs
+}
+
+/// The tab shown for the chosen `tab`: the general one when the clip has no such tab.
+fn shown_clip_tab(tab: ClipTab, tabs: &[ClipTab]) -> ClipTab {
+    if tabs.contains(&tab) { tab } else { ClipTab::General }
+}
+
+/// The label of a clip tab. The general tab is named after what the clip is, as the title is,
+/// except on a sound clip, whose sound tab already has that name.
+fn clip_tab_label(tab: ClipTab, kind: engine::TrackKind, clip: &engine::Clip) -> Message {
+    match tab {
+        ClipTab::General if kind == engine::TrackKind::Audio => Message::ClipTabGeneral,
+        ClipTab::General => clip_title(kind, Some(clip)),
+        ClipTab::Picture => Message::ClipTabPicture,
+        ClipTab::Sound => Message::TabAudio,
+    }
+}
+
+/// The clip's name, the locked note and the tabs. Returns the tab shown.
+fn clip_header(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) -> ClipTab {
     let language = state.language();
-    let Some(clip) = clip_of(state, key).cloned() else { return };
-    let track_kind = state.project().tracks[key.track].kind;
-    let editable = !state.is_track_locked(key.track);
+    let Some(clip) = clip_of(state, key).cloned() else { return ClipTab::General };
+    let kind = state.project().tracks[key.track].kind;
     ui.add(egui::Label::new(egui::RichText::new(clip_name(&clip)).strong()).truncate());
-    if !editable {
+    if state.is_track_locked(key.track) {
         ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::text_dim())).wrap());
     }
-    // A clip with a picture has its animations on a tab of their own; a sound clip has none.
-    if super::animation_inspector::shows_animation(track_kind) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut state.ui.clip_tab, ClipTab::Properties, language.t(Message::ClipTabProperties));
-            ui.selectable_value(&mut state.ui.clip_tab, ClipTab::Animation, language.t(Message::TabAnimation));
-        });
-        ui.separator();
-        if state.ui.clip_tab == ClipTab::Animation {
-            let id = ui.scope_id().with(("animation-inspector", clip_identity(key, &clip)));
-            ui.add_enabled_ui(editable, |ui| super::animation_inspector::show(ui, state, id, &clip));
-            return;
+    let tabs = clip_tabs(kind, &clip);
+    let mut shown = shown_clip_tab(state.ui.clip_tab, &tabs);
+    ui.horizontal_wrapped(|ui| {
+        for tab in tabs {
+            if ui.selectable_value(&mut shown, tab, language.t(clip_tab_label(tab, kind, &clip))).clicked() {
+                state.ui.clip_tab = tab;
+            }
         }
+    });
+    if shown == ClipTab::Picture {
+        ui.horizontal_wrapped(|ui| {
+            ui.selectable_value(&mut state.ui.picture_tab, PictureTab::Properties, language.t(Message::ClipTabProperties));
+            ui.selectable_value(&mut state.ui.picture_tab, PictureTab::Animation, language.t(Message::TabAnimation));
+            ui.selectable_value(&mut state.ui.picture_tab, PictureTab::Effects, language.t(Message::TabEffects));
+        });
+    }
+    ui.separator();
+    shown
+}
+
+/// Whether the clip at `key` shows its Effects tab now, which scrolls its own lists.
+fn shows_effects_tab(state: &EditorState, key: ClipKey) -> bool {
+    let Some(clip) = clip_of(state, key) else { return false };
+    let tabs = clip_tabs(state.project().tracks[key.track].kind, clip);
+    shown_clip_tab(state.ui.clip_tab, &tabs) == ClipTab::Picture && state.ui.picture_tab == PictureTab::Effects
+}
+
+/// The Effects tab: the effects on the clip, then the list to add more from, which fills the rest.
+fn effects_tab_contents(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, requests: &mut Vec<UiRequest>) {
+    let editable = !state.is_track_locked(key.track);
+    // The effects on the clip take at most this share of the height, so the list stays usable.
+    let attached_height = (ui.available_height() * 0.45).max(60.0);
+    egui::ScrollArea::vertical().id_salt("clip-effects").max_height(attached_height).auto_shrink([false, true]).show(ui, |ui| effects(ui, state, key, editable));
+    ui.separator();
+    super::left_panel::picker(ui, state, requests, super::left_panel::PickerFor::Effects, editable);
+}
+
+fn clip_inspector(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
+    let Some(clip) = clip_of(state, key).cloned() else { return };
+    let editable = !state.is_track_locked(key.track);
+    match clip_header(ui, state, key) {
+        ClipTab::General => {
+            ui.add_enabled_ui(editable, |ui| general_rows(ui, state, key, &clip));
+        }
+        ClipTab::Sound => {
+            ui.add_enabled_ui(editable, |ui| sound_rows(ui, state, key, &clip));
+        }
+        ClipTab::Picture => match state.ui.picture_tab {
+            PictureTab::Properties => picture_rows(ui, state, key, &clip, editable),
+            PictureTab::Animation => {
+                let id = ui.scope_id().with(("animation-inspector", clip_identity(key, &clip)));
+                ui.add_enabled_ui(editable, |ui| super::animation_inspector::show(ui, state, id, &clip));
+            }
+            // Drawn by `show`, outside the scrolling card.
+            PictureTab::Effects => {}
+        },
+    }
+}
+
+/// The general tab: where the clip sits and how much of its source it plays, how fast.
+fn general_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: &engine::Clip) {
+    let language = state.language();
+    // A still has no source to walk through.
+    if clip.is_still() {
+        time_field(ui, state, &language.t(Message::FieldVideoDuration), to_seconds(clip.duration), ClipField::Duration, None);
+        time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start, None);
+        return;
+    }
+    let full_source = state.source_remaining(key).filter(|left| clip.timeline_ticks(*left) != clip.media_duration());
+    time_field(ui, state, &language.t(Message::FieldSourceIn), to_seconds(clip.source_in), ClipField::SourceIn, Some((clip.source_in != Time::ZERO).then_some(ClipField::SourceIn(0.0))));
+    time_field(ui, state, &language.t(Message::FieldVideoDuration), to_seconds(clip.source_offset(clip.media_duration())), ClipField::Duration, Some(full_source.map(|source| ClipField::Duration(to_seconds(source)))));
+    ui.separator();
+
+    time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start, None);
+    speed_row(ui, state, key, &language.t(Message::FieldSpeed), clip.speed);
+    let mut reverse = clip.reverse;
+    if ui.checkbox(&mut reverse, language.t(Message::Reverse)).changed() {
+        state.set_reverse(reverse);
+    }
+}
+
+/// The sound tab: volume, fades, noise, voice and beats.
+fn sound_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: &engine::Clip) {
+    let language = state.language();
+    let mut gain = clip.gain_db;
+    ui.colored_label(theme::text_dim(), language.t(Message::FieldVolume));
+    let changed = ui.horizontal(|ui| {
+        ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+        let mut changed = numeric::add_slider(ui, slider(&mut gain, GAIN_RANGE)).changed();
+        changed |= drag_field(ui, &mut gain, GAIN_RANGE, 0.1, 1, " dB", None).1;
+        changed
+    });
+    if changed.inner {
+        state.live_gain(gain);
+    }
+    let mut muted = clip.muted;
+    if ui.checkbox(&mut muted, language.t(Message::Mute)).changed() {
+        state.set_muted(muted);
+    }
+
+    let (has_before, has_after) = transitions_beside(state, key);
+    // The sound, and so its fades, is only the moving part between the holds.
+    fade_row(ui, state, &language.t(Message::FadeIn), clip.fade_in, clip.media_duration().saturating_sub(clip.fade_out), !has_before, |state, value| state.live_fades(value, clip.fade_out));
+    fade_row(ui, state, &language.t(Message::FadeOut), clip.fade_out, clip.media_duration().saturating_sub(clip.fade_in), !has_after, |state, value| state.live_fades(clip.fade_in, value));
+    ui.separator();
+    denoise_rows(ui, state, &clip.denoise);
+    ui.separator();
+    voice_rows(ui, state, &clip.voice);
+    ui.separator();
+    beats_rows(ui, state, key, clip);
+}
+
+/// The picture's properties: the text and font of a text clip, then place, motion and the
+/// background removal.
+fn picture_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: &engine::Clip, editable: bool) {
+    let language = state.language();
+    if let Some(text) = &clip.text {
+        let id = ui.scope_id().with(("text-inspector", clip_identity(key, clip)));
+        ui.add_enabled_ui(editable, |ui| super::text_inspector::show(ui, state, key, id, text));
+        ui.separator();
     }
     ui.add_enabled_ui(editable, |ui| {
-        // A still has no source to walk through and no sound.
-        if clip.is_still() {
-            time_field(ui, state, &language.t(Message::FieldVideoDuration), to_seconds(clip.duration), ClipField::Duration, None);
-            time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start, None);
-            return;
-        }
-        let full_source = state.source_remaining(key).filter(|left| clip.timeline_ticks(*left) != clip.media_duration());
-        time_field(ui, state, &language.t(Message::FieldSourceIn), to_seconds(clip.source_in), ClipField::SourceIn, Some((clip.source_in != Time::ZERO).then_some(ClipField::SourceIn(0.0))));
-        time_field(ui, state, &language.t(Message::FieldVideoDuration), to_seconds(clip.source_offset(clip.media_duration())), ClipField::Duration, Some(full_source.map(|source| ClipField::Duration(to_seconds(source)))));
-        ui.separator();
-
-        time_field(ui, state, &language.t(Message::FieldStart), to_seconds(clip.start), ClipField::Start, None);
-        speed_row(ui, state, key, &language.t(Message::FieldSpeed), clip.speed);
-        let mut reverse = clip.reverse;
-        if ui.checkbox(&mut reverse, language.t(Message::Reverse)).changed() {
-            state.set_reverse(reverse);
-        }
-        ui.separator();
-
-        let mut gain = clip.gain_db;
-        ui.colored_label(theme::text_dim(), language.t(Message::FieldVolume));
-        let changed = ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
-            let mut changed = numeric::add_slider(ui, slider(&mut gain, GAIN_RANGE)).changed();
-            changed |= drag_field(ui, &mut gain, GAIN_RANGE, 0.1, 1, " dB", None).1;
-            changed
-        });
-        if changed.inner {
-            state.live_gain(gain);
-        }
-        let mut muted = clip.muted;
-        if ui.checkbox(&mut muted, language.t(Message::Mute)).changed() {
-            state.set_muted(muted);
-        }
-
-        let (has_before, has_after) = transitions_beside(state, key);
-        // The sound, and so its fades, is only the moving part between the holds.
-        fade_row(ui, state, &language.t(Message::FadeIn), clip.fade_in, clip.media_duration().saturating_sub(clip.fade_out), !has_before, |state, value| state.live_fades(value, clip.fade_out));
-        fade_row(ui, state, &language.t(Message::FadeOut), clip.fade_out, clip.media_duration().saturating_sub(clip.fade_in), !has_after, |state, value| state.live_fades(clip.fade_in, value));
-        ui.separator();
-        denoise_rows(ui, state, &clip.denoise);
-        ui.separator();
-        voice_rows(ui, state, &clip.voice);
-        ui.separator();
-        beats_rows(ui, state, key, &clip);
+        placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some() || ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)));
+        motion_rows(ui, state, key, clip);
     });
-
-    if let Some(text) = &clip.text {
+    if clip.text.is_none() {
         ui.separator();
-        let id = ui.scope_id().with(("text-inspector", clip_identity(key, &clip)));
-        ui.add_enabled_ui(editable, |ui| super::text_inspector::show(ui, state, key, id, text));
-    }
-
-    if track_kind.shows_picture() {
-        ui.separator();
-        ui.add_enabled_ui(editable, |ui| {
-            placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some() || ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)));
-            motion_rows(ui, state, key, &clip);
-        });
-        if clip.text.is_none() {
-            ui.separator();
-            ui.add_enabled_ui(editable, |ui| matte_rows(ui, state, &clip.matte));
-        }
-        ui.separator();
-        effects(ui, state, key, editable);
+        ui.add_enabled_ui(editable, |ui| matte_rows(ui, state, &clip.matte));
     }
 }
 
@@ -740,7 +829,7 @@ mod tests {
     use std::path::Path;
 
     fn frame(ctx: &egui::Context, state: &mut EditorState) {
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| show(ui, state));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| show(ui, state, &mut Vec::new()));
         output.textures_delta.clear();
     }
 
@@ -754,7 +843,7 @@ mod tests {
 
     /// Every text one pass of the inspector draws.
     fn drawn_texts(ctx: &egui::Context, state: &mut EditorState) -> Vec<String> {
-        let output = ctx.run_ui(egui::RawInput::default(), |ui| show(ui, state));
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| show(ui, state, &mut Vec::new()));
         fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
             match shape {
                 egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
@@ -770,23 +859,39 @@ mod tests {
     }
 
     #[test]
-    fn the_clip_card_puts_the_animations_on_their_own_tab() {
+    fn a_video_clip_splits_its_card_into_general_picture_and_sound_tabs() {
         let ctx = egui::Context::default();
         let mut state = selected_clip();
         let language = state.language();
-        let (enter, volume) = (language.t(Message::AnimationEnter), language.t(Message::FieldVolume));
+        let (enter, volume, speed, search) = (language.t(Message::AnimationEnter), language.t(Message::FieldVolume), language.t(Message::FieldSpeed), language.t(Message::SearchEffects));
         frame(&ctx, &mut state);
-        let properties = drawn_texts(&ctx, &mut state);
-        assert!(properties.contains(&language.t(Message::ClipTabProperties)) && properties.contains(&language.t(Message::TabAnimation)), "{properties:?}");
-        assert!(properties.contains(&volume) && !properties.contains(&enter), "{properties:?}");
-        state.ui.clip_tab = ClipTab::Animation;
+        let general = drawn_texts(&ctx, &mut state);
+        for tab in [Message::ClipTitleVideo, Message::ClipTabPicture, Message::TabAudio] {
+            assert!(general.contains(&language.t(tab)), "{general:?}");
+        }
+        assert!(general.contains(&speed) && !general.contains(&volume) && !general.contains(&language.t(Message::TabAnimation)), "{general:?}");
+        state.ui.clip_tab = ClipTab::Sound;
+        frame(&ctx, &mut state);
+        let sound = drawn_texts(&ctx, &mut state);
+        assert!(sound.contains(&volume) && !sound.contains(&speed), "{sound:?}");
+        state.ui.clip_tab = ClipTab::Picture;
+        frame(&ctx, &mut state);
+        let picture = drawn_texts(&ctx, &mut state);
+        for tab in [Message::ClipTabProperties, Message::TabAnimation, Message::TabEffects] {
+            assert!(picture.contains(&language.t(tab)), "{picture:?}");
+        }
+        state.ui.picture_tab = PictureTab::Animation;
         frame(&ctx, &mut state);
         let animation = drawn_texts(&ctx, &mut state);
         assert!(animation.contains(&enter) && !animation.contains(&volume), "{animation:?}");
+        state.ui.picture_tab = PictureTab::Effects;
+        frame(&ctx, &mut state);
+        let effects = drawn_texts(&ctx, &mut state);
+        assert!(effects.contains(&search) && effects.contains(&language.t(Message::ImportPackage)) && !effects.contains(&enter), "{effects:?}");
     }
 
     #[test]
-    fn a_sound_clip_has_no_tabs() {
+    fn a_sound_clip_has_no_picture_tab_and_a_still_no_sound_tab() {
         let ctx = egui::Context::default();
         let mut state = EditorState::default();
         state.add_track(engine::TrackKind::Audio);
@@ -794,7 +899,30 @@ mod tests {
         state.select(Some(ClipKey { track: 0, clip: 0 }));
         frame(&ctx, &mut state);
         let texts = drawn_texts(&ctx, &mut state);
-        assert!(!texts.contains(&state.language().t(Message::ClipTabProperties)), "{texts:?}");
+        let language = state.language();
+        assert!(!texts.contains(&language.t(Message::ClipTabPicture)) && texts.contains(&language.t(Message::ClipTabGeneral)), "{texts:?}");
+        let mut state = EditorState::default();
+        state.add_track(engine::TrackKind::Video);
+        state.add_clip_from_file(0, Path::new("a.png"));
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        frame(&ctx, &mut state);
+        let texts = drawn_texts(&ctx, &mut state);
+        assert!(texts.contains(&language.t(Message::ClipTabPicture)) && !texts.contains(&language.t(Message::TabAudio)), "{texts:?}");
+    }
+
+    #[test]
+    fn a_chosen_tab_the_clip_lacks_shows_the_general_tab_and_stays_chosen() {
+        let tabs = [ClipTab::General, ClipTab::Picture];
+        assert_eq!(shown_clip_tab(ClipTab::Sound, &tabs), ClipTab::General);
+        assert_eq!(shown_clip_tab(ClipTab::Picture, &tabs), ClipTab::Picture);
+        let ctx = egui::Context::default();
+        let mut state = selected_clip();
+        state.ui.clip_tab = ClipTab::Sound;
+        state.add_track(engine::TrackKind::Video);
+        state.add_clip_from_file(1, Path::new("b.png"));
+        state.select(Some(ClipKey { track: 1, clip: 0 }));
+        frame(&ctx, &mut state);
+        assert_eq!(state.ui.clip_tab, ClipTab::Sound, "an image keeps the choice for the next video");
     }
 
     fn typed_draft(ctx: &egui::Context) {
@@ -894,7 +1022,7 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 500.0));
         let mut pass = |events: Vec<egui::Event>| {
             let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
-            let mut output = ctx.run_ui(raw, |ui| show(ui, &mut state));
+            let mut output = ctx.run_ui(raw, |ui| show(ui, &mut state, &mut Vec::new()));
             output.textures_delta.clear();
         };
         let button = |at, pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
@@ -909,6 +1037,40 @@ mod tests {
         assert_eq!(state.selection(), Some(ClipKey { track: 0, clip: 0 }), "it stays selected");
         assert!(!matches!(state.status(), Status::Refused(_)), "the controls are off, not refused: {:?}", state.status());
         assert_eq!(state.project(), &before);
+    }
+
+    #[test]
+    fn a_locked_clip_still_imports_packages_from_the_effects_tab() {
+        let ctx = egui::Context::default();
+        let mut state = selected_clip();
+        state.toggle_track_locked(0);
+        state.ui.clip_tab = ClipTab::Picture;
+        state.ui.picture_tab = PictureTab::Effects;
+        let label = state.language().t(Message::ImportPackage);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 500.0));
+        let mut pass = |events: Vec<egui::Event>| {
+            let mut requests = Vec::new();
+            let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
+            let mut output = ctx.run_ui(raw, |ui| show(ui, &mut state, &mut requests));
+            output.textures_delta.clear();
+            (output, requests)
+        };
+        fn find(shape: &egui::Shape, label: &str, found: &mut Option<egui::Pos2>) {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => *found = Some(text.visual_bounding_rect().center()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| find(shape, label, found)),
+                _ => {}
+            }
+        }
+        let (output, _) = pass(vec![]);
+        let mut at = None;
+        output.shapes.iter().for_each(|clipped| find(&clipped.shape, &label, &mut at));
+        let at = at.expect("the import button is drawn");
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        pass(vec![egui::Event::PointerMoved(at)]);
+        pass(vec![button(true)]);
+        let (_, requests) = pass(vec![button(false)]);
+        assert!(requests.iter().any(|request| matches!(request, UiRequest::ImportPackage)), "{requests:?}");
     }
 
     #[test]
