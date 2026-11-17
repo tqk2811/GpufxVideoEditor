@@ -10,10 +10,12 @@ pub const STATUS_HEIGHT: f32 = 22.0;
 
 const LEFT_SHARE: f32 = 0.22;
 const LEFT_MIN: f32 = 240.0;
-const LEFT_MAX: f32 = 420.0;
+/// The widest a side panel grows while it follows the window. A dragged size has no such cap: it
+/// only leaves the centre its minimum.
+const LEFT_DEFAULT_MAX: f32 = 420.0;
 const RIGHT_SHARE: f32 = 0.2;
 const RIGHT_MIN: f32 = 180.0;
-const RIGHT_MAX: f32 = 380.0;
+const RIGHT_DEFAULT_MAX: f32 = 380.0;
 const CENTER_MIN: f32 = 240.0;
 const TIMELINE_SHARE: f32 = 0.36;
 const TIMELINE_MIN: f32 = 180.0;
@@ -118,11 +120,25 @@ impl PanelSizes {
     /// `size` with the other panels as they are, so the bar stops where the panel can go no further.
     pub fn dragged_to(self, size: Vec2, splitter: Splitter, wanted: f32) -> Self {
         let laid_out = panels(size, &self);
-        let room_beside = |other: f32| columns_width(size.x) - CENTER_MIN - other;
+        // A side panel may take the room of the other side down to that one's minimum; the centre
+        // always keeps its own. The other side then shrinks to what is left.
+        let sides = columns_width(size.x) - CENTER_MIN;
         let mut next = self;
         match splitter {
-            Splitter::Left => next.left = Some(wanted.min(room_beside(laid_out.right.width())).min(LEFT_MAX).max(LEFT_MIN)),
-            Splitter::Right => next.right = Some(wanted.min(room_beside(laid_out.left.width())).min(RIGHT_MAX).max(RIGHT_MIN)),
+            Splitter::Left => {
+                let left = wanted.min(sides - RIGHT_MIN).max(LEFT_MIN);
+                next.left = Some(left);
+                if laid_out.right.width() > sides - left {
+                    next.right = Some((sides - left).max(RIGHT_MIN));
+                }
+            }
+            Splitter::Right => {
+                let right = wanted.min(sides - LEFT_MIN).max(RIGHT_MIN);
+                next.right = Some(right);
+                if laid_out.left.width() > sides - right {
+                    next.left = Some((sides - right).max(LEFT_MIN));
+                }
+            }
             Splitter::Timeline => {
                 let (top, bottom) = body_bounds(size.y);
                 next.timeline = Some(wanted.min(bottom - top - MAIN_MIN - GAP).max(TIMELINE_MIN));
@@ -147,8 +163,8 @@ pub fn panels(size: Vec2, sizes: &PanelSizes) -> Panels {
     let main_bottom = (timeline_top - GAP).max(body_top);
 
     let columns_width = columns_width(width);
-    let mut left_width = sizes.left.unwrap_or(width * LEFT_SHARE).clamp(LEFT_MIN, LEFT_MAX);
-    let mut right_width = sizes.right.unwrap_or(width * RIGHT_SHARE).clamp(RIGHT_MIN, RIGHT_MAX);
+    let mut left_width = sizes.left.unwrap_or((width * LEFT_SHARE).min(LEFT_DEFAULT_MAX)).max(LEFT_MIN);
+    let mut right_width = sizes.right.unwrap_or((width * RIGHT_SHARE).min(RIGHT_DEFAULT_MAX)).max(RIGHT_MIN);
     let center_room = columns_width - left_width - right_width;
     if center_room < CENTER_MIN {
         // The sides first give up what they have above their minimums, each in proportion to it.
@@ -222,10 +238,38 @@ mod tests {
     }
 
     #[test]
-    fn side_panels_stop_growing_at_their_maximum() {
+    fn side_panels_following_the_window_stop_growing_at_their_default_maximum() {
         let p = panels(Vec2::new(3840.0, 2160.0));
-        assert_eq!(p.left.width(), LEFT_MAX);
-        assert_eq!(p.right.width(), RIGHT_MAX);
+        assert_eq!(p.left.width(), LEFT_DEFAULT_MAX);
+        assert_eq!(p.right.width(), RIGHT_DEFAULT_MAX);
+    }
+
+    #[test]
+    fn a_drag_widens_a_side_panel_past_its_default_maximum_up_to_the_centre_minimum() {
+        let window = Vec2::new(1920.0, 1080.0);
+        let right = PanelSizes::default().dragged_to(window, Splitter::Right, 900.0);
+        assert_eq!(super::panels(window, &right).right.width(), 900.0);
+        let left = PanelSizes::default().dragged_to(window, Splitter::Left, 800.0);
+        assert_eq!(super::panels(window, &left).left.width(), 800.0);
+        let widest = PanelSizes::default().dragged_to(window, Splitter::Right, 5000.0);
+        let p = super::panels(window, &widest);
+        assert!((p.center.width() - CENTER_MIN).abs() < 0.5, "{p:?}");
+        assert!((p.left.width() - LEFT_MIN).abs() < 0.5, "the left gives its room down to its minimum: {p:?}");
+        assert_disjoint(&p);
+    }
+
+    #[test]
+    fn a_drag_past_the_room_beside_pushes_the_other_side_in_and_the_centre_keeps_its_minimum() {
+        let window = Vec2::new(1920.0, 1080.0);
+        let sides = columns_width(window.x) - CENTER_MIN;
+        let start = PanelSizes { left: Some(400.0), right: Some(300.0), timeline: None };
+        let p = super::panels(window, &start.dragged_to(window, Splitter::Right, sides - 300.0));
+        assert_eq!(p.right.width(), sides - 300.0);
+        assert!((p.left.width() - 300.0).abs() < 0.5, "{p:?}");
+        assert!((p.center.width() - CENTER_MIN).abs() < 0.5, "{p:?}");
+        let p = super::panels(window, &start.dragged_to(window, Splitter::Left, sides - 200.0));
+        assert!((p.right.width() - 200.0).abs() < 0.5, "{p:?}");
+        assert!(p.center.width() >= CENTER_MIN - 0.5, "{p:?}");
     }
 
     #[test]
