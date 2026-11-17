@@ -17,7 +17,7 @@ pub use d3d12_backend::{is_clip_animation_type, ClipAnimationManifest, ClipAnima
 use d3d12_backend::{ManifestProblem, CLIP_ANIMATION_FOLDER};
 use zip::ZipArchive;
 
-use crate::asset_install::{check_entry_extensions, check_named_files, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
+use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_named_files, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem, Limits, MIB};
 
 /// What the `type` of a clip animation pack says, and the folder it goes to.
@@ -56,6 +56,15 @@ fn import_problem(problem: ManifestProblem) -> ImportProblem {
 /// A pack holds no media file.
 fn no_media(_: &str) -> bool {
     false
+}
+
+/// The clip animation packs installed under `root`, as the package manager lists them.
+pub fn list_installed(root: &Path) -> Vec<ListedPack> {
+    list_pack_folders(root, CLIP_ANIMATION_TYPE, |bytes| {
+        let manifest = parse_clip_animation_manifest(bytes)?;
+        check_clip_animation_fields(&manifest)?;
+        Ok(PackSummary { id: manifest.id, name: manifest.name, version: manifest.version, items: manifest.items.len() })
+    })
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. An existing pack of the same id is

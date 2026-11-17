@@ -19,7 +19,7 @@ use engine::{AnimationGroup, Rgba, TextAlign, TextBackground, TextContent, TextG
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
+use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem, Limits, MIB};
 use crate::text_clip::TEXT_SIZE_RANGE;
 
@@ -320,6 +320,15 @@ pub fn check_text_style_fields(manifest: &TextStyleManifest) -> Result<(), Impor
 /// A pack holds no media file.
 pub(crate) fn no_media(_: &str) -> bool {
     false
+}
+
+/// The text style packs installed under `root`, as the package manager lists them.
+pub fn list_installed(root: &Path) -> Vec<ListedPack> {
+    list_pack_folders(root, TEXT_STYLE_TYPE, |bytes| {
+        let manifest = parse_text_style_manifest(bytes)?;
+        check_text_style_fields(&manifest)?;
+        Ok(PackSummary { id: manifest.id, name: manifest.name, version: manifest.version, items: manifest.items.len() })
+    })
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. An existing pack of the same id is

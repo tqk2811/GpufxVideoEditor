@@ -14,7 +14,7 @@ use d3d12_backend::ASSET_IMAGE_EXTENSIONS;
 use serde::Deserialize;
 use zip::ZipArchive;
 
-use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, extension, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
+use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, extension, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem, Limits, MIB};
 
 /// What the `type` of a sticker pack says.
@@ -78,6 +78,15 @@ pub fn check_sticker_fields(manifest: &StickerManifest) -> Result<(), ImportProb
         }
     }
     Ok(())
+}
+
+/// The sticker packs installed under `root`, as the package manager lists them.
+pub fn list_installed(root: &Path) -> Vec<ListedPack> {
+    list_pack_folders(root, STICKER_TYPE, |bytes| {
+        let manifest = parse_sticker_manifest(bytes)?;
+        check_sticker_fields(&manifest)?;
+        Ok(PackSummary { id: manifest.id, name: manifest.name, version: manifest.version, items: manifest.items.len() })
+    })
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. An existing pack of the same id is

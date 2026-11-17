@@ -15,7 +15,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, Unpacked, MANIFEST};
+use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, Unpacked, MANIFEST};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem};
 use crate::text_style_install::{check_style_item_parts, no_media, PackStyleAnimation, PackTextStyle, STYLE_PACK_EXTRACT, STYLE_PACK_LIMITS};
 
@@ -149,6 +149,15 @@ pub fn check_subtitle_style_fields(manifest: &SubtitleStyleManifest) -> Result<(
         item.karaoke.as_ref().map_or(Ok(()), check_karaoke).map_err(in_item)?;
     }
     Ok(())
+}
+
+/// The subtitle style packs installed under `root`, as the package manager lists them.
+pub fn list_installed(root: &Path) -> Vec<ListedPack> {
+    list_pack_folders(root, SUBTITLE_STYLE_TYPE, |bytes| {
+        let manifest = parse_subtitle_style_manifest(bytes)?;
+        check_subtitle_style_fields(&manifest)?;
+        Ok(PackSummary { id: manifest.id, name: manifest.name, version: manifest.version, items: manifest.items.len() })
+    })
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. An existing pack of the same id is

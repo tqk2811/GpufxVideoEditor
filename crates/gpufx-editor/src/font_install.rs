@@ -19,7 +19,7 @@ use d3d12_backend::{ASSET_FONT_EXTENSIONS, FONT_ASSET_TYPE};
 use serde::Deserialize;
 use zip::ZipArchive;
 
-use crate::asset_install::{check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, extension, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
+use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_item_ids, check_named_files, check_pack_header, clean_leftovers, extension, lock_installs, rename_with_retries, unpack_into_place, AudioLicense, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
 use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem, Limits, MIB};
 
 /// What the `type` of a font pack says, and the folder it goes to.
@@ -89,6 +89,15 @@ pub fn check_font_fields(manifest: &FontManifest) -> Result<(), ImportProblem> {
         }
     }
     Ok(())
+}
+
+/// The font packs installed under `root`, as the package manager lists them.
+pub fn list_installed(root: &Path) -> Vec<ListedPack> {
+    list_pack_folders(root, FONT_TYPE, |bytes| {
+        let manifest = parse_font_manifest(bytes)?;
+        check_font_fields(&manifest)?;
+        Ok(PackSummary { id: manifest.id, name: manifest.name, version: manifest.version, items: manifest.items.len() })
+    })
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. An existing pack of the same id is

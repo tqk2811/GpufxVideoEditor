@@ -423,8 +423,15 @@ impl ProjectPaths {
         is_asset_source(source).then(|| self.asset_path(source).err()).flatten()
     }
 
-    /// The path of `package`, or `None` when it is not found.
+    /// The path of `package`, or `None` when it is not found or the user turned it off.
     pub fn package_path(&self, package: &str) -> Option<PathBuf> {
+        let found = self.package_path_even_disabled(package)?;
+        (!self.is_disabled(&found)).then_some(found)
+    }
+
+    /// The path of `package` as [`Self::package_path`] finds it, turned off or not: for telling a
+    /// package that is missing from one the user turned off.
+    pub fn package_path_even_disabled(&self, package: &str) -> Option<PathBuf> {
         if !self.project_packages && !self.inside_roots(package) {
             return None;
         }
@@ -451,8 +458,7 @@ impl ProjectPaths {
         // The name as given is tried everywhere before the zipped one, so turning a folder into a zip
         // changes nothing for a project whose package still exists under its old name, and a bare
         // `mix` is not taken by an unrelated `mix.zip` beside the project.
-        let found = direct(package).or_else(|| grouped(package)).or_else(|| zipped.as_deref().and_then(direct)).or_else(|| zipped.as_deref().and_then(grouped))?;
-        (!self.is_disabled(&found)).then_some(found)
+        direct(package).or_else(|| grouped(package)).or_else(|| zipped.as_deref().and_then(direct)).or_else(|| zipped.as_deref().and_then(grouped))
     }
 
     /// Whether the package at `path`, under one of the roots, was turned off by the user.

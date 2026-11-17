@@ -468,6 +468,59 @@ fn installed_pack_name(folder: &Path) -> Option<String> {
     Some(manifest.get("name")?.as_str()?.to_owned())
 }
 
+/// What a list of installed packs shows of one pack, read from its manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackSummary {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub items: usize,
+}
+
+/// One folder under `<root>/packages/<type>`: the pack read from it, or why it cannot be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedPack {
+    /// The folder name, lower-cased, as an `asset:` source names the pack.
+    pub id: String,
+    pub folder: PathBuf,
+    pub read: Result<PackSummary, String>,
+}
+
+/// The pack folders under `<root>/packages/<type_folder>`, each read by `read` from the bytes of its
+/// manifest. A folder whose manifest is missing, refused or names another id is listed with the
+/// reason, so it can be seen and removed. The working folders of an install are skipped.
+pub(crate) fn list_pack_folders(root: &Path, type_folder: &str, read: impl Fn(&[u8]) -> Result<PackSummary, ImportProblem>) -> Vec<ListedPack> {
+    let Ok(entries) = fs::read_dir(root.join("packages").join(type_folder)) else { return Vec::new() };
+    let mut folders: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path.is_dir()).collect();
+    folders.sort();
+    folders
+        .into_iter()
+        .filter(|folder| !folder.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')))
+        .map(|folder| {
+            let label = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+            let read = fs::read(folder.join(MANIFEST)).map_err(|e| format!("its manifest cannot be read ({e})")).and_then(|bytes| read(&bytes).map_err(|problem| format!("{problem:?}"))).and_then(|summary| {
+                if summary.id.eq_ignore_ascii_case(&label) {
+                    Ok(summary)
+                } else {
+                    Err(format!("its manifest does not match the folder ({})", summary.id))
+                }
+            });
+            ListedPack { id: label.to_ascii_lowercase(), folder, read }
+        })
+        .collect()
+}
+
+/// The audio packs of `kind` installed under `root`, as the package manager lists them.
+pub fn list_installed(root: &Path, kind: AudioPackKind) -> Vec<ListedPack> {
+    list_pack_folders(root, kind.name(), |bytes| {
+        let manifest = parse_audio_manifest(bytes)?;
+        if check_manifest_fields(&manifest)? != kind {
+            return Err(ImportProblem::BadManifest(format!("it is a {} pack", manifest.kind)));
+        }
+        Ok(PackSummary { id: manifest.id, name: manifest.name, version: manifest.version, items: manifest.items.len() })
+    })
+}
+
 /// The folder an installed pack of `kind` and `id` lives in.
 pub fn pack_folder(user_root: &Path, kind: AudioPackKind, id: &str) -> PathBuf {
     user_root.join("packages").join(kind.name()).join(id.to_ascii_lowercase())

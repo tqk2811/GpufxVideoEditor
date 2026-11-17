@@ -122,6 +122,30 @@ pub fn scan(roots: &[PathBuf], read: impl Fn(&Path) -> Result<PackageInfo, Strin
     catalog
 }
 
+/// One shader package under `<root>/packages/gpufx`, as the package manager lists it: what its
+/// manifest says, or why it cannot be read.
+#[derive(Debug, Clone)]
+pub struct ListedShader {
+    /// The name a project stores, as in [`PackageEntry::package`].
+    pub package: String,
+    pub path: PathBuf,
+    pub read: Result<PackageInfo, String>,
+}
+
+/// Every shader package under the `packages/gpufx` of `root`, read by `read` as [`scan`] reads them,
+/// turned off or not.
+pub fn list_installed(root: &Path, read: impl Fn(&Path) -> Result<PackageInfo, String>) -> Vec<ListedShader> {
+    let mut found = Vec::new();
+    collect(&root.join("packages").join("gpufx"), 0, &mut found);
+    found
+        .into_iter()
+        .map(|path| {
+            let read = catch_unwind(AssertUnwindSafe(|| read(&path))).unwrap_or_else(|_| Err("reading the package panicked".to_owned()));
+            ListedShader { package: package_name(root, &path), path, read }
+        })
+        .collect()
+}
+
 /// The entries a user may pick whose name or package contains every word of `filter`, ignoring
 /// case. A hidden entry is never listed.
 pub fn filter_entries<'a>(entries: &'a [PackageEntry], filter: &str) -> Vec<&'a PackageEntry> {
