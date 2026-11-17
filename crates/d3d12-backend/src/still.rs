@@ -179,6 +179,80 @@ pub fn still_thumbnail(path: &Path, height: u32) -> Result<ThumbnailImage, Strin
     Ok(ThumbnailImage { width, height, rgba: small.into_raw() })
 }
 
+/// The most bytes the decoded frames of one animated picture may take; a longer or larger one is
+/// refused rather than kept half.
+pub const MAX_ANIMATION_BYTES: u64 = 512 * 1024 * 1024;
+/// How long a frame with a delay of this many milliseconds or less is shown instead, as browsers
+/// do: some files say 0 and mean "as fast as the player likes", which would be a frozen picture.
+const SHORTEST_FRAME_MS: u64 = 10;
+/// What such a frame lasts.
+const DEFAULT_FRAME_MS: u64 = 100;
+
+/// The frames of an animated picture, each finished as a still is, and when each one ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnimatedPicture {
+    pub frames: Vec<StillPicture>,
+    /// The time each frame ends, in milliseconds from the start of the loop; the last one is the
+    /// length of the loop.
+    pub ends_ms: Vec<u64>,
+}
+
+impl AnimatedPicture {
+    /// The frame shown `ticks` (1/90000 s) after the clip starts, the animation looping forever.
+    pub fn frame_index_at(&self, ticks: i64) -> usize {
+        let Some(&length) = self.ends_ms.last().filter(|length| **length > 0) else { return 0 };
+        // Milliseconds rounded down, so a frame starts exactly at its time.
+        let ms = (ticks.max(0) / (engine::TICKS_PER_SECOND / 1000)) as u64 % length;
+        self.ends_ms.partition_point(|end| *end <= ms).min(self.frames.len() - 1)
+    }
+}
+
+/// The frames of `path` when it is an animated WebP, or `None` for any other picture, which is a
+/// still. Each frame is the whole canvas with the frames before it laid under it.
+pub fn read_animation(path: &Path) -> Result<Option<AnimatedPicture>, String> {
+    use image::codecs::webp::WebPDecoder;
+    use image::AnimationDecoder;
+    let shown = path.display();
+    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("webp")) {
+        return Ok(None);
+    }
+    let file = BufReader::new(File::open(path).map_err(|e| format!("{shown}: {e}"))?);
+    let mut decoder = WebPDecoder::new(file).map_err(|e| format!("{shown}: {e}"))?;
+    if !decoder.has_animation() {
+        return Ok(None);
+    }
+    check_pixels(path, decoder.dimensions())?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(DECODER_SIDE_LIMIT);
+    limits.max_image_height = Some(DECODER_SIDE_LIMIT);
+    limits.max_alloc = Some(DECODER_ALLOCATION);
+    decoder.set_limits(limits).map_err(|e| format!("{shown}: {e}"))?;
+    let mut picture = AnimatedPicture { frames: Vec::new(), ends_ms: Vec::new() };
+    let (mut bytes, mut end) = (0u64, 0u64);
+    for frame in decoder.into_frames() {
+        let frame = frame.map_err(|e| format!("{shown}: {e}"))?;
+        let (numerator, denominator) = frame.delay().numer_denom_ms();
+        let delay = u64::from(numerator) / u64::from(denominator.max(1));
+        end += if delay <= SHORTEST_FRAME_MS { DEFAULT_FRAME_MS } else { delay };
+        let still = finished_picture(frame.into_buffer());
+        bytes += still.rgba.len() as u64;
+        if bytes > MAX_ANIMATION_BYTES {
+            return Err(format!("{shown}: its frames take more than the {MAX_ANIMATION_BYTES} bytes an animated picture may have"));
+        }
+        picture.frames.push(still);
+        picture.ends_ms.push(end);
+    }
+    if picture.frames.is_empty() {
+        return Err(format!("{shown}: an animated picture with no frame"));
+    }
+    // Whether a picture has alpha picks how it is drawn, so every frame says the same.
+    let has_alpha = picture.frames.iter().any(|frame| frame.has_alpha);
+    for frame in &mut picture.frames {
+        frame.has_alpha = has_alpha;
+    }
+    Ok(Some(picture))
+}
+
 /// The bytes of `rgba`, tight rows, in rows of `aligned_row` bytes as a copy to a texture needs.
 pub(crate) fn aligned_rows(rgba: &[u8], row_bytes: usize, aligned_row: usize) -> Vec<u8> {
     let mut aligned = vec![0u8; rgba.len() / row_bytes.max(1) * aligned_row];
@@ -301,6 +375,56 @@ mod tests {
         std::fs::write(&refused, png_header(20_000, 20_000)).unwrap();
         assert!(read_still(&refused).unwrap_err().contains("20000x20000"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn animated_fixture() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/animated.webp")
+    }
+
+    #[test]
+    fn an_animated_webp_decodes_every_frame_with_its_end() {
+        let picture = read_animation(&animated_fixture()).unwrap().expect("animated");
+        assert_eq!(picture.ends_ms, [100, 300, 600]);
+        assert_eq!(picture.frames.len(), 3);
+        for (frame, colour) in picture.frames.iter().zip([[255, 0, 0], [0, 255, 0], [0, 0, 255]]) {
+            assert_eq!((frame.width, frame.height), (4, 4));
+            assert!(frame.has_alpha, "the first frame has a hole, so every frame says it has alpha");
+            // The encoder that made the fixture may move a channel by one, even lossless.
+            let close = frame.rgba[4..7].iter().zip(colour).all(|(got, want)| got.abs_diff(want) <= 2);
+            assert!(close && frame.rgba[7] == 255, "{:?} is not {colour:?}", &frame.rgba[4..8]);
+        }
+        assert_eq!(picture.frames[0].rgba[3], 0, "the hole of the first frame stays transparent");
+        assert_eq!(picture.frames[0].rgba[..3], [255, 0, 0], "and takes the colour next to it");
+    }
+
+    #[test]
+    fn an_animated_frame_is_picked_by_time_and_the_loop_repeats() {
+        let picture = read_animation(&animated_fixture()).unwrap().expect("animated");
+        let ms = |ms: i64| ms * 90;
+        for (time, index) in [(0, 0), (99, 0), (100, 1), (299, 1), (300, 2), (599, 2), (600, 0), (700, 1), (6_000 + 350, 2)] {
+            assert_eq!(picture.frame_index_at(ms(time)), index, "at {time} ms");
+        }
+        assert_eq!(picture.frame_index_at(-5), 0, "before the clip is the first frame");
+    }
+
+    #[test]
+    fn a_still_webp_and_a_png_are_not_animations() {
+        let dir = scratch("not-animated");
+        let webp = dir.join("a.webp");
+        let bytes = checker();
+        WebPEncoder::new_lossless(std::fs::File::create(&webp).unwrap()).write_image(bytes.as_raw(), 3, 2, ExtendedColorType::Rgba8).unwrap();
+        assert_eq!(read_animation(&webp).unwrap(), None);
+        let png = dir.join("a.png");
+        checker().save(&png).unwrap();
+        assert_eq!(read_animation(&png).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_first_frame_of_an_animated_webp_is_its_still() {
+        let picture = read_still(&animated_fixture()).unwrap();
+        assert_eq!(picture.rgba[4..8], [255, 0, 0, 255]);
+        assert_eq!(still_dimensions(&animated_fixture()).unwrap(), (4, 4));
     }
 
     /// The start of a PNG with this size in its header: enough for a header read.
