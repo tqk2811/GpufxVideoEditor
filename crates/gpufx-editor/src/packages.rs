@@ -34,6 +34,8 @@ pub struct PackageEntry {
     pub description: String,
     pub kind: PackageKind,
     pub params: Vec<ParamInfo>,
+    /// Kept out of the pickers and the agent's list; a project that uses it still renders it.
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +106,7 @@ pub fn scan(roots: &[PathBuf], read: impl Fn(&Path) -> Result<PackageInfo, Strin
             match info {
                 Ok(info) => {
                     let Some(kind) = classify(&info) else { continue };
-                    let entry = PackageEntry { package, name: info.name, description: info.description, kind, params: info.params };
+                    let entry = PackageEntry { package, name: info.name, description: info.description, kind, params: info.params, hidden: info.hidden };
                     match kind {
                         PackageKind::Effect => catalog.effects.push(entry),
                         PackageKind::Transition => catalog.transitions.push(entry),
@@ -120,11 +122,12 @@ pub fn scan(roots: &[PathBuf], read: impl Fn(&Path) -> Result<PackageInfo, Strin
     catalog
 }
 
-/// The entries whose name or package contains every word of `filter`, ignoring case.
+/// The entries a user may pick whose name or package contains every word of `filter`, ignoring
+/// case. A hidden entry is never listed.
 pub fn filter_entries<'a>(entries: &'a [PackageEntry], filter: &str) -> Vec<&'a PackageEntry> {
     let filter = filter.to_lowercase();
     let words: Vec<&str> = filter.split_whitespace().collect();
-    entries.iter().filter(|entry| {
+    entries.iter().filter(|entry| !entry.hidden).filter(|entry| {
         let haystack = format!("{} {}", entry.name.to_lowercase(), entry.package.to_lowercase());
         words.iter().all(|word| haystack.contains(word))
     }).collect()
@@ -187,7 +190,7 @@ mod tests {
     use super::*;
 
     fn info(inputs: usize, has_progress: bool) -> PackageInfo {
-        PackageInfo { name: "n".to_owned(), description: String::new(), inputs, has_progress, params: Vec::new() }
+        PackageInfo { name: "n".to_owned(), description: String::new(), version: String::new(), hidden: false, inputs, has_progress, params: Vec::new() }
     }
 
     #[test]
@@ -215,8 +218,8 @@ mod tests {
 
     fn fake_read(path: &Path) -> Result<PackageInfo, String> {
         match path.file_name().unwrap().to_str().unwrap() {
-            "blur" => Ok(PackageInfo { name: "Blur".into(), description: String::new(), inputs: 1, has_progress: false, params: Vec::new() }),
-            "wipe" => Ok(PackageInfo { name: "Wipe".into(), description: String::new(), inputs: 2, has_progress: true, params: Vec::new() }),
+            "blur" => Ok(PackageInfo { name: "Blur".into(), description: String::new(), version: String::new(), hidden: false, inputs: 1, has_progress: false, params: Vec::new() }),
+            "wipe" => Ok(PackageInfo { name: "Wipe".into(), description: String::new(), version: String::new(), hidden: false, inputs: 2, has_progress: true, params: Vec::new() }),
             _ => Err("bad manifest".to_owned()),
         }
     }
@@ -246,8 +249,8 @@ mod tests {
     #[test]
     fn the_filter_matches_every_word_in_name_or_package() {
         let entries = vec![
-            PackageEntry { package: "packages/gpufx/capcut/snow".into(), name: "Snow Fall".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new() },
-            PackageEntry { package: "packages/gpufx/ffmpeg/blur".into(), name: "Box Blur".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new() },
+            PackageEntry { package: "packages/gpufx/capcut/snow".into(), name: "Snow Fall".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false },
+            PackageEntry { package: "packages/gpufx/ffmpeg/blur".into(), name: "Box Blur".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false },
         ];
         assert_eq!(filter_entries(&entries, "").len(), 2);
         assert_eq!(filter_entries(&entries, "BLUR")[0].name, "Box Blur");
@@ -275,7 +278,7 @@ mod tests {
     }
 
     fn picker_catalog() -> Catalog {
-        let entry = |package: &str, name: &str, kind| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind, params: Vec::new() };
+        let entry = |package: &str, name: &str, kind| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind, params: Vec::new(), hidden: false };
         Catalog {
             loaded: true,
             effects: vec![entry("packages/gpufx/a/blur", "Blur", PackageKind::Effect)],
@@ -307,7 +310,7 @@ mod tests {
 
     #[test]
     fn a_shared_name_shows_the_group_and_a_unique_one_does_not() {
-        let entry = |package: &str, name: &str| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new() };
+        let entry = |package: &str, name: &str| PackageEntry { package: package.into(), name: name.into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
         let entries = vec![entry("packages/gpufx/capcut/blur", "Blur"), entry("packages/gpufx/ffmpeg/deep/blur", "blur"), entry("packages/gpufx/capcut/snow", "Snow")];
         let duplicates = duplicated_names(&entries);
         assert_eq!(list_label(&entries[0], &duplicates), "Blur (capcut)");
@@ -347,5 +350,16 @@ mod tests {
         assert!(catalog.effects.is_empty());
         assert_eq!(catalog.transitions.len(), 1);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_hidden_entry_stays_in_the_catalog_but_is_never_offered() {
+        let entry = |package: &str, hidden| PackageEntry { package: package.into(), name: "Grow".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden };
+        let entries = vec![entry("packages/gpufx/a/grow", true), entry("packages/gpufx/a/grow-2", false)];
+        let offered = filter_entries(&entries, "");
+        assert_eq!(offered.len(), 1);
+        assert_eq!(offered[0].package, "packages/gpufx/a/grow-2");
+        let catalog = Catalog { loaded: true, effects: entries, ..Catalog::default() };
+        assert!(catalog.params_of("packages/gpufx/a/grow").is_some(), "a project using it still finds its parameters");
     }
 }

@@ -959,7 +959,7 @@ mod tests {
     }
 
     fn entry(package: &str, name: &str, description: &str) -> PackageEntry {
-        PackageEntry { package: package.to_owned(), name: name.to_owned(), description: description.to_owned(), kind: PackageKind::Effect, params: Vec::new() }
+        PackageEntry { package: package.to_owned(), name: name.to_owned(), description: description.to_owned(), kind: PackageKind::Effect, params: Vec::new(), hidden: false }
     }
 
     #[test]

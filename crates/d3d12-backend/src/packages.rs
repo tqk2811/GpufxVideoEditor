@@ -45,6 +45,9 @@ pub struct ParamInfo {
 pub struct PackageInfo {
     pub name: String,
     pub description: String,
+    pub version: String,
+    /// Kept out of the lists a user picks effects from; it still renders.
+    pub hidden: bool,
     pub inputs: usize,
     pub has_progress: bool,
     pub params: Vec<ParamInfo>,
@@ -94,6 +97,8 @@ fn package_info(package: &Package) -> PackageInfo {
     PackageInfo {
         name: manifest.name.clone(),
         description: manifest.description.clone(),
+        version: manifest.version.clone(),
+        hidden: manifest.hidden,
         inputs: manifest.inputs.len(),
         has_progress: manifest.params.iter().any(|param| param.name == "progress"),
         params: manifest.params.iter().map(param_info).collect(),
