@@ -163,6 +163,20 @@ pub struct RunResult {
     pub end: RunEnd,
 }
 
+/// What a finished run did, kept for an agent that asks later.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunReport {
+    pub track_id: u32,
+    /// `done`, `lost`, `cancelled` or `failed`.
+    pub outcome: &'static str,
+    /// Samples written.
+    pub count: usize,
+    /// The last sample written: for a lost run, the one marked to fix.
+    pub last: Option<TrackSample>,
+    /// Why it failed.
+    pub message: Option<String>,
+}
+
 /// Where a run stands.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunState {
@@ -273,10 +287,10 @@ impl TrackRunner {
         self.jobs.values().any(|job| job.shared.result().is_none())
     }
 
-    /// The finished jobs and their outcomes, which this runner forgets.
-    pub fn take_finished(&mut self) -> Vec<(u64, Result<RunResult, String>)> {
+    /// The finished jobs, the track each ran on and their outcomes, which this runner forgets.
+    pub fn take_finished(&mut self) -> Vec<(u64, u32, Result<RunResult, String>)> {
         let ids: Vec<u64> = self.jobs.iter().filter(|(_, job)| job.shared.result().is_some()).map(|(id, _)| *id).collect();
-        ids.into_iter().filter_map(|id| self.jobs.remove(&id).and_then(|job| job.shared.result().map(|result| (id, result)))).collect()
+        ids.into_iter().filter_map(|id| self.jobs.remove(&id).and_then(|job| job.shared.result().map(|result| (id, job.track_id, result)))).collect()
     }
 }
 
@@ -478,7 +492,8 @@ mod tests {
         runner.wait(id);
         let finished = runner.take_finished();
         assert_eq!(finished.len(), 1);
-        let result = finished[0].1.clone().unwrap();
+        let result = finished[0].2.clone().unwrap();
+        assert_eq!(finished[0].1, 3);
         assert_eq!(result.end, RunEnd::Cancelled);
         assert!((3..=4).contains(&result.samples.len()), "{}", result.samples.len());
         assert!(!runner.running() && runner.status(id).is_none());

@@ -750,6 +750,57 @@ fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef, retry:
     }
 }
 
+/// Starts a tracker run; a session without a window waits for it and answers its outcome.
+fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Option<Time>, direction: Option<String>, rotation: Option<bool>) -> Result<Value, AgentError> {
+    writable(host, expected)?;
+    let direction = match direction.as_deref() {
+        None => crate::tracking::Direction::Forward,
+        Some(code) => crate::tracking::Direction::from_code(code).ok_or_else(|| AgentError::new("invalid_params", format!("direction {code}: forward or backward")))?,
+    };
+    let paths = host.paths();
+    let wait = host.mode() == "file";
+    let state = host.state();
+    let Some(track) = state.project().motion_track(track_id) else {
+        return Err(AgentError::from_edit(&engine::EditError::MotionTrackNotFound { id: track_id }));
+    };
+    if let Some(job) = state.tracking.running_on(track_id) {
+        return Err(AgentError::new("busy", format!("motion track {track_id} is being tracked by job {job}")));
+    }
+    let path = paths.video_decode_path(&track.media_path);
+    let job = state.start_tracking(path, track_id, from, direction, rotation.unwrap_or(true)).map_err(|message| AgentError::new("invalid_params", message))?;
+    if wait {
+        state.tracking.wait(job);
+    }
+    track_status(state, Some(job))
+}
+
+/// Where tracker job `job` (the last one when absent) stands; writes finished runs first.
+fn track_status(state: &mut EditorState, job: Option<u64>) -> Result<Value, AgentError> {
+    let Some(job) = job.or(state.last_track_job) else {
+        return Err(AgentError::new("job_not_found", "no tracker job was started"));
+    };
+    state.poll_tracking();
+    if let Some(status) = state.tracking.status(job) {
+        // Finished but not written yet: edits wait for a drag or an export.
+        let (done, total) = match status {
+            crate::tracking::RunState::Running { done, total } => (done, total),
+            _ => (1, 1),
+        };
+        return Ok(json!({"job": job, "state": "running", "done": done, "total": total}));
+    }
+    let Some(report) = state.track_reports.get(&job) else {
+        return Err(AgentError::new("job_not_found", format!("no tracker job {job}")));
+    };
+    let mut answer = json!({"job": job, "state": report.outcome, "track_id": report.track_id, "count": report.count});
+    if let Some(last) = report.last {
+        answer["last"] = json!({"source_time": last.source_time, "cx": last.cx, "cy": last.cy, "w": last.w, "h": last.h, "angle": last.angle, "confidence": last.confidence});
+    }
+    if let Some(message) = &report.message {
+        answer["message"] = Value::from(message.clone());
+    }
+    Ok(answer)
+}
+
 fn replaceable<H: AgentHost>(host: &mut H, discard_changes: bool) -> Result<(), AgentError> {
     if host.tasks_busy() {
         return Err(busy(TASKS_BUSY));
@@ -1000,6 +1051,15 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::SubtitleExport { track, path, overwrite } => subtitle_export(host, track, path.as_deref(), overwrite),
         AgentRequest::MarkersList => Ok(markers_list(host.state().project())),
         AgentRequest::BeatsDetect { expected_revision, clip, retry } => beats_detect(host, expected_revision, clip, retry),
+        AgentRequest::TrackRun { expected_revision, track_id, from, direction, rotation } => track_run(host, expected_revision, track_id, from, direction, rotation),
+        AgentRequest::TrackStatus { job } => track_status(host.state(), job),
+        AgentRequest::TrackCancel { job } => {
+            let state = host.state();
+            if let Some(job) = job.or(state.last_track_job) {
+                state.tracking.cancel(job);
+            }
+            track_status(state, job)
+        }
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
             None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe, animation)),

@@ -243,6 +243,8 @@ impl Session {
         state.font_paths = ProjectPaths::roots_only(Path::new(crate::editor::FONT_PATHS_FILE), package_roots.clone());
         let visuals_window = session_window.clone();
         state.visuals.get_mut().set_waker(Arc::new(move || visuals_window.request_redraw()));
+        let tracking_window = session_window.clone();
+        state.tracking.set_waker(Arc::new(move || tracking_window.request_redraw()));
         let previews_window = session_window.clone();
         state.previews.get_mut().start_for_editor(package_roots.clone(), Arc::new(move || previews_window.request_redraw()));
         let audio_library = spawn_audio_scan(package_roots.clone(), window_for_scan.clone());

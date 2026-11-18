@@ -632,6 +632,12 @@ pub enum Message {
     /// A detection finished after an undo: its beats wait in the cache so the redo step stays.
     BeatsKeptForRedo,
     BeatsFailed(String),
+    /// A tracker run wrote `count` samples and reached its end.
+    TrackingDone { count: usize },
+    /// A tracker run lost the object after `count` samples; the last one is marked to fix by hand.
+    TrackingLost { count: usize },
+    TrackingCancelled { count: usize },
+    TrackingFailed(String),
     MarkerAddShortcut,
     MarkerHint,
     MarkerRemove,
@@ -1047,6 +1053,10 @@ mod tests {
             Message::BeatsNotFound,
             Message::BeatsKeptForRedo,
             Message::BeatsFailed("x".to_owned()),
+            Message::TrackingDone { count: 3 },
+            Message::TrackingLost { count: 3 },
+            Message::TrackingCancelled { count: 3 },
+            Message::TrackingFailed("x".to_owned()),
             Message::MarkerAddShortcut,
             Message::MarkerHint,
             Message::MarkerRemove,

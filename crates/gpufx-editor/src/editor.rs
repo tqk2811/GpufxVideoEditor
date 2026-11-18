@@ -148,6 +148,13 @@ pub struct EditorState {
     /// Detections the user started from a clip, whose beats go to the clip's source when they are
     /// ready; at most one per source.
     beat_requests: Vec<BeatRequest>,
+    /// Object tracker runs in the background; the samples of a finished one are written as one
+    /// undo step by [`Self::poll_tracking`].
+    pub tracking: crate::tracking::TrackRunner,
+    /// What finished runs did, by job id.
+    pub track_reports: std::collections::BTreeMap<u64, crate::tracking::RunReport>,
+    /// The tracker job started last.
+    pub last_track_job: Option<u64>,
     /// The snap points of the drag or press going on, built once rather than every frame.
     snap_cache: RefCell<Option<SnapCache>>,
 }
@@ -606,6 +613,9 @@ impl EditorState {
             language: Language::default(),
             beats: BeatDetector::default(),
             beat_requests: Vec::new(),
+            tracking: crate::tracking::TrackRunner::default(),
+            track_reports: std::collections::BTreeMap::new(),
+            last_track_job: None,
             snap_cache: RefCell::new(None),
         }
     }
@@ -1869,6 +1879,55 @@ impl EditorState {
             }
         }
         self.beats.running()
+    }
+
+    /// Starts tracking motion track `track_id` from its sample at `from` (see
+    /// [`crate::tracking::RunRequest::for_track`] for the default) in `direction`, reading
+    /// `decode_path` (the file of the track, or its proxy). Answers the job id.
+    pub fn start_tracking(&mut self, decode_path: PathBuf, track_id: u32, from: Option<Time>, direction: crate::tracking::Direction, rotation: bool) -> Result<u64, String> {
+        use crate::tracking::{FileFrames, FrameSource, RunRequest};
+        let track = self.project().motion_track(track_id).ok_or_else(|| EditError::MotionTrackNotFound { id: track_id }.to_string())?;
+        let request = RunRequest::for_track(track, from, direction, rotation)?;
+        let id = self.tracking.start(request, move || FileFrames::open(&decode_path).map(|frames| Box::new(frames) as Box<dyn FrameSource>))?;
+        self.last_track_job = Some(id);
+        Ok(id)
+    }
+
+    /// Writes the samples of finished tracker runs, each as one undo step, says so on the status
+    /// line and keeps a report; says whether a run still goes. While edits wait (a drag or an
+    /// export) finished runs wait too. A cancelled run writes the samples it made.
+    pub fn poll_tracking(&mut self) -> bool {
+        if self.export.is_some() || self.is_holding() {
+            return self.tracking.running();
+        }
+        for (id, track_id, result) in self.tracking.take_finished() {
+            let report = match result {
+                Ok(run) => {
+                    let count = run.samples.len();
+                    let written = count == 0 || self.run(|project| engine::apply_track_run(project, run.track_id, &run.samples));
+                    let (outcome, message) = match (written, run.end) {
+                        (false, _) => ("failed", Some(format!("motion track {} could not take the samples", run.track_id))),
+                        (true, engine::tracker::RunEnd::Finished) => ("done", None),
+                        (true, engine::tracker::RunEnd::Lost) => ("lost", None),
+                        (true, engine::tracker::RunEnd::Cancelled) => ("cancelled", None),
+                    };
+                    if written {
+                        self.status = match outcome {
+                            "lost" => Status::Error(Message::TrackingLost { count }),
+                            "cancelled" => Status::Info(Message::TrackingCancelled { count }),
+                            _ => Status::Info(Message::TrackingDone { count }),
+                        };
+                    }
+                    crate::tracking::RunReport { track_id: run.track_id, outcome, count: if written { count } else { 0 }, last: run.samples.last().copied(), message }
+                }
+                Err(message) => {
+                    self.status = Status::Error(Message::TrackingFailed(message.clone()));
+                    crate::tracking::RunReport { track_id, outcome: "failed", count: 0, last: None, message: Some(message) }
+                }
+            };
+            self.track_reports.insert(id, report);
+        }
+        self.tracking.running()
     }
 
     /// Takes the beats off the source of clip `key`, so off every clip of it: one undo step.

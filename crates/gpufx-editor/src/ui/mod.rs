@@ -76,6 +76,10 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     if state.poll_beats() {
         root.ctx().request_repaint_after(std::time::Duration::from_millis(100));
     }
+    // Finished tracker runs write their samples.
+    if state.poll_tracking() {
+        root.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    }
     track_fullscreen_activity(root.ctx(), state);
     handle_shortcuts(root.ctx(), state, requests);
     if state.ui.fullscreen {

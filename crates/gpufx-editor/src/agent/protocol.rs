@@ -251,6 +251,23 @@ pub enum AgentRequest {
         #[serde(default)]
         retry: bool,
     },
+    /// Runs the object tracker on motion track `track_id` from its sample at source time `from`
+    /// (by default the last sample placed by hand going forward, the first going backward),
+    /// `forward` (default) or `backward`, up to the next sample placed by hand, the end of the file
+    /// or a lost frame; `rotation` (default true) follows the object's turn. The samples are written
+    /// as one undo step when it ends. A session without a window waits and answers the outcome; an
+    /// open window answers the job at once, for [`AgentRequest::TrackStatus`].
+    TrackRun {
+        expected_revision: u64,
+        track_id: u32,
+        from: Option<Time>,
+        direction: Option<String>,
+        rotation: Option<bool>,
+    },
+    /// Where tracker job `job` (the last one when absent) stands.
+    TrackStatus { job: Option<u64> },
+    /// Stops tracker job `job` (the last one when absent); it writes the samples made so far.
+    TrackCancel { job: Option<u64> },
     Edit { expected_revision: u64, edit: AgentEdit },
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },
