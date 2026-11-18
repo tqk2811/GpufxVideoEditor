@@ -3,7 +3,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use engine::tracker::{track_frames, GrayImage, RunEnd, TrackBox, Tracker, TrackerOptions, LOST_CONFIDENCE};
+use engine::tracker::flow::{track_point, FlowOptions};
+use engine::tracker::{track_frames, GrayImage, Pyramid, RunEnd, Similarity, TrackBox, Tracker, TrackerOptions, LOST_CONFIDENCE};
 
 const WIDTH: usize = 240;
 const HEIGHT: usize = 180;
@@ -205,4 +206,53 @@ fn a_box_round_trips_through_a_sample() {
     assert!((sample.cx - 0.5).abs() < 1e-12 && (sample.cy - 0.5).abs() < 1e-12 && (sample.w - 0.2).abs() < 1e-12 && (sample.h - 0.2).abs() < 1e-12);
     let back = TrackBox::from_sample(&sample, 120, 60);
     assert!((back.cx - area.cx).abs() < 1e-9 && (back.h - area.h).abs() < 1e-9 && back.angle == 30.0);
+}
+
+#[test]
+fn a_read_cut_short_by_the_cancel_ends_the_run_as_cancelled() {
+    let grid = texture_grid();
+    let start = Pose { cx: 80.0, cy: 90.0, scale: 1.0, angle: 0.0 };
+    let mut tracker = Tracker::new(render(&grid, Some(start)), start.area(), TrackerOptions::default());
+    let cancel = AtomicBool::new(false);
+    // The decoder gives up with an error once it sees the cancel, before the loop checks it.
+    let frames = (1..30).map(|i| {
+        if i == 4 {
+            cancel.store(true, Ordering::Relaxed);
+            return Err("cancelled");
+        }
+        Ok(render(&grid, Some(Pose { cx: 80.0 + f64::from(i), ..start })))
+    });
+    let (steps, end) = track_frames(&mut tracker, frames, &cancel, |_, _| {}).expect("a cancel is not a failure");
+    assert_eq!(end, RunEnd::Cancelled);
+    assert_eq!(steps.len(), 3, "the steps made before the cancel stay");
+    let failing = (1..3).map(|_| Err::<GrayImage, _>("broken"));
+    let mut tracker = Tracker::new(render(&grid, Some(start)), start.area(), TrackerOptions::default());
+    assert_eq!(track_frames(&mut tracker, failing, &AtomicBool::new(false), |_, _| {}).err(), Some("broken"), "without a cancel an error still fails the run");
+}
+
+#[test]
+fn without_rotation_a_turned_object_keeps_its_scale() {
+    let points = [[0.0, 0.0], [10.0, 0.0], [0.0, 10.0], [10.0, 10.0], [5.0, 3.0]];
+    for degrees in [30.0f64, 60.0, 120.0, 170.0] {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let pairs: Vec<_> = points.iter().map(|p| (*p, [cos * p[0] - sin * p[1] + 7.0, sin * p[0] + cos * p[1] - 2.0])).collect();
+        let fitted = Similarity::fit(&pairs, false).unwrap();
+        assert!((fitted.a - 1.0).abs() < 1e-9 && fitted.b == 0.0, "{degrees} degrees: {fitted:?}");
+        let two = Similarity::from_two(pairs[0].0, pairs[1].0, pairs[0].1, pairs[1].1, false).unwrap();
+        assert!((two.a - fitted.a).abs() < 1e-9, "both fits agree: {two:?} vs {fitted:?}");
+    }
+}
+
+#[test]
+fn a_texture_only_the_full_picture_shows_is_still_followed() {
+    // A texture of period 4 that is zero on every even pixel: halving keeps only even pixels, so
+    // the smaller level is flat while the full picture is strongly textured.
+    let side = 128;
+    let wave = |n: usize| [0.0, 1.0, 0.0, -1.0][n % 4];
+    let data = (0..side * side).map(|i| 0.5 + 0.3 * wave(i % side) * wave(i / side)).collect();
+    let pyramid = Pyramid::new(GrayImage::new(side, side, data), 2);
+    assert_eq!(pyramid.levels.len(), 2);
+    let found = track_point(&pyramid, &pyramid, [64.0, 64.0], [64.0, 64.0], &FlowOptions::default());
+    let found = found.expect("a weak coarse level does not reject the point");
+    assert!((found[0] - 64.0).abs() < 0.01 && (found[1] - 64.0).abs() < 0.01, "{found:?}");
 }

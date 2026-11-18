@@ -57,11 +57,14 @@ pub fn track_point(from: &Pyramid, to: &Pyramid, point: [f32; 2], guess: [f32; 2
         }
         let determinant = gxx * gyy - gxy * gxy;
         let min_eigen = ((gxx + gyy) - ((gxx - gyy).powi(2) + 4.0 * gxy * gxy).sqrt()) * 0.5 / (side * side) as f32;
-        if min_eigen < options.min_eigen || determinant.abs() < 1.0e-12 {
+        let weak = min_eigen < options.min_eigen || determinant.abs() < 1.0e-12;
+        // Only the full picture decides whether the point can be followed: a fine texture fades
+        // out of the smaller levels, which then just pass the guess on.
+        if weak && level == 0 {
             return None;
         }
         let mut v = [0.0f32; 2];
-        for _ in 0..options.iterations {
+        for _ in 0..if weak { 0 } else { options.iterations } {
             let (mut bx, mut by) = (0.0f32, 0.0f32);
             let mut k = 0;
             for dy in -options.radius..=options.radius {

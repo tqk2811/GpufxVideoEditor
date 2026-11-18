@@ -261,7 +261,7 @@ pub enum RunEnd {
 
 /// Steps `tracker` through `frames` until they run out, a step is lost (it is the last one
 /// given) or `cancel` is set (checked before each frame). `on_step` sees each step with its
-/// index. A frame that cannot be read ends the run with its error.
+/// index. A frame that cannot be read ends the run with its error, unless `cancel` is set by then.
 pub fn track_frames<E>(tracker: &mut Tracker, frames: impl IntoIterator<Item = Result<GrayImage, E>>, cancel: &AtomicBool, mut on_step: impl FnMut(usize, &TrackStep)) -> Result<(Vec<TrackStep>, RunEnd), E> {
     let mut steps = Vec::new();
     let mut frames = frames.into_iter();
@@ -270,7 +270,13 @@ pub fn track_frames<E>(tracker: &mut Tracker, frames: impl IntoIterator<Item = R
             return Ok((steps, RunEnd::Cancelled));
         }
         let Some(frame) = frames.next() else { return Ok((steps, RunEnd::Finished)) };
-        let step = tracker.step(frame?);
+        let frame = match frame {
+            Ok(frame) => frame,
+            // A read cut short by the cancel is the cancel, not a failure: the steps made stay.
+            Err(_) if cancel.load(Ordering::Relaxed) => return Ok((steps, RunEnd::Cancelled)),
+            Err(error) => return Err(error),
+        };
+        let step = tracker.step(frame);
         on_step(steps.len(), &step);
         steps.push(step);
         if step.lost {

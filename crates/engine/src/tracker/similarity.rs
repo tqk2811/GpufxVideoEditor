@@ -70,7 +70,10 @@ impl Similarity {
         if length < 1.0e-9 {
             return None;
         }
-        let (a, b) = if rotation { (dot / length, cross / length) } else { (dot / length, 0.0) };
+        // Without a turn the scale is the length of the fitted (a, b), as in `from_two`: `dot`
+        // alone is the scale times the cosine of the turn, which shrinks the box of an object that
+        // turns and flips it past a quarter turn.
+        let (a, b) = if rotation { (dot / length, cross / length) } else { (dot.hypot(cross) / length, 0.0) };
         Some(Self { a, b, tx: qx - (a * px - b * py), ty: qy - (b * px + a * py) })
     }
 }
