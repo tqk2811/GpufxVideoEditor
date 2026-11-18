@@ -532,13 +532,13 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             })
             .map_err(refused)?,
         AgentEdit::ClipFollowClear { clip } => state.apply_agent_command(|project| engine::set_follow(project, clip.into(), None)).map_err(refused)?,
-        AgentEdit::ClipLockSet { clip, track_id, at, lock_scale, lock_rotation, zoom, smooth } => state
+        AgentEdit::ClipLockSet { clip, track_id, at, lock_scale, lock_rotation, zoom, smooth, perspective } => state
             .apply_agent_command(|project| {
                 let shown = current_clip(project, clip)?;
                 let at = at.unwrap_or(shown.start);
                 let anchor_source_time = shown.source_time_at(at.saturating_sub(shown.start)).max(Time::ZERO);
                 let link = engine::TrackLink { track_id, anchor_source_time, follow_scale: lock_scale, follow_rotation: lock_rotation, smooth };
-                engine::set_lock(project, clip.into(), Some(engine::TrackLock { link, zoom: zoom.unwrap_or(1.0) }))
+                engine::set_lock(project, clip.into(), Some(engine::TrackLock { link, zoom: zoom.unwrap_or(1.0), perspective }))
             })
             .map_err(refused)?,
         AgentEdit::ClipLockClear { clip } => state.apply_agent_command(|project| engine::set_lock(project, clip.into(), None)).map_err(refused)?,
@@ -1658,7 +1658,7 @@ mod tests {
         edit(&mut host, AgentEdit::ClipFollowClear { clip: censor_clip }).expect("clear");
         assert!(host.state.project().tracks[censor_clip.track].clips[0].follow.is_none());
 
-        let lock = |track_id, zoom| AgentEdit::ClipLockSet { clip: video, track_id, at: Some(Time::from_ticks(45_000)), lock_scale: true, lock_rotation: false, zoom, smooth: 0.0 };
+        let lock = |track_id, zoom| AgentEdit::ClipLockSet { clip: video, track_id, at: Some(Time::from_ticks(45_000)), lock_scale: true, lock_rotation: false, zoom, smooth: 0.0, perspective: false };
         assert_eq!(code(edit(&mut host, lock(id + 5, None))), "invalid_project");
         assert_eq!(code(edit(&mut host, lock(id, Some(50.0)))), "invalid_project");
         edit(&mut host, lock(id, Some(1.5))).expect("lock");
@@ -1667,6 +1667,14 @@ mod tests {
         edit(&mut host, AgentEdit::ClipLockClear { clip: video }).expect("clear lock");
         assert!(host.state.project().tracks[0].clips[0].lock.is_none());
 
+        // A lock in perspective needs four corners, and is not baked.
+        let flat = |id| AgentEdit::ClipLockSet { clip: video, track_id: id, at: None, lock_scale: false, lock_rotation: false, zoom: None, smooth: 0.0, perspective: true };
+        assert_eq!(code(edit(&mut host, flat(id))), "invalid_project");
+        let quad = engine::TrackSample { quad: Some([[0.2, 0.3], [0.4, 0.3], [0.4, 0.6], [0.2, 0.6]]), ..sample(0, 0.3) };
+        edit(&mut host, AgentEdit::TrackSetSample { track_id: Some(id), clip: None, sample: quad }).expect("four corners");
+        edit(&mut host, flat(id)).expect("lock in perspective");
+        assert!(host.state.project().tracks[0].clips[0].lock.expect("set").perspective);
+        assert_eq!(code(edit(&mut host, AgentEdit::TrackBakeKeyframes { clip: video })), "bake_perspective");
     }
 
     #[test]

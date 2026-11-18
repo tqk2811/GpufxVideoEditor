@@ -167,7 +167,7 @@ fn a_reference_clip_cannot_itself_follow_in_perspective() {
 fn a_clip_cannot_both_lock_and_follow_in_perspective() {
     // So a corner pin and a lock never stack on one clip, and their order does not matter.
     let mut p = rig(true);
-    let lock = engine::TrackLock { link: follow(true).link, zoom: 1.0 };
+    let lock = engine::TrackLock { link: follow(true).link, zoom: 1.0, perspective: false };
     p.tracks[1].clips[0].lock = Some(lock);
     assert!(engine::validate(&p, &engine::AcceptAll).iter().any(|error| matches!(error, engine::ValidationError::InvalidFollow { .. } | engine::ValidationError::InvalidLock { .. })));
 }

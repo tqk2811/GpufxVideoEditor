@@ -207,6 +207,12 @@ pub fn follow_transform(project: &Project, follow: &crate::tracking::Follow, tra
 /// matter.
 pub fn lock_transform(project: &Project, track: usize, clip: usize, transform: &mut ClipTransform, t: Time) {
     let Some(lock) = project.tracks.get(track).and_then(|lane| lane.clips.get(clip)).and_then(|c| c.lock) else { return };
+    // In perspective the picture is warped against the object's corners (an inverse corner pin)
+    // rather than moved by a pose.
+    if lock.perspective {
+        transform.pin = project.lock_pin(track, clip, t);
+        return;
+    }
     transform.rotates |= lock.link.follow_rotation;
     if let Some(pose) = project.lock_pose(track, clip, t) {
         transform.rotation += pose.rotation;

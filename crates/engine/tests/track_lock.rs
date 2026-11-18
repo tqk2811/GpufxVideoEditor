@@ -25,7 +25,7 @@ fn moving_track() -> MotionTrack {
 }
 
 fn lock(anchor: i64, scale: bool, rotation: bool) -> TrackLock {
-    TrackLock { link: TrackLink { track_id: 7, anchor_source_time: t(anchor), follow_scale: scale, follow_rotation: rotation, smooth: 0.0 }, zoom: 1.0 }
+    TrackLock { link: TrackLink { track_id: 7, anchor_source_time: t(anchor), follow_scale: scale, follow_rotation: rotation, smooth: 0.0 }, zoom: 1.0, perspective: false }
 }
 
 /// One video track with `video` locked by `with`.
@@ -42,7 +42,7 @@ fn drawn(p: &Project, lane: usize, frame: i64) -> FrameMapping {
     let layers = layers_at_frame(p, frame);
     let layer = layers.iter().find(|layer| layer.track == lane).expect("the clip shows");
     let LayerContent::Clip(sample) = layer.content else { panic!("no transition") };
-    FrameMapping { rect: sample.transform.rect(ASPECT, ASPECT), rotation: sample.transform.rotation, output_aspect: ASPECT }
+    FrameMapping { rect: sample.transform.rect(ASPECT, ASPECT), rotation: sample.transform.rotation, output_aspect: ASPECT, pin: sample.transform.pin }
 }
 
 /// Where the object is on screen at output frame `frame`, its angle there and its width in parts
@@ -275,4 +275,74 @@ fn a_reference_may_lock_but_may_not_follow() {
     let errors = validate(&p, &AcceptAll);
     assert!(errors.iter().all(|e| !matches!(e, ValidationError::InvalidFollow { track: 1, .. })), "following a locked clip is fine: {errors:?}");
     assert!(errors.iter().any(|e| matches!(e, ValidationError::InvalidFollow { track: 2, .. })), "a following clip cannot be a reference: {errors:?}");
+}
+
+/// The planar object two seconds apart: a square on the left, then a trapezoid on the right.
+fn planar_track() -> MotionTrack {
+    let first = [[0.2, 0.3], [0.4, 0.3], [0.4, 0.6], [0.2, 0.6]];
+    let later = [[0.55, 0.25], [0.85, 0.35], [0.8, 0.6], [0.6, 0.75]];
+    let planar = |seconds: f64, quad| TrackSample::from_quad(t((seconds * SECOND as f64) as i64), quad, ASPECT, 1.0, false);
+    MotionTrack { id: 7, media_path: "a.mp4".into(), aspect: ASPECT, samples: vec![planar(0.0, first), planar(2.0, later)] }
+}
+
+fn perspective_rig(zoom: f64) -> Project {
+    let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), TrackLock { zoom, perspective: true, ..lock(0, false, false) });
+    p.motion_tracks[0] = planar_track();
+    p
+}
+
+#[test]
+fn a_lock_in_perspective_holds_the_object_corners_where_they_stood_at_the_anchor() {
+    let p = perspective_rig(1.0);
+    assert!(validate(&p, &AcceptAll).is_empty());
+    let anchor = p.motion_tracks[0].quad_at(t(0), 0.0).unwrap();
+    for frame in [0, 20, 45, 59] {
+        let source = t(frame * FRAME);
+        let quad = p.motion_tracks[0].quad_at(source, 0.0).unwrap();
+        let mapping = drawn(&p, 0, frame);
+        assert!(mapping.pin.is_some(), "frame {frame} is corner pinned");
+        for (corner, still) in quad.iter().zip(&anchor) {
+            let on_screen = mapping.to_frame(*corner);
+            assert!((on_screen[0] - still[0]).abs() < 1e-6 && (on_screen[1] - still[1]).abs() < 1e-6, "frame {frame}: {on_screen:?} != {still:?}");
+            // And back again through the pin.
+            let back = mapping.to_source(on_screen);
+            assert!((back[0] - corner[0]).abs() < 1e-6 && (back[1] - corner[1]).abs() < 1e-6);
+        }
+    }
+}
+
+#[test]
+fn the_zoom_of_a_lock_in_perspective_grows_the_held_surface_around_its_middle() {
+    let p = perspective_rig(2.0);
+    let anchor = p.motion_tracks[0].quad_at(t(0), 0.0).unwrap();
+    let middle = [anchor.iter().map(|c| c[0]).sum::<f64>() / 4.0, anchor.iter().map(|c| c[1]).sum::<f64>() / 4.0];
+    let quad = p.motion_tracks[0].quad_at(t(30 * FRAME), 0.0).unwrap();
+    let mapping = drawn(&p, 0, 30);
+    for (corner, still) in quad.iter().zip(&anchor) {
+        let on_screen = mapping.to_frame(*corner);
+        let wanted = [middle[0] + (still[0] - middle[0]) * 2.0, middle[1] + (still[1] - middle[1]) * 2.0];
+        assert!((on_screen[0] - wanted[0]).abs() < 1e-6 && (on_screen[1] - wanted[1]).abs() < 1e-6, "{on_screen:?} != {wanted:?}");
+    }
+}
+
+#[test]
+fn a_lock_in_perspective_needs_a_planar_track_and_is_not_baked() {
+    let mut boxes = rig(clip("a.mp4", 0, 0, 2 * SECOND), lock(0, false, false));
+    let perspective = TrackLock { perspective: true, ..lock(0, false, false) };
+    assert!(matches!(set_lock(&boxes, KEY, Some(perspective)), Err(EditError::Invalid(_))));
+    boxes.tracks[0].clips[0].lock = Some(perspective);
+    assert!(validate(&boxes, &AcceptAll).iter().any(|error| matches!(error, ValidationError::InvalidLock { .. })));
+    let p = perspective_rig(1.0);
+    assert!(set_lock(&p, KEY, Some(TrackLock { perspective: true, ..lock(0, false, false) })).is_ok());
+    assert!(matches!(bake_lock(&p, KEY, ASPECT), Err(EditError::BakePerspective { .. })));
+}
+
+#[test]
+fn a_lock_in_perspective_round_trips_and_is_left_out_when_off() {
+    let p = perspective_rig(1.0);
+    let json = serde_json::to_string(&p.tracks[0].clips[0].lock).unwrap();
+    assert!(json.contains("\"perspective\":true"), "{json}");
+    let back: Option<TrackLock> = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, p.tracks[0].clips[0].lock);
+    assert!(!serde_json::to_string(&lock(0, false, false)).unwrap().contains("perspective"));
 }

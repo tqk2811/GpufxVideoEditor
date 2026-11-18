@@ -55,8 +55,10 @@ fn a_censor_region_follows_a_track_of_the_video_under_it() {
     let project = project_of(&mut session);
     assert!(project.tracks[0].clips[0].lock.is_none() && project.tracks[0].clips[0].motion.has_keyframes(engine::ClipProperty::Width), "the zoom bakes to width");
     let undone = call_ok(&mut session, "undo", json!({"expected_revision": revision(&baked)}));
-    call_ok(&mut session, "clip_lock_clear", json!({"expected_revision": revision(&undone), "clip": video}));
+    let unlocked = call_ok(&mut session, "clip_lock_clear", json!({"expected_revision": revision(&undone), "clip": video}));
     assert!(project_of(&mut session).tracks[0].clips[0].lock.is_none());
+    // A lock in perspective needs a track with four corners.
+    assert_eq!(call_err(&mut session, "clip_lock_set", json!({"expected_revision": revision(&unlocked), "clip": video, "track_id": id, "perspective": true})).code, "invalid_project");
 }
 
 

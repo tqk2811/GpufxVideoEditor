@@ -202,12 +202,22 @@ fn lock_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, track_id:
             lock.link.follow_rotation = rotation;
         });
     }
+    let planar = state.project().motion_track(lock.link.track_id).is_some_and(MotionTrack::is_planar);
+    let mut perspective = lock.perspective;
+    let toggled = ui
+        .add_enabled(planar || lock.perspective, egui::Checkbox::new(&mut perspective, language.t(Message::FollowPerspective)))
+        .on_hover_text(language.t(Message::LockPerspectiveHint))
+        .on_disabled_hover_text(language.t(Message::LockPerspectiveNeedsPlanar))
+        .changed();
+    if toggled {
+        state.set_lock_options(key, |lock| lock.perspective = perspective);
+    }
     let mut zoom = lock.zoom;
     if number_row(ui, &language.t(Message::LockZoom), &mut zoom, MIN_LOCK_ZOOM..=MAX_LOCK_ZOOM, 2, "\u{d7}") {
         state.live_lock_zoom(key, zoom);
     }
     ui.horizontal(|ui| {
-        if ui.button(language.t(Message::FollowBake)).clicked() {
+        if ui.add_enabled(!lock.perspective, egui::Button::new(language.t(Message::FollowBake))).on_disabled_hover_text(language.t(Message::FollowBakePerspective)).clicked() {
             state.bake_lock(key);
         }
         if ui.button(language.t(Message::LockClear)).clicked() {

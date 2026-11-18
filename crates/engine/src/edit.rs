@@ -121,7 +121,7 @@ pub enum EditError {
     TrackRunStale { id: u32 },
     /// The clip follows no motion track.
     NotFollowing { key: ClipKey },
-    /// The clip follows with its corners pinned in perspective, which keyframes cannot hold.
+    /// The clip follows or locks with its corners pinned in perspective, which keyframes cannot hold.
     BakePerspective { key: ClipKey },
     /// The clip is not locked to a motion track.
     NotLocked { key: ClipKey },
@@ -190,7 +190,7 @@ impl fmt::Display for EditError {
             TrackRunStale { id } => write!(f, "motion track {id} changed while it was being tracked; the run was not written"),
             MarkerNotFound { marker } => write!(f, "marker {marker} does not exist"),
             NotFollowing { key } => write!(f, "track {}, clip {}: the clip follows no motion track", key.track, key.clip),
-            BakePerspective { key } => write!(f, "track {}, clip {}: a follow in perspective (corner pin) cannot be baked into keyframes", key.track, key.clip),
+            BakePerspective { key } => write!(f, "track {}, clip {}: a follow or lock in perspective (corner pin) cannot be baked into keyframes", key.track, key.clip),
             NotLocked { key } => write!(f, "track {}, clip {}: the clip is not locked to a motion track", key.track, key.clip),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
@@ -1557,6 +1557,9 @@ pub fn bake_follow(project: &Project, key: ClipKey, source_aspect: f64) -> Resul
 pub fn bake_lock(project: &Project, key: ClipKey, source_aspect: f64) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let lock = clip_of(project, key)?.lock.ok_or(EditError::NotLocked { key })?;
+    if lock.perspective {
+        return Err(EditError::BakePerspective { key });
+    }
     let link = lock.link;
     bake_motion(project, key, source_aspect, link.follow_scale || lock.zoom != 1.0, link.follow_rotation, |transform, t| crate::schedule::lock_transform(project, key.track, key.clip, transform, t), |clip| clip.lock = None)
 }

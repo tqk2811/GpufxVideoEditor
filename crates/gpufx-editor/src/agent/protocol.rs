@@ -205,7 +205,7 @@ pub enum AgentEdit {
     /// Locks the frame of video clip `clip` to motion track `track_id` of its own source, anchored
     /// at the source time it shows at timeline time `at` (its start when absent): the object stays
     /// where it is at the anchor and the frame moves against it. `zoom` absent: 1.
-    ClipLockSet { clip: ClipRef, track_id: u32, at: Option<Time>, lock_scale: bool, lock_rotation: bool, zoom: Option<f64>, smooth: f64 },
+    ClipLockSet { clip: ClipRef, track_id: u32, at: Option<Time>, lock_scale: bool, lock_rotation: bool, zoom: Option<f64>, smooth: f64, perspective: bool },
     /// Ends the lock of `clip`.
     ClipLockClear { clip: ClipRef },
     /// Adds or replaces a sample of motion track `track_id`, or starts a new track of the source

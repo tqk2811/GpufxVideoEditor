@@ -684,7 +684,7 @@ mod tests {
         let (plain, _) = state.clip_frame_now(key).unwrap();
         let mut project = state.project().clone();
         let link = engine::TrackLink { track_id: 1, anchor_source_time: Time::ZERO, follow_scale: true, follow_rotation: true, smooth: 0.0 };
-        project.tracks[0].clips[0].lock = Some(engine::TrackLock { link, zoom: 1.5 });
+        project.tracks[0].clips[0].lock = Some(engine::TrackLock { link, zoom: 1.5, perspective: false });
         state.replace_project(project, None);
         let (locked, _) = state.clip_frame_now(key).unwrap();
         assert_ne!(locked, plain, "the picture itself is drawn locked");

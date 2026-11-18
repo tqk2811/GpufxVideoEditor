@@ -2556,6 +2556,53 @@ mod tests {
     }
 
     #[test]
+    fn a_video_locked_in_perspective_draws_the_planar_surface_back_where_it_stood() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let (width, height) = (compositor.width, compositor.height);
+        let aspect = f64::from(width) / f64::from(height);
+        let mut project = engine::Project::from_json(r#"{"version":1,"output":{"width":640,"height":360,"frame_rate":{"num":30,"den":1}},"tracks":[
+            {"clips":[{"source":"a.mp4","start":0,"source_in":0,"duration":180000,"lock":{"track_id":7,"anchor_source_time":0,"perspective":true}}]}]}"#).expect("a project");
+        let planar = |seconds: f64, quad| engine::TrackSample::from_quad(engine::Time::from_ticks((seconds * 90_000.0) as i64), quad, aspect, 1.0, false);
+        let first = [[0.2, 0.3], [0.45, 0.3], [0.45, 0.7], [0.2, 0.7]];
+        let later = [[0.5, 0.2], [0.85, 0.3], [0.8, 0.65], [0.55, 0.8]];
+        project.motion_tracks.push(engine::MotionTrack { id: 7, media_path: "a.mp4".into(), aspect, samples: vec![planar(0.0, first), planar(2.0, later)] });
+        let layers = engine::layers_at_frame(&project, 30);
+        let engine::LayerContent::Clip(sample) = layers[0].content else { panic!("one clip") };
+        let transform = sample.transform;
+        assert!(transform.pin.is_some(), "the lock pins the clip");
+        let mapping = project.clip_frame_mapping(0, 0, engine::Time::from_ticks(90_000), aspect).expect("a mapping");
+        // A checker of 16 x 9 cells.
+        let cell = |x: f64, y: f64| ((x * 16.0) as u32 + (y * 9.0) as u32) % 2 == 0;
+        let rgba = (0..width * height).flat_map(|i| if cell(f64::from(i % width) / f64::from(width), f64::from(i / width) / f64::from(height)) { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
+        let picture = StillPicture { width, height, rgba, has_alpha: false };
+        let image = ImageId(compositor.images.push(Image::upload(&compositor.gpu, &picture).expect("an upload")));
+        let placed = compositor.place(image, transform, aspect, (0.0, 0.0), false, &FrameInfo::new(0.0, 0)).expect("placed");
+        let mut rgba = Vec::new();
+        compositor.read(placed, &mut rgba).expect("read");
+        compositor.release(placed);
+        // The object now (half way) shows on screen at the corners it had at the anchor: each cell
+        // middle inside it lands where the mapping, pin included, says, with its own colour.
+        let now = project.motion_tracks[0].quad_at(engine::Time::from_ticks(90_000), 0.0).unwrap();
+        let anchor_middle = mapping.to_frame([(now[0][0] + now[2][0]) / 2.0, (now[0][1] + now[2][1]) / 2.0]);
+        assert!((anchor_middle[0] - 0.325).abs() < 0.06 && (anchor_middle[1] - 0.5).abs() < 0.06, "near the anchor's middle: {anchor_middle:?}");
+        let mut checked = 0;
+        for j in 0..9 {
+            for i in 0..16 {
+                let point = [(f64::from(i) + 0.5) / 16.0, (f64::from(j) + 0.5) / 9.0];
+                if !engine::tracker::homography::quad_contains(&now, point, 0.0) {
+                    continue;
+                }
+                let screen = mapping.to_frame(point);
+                let (x, y) = ((screen[0] * f64::from(width)) as u32, (screen[1] * f64::from(height)) as u32);
+                let wanted = if cell(point[0], point[1]) { 255 } else { 0 };
+                assert_eq!(rgba[((y * width + x) * 4) as usize], wanted, "cell {i}, {j} at {screen:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 6, "{checked} cells checked");
+    }
+
+    #[test]
     fn a_region_in_perspective_hides_its_quadrilateral_not_its_bounding_box() {
         let Some(mut compositor) = censor_rig() else { return };
         let white = |_x: u32, _y: u32| [255, 255, 255, 255];

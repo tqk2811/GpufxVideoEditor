@@ -171,6 +171,12 @@ pub struct TrackLock {
     /// Extra scale of the locked picture around the object, to hide the revealed edges; 1 is none.
     #[serde(default = "unit_zoom", skip_serializing_if = "is_unit")]
     pub zoom: f64,
+    /// Hold the planar object's four corners where they stood at the anchor (inverse corner pin):
+    /// the picture is warped by the homography from the corners now to the corners at the anchor,
+    /// so the flat surface stays fixed on screen, scale, turn and perspective included, whatever
+    /// `follow_scale` and `follow_rotation` say. The track must be planar.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub perspective: bool,
 }
 
 fn unit_zoom() -> f64 {
@@ -184,7 +190,7 @@ fn is_unit(value: &f64) -> bool {
 impl TrackLock {
     /// A lock on track `track_id` at `anchor_source_time` that keeps only the position.
     pub fn new(track_id: u32, anchor_source_time: Time) -> Self {
-        Self { link: TrackLink { track_id, anchor_source_time, follow_scale: false, follow_rotation: false, smooth: 0.0 }, zoom: 1.0 }
+        Self { link: TrackLink { track_id, anchor_source_time, follow_scale: false, follow_rotation: false, smooth: 0.0 }, zoom: 1.0, perspective: false }
     }
 }
 
@@ -476,7 +482,38 @@ impl Project {
         if own.follow.is_some() {
             return Some("a clip cannot both follow a track and lock to one".to_owned());
         }
+        if lock.perspective && !motion.is_planar() {
+            return Some(format!("motion track {} has no four corners, and a lock in perspective needs a planar track", lock.link.track_id));
+        }
         None
+    }
+
+    /// The inverse corner pin of the locked clip `clip` of track `track` at timeline time `t`
+    /// when its lock is in perspective: the homography, in parts of the output frame, that takes
+    /// the object's four corners as the clip shows them now (its own place, keyframes and
+    /// animations, without the lock) to where they stood at the anchor, then scales by the lock's
+    /// zoom around the corners' middle. `None` without a lock in perspective, when the track cannot
+    /// be read or the corners fix no map.
+    pub fn lock_pin(&self, track: usize, clip: usize, t: Time) -> Option<crate::tracker::homography::Homography> {
+        let lane = self.tracks.get(track)?;
+        let own = lane.clips.get(clip)?;
+        let lock = own.lock.filter(|lock| lock.perspective)?;
+        let motion = self.motion_track(lock.link.track_id)?;
+        let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
+        let mapping = |transform: ClipTransform| FrameMapping { rect: transform.rect(output_aspect, motion.aspect), rotation: transform.rotation, output_aspect, pin: None };
+        // The anchor side is the clip's own place and keyframes, as in [`Self::lock_pose`].
+        let last = own.duration.saturating_sub(Time::from_ticks(1)).max(Time::ZERO);
+        let anchor_offset = own.timeline_time_of(lock.link.anchor_source_time).saturating_sub(own.start).clamp(Time::ZERO, last);
+        let anchor_mapping = mapping(own.transform_at(anchor_offset));
+        let to = motion.quad_at(lock.link.anchor_source_time, lock.link.smooth)?.map(|corner| anchor_mapping.to_frame(corner));
+        let source = own.source_time_at(t.saturating_sub(own.start)).max(Time::ZERO);
+        let now_mapping = mapping(crate::schedule::clip_transform_at(lane, clip, t));
+        let from = motion.quad_at(source, lock.link.smooth)?.map(|corner| now_mapping.to_frame(corner));
+        let pin = crate::tracker::homography::Homography::from_quads(&from, &to)?;
+        let (mx, my) = (to.iter().map(|c| c[0]).sum::<f64>() / 4.0, to.iter().map(|c| c[1]).sum::<f64>() / 4.0);
+        let z = lock.zoom;
+        let zoom = crate::tracker::homography::Homography { m: [z, 0.0, mx * (1.0 - z), 0.0, z, my * (1.0 - z), 0.0, 0.0, 1.0] };
+        Some(zoom.after(&pin))
     }
 
     /// How the picture of the locked clip `clip` of track `track` moves at timeline time `t` so the
@@ -694,6 +731,9 @@ pub struct FrameMapping {
     pub rotation: f64,
     /// Width over height of the output frame.
     pub output_aspect: f64,
+    /// The corner pin the picture is drawn warped by after its place (a lock in perspective, see
+    /// [`Project::lock_pin`]), in parts of the frame.
+    pub pin: Option<crate::tracker::homography::Homography>,
 }
 
 impl FrameMapping {
@@ -704,11 +744,13 @@ impl FrameMapping {
         let (mx, my) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
         let (sine, cosine) = self.rotation.to_radians().sin_cos();
         let (dx, dy) = ((x - mx) * self.output_aspect, y - my);
-        [mx + (cosine * dx - sine * dy) / self.output_aspect, my + sine * dx + cosine * dy]
+        let placed = [mx + (cosine * dx - sine * dy) / self.output_aspect, my + sine * dx + cosine * dy];
+        self.pin.and_then(|pin| pin.apply(placed)).unwrap_or(placed)
     }
 
     /// The point of the picture shown at point `point` of the frame: undoes [`FrameMapping::to_frame`].
     pub fn to_source(&self, point: [f64; 2]) -> [f64; 2] {
+        let point = self.pin.and_then(|pin| pin.inverse()).and_then(|back| back.apply(point)).unwrap_or(point);
         let rect = self.rect;
         let (mx, my) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
         let (sine, cosine) = self.rotation.to_radians().sin_cos();
@@ -737,6 +779,6 @@ impl Project {
         let unlocked = motion_track.is_some_and(|id| own.lock.is_some_and(|lock| lock.link.track_id == id));
         let transform = if unlocked { crate::schedule::clip_transform_at(lane, clip, t) } else { crate::schedule::placed_transform_at(self, track, clip, t) };
         let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
-        Some(FrameMapping { rect: transform.rect(output_aspect, source_aspect), rotation: transform.rotation, output_aspect })
+        Some(FrameMapping { rect: transform.rect(output_aspect, source_aspect), rotation: transform.rotation, output_aspect, pin: transform.pin })
     }
 }
