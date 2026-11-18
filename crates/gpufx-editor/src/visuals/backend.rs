@@ -40,7 +40,7 @@ impl Generator for FfmpegGenerator {
     fn inspect(&self, path: &Path) -> Result<SourceFacts, String> {
         if engine::is_image_source(&path.to_string_lossy()) {
             let (width, height) = still_dimensions(path)?;
-            return Ok(SourceFacts { has_video: true, has_audio: false, aspect: width as f32 / height.max(1) as f32, length: None });
+            return Ok(SourceFacts { has_video: true, has_audio: false, aspect: width as f32 / height.max(1) as f32, length: None, rate: None });
         }
         let probe = probe_media(path)?;
         let sampler = if probe.has_video { FrameSampler::open(path, THUMBNAIL_HEIGHT).map(Some) } else { Ok(None) };
@@ -56,7 +56,8 @@ impl Generator for FfmpegGenerator {
             }
             Err(reason) => return Err(reason),
         };
-        Ok(SourceFacts { has_video, has_audio: probe.has_audio, aspect, length: probe.video_duration.or(probe.audio_duration) })
+        let rate = if has_video { d3d12_backend::probe_video_format(path).ok().and_then(|format| format.rate) } else { None };
+        Ok(SourceFacts { has_video, has_audio: probe.has_audio, aspect, length: probe.video_duration.or(probe.audio_duration), rate })
     }
 
     fn frame(&self, local: &mut Self::Local, identity: u32, path: &Path, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {

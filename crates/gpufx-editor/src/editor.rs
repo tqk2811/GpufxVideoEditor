@@ -162,6 +162,9 @@ pub struct EditorState {
     track_chain: Vec<ChainedRun>,
     /// The backward job each forward job of [`Self::start_tracking_both`] went on with.
     pub chained_track_jobs: std::collections::BTreeMap<u64, u64>,
+    /// The forward jobs of [`Self::start_tracking_both`] whose backward run could not start
+    /// because the sample both start from changed or went meanwhile; the last few.
+    pub chained_track_stale: std::collections::BTreeSet<u64>,
     /// The snap points of the drag or press going on, built once rather than every frame.
     snap_cache: RefCell<Option<SnapCache>>,
 }
@@ -390,8 +393,9 @@ pub struct UiState {
     pub packages: crate::ui::package_manager::PackageManagerUi,
     /// Whether a save also copies the packs the project uses into `<project>.packages`.
     pub save_with_packs: bool,
-    /// The video clip whose preview takes a box drawn for a new motion track.
-    pub tracking_pick: Option<ClipKey>,
+    /// The video clip whose preview takes a box drawn for a new motion track, with its source
+    /// file; read it through [`EditorState::track_pick`], which drops a stale one.
+    pub tracking_pick: Option<(ClipKey, String)>,
     /// The motion track the inspector, the preview and the timeline show, when it is of the
     /// selected clip's file.
     pub motion_track: Option<u32>,
@@ -643,6 +647,7 @@ impl EditorState {
             last_track_job: None,
             track_chain: Vec::new(),
             chained_track_jobs: std::collections::BTreeMap::new(),
+            chained_track_stale: std::collections::BTreeSet::new(),
             snap_cache: RefCell::new(None),
         }
     }
@@ -763,6 +768,7 @@ impl EditorState {
         self.project_file = file;
         self.selection = None;
         self.transition_selection = None;
+        self.ui.tracking_pick = None;
         self.playhead = Time::ZERO;
         self.playing = false;
         self.scrub_target = None;
@@ -932,6 +938,9 @@ impl EditorState {
     }
 
     pub fn select(&mut self, selection: Option<ClipKey>) {
+        if self.selection != selection {
+            self.ui.tracking_pick = None;
+        }
         self.selection = selection;
         self.transition_selection = None;
     }
@@ -1505,6 +1514,16 @@ impl EditorState {
         }
     }
 
+    /// The frame rate of video `source` as `(num, den)` frames per second, once a probe said it.
+    pub fn source_rate(&self, source: &str) -> Option<(i32, i32)> {
+        let mut visuals = self.visuals.borrow_mut();
+        let slot = visuals.slot(source);
+        match visuals.view(slot) {
+            SourceView::Known(facts) => facts.rate.filter(|(num, den)| *num > 0 && *den > 0),
+            _ => None,
+        }
+    }
+
     /// Width over height of the picture of `clip`: that of its rasterized text for a text clip,
     /// else that of its source.
     pub fn clip_aspect(&self, clip: &Clip) -> f64 {
@@ -1962,6 +1981,15 @@ impl EditorState {
                 self.chained_track_jobs.insert(id, job);
                 while self.chained_track_jobs.len() > MAX_TRACK_REPORTS {
                     self.chained_track_jobs.pop_first();
+                }
+            }
+            // The sample both runs start from changed or went after the forward run was written:
+            // the track changed under the chain, as a stale run.
+            Err(_) if self.project().motion_track(chained.track_id).is_none_or(|track| !track.samples.iter().any(|s| s.source_time == chained.from)) => {
+                self.status = Status::Error(Message::TrackingStale);
+                self.chained_track_stale.insert(id);
+                while self.chained_track_stale.len() > MAX_TRACK_REPORTS {
+                    self.chained_track_stale.pop_first();
                 }
             }
             Err(message) => self.status = Status::Error(Message::TrackingFailed(message)),
@@ -2849,6 +2877,7 @@ impl EditorState {
         self.selection = None;
         self.transition_selection = None;
         self.ui.clip_menu = None;
+        self.ui.tracking_pick = None;
         self.status = Status::Idle;
     }
 }
@@ -5545,6 +5574,17 @@ lines"));
         let samples = &state.project().motion_track(3).unwrap().samples;
         assert_eq!(samples.len(), 11);
         assert!(samples.iter().all(|s| s.manual || s.source_time < placed.source_time));
+    }
+
+    #[test]
+    fn a_chained_backward_run_whose_start_sample_went_is_stale_rather_than_failed() {
+        let (mut state, id) = state_with_a_finished_run();
+        // The backward run waits for a sample that is not there once the forward run is written.
+        state.track_chain.push(ChainedRun { after: id, decode_path: PathBuf::from("a.mp4"), track_id: 3, from: Time::from_ticks(5), rotation: false });
+        state.poll_tracking();
+        assert_eq!(state.track_reports[&id].outcome, "done");
+        assert!(state.chained_track_stale.contains(&id) && !state.chained_track_jobs.contains_key(&id));
+        assert!(matches!(state.status, Status::Error(Message::TrackingStale)), "{:?}", state.status);
     }
 
     #[test]

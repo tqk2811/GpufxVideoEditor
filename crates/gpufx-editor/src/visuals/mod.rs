@@ -292,7 +292,14 @@ impl ClipVisuals {
     #[cfg(test)]
     pub fn set_known_for_test(&mut self, source: &str, aspect: f32) {
         let slot = self.slot(source);
-        self.slots[slot].view = SourceView::Known(SourceFacts { has_video: true, has_audio: false, aspect, length: None });
+        self.slots[slot].view = SourceView::Known(SourceFacts { has_video: true, has_audio: false, aspect, length: None, rate: None });
+    }
+
+    /// Makes `source` a video of `aspect` at `rate` frames per second with no probe, for tests.
+    #[cfg(test)]
+    pub fn set_video_for_test(&mut self, source: &str, aspect: f32, rate: (i32, i32)) {
+        let slot = self.slot(source);
+        self.slots[slot].view = SourceView::Known(SourceFacts { has_video: true, has_audio: false, aspect, length: None, rate: Some(rate) });
     }
 
     /// What is known of the source of `slot`, and asks for it when nothing is yet.

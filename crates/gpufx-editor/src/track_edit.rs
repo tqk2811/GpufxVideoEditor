@@ -85,6 +85,15 @@ pub fn sample_near(track: &MotionTrack, at: Time, tolerance: Time) -> Option<Tra
         .copied()
 }
 
+/// Source time `at` moved to the start of the nearest frame of a source of `rate` frames per
+/// second `(num, den)`, counted from time zero.
+pub fn snap_to_frame(at: Time, (num, den): (i32, i32)) -> Time {
+    let unit = i128::from(den) * i128::from(engine::TICKS_PER_SECOND);
+    let num = i128::from(num.max(1));
+    let index = (i128::from(at.ticks()) * num + unit / 2).div_euclid(unit);
+    Time::from_ticks((index * unit / num) as i64)
+}
+
 /// The upright box in parts of the frame around the four corners of `sample` drawn with `mapping`:
 /// left, top, width and height.
 pub fn frame_box(mapping: &FrameMapping, sample: &TrackSample) -> [f64; 4] {
@@ -137,28 +146,72 @@ impl EditorState {
     }
 
     /// How far, in source time, a sample may be from the frame clip `key` shows to count as on it:
-    /// half an output frame at the clip's speed.
+    /// half a frame of the source, as the tracker writes one sample per source frame; half an
+    /// output frame at the clip's speed until a probe says the source's rate.
     pub fn sample_tolerance(&self, key: ClipKey) -> Time {
-        let speed = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map_or(1.0, |clip| clip.speed);
-        let frame = self.project().output.frame_rate.frame_duration().ticks() as f64;
-        Time::from_ticks((frame * speed / 2.0).ceil() as i64)
+        let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return Time::ZERO };
+        let frame = match self.source_rate(&clip.source) {
+            Some((num, den)) => f64::from(den) * engine::TICKS_PER_SECOND as f64 / f64::from(num),
+            None => self.project().output.frame_rate.frame_duration().ticks() as f64 * clip.speed.abs(),
+        };
+        Time::from_ticks((frame / 2.0).ceil() as i64)
+    }
+
+    /// The box of `track` the player shows for clip `key` at the playhead, which a drag turns
+    /// into a sample placed by hand, and the sample on that frame when there is one. On a sample's
+    /// frame the box is that sample, at its source time, so an edit replaces it rather than adding
+    /// one beside it; between samples it is the path at the playhead, put on the nearest frame of
+    /// the source when its rate is known.
+    pub fn box_at_playhead(&self, key: ClipKey, track: &MotionTrack) -> Option<(TrackSample, Option<TrackSample>)> {
+        let (_, now) = self.clip_frame_now(key)?;
+        let on_frame = sample_near(track, now, self.sample_tolerance(key));
+        if let Some(sample) = on_frame {
+            return Some((sample, on_frame));
+        }
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        let time = self.source_rate(&clip.source).map_or(now, |rate| snap_to_frame(now, rate));
+        let point = track.point_at(time, 0.0)?;
+        Some((TrackSample { source_time: time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false }, None))
     }
 
     /// Starts or ends drawing a box for a new motion track on the preview, for video clip `key`.
     pub fn toggle_track_pick(&mut self, key: ClipKey) {
-        self.ui.tracking_pick = if self.ui.tracking_pick == Some(key) { None } else { Some(key) };
+        let source = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map(|clip| clip.source.clone());
+        self.ui.tracking_pick = match source {
+            Some(source) if self.track_pick() != Some(key) => Some((key, source)),
+            _ => None,
+        };
+    }
+
+    /// The clip whose preview takes a box for a new motion track: only while it is the selected
+    /// clip and still shows the file it showed when the drawing started, so a delete, an undo or
+    /// another selection that left the key on another clip does not draw on that one.
+    pub fn track_pick(&self) -> Option<ClipKey> {
+        let (key, source) = self.ui.tracking_pick.as_ref()?;
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        (self.selection() == Some(*key) && clip.source == *source).then_some(*key)
     }
 
     /// Starts a motion track of the file of clip `key` with the box drawn on the preview: `rect`
-    /// is left, top, width and height in parts of the frame, at the playhead. One undo step; the
-    /// new track is chosen and the drawing ends.
+    /// is left, top, width and height in parts of the frame, at the playhead. The sample is the
+    /// upright box of the picture around all four corners of `rect`, so a turned clip still has
+    /// the whole drawn box inside it. One undo step; the new track is chosen and the drawing ends.
     pub fn create_motion_track(&mut self, key: ClipKey, rect: [f64; 4]) -> Option<u32> {
         self.ui.tracking_pick = None;
         let (mapping, source_time) = self.clip_frame_now(key)?;
         let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?.clone();
-        let a = mapping.to_source([rect[0], rect[1]]);
-        let b = mapping.to_source([rect[0] + rect[2], rect[1] + rect[3]]);
-        let (w, h) = ((b[0] - a[0]).abs(), (b[1] - a[1]).abs());
+        if rect[2].abs() < MIN_BOX_SIDE || rect[3].abs() < MIN_BOX_SIDE {
+            return None;
+        }
+        let (right, bottom) = (rect[0] + rect[2], rect[1] + rect[3]);
+        let corners = [[rect[0], rect[1]], [right, rect[1]], [right, bottom], [rect[0], bottom]].map(|corner| mapping.to_source(corner));
+        let (mut low, mut high) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for [x, y] in corners {
+            low = [low[0].min(x), low[1].min(y)];
+            high = [high[0].max(x), high[1].max(y)];
+        }
+        let (a, b) = (low, high);
+        let (w, h) = (b[0] - a[0], b[1] - a[1]);
         if w < MIN_BOX_SIDE || h < MIN_BOX_SIDE {
             return None;
         }
@@ -436,12 +489,13 @@ mod tests {
         let mut state = rigged();
         let key = ClipKey { track: 0, clip: 0 };
         state.set_playhead(Time::from_ticks(SECOND / 2));
+        state.select(Some(key));
         state.toggle_track_pick(key);
-        assert_eq!(state.ui.tracking_pick, Some(key));
+        assert_eq!(state.track_pick(), Some(key));
         assert!(state.create_motion_track(key, [0.4, 0.4, 0.005, 0.2]).is_none(), "too thin to be a box");
         state.toggle_track_pick(key);
         let id = state.create_motion_track(key, [0.4, 0.4, 0.2, 0.2]).expect("a new track");
-        assert_eq!(state.ui.tracking_pick, None);
+        assert_eq!(state.track_pick(), None);
         assert_eq!(state.motion_track_for(key).map(|track| track.id), Some(id));
         let track = state.project().motion_track(id).unwrap();
         let first = track.samples[0];
@@ -454,6 +508,93 @@ mod tests {
         assert!(fixed.manual && fixed.confidence == 1.0 && fixed.cx == 0.3);
         state.delete_motion_track(id);
         assert!(state.project().motion_track(id).is_none());
+    }
+
+    /// [`rigged`] with a 24 fps source played on a 60 fps output.
+    fn rigged_24_on_60() -> EditorState {
+        let mut state = rigged();
+        state.visuals.borrow_mut().set_video_for_test("a.mp4", 16.0 / 9.0, (24, 1));
+        let mut project = state.project().clone();
+        project.output.frame_rate = engine::FrameRate::whole(60);
+        state.replace_project(project, None);
+        state
+    }
+
+    #[test]
+    fn the_box_on_a_tracked_frame_is_that_sample_so_an_edit_replaces_it() {
+        let mut state = rigged_24_on_60();
+        let key = ClipKey { track: 0, clip: 0 };
+        assert_eq!(state.sample_tolerance(key), Time::from_ticks((SECOND + 47) / 48), "half a frame of the source");
+        let track = state.project().motion_track(1).unwrap().clone();
+        // A few ticks past the sample, and a whole output frame past it: still its source frame.
+        for off in [3, SECOND / 60] {
+            state.set_playhead(Time::from_ticks(2 * SECOND + off));
+            let (shown, on_frame) = state.box_at_playhead(key, &track).expect("a box");
+            assert_eq!(on_frame, Some(track.samples[1]), "{off} ticks off");
+            assert_eq!(shown.source_time, Time::from_ticks(2 * SECOND), "{off} ticks off");
+        }
+        let (shown, _) = state.box_at_playhead(key, &track).unwrap();
+        state.live_track_sample(1, TrackSample { cx: 0.6, ..shown });
+        state.commit_live();
+        let samples = &state.project().motion_track(1).unwrap().samples;
+        assert_eq!(samples.len(), 2, "replaced, not added beside it");
+        assert!(samples[1].manual && samples[1].cx == 0.6);
+        // Between samples the box goes on the nearest frame of the source.
+        state.set_playhead(Time::from_ticks(SECOND + 5));
+        let (shown, on_frame) = state.box_at_playhead(key, &track).unwrap();
+        assert_eq!((shown.source_time, on_frame), (Time::from_ticks(SECOND), None));
+        assert_eq!(snap_to_frame(Time::from_ticks(SECOND / 24 * 3 + 7), (24, 1)), Time::from_ticks(SECOND / 8));
+    }
+
+    #[test]
+    fn a_box_drawn_on_a_turned_clip_covers_all_it_was_drawn_around() {
+        let mut state = rigged();
+        let key = ClipKey { track: 0, clip: 0 };
+        let mut project = state.project().clone();
+        project.tracks[0].clips[0].motion.rotation = 30.0;
+        state.replace_project(project, None);
+        state.set_playhead(Time::from_ticks(SECOND / 2));
+        let drawn = [0.4, 0.4, 0.2, 0.1];
+        let id = state.create_motion_track(key, drawn).expect("a new track");
+        let sample = state.project().motion_track(id).unwrap().samples[0];
+        let (mapping, _) = state.clip_frame_now(key).unwrap();
+        let (right, bottom) = (drawn[0] + drawn[2], drawn[1] + drawn[3]);
+        for corner in [[drawn[0], drawn[1]], [right, drawn[1]], [right, bottom], [drawn[0], bottom]] {
+            let [x, y] = mapping.to_source(corner);
+            let inside = (x - sample.cx).abs() <= sample.w / 2.0 + 1e-9 && (y - sample.cy).abs() <= sample.h / 2.0 + 1e-9;
+            assert!(inside, "corner {corner:?} of the drawn box is outside {sample:?}");
+        }
+        let centre = mapping.to_source([0.5, 0.45]);
+        assert!((sample.cx - centre[0]).abs() < 1e-9 && (sample.cy - centre[1]).abs() < 1e-9, "{sample:?}");
+    }
+
+    #[test]
+    fn picking_ends_when_the_clip_is_no_longer_the_one_selected() {
+        let mut state = rigged();
+        let key = ClipKey { track: 0, clip: 0 };
+        let other = ClipKey { track: 1, clip: 0 };
+        state.select(Some(key));
+        state.toggle_track_pick(key);
+        assert_eq!(state.track_pick(), Some(key));
+        state.select(Some(other));
+        state.select(Some(key));
+        assert_eq!(state.track_pick(), None, "another selection ends it, and coming back does not revive it");
+        state.toggle_track_pick(key);
+        state.delete_selected();
+        assert_eq!(state.track_pick(), None, "the clip went");
+        state.undo();
+        state.select(Some(key));
+        assert_eq!(state.track_pick(), None, "undo does not bring it back");
+        state.toggle_track_pick(key);
+        let mut project = state.project().clone();
+        project.tracks[0].clips[0].source = "b.mp4".into();
+        state.replace_project(project, None);
+        state.select(Some(key));
+        assert_eq!(state.track_pick(), None, "another project");
+        // A clip of another file landing on the key does not take the drawing.
+        state.toggle_track_pick(key);
+        state.ui.tracking_pick = Some((key, "a.mp4".into()));
+        assert_eq!(state.track_pick(), None);
     }
 
     #[test]

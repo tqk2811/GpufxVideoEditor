@@ -274,7 +274,7 @@ fn a_late_result_for_a_replaced_file_is_ignored() {
 
 #[test]
 fn a_cancelled_run_of_levels_leaves_nothing_and_the_next_starts_over() {
-    let facts = SourceFacts { has_video: false, has_audio: true, aspect: 1.0, length: None };
+    let facts = SourceFacts { has_video: false, has_audio: true, aspect: 1.0, length: None, rate: None };
     let mut visuals = ClipVisuals::default();
     visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp: None, identity: Some(1), view: SourceView::Known(facts), checked: None, stamp_lost: false });
     visuals.live_identities.insert(1);
@@ -293,7 +293,7 @@ fn a_cancelled_run_of_levels_leaves_nothing_and_the_next_starts_over() {
 }
 
 fn known_slot(visuals: &mut ClipVisuals, stamp: Option<FileStamp>, identity: u32) {
-    let facts = SourceFacts { has_video: true, has_audio: true, aspect: 1.0, length: None };
+    let facts = SourceFacts { has_video: true, has_audio: true, aspect: 1.0, length: None, rate: None };
     visuals.slots.push(Slot { path: Path::new("a.mp4").into(), stamp, identity: Some(identity), view: SourceView::Known(facts), checked: None, stamp_lost: false });
     visuals.live_identities.insert(identity);
     visuals.interned.insert("a.mp4".to_owned(), visuals.slots.len() - 1);

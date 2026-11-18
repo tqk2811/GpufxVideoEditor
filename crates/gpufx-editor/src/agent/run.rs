@@ -91,6 +91,11 @@ pub trait AgentHost {
     }
     /// How files of the open project resolve.
     fn paths(&self) -> Arc<ProjectPaths>;
+    /// How files resolve for decoding pictures the way the preview shows them: with the proxies
+    /// where there are some, so a tracker run reads the frames the player and its boxes show.
+    fn decode_paths(&self) -> Arc<ProjectPaths> {
+        self.paths()
+    }
     /// The file the running export writes, if one runs.
     fn export_out(&self) -> Option<PathBuf>;
     /// The project was replaced: what was built from the old one goes.
@@ -776,7 +781,7 @@ fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Opt
         None | Some("both") => crate::tracking::Direction::Forward,
         Some(code) => crate::tracking::Direction::from_code(code).ok_or_else(|| AgentError::new("invalid_params", format!("direction {code}: forward, backward or both")))?,
     };
-    let paths = host.paths();
+    let paths = host.decode_paths();
     let wait = host.mode() == "file";
     let state = host.state();
     let Some(track) = state.project().motion_track(track_id) else {
@@ -804,6 +809,7 @@ fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Opt
         answer["backward"] = match state.chained_track_jobs.get(&job).copied() {
             Some(back) => track_status(state, Some(back))?,
             None if state.has_chained_run(job) => json!({"state": "queued"}),
+            None if state.chained_track_stale.contains(&job) => json!({"state": "stale"}),
             None => json!({"state": "not_started"}),
         };
     }
@@ -1144,11 +1150,13 @@ mod tests {
         busy: bool,
         running_out: Option<PathBuf>,
         started: Vec<PathBuf>,
+        /// The paths pictures decode with, when they differ from the project's (a proxy).
+        decode: Option<Arc<ProjectPaths>>,
     }
 
     impl FakeHost {
         fn new(mode: &'static str) -> Self {
-            Self { state: EditorState::default(), mode, busy: false, running_out: None, started: Vec::new() }
+            Self { state: EditorState::default(), mode, busy: false, running_out: None, started: Vec::new(), decode: None }
         }
 
         fn run(&mut self, request: AgentRequest) -> AgentResult {
@@ -1187,6 +1195,10 @@ mod tests {
             Arc::new(ProjectPaths::new(Path::new("unsaved.json"), Vec::new()))
         }
 
+        fn decode_paths(&self) -> Arc<ProjectPaths> {
+            self.decode.clone().unwrap_or_else(|| self.paths())
+        }
+
         fn export_out(&self) -> Option<PathBuf> {
             self.running_out.clone()
         }
@@ -1222,6 +1234,21 @@ mod tests {
         let now = revision(&mut host);
         host.run(AgentRequest::Undo { expected_revision: now }).expect("undo");
         assert_eq!(host.state.project().markers.len(), 2);
+    }
+
+    #[test]
+    fn a_tracker_run_reads_the_file_the_preview_decodes() {
+        let mut host = FakeHost::new("file");
+        host.decode = Some(Arc::new(ProjectPaths::new(Path::new("Z:/gpufx-preview-decodes/unsaved.json"), Vec::new())));
+        let mut project = host.state.project().clone();
+        let sample = engine::TrackSample { source_time: Time::ZERO, cx: 0.5, cy: 0.5, w: 0.2, h: 0.2, angle: 0.0, confidence: 1.0, manual: true };
+        project.motion_tracks.push(engine::MotionTrack { id: 1, media_path: "missing.mp4".into(), aspect: 16.0 / 9.0, samples: vec![sample] });
+        host.state.replace_project(project, None);
+        let now = host.state.revision();
+        let answer = host.run(AgentRequest::TrackRun { expected_revision: now, track_id: 1, from: None, direction: Some("forward".into()), rotation: Some(false) }).expect("an answer");
+        assert_eq!(answer["state"], "failed", "{answer}");
+        let message = answer["message"].as_str().unwrap_or_default();
+        assert!(message.contains("gpufx-preview-decodes"), "opened through the decode paths: {message}");
     }
 
     /// Writes eight seconds of stereo 16-bit clicks at 120 BPM as a WAV file.

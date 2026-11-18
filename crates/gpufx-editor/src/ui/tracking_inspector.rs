@@ -34,7 +34,7 @@ fn track_label(language: Language, track: &MotionTrack) -> String {
 pub(super) fn tracking_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, source: &str) {
     let language = state.language();
     ui.colored_label(theme::text_dim(), language.t(Message::FieldTracking));
-    let picking = state.ui.tracking_pick == Some(key);
+    let picking = state.track_pick() == Some(key);
     let label = language.t(if picking { Message::TrackPicking } else { Message::TrackPick });
     if ui.selectable_label(picking, label).on_hover_text(language.t(Message::TrackPickHint)).clicked() {
         state.toggle_track_pick(key);

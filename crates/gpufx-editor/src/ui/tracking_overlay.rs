@@ -49,7 +49,7 @@ fn target(state: &EditorState) -> Option<ClipKey> {
 
 /// Whether the player is drawing a box for a new track, so the placement frame steps aside.
 pub(super) fn picking(state: &EditorState) -> bool {
-    target(state).is_some_and(|key| state.ui.tracking_pick == Some(key))
+    target(state).is_some_and(|key| state.track_pick() == Some(key))
 }
 
 /// Draws the tracking of the selected clip over `picture`, inside `area`, and handles its drags.
@@ -58,18 +58,15 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, pictu
         return;
     }
     let Some(key) = target(state) else { return };
-    if state.ui.tracking_pick == Some(key) {
+    if state.track_pick() == Some(key) {
         pick(ui, state, key, area, picture);
         return;
     }
     let Some(track) = state.motion_track_for(key).cloned() else { return };
-    let Some((mapping, now)) = state.clip_frame_now(key) else { return };
+    let Some((mapping, _)) = state.clip_frame_now(key) else { return };
     let painter = ui.painter_at(area);
     draw_path(&painter, state, key, &track, &mapping, picture);
-    let Some(point) = track.point_at(now, 0.0) else { return };
-    let tolerance = state.sample_tolerance(key);
-    let on_frame = crate::track_edit::sample_near(&track, now, tolerance);
-    let shown = TrackSample { source_time: now, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: on_frame.map_or(1.0, |s| s.confidence), manual: on_frame.is_some_and(|s| s.manual) };
+    let Some((shown, on_frame)) = state.box_at_playhead(key, &track) else { return };
     let corners = box_corners(&shown).map(|corner| to_screen(mapping.to_frame(corner), picture));
     let color = if on_frame.is_some() { sample_color(&shown) } else { TRACKED_COLOR.gamma_multiply(0.7) };
     painter.add(Shape::closed_line(corners.to_vec(), Stroke::new(BOX_WIDTH, color)));
@@ -155,15 +152,52 @@ fn pick(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, area: Rect, pi
     let response = response.on_hover_cursor(CursorIcon::Crosshair);
     let painter = ui.painter_at(area);
     painter.rect_stroke(picture, 0.0, Stroke::new(1.0, PICK_COLOR.gamma_multiply(0.6)), egui::StrokeKind::Inside);
-    let drawn = ui.ctx().input(|input| input.pointer.press_origin().zip(input.pointer.latest_pos())).map(|(from, to)| Rect::from_two_pos(from, to).intersect(picture));
-    if let Some(rect) = drawn.filter(|_| response.dragged() || response.drag_stopped()) {
+    let (drawn, finished) = drawn_box(ui, &response, picture);
+    if let Some(rect) = drawn {
         painter.rect_stroke(rect, 0.0, Stroke::new(BOX_WIDTH, PICK_COLOR), egui::StrokeKind::Middle);
-        if response.drag_stopped() {
-            let [x, y] = to_frame(rect.min, picture);
-            let [right, bottom] = to_frame(rect.max, picture);
-            state.create_motion_track(key, [x, y, right - x, bottom - y]);
+    }
+    if let Some(rect) = finished {
+        let [x, y] = to_frame(rect.min, picture);
+        let [right, bottom] = to_frame(rect.max, picture);
+        state.create_motion_track(key, [x, y, right - x, bottom - y]);
+    }
+}
+
+/// The box a drag of `response` draws over `picture`: the one to show while it goes, and the one
+/// it leaves on its release. The press point is kept at the start of the drag and the box at each
+/// step, because egui forgets where the pointer went down on the frame of the release.
+fn drawn_box(ui: &egui::Ui, response: &egui::Response, picture: Rect) -> (Option<Rect>, Option<Rect>) {
+    let (origin_id, rect_id) = (response.id.with("origin"), response.id.with("rect"));
+    if response.drag_started() {
+        let origin = ui.ctx().input(|input| input.pointer.press_origin()).or(response.interact_pointer_pos());
+        ui.data_mut(|data| {
+            data.remove::<Rect>(rect_id);
+            if let Some(origin) = origin {
+                data.insert_temp(origin_id, origin);
+            }
+        });
+    }
+    let mut shown = None;
+    if response.dragged() {
+        let origin = ui.data(|data| data.get_temp::<Pos2>(origin_id));
+        let latest = ui.ctx().input(|input| input.pointer.latest_pos());
+        if let Some((from, to)) = origin.zip(latest) {
+            let rect = Rect::from_two_pos(from, to).intersect(picture);
+            ui.data_mut(|data| data.insert_temp(rect_id, rect));
+            shown = Some(rect);
         }
     }
+    let mut finished = None;
+    if response.drag_stopped() {
+        finished = ui.data_mut(|data| {
+            data.remove::<Pos2>(origin_id);
+            let rect = data.get_temp::<Rect>(rect_id);
+            data.remove::<Rect>(rect_id);
+            rect
+        });
+        shown = finished;
+    }
+    (shown, finished)
 }
 
 #[cfg(test)]
@@ -177,6 +211,39 @@ mod tests {
         assert_eq!(at, Pos2::new(60.0, 70.0));
         let back = to_frame(at, picture);
         assert!((back[0] - 0.25).abs() < 1e-6 && (back[1] - 0.5).abs() < 1e-6);
+    }
+
+    /// One frame of a 400 by 300 screen with the pointer `events`, a drag area over `picture`;
+    /// what [`drawn_box`] answers.
+    fn pick_frame(ctx: &egui::Context, picture: Rect, events: Vec<egui::Event>) -> (Option<Rect>, Option<Rect>) {
+        let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))), events, ..Default::default() };
+        let mut answer = (None, None);
+        let mut output = ctx.run_ui(input, |ui| {
+            let response = ui.interact(picture, ui.scope_id().with("pick-test"), Sense::drag());
+            answer = drawn_box(ui, &response, picture);
+        });
+        output.textures_delta.clear();
+        answer
+    }
+
+    fn button(at: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn a_released_drag_leaves_the_box_it_drew() {
+        let ctx = egui::Context::default();
+        let picture = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(300.0, 200.0));
+        let (from, to) = (Pos2::new(50.0, 60.0), Pos2::new(150.0, 120.0));
+        pick_frame(&ctx, picture, vec![egui::Event::PointerMoved(from)]);
+        pick_frame(&ctx, picture, vec![button(from, true)]);
+        pick_frame(&ctx, picture, vec![egui::Event::PointerMoved(Pos2::new(100.0, 90.0))]);
+        let (shown, finished) = pick_frame(&ctx, picture, vec![egui::Event::PointerMoved(to)]);
+        assert_eq!((shown, finished), (Some(Rect::from_two_pos(from, to)), None), "drawn while dragged");
+        let (_, finished) = pick_frame(&ctx, picture, vec![button(to, false)]);
+        assert_eq!(finished, Some(Rect::from_two_pos(from, to)), "the release leaves the box");
+        let (shown, finished) = pick_frame(&ctx, picture, vec![]);
+        assert_eq!((shown, finished), (None, None), "nothing after the release");
     }
 
     #[test]

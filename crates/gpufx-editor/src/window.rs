@@ -1501,6 +1501,10 @@ impl AgentHost for Session {
         self.paths.clone()
     }
 
+    fn decode_paths(&self) -> Arc<ProjectPaths> {
+        self.preview_paths.clone()
+    }
+
     fn export_out(&self) -> Option<PathBuf> {
         self.export_out.clone()
     }

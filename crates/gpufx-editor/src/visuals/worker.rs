@@ -36,6 +36,8 @@ pub struct SourceFacts {
     pub aspect: f32,
     /// How long the source runs, when it says.
     pub length: Option<Time>,
+    /// The frame rate of the pictures as `(num, den)` frames per second, when the file states one.
+    pub rate: Option<(i32, i32)>,
 }
 
 /// The file work behind the pictures. A trait so the pool can be tested without FFmpeg.
@@ -392,7 +394,7 @@ mod tests {
         }
 
         fn inspect(&self, _: &Path) -> Result<SourceFacts, String> {
-            Ok(SourceFacts { has_video: true, has_audio: false, aspect: 1.0, length: None })
+            Ok(SourceFacts { has_video: true, has_audio: false, aspect: 1.0, length: None, rate: None })
         }
 
         fn frame(&self, _: &mut (), _: u32, _: &Path, at: Time, _: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {

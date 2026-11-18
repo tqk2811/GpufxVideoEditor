@@ -687,4 +687,37 @@ mod tests {
             }
         }
     }
+    /// A file stored landscape and shown turned a quarter (a phone video): the tracker reads the
+    /// upright picture, in the shape the editor gives the clip, and the way ffmpeg turns it.
+    #[test]
+    fn a_turned_file_is_tracked_upright_in_the_shape_of_its_clip() {
+        use crate::visuals::worker::Generator;
+        let tool = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/ffmpeg/bin/ffmpeg.exe"));
+        let dir = std::env::temp_dir().join(format!("gpufx-tracking-turned-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ffmpeg = |arguments: &[&str]| {
+            let status = std::process::Command::new(&tool).args(["-hide_banner", "-y", "-v", "error"]).args(arguments).status().expect("ffmpeg runs");
+            assert!(status.success(), "ffmpeg {arguments:?}");
+        };
+        let stored = dir.join("stored.mp4");
+        let turned = dir.join("turned.mp4");
+        // A bright block near the top left of the stored picture shows where the turn takes it.
+        ffmpeg(&["-f", "lavfi", "-i", "color=c=gray:s=640x360:r=30:d=1", "-vf", "drawbox=x=20:y=20:w=260:h=150:color=white:t=fill", "-c:v", "libopenh264", "-pix_fmt", "yuv420p", "-b:v", "4M", &stored.to_string_lossy()]);
+        ffmpeg(&["-display_rotation", "90", "-i", &stored.to_string_lossy(), "-c", "copy", &turned.to_string_lossy()]);
+        let facts = crate::visuals::backend::FfmpegGenerator.inspect(&turned).expect("inspect");
+        let mut frames = FileFrames::open(&turned).expect("open");
+        let (picture, _) = frames.frame_at(Time::ZERO, &|| false).expect("a frame");
+        assert!(picture.height > picture.width, "upright: {}x{}", picture.width, picture.height);
+        let shape = picture.width as f32 / picture.height as f32;
+        assert!((shape - facts.aspect).abs() < 0.02, "tracker {shape} and clip {} agree", facts.aspect);
+        // ffmpeg turns the file by itself on decoding: the same picture.
+        let raw = dir.join("upright.gray");
+        let size = format!("scale={}:{}", picture.width, picture.height);
+        ffmpeg(&["-i", &turned.to_string_lossy(), "-frames:v", "1", "-vf", &size, "-f", "rawvideo", "-pix_fmt", "gray", &raw.to_string_lossy()]);
+        let oracle = std::fs::read(&raw).unwrap();
+        assert_eq!(oracle.len(), picture.data.len());
+        let difference = picture.data.iter().zip(&oracle).map(|(a, b)| (a - f32::from(*b) / 255.0).abs()).sum::<f32>() / oracle.len() as f32;
+        assert!(difference < 0.05, "turned the way ffmpeg turns it: mean difference {difference}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

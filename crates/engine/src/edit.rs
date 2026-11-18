@@ -1507,6 +1507,13 @@ pub const MAX_BAKED_KEYFRAMES: usize = crate::keyframe::MAX_KEYFRAMES;
 /// to where the clip shows with the follow; then the follow goes. The keyframes it writes replace
 /// those of the same properties. A preset animation of a text clip moves on top as before, only
 /// now after the motion rather than before it.
+///
+/// Keyframes start at the clip's start: inside a transition into the clip, where it already shows
+/// before its start (a negative offset), the values hold those of its first frame, as keyframes
+/// hold their first value before it, rather than following the object there. Each value is
+/// clamped to the range a keyframe takes ([`MAX_PLACEMENT_OFFSET`], [`MIN_PLACEMENT_WIDTH`] to
+/// [`MAX_PLACEMENT_WIDTH`], [`crate::keyframe::MAX_ROTATION`]), so an object followed far out of
+/// the frame bakes to the edge of that range and the clip stops short of where the follow put it.
 pub fn bake_follow(project: &Project, key: ClipKey, source_aspect: f64) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
