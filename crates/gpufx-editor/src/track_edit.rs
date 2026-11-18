@@ -292,6 +292,16 @@ impl EditorState {
         self.ui.track_run_request = Some(TrackRunAsk { track_id: id, from, direction, limit });
     }
 
+    /// Whether a run of motion track `id` for clip `key` would start from a sample with four
+    /// corners (the sample [`Self::ask_track_run`] starts from), which always runs the planar
+    /// tracker of the Fast mode.
+    pub fn track_run_starts_planar(&self, key: ClipKey, id: u32) -> bool {
+        let Some(track) = self.project().motion_track(id) else { return false };
+        let tolerance = self.sample_tolerance(key);
+        let from = self.clip_frame_now(key).and_then(|(_, at)| sample_near(track, at, tolerance)).map(|sample| sample.source_time);
+        crate::tracking::RunRequest::for_track(track, from, Direction::Forward, true).is_ok_and(|request| request.start.quad.is_some())
+    }
+
     /// Starts the run `ask` reading `decode_path`; a refusal goes to the status line.
     pub fn run_track_ask(&mut self, decode_path: std::path::PathBuf, ask: TrackRunAsk) {
         let started = self.track_request(ask.track_id, ask.from, ask.direction, true, self.ui.track_mode).and_then(|request| self.start_track_request(decode_path, crate::tracking::RunRequest { limit: ask.limit, ..request }));
@@ -515,6 +525,19 @@ mod tests {
             engine::follow_transform(project, follow, &mut transform, at);
         }
         transform.rect(16.0 / 9.0, clip.censor.unwrap().aspect).x
+    }
+
+    #[test]
+    fn a_run_from_four_corners_is_known_before_it_starts_so_robust_is_off() {
+        let mut state = rigged();
+        let video = ClipKey { track: 0, clip: 0 };
+        state.set_playhead(Time::from_ticks(SECOND));
+        assert!(!state.track_run_starts_planar(video, 1), "a track of boxes may run Robust");
+        assert!(!state.track_run_starts_planar(video, 9), "no such track");
+        state.set_track_planar(video, 1, true);
+        assert!(state.track_run_starts_planar(video, 1), "the sample at the playhead has four corners");
+        state.set_track_planar(video, 1, false);
+        assert!(!state.track_run_starts_planar(video, 1));
     }
 
     #[test]

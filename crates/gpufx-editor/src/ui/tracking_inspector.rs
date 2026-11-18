@@ -61,7 +61,8 @@ pub(super) fn tracking_rows(ui: &mut egui::Ui, state: &mut EditorState, key: Cli
     if ui.checkbox(&mut planar, language.t(Message::TrackPlanar)).on_hover_text(language.t(Message::TrackPlanarHint)).changed() {
         state.set_track_planar(key, current.id, planar);
     }
-    mode_rows(ui, state);
+    let planar_start = state.track_run_starts_planar(key, current.id);
+    mode_rows(ui, state, planar_start);
     match state.track_progress(current.id) {
         Some(progress) => {
             ui.horizontal(|ui| {
@@ -126,18 +127,23 @@ fn face_censor_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
 }
 
 /// The tracker choice and, for the robust tracker without its model, the download or import.
-fn mode_rows(ui: &mut egui::Ui, state: &mut EditorState) {
+/// With `planar_start` (the run starts from four corners, which always runs Fast) the Robust
+/// option is off, with a tooltip saying why.
+fn mode_rows(ui: &mut egui::Ui, state: &mut EditorState, planar_start: bool) {
     let language = state.language();
     ui.horizontal(|ui| {
         ui.label(language.t(Message::TrackMode));
         for (mode, label, hint) in [(TrackMode::Fast, Message::TrackModeFast, Message::TrackModeFastHint), (TrackMode::Robust, Message::TrackModeRobust, Message::TrackModeRobustHint)] {
-            if ui.selectable_label(state.ui.track_mode == mode, language.t(label)).on_hover_text(language.t(hint)).clicked() {
+            let robust_off = planar_start && mode == TrackMode::Robust;
+            let chosen = if planar_start { mode == TrackMode::Fast } else { state.ui.track_mode == mode };
+            let response = ui.add_enabled(!robust_off, egui::Button::selectable(chosen, language.t(label))).on_hover_text(language.t(hint)).on_disabled_hover_text(language.t(Message::TrackModeRobustPlanar));
+            if response.clicked() {
                 state.ui.track_mode = mode;
             }
         }
     });
     let model = crate::tracking_models::TrackingModel::NanoTrack;
-    if state.ui.track_mode != TrackMode::Robust || crate::tracking_models::installed(model, &crate::project_file::package_roots()).is_some() {
+    if planar_start || state.ui.track_mode != TrackMode::Robust || crate::tracking_models::installed(model, &crate::project_file::package_roots()).is_some() {
         return;
     }
     model_rows(ui, state, model, Message::TrackModelMissing);
