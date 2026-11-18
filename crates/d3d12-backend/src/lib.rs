@@ -14,6 +14,7 @@ mod alpha_merge;
 mod animated_gif;
 mod animated_webp;
 mod audio;
+mod censor_mix;
 mod clip_animation_pack;
 mod compositor;
 mod decoder;

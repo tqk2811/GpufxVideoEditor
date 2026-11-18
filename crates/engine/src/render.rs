@@ -15,11 +15,12 @@ use crate::clip_animation::animation_effects;
 use crate::keyframe::effects_at;
 use crate::keyframe::ClipTransform;
 use crate::keyframe::ClipProperty;
-use crate::project::{text_step_up, Clip, ClipMatte, Effect, Project, TextContent};
+use crate::project::{text_step_up, CensorContent, CensorMode, Clip, ClipMatte, Effect, PlacedRect, Project, RegionShape, TextContent};
+use crate::tracking::{follow_region, RegionBox};
+use std::borrow::Cow;
 use crate::schedule::{
     frame_count, frame_time, layers_at_frame, ClipClock, LayerContent, Progress, SourceSample,
 };
-use crate::frame_rate::FrameRate;
 use crate::time::Time;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -123,6 +124,13 @@ pub trait Compositor {
         at: FrameContext,
     ) -> Result<Self::Image, RenderError>;
 
+    /// Changes `base`, the picture of the tracks below a censor clip, inside `region`, and returns
+    /// the result as a new image; the caller still releases `base`. `base` may be the image of
+    /// [`Compositor::blank`]. The default refuses, for a backend without censor regions.
+    fn censor(&mut self, _base: Self::Image, _region: &CensorRegion, _at: FrameContext) -> Result<Self::Image, RenderError> {
+        Err(RenderError("censor regions are not supported by this compositor".to_owned()))
+    }
+
     /// Draws `top` over `base`.
     fn composite(
         &mut self,
@@ -147,6 +155,46 @@ pub trait Compositor {
     /// Frees whatever is kept only for the next frames, for a caller that stopped rendering
     /// (a paused preview, a finished export). The next frame builds what it needs again.
     fn trim(&mut self) {}
+}
+
+/// The box of a censor clip in the output frame and how it hides, see [`Compositor::censor`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CensorRegion {
+    /// The box before turning, in parts of the frame.
+    pub rect: PlacedRect,
+    /// Clockwise degrees around the middle of the box.
+    pub rotation: f64,
+    pub shape: RegionShape,
+    /// Softness of the edge, in parts of half the smaller side of the box.
+    pub feather: f64,
+    /// Strengths in pixels of a 1080-line frame.
+    pub mode: CensorMode,
+    /// How much of the change shows, 0 to 1.
+    pub opacity: f64,
+}
+
+impl CensorRegion {
+    /// The region of censor clip `sample` at this frame, for a frame of `output_aspect`.
+    pub fn of(sample: &SourceSample<'_>, censor: &CensorContent, output_aspect: f64) -> CensorRegion {
+        let rect = sample.transform.rect(output_aspect, censor.aspect);
+        CensorRegion { rect, rotation: sample.transform.rotation, shape: censor.shape, feather: censor.feather, mode: censor.mode, opacity: sample.transform.opacity.clamp(0.0, 1.0) }
+    }
+}
+
+/// `effects` (of clip `sample`, at this frame) with the regions that follow a motion track moved
+/// where the track puts them and their link dropped, so the compositor reads a still box.
+fn regions_now<'a>(project: &Project, sample: &SourceSample<'_>, effects: Cow<'a, [Effect]>, t: Time) -> Cow<'a, [Effect]> {
+    if !effects.iter().any(|effect| effect.region.is_some_and(|region| region.link.is_some())) {
+        return effects;
+    }
+    let mut effects = effects.into_owned();
+    for effect in &mut effects {
+        let Some(region) = effect.region.as_mut() else { continue };
+        let Some(link) = region.link.take() else { continue };
+        let moved = follow_region(project, sample.model, &link, RegionBox { cx: region.cx, cy: region.cy, w: region.w, h: region.h, angle: region.angle }, t);
+        (region.cx, region.cy, region.w, region.h, region.angle) = (moved.cx, moved.cy, moved.w, moved.h, moved.angle);
+    }
+    Cow::Owned(effects)
 }
 
 /// Where the finished frames go.
@@ -298,8 +346,9 @@ fn decode_sample<C: Compositor>(
 /// [`animation_effects`]). When that fails and a preset added an effect, the clip is prepared again
 /// with its own effects only: a preset effect whose package went away since the packs were read
 /// leaves the clip drawn without it, as a missing package does when the packs are read.
-fn prepare_sample<C: Compositor>(compositor: &mut C, key: ClipKey, frame: &mut <C::Decoder as Decoder>::Frame, sample: &SourceSample<'_>, at: FrameContext, frame_rate: FrameRate) -> Result<C::Image, RenderError> {
-    let own = effects_at(sample.effects, sample.offset);
+fn prepare_sample<C: Compositor>(compositor: &mut C, project: &Project, key: ClipKey, frame: &mut <C::Decoder as Decoder>::Frame, sample: &SourceSample<'_>, at: FrameContext) -> Result<C::Image, RenderError> {
+    let frame_rate = project.output.frame_rate;
+    let own = regions_now(project, sample, effects_at(sample.effects, sample.offset), at.time);
     let added = animation_effects(&sample.model.animation, sample.clock, frame_rate);
     let matte = if sample.model.text.is_some() { ClipMatte::default() } else { sample.model.matte };
     with_preset_fallback(&own, added, |effects| compositor.prepare_clip(key, frame, effects, &matte, sample.transform, sample.clock, at))
@@ -324,7 +373,7 @@ fn render_layer<C: Compositor>(
     track: usize,
     content: &LayerContent<'_>,
     at: FrameContext,
-    frame_rate: FrameRate,
+    project: &Project,
 ) -> Result<C::Image, RenderError> {
     let key = |clip| ClipKey { track, clip };
     match content {
@@ -334,7 +383,7 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(sample.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let image = prepare_sample(compositor, key(sample.clip), &mut frame, sample, at, frame_rate)?;
+            let image = prepare_sample(compositor, project, key(sample.clip), &mut frame, sample, at)?;
             kept.0.push(frame);
             Ok(image)
         }
@@ -355,9 +404,9 @@ fn render_layer<C: Compositor>(
                 .get_mut(key(to.clip))
                 .expect("just used")
                 .wait_idle()?;
-            let from_image = prepare_sample(compositor, key(from.clip), &mut from_frame, from, at, frame_rate)?;
+            let from_image = prepare_sample(compositor, project, key(from.clip), &mut from_frame, from, at)?;
             let to_image =
-                match prepare_sample(compositor, key(to.clip), &mut to_frame, to, at, frame_rate) {
+                match prepare_sample(compositor, project, key(to.clip), &mut to_frame, to, at) {
                     Ok(image) => image,
                     Err(e) => {
                         compositor.release(from_image);
@@ -426,7 +475,21 @@ impl<C: Compositor> FrameRenderer<C> {
         for layer in &layers {
             used.extend(layer_clips(&layer.content, layer.track));
             let failed = |e: RenderError| RenderError(format!("frame {index}, track {}: {e}", layer.track));
-            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project.output.frame_rate) {
+            // A censor clip draws no picture of its own: it changes what the tracks below made.
+            if let LayerContent::Clip(sample) = &layer.content {
+                if let Some(censor) = &sample.model.censor {
+                    let region = CensorRegion::of(sample, censor, f64::from(project.output.width) / f64::from(project.output.height.max(1)));
+                    let base = match canvas {
+                        Some(base) => base,
+                        None => compositor.blank().map_err(failed)?,
+                    };
+                    let hidden = compositor.censor(base, &region, at);
+                    compositor.release(base);
+                    canvas = Some(hidden.map_err(failed)?);
+                    continue;
+                }
+            }
+            let image = match render_layer(compositor, &mut self.decoders, &mut kept, layer.track, &layer.content, at, project) {
                 Ok(image) => image,
                 Err(e) => {
                     if let Some(base) = canvas {
@@ -579,11 +642,18 @@ mod tests {
             })
         }
 
+        fn censor(&mut self, _base: usize, region: &CensorRegion, at: FrameContext) -> Result<usize, RenderError> {
+            let mut journal = self.journal.borrow_mut();
+            journal.acquired += 1;
+            journal.events.push(format!("f{} censor {:?} x{:.2}", at.index, region.mode, region.rect.x));
+            Ok(journal.acquired)
+        }
+
         fn prepare_clip(
             &mut self,
             key: ClipKey,
             frame: &mut String,
-            _effects: &[Effect],
+            effects: &[Effect],
             matte: &ClipMatte,
             _transform: ClipTransform,
             _clock: ClipClock,
@@ -594,7 +664,10 @@ mod tests {
                 return Err(RenderError("broken effect".to_owned()));
             }
             journal.acquired += 1;
-            let matted = if matte.is_off() { String::new() } else { format!(" matte {:?}", matte.model) };
+            let mut matted = if matte.is_off() { String::new() } else { format!(" matte {:?}", matte.model) };
+            for region in effects.iter().filter_map(|effect| effect.region) {
+                matted.push_str(&format!(" region {:.2}", region.cx));
+            }
             journal.events.push(format!(
                 "f{} clip {}:{} {frame}{matted}",
                 at.index, key.track, key.clip
@@ -1092,6 +1165,32 @@ mod tests {
             let picked = |events: &[String]| events.iter().filter(|e| e.contains(" clip ")).cloned().collect::<Vec<_>>();
             assert_eq!(picked(&journal.borrow().events), picked(&exported.events), "speed {speed}");
         }
+    }
+
+    const CENSOR: &str = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},"tracks":[
+        {"clips":[{"source":"a","start":100,"source_in":0,"duration":100}]},
+        {"kind":"sticker","clips":[{"source":"censor:","start":0,"source_in":0,"duration":200,"placement":{"x":0.25,"y":0.25,"width":0.5},"censor":{"aspect":1.0,"mode":{"kind":"pixelate","block":8}}}]}]}"#;
+
+    #[test]
+    fn a_censor_clip_changes_the_picture_below_and_opens_no_decoder() {
+        let (journal, summary) = run(CENSOR);
+        assert_eq!(summary.frames, 2);
+        assert!(!journal.events.iter().any(|event| event.contains("censor:")), "no decoder for the region: {:?}", journal.events);
+        assert_eq!(journal.events.iter().filter(|event| event.contains("censor Pixelate")).count(), 2, "{:?}", journal.events);
+        // With nothing below, the region changes the blank frame.
+        assert_eq!(journal.events[0], "blank");
+        assert_eq!(journal.acquired, journal.released, "every image is given back");
+    }
+
+    #[test]
+    fn an_effect_region_reaches_the_compositor_moved_by_its_track() {
+        let json = r#"{"version":1,"output":{"width":16,"height":16,"frame_rate":{"num":900,"den":1}},
+            "motion_tracks":[{"id":1,"media_path":"a","aspect":1.0,"samples":[{"source_time":0,"cx":0.2,"cy":0.5,"w":0.1,"h":0.1},{"source_time":100,"cx":0.6,"cy":0.5,"w":0.1,"h":0.1}]}],
+            "tracks":[{"clips":[{"source":"a","start":0,"source_in":0,"duration":200,
+            "effects":[{"package":"pixelate","params":{"block":4},"region":{"cx":0.3,"cy":0.5,"w":0.2,"h":0.2,"link":{"track_id":1,"anchor_source_time":0}}}]}]}]}"#;
+        let (journal, _) = run(json);
+        assert!(journal.events.iter().any(|event| event.starts_with("f0 clip") && event.ends_with("region 0.30")), "{:?}", journal.events);
+        assert!(journal.events.iter().any(|event| event.starts_with("f1 clip") && event.ends_with("region 0.70")), "{:?}", journal.events);
     }
 
     #[test]

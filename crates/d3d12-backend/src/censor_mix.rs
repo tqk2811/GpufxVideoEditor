@@ -1,0 +1,104 @@
+//! The built-in package that hides a region of a picture: a censor clip, or an effect limited to a
+//! region of its clip.
+//!
+//! It mixes the picture with a changed copy of it through a rectangle or an ellipse, turned and
+//! with a soft edge. The changed copy is the second input (a blur made before), blocks of the
+//! picture made here (pixelate), or one colour. Built in memory, as the alpha packages are, because
+//! it is part of how the compositor works.
+
+use std::sync::Arc;
+
+use gpufx_core::{Effect, GpuContext};
+
+use crate::alpha_merge::effect_of;
+
+const MANIFEST: &str = r#"{
+  "api": 1,
+  "id": "io.github.tqk2811.editor-censor-mix",
+  "name": "Censor mix",
+  "used_for": ["gpufx"],
+  "version": "1.0.0",
+  "description": "Mixes the picture with a hidden copy through a turned rectangle or ellipse with a soft edge.",
+  "inputs": [{ "name": "picture" }, { "name": "hidden", "same_size": true }],
+  "params": [
+    { "name": "x", "type": "float", "default": 0, "min": -16, "max": 16 },
+    { "name": "y", "type": "float", "default": 0, "min": -16, "max": 16 },
+    { "name": "width", "type": "float", "default": 1, "min": 0, "max": 16 },
+    { "name": "height", "type": "float", "default": 1, "min": 0, "max": 1000 },
+    { "name": "rotation", "type": "float", "default": 0, "min": -100000, "max": 100000 },
+    { "name": "feather", "type": "float", "default": 0, "min": 0, "max": 100000 },
+    { "name": "ellipse", "type": "float", "default": 0, "min": 0, "max": 1 },
+    { "name": "opacity", "type": "float", "default": 1, "min": 0, "max": 1 },
+    { "name": "mode", "type": "float", "default": 0, "min": 0, "max": 2 },
+    { "name": "block", "type": "float", "default": 1, "min": 1, "max": 100000 },
+    { "name": "red", "type": "float", "default": 0, "min": 0, "max": 1 },
+    { "name": "green", "type": "float", "default": 0, "min": 0, "max": 1 },
+    { "name": "blue", "type": "float", "default": 0, "min": 0, "max": 1 },
+    { "name": "alpha", "type": "float", "default": 1, "min": 0, "max": 1 },
+    { "name": "blank", "type": "float", "default": 0, "min": 0, "max": 1 }
+  ],
+  "groups": [{ "passes": [{ "shader": "shaders/main.wgsl" }] }]
+}"#;
+
+const SHADER: &str = r#"fn picture_at(p: vec2i) -> vec4f {
+    if (params.blank > 0.5) { return vec4f(0.0, 0.0, 0.0, 1.0); }
+    let limit = vec2i(textureDimensions(picture)) - vec2i(1);
+    return textureLoad(picture, clamp(p, vec2i(0), limit), 0);
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+    if (!gpufx_in_bounds(id)) { return; }
+    let p = vec2i(id.xy);
+    let original = picture_at(p);
+    // In output pixels, so a turn keeps the shape of the box whatever the frame's is.
+    let size = vec2f(params.width, params.height) * globals.size;
+    let centre = (vec2f(params.x, params.y) + vec2f(params.width, params.height) * 0.5) * globals.size;
+    let turn = radians(params.rotation);
+    let cosine = cos(turn);
+    let sine = sin(turn);
+    let d = vec2f(id.xy) + 0.5 - centre;
+    let local = vec2f(cosine * d.x + sine * d.y, cosine * d.y - sine * d.x);
+    let half = max(size * 0.5, vec2f(0.0001));
+    // How far inside the edge the pixel is, in pixels.
+    var inside = 0.0;
+    if (params.ellipse > 0.5) {
+        inside = (1.0 - length(local / half)) * min(half.x, half.y);
+    } else {
+        let room = half - abs(local);
+        inside = min(room.x, room.y);
+    }
+    var mask = clamp(inside + 0.5, 0.0, 1.0);
+    if (params.feather >= 1.0) {
+        mask = smoothstep(0.0, params.feather, inside);
+    }
+    mask = mask * params.opacity;
+    if (mask <= 0.0) {
+        gpufx_write(id, original);
+        return;
+    }
+    var changed = vec4f(params.red, params.green, params.blue, params.alpha);
+    if (params.mode < 0.5) {
+        changed = textureLoad(hidden, p, 0);
+    } else if (params.mode < 1.5) {
+        // The mean of a few points spread over the block, on a grid of the frame.
+        let block = max(params.block, 1.0);
+        let cell = floor(vec2f(id.xy) / block) * block;
+        let steps = i32(min(ceil(block), 16.0));
+        var sum = vec4f(0.0);
+        for (var j = 0; j < steps; j = j + 1) {
+            for (var i = 0; i < steps; i = i + 1) {
+                let q = cell + (vec2f(f32(i), f32(j)) + 0.5) * block / f32(steps);
+                sum = sum + picture_at(vec2i(q));
+            }
+        }
+        changed = sum / f32(steps * steps);
+    }
+    gpufx_write(id, mix(original, changed, mask));
+}
+"#;
+
+/// Takes `picture, hidden`; see the module documentation.
+pub(crate) fn censor_mix_effect(context: &Arc<GpuContext>) -> Result<Effect, String> {
+    effect_of(context, MANIFEST, SHADER)
+}

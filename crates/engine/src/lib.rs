@@ -62,7 +62,7 @@ pub use project::{
 , TextBloom, MAX_BLOOM_RADIUS, MAX_BLOOM_DIR, MAX_GLOW_INTENSITY, GLOW_FALLOFF_RANGE, TextTransform, NORMAL_WEIGHT, TEXT_WEIGHT_RANGE, MAX_LETTER_SPACING, MAX_GLOW_RADIUS, TEXT_SOURCE, text_raster_scale, text_step_up, MAX_TEXT_SCALE, MIN_TEXT_SCALE,
     is_image_source, is_sticker_source, STICKER_SOURCE_PREFIX, speed_in_range, speed_milli, IMAGE_EXTENSIONS, MAX_SPEED, MIN_SPEED, SPEED_SCALE, SUPPORTED_VERSION,
 };
-pub use render::{ClipKey, DecoderSpec, RenderError};
+pub use render::{CensorRegion, ClipKey, DecoderSpec, RenderError};
 pub use schedule::{
     follow_transform, frame_count, frame_time, layers_at_frame, ClipClock, Layer, LayerContent, Progress, SourceSample,
     PROGRESS_PPM_SCALE,

@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 
-use engine::render::{ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
+use engine::render::{CensorRegion, ClipCache, ClipKey, Compositor, Decoder, FrameContext, RenderError};
+use engine::{CensorMode, EffectRegion, PlacedRect, RegionShape};
 use engine::schedule::{ClipClock, Progress};
 use engine::{is_image_source, text_raster_scale, Clip, ClipMatte, ClipTransform, MatteModel, Effect as ProjectEffect, TextContent, Time, TICKS_PER_SECOND};
 use gpufx_core::d3d12::D3d12Frame;
@@ -35,6 +36,7 @@ use crate::matte::{find_matting_model, matte_texture, MatteCache, MatteKey, Matt
 use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
 use crate::rotated_place::rotated_place_effect;
+use crate::censor_mix::censor_mix_effect;
 use crate::still::{aligned_rows, premultiplied_still, read_animation, read_still, AnimatedPicture, StillPicture};
 use gpufx_text::TextRasterizer;
 use sha2::{Digest, Sha256};
@@ -822,6 +824,9 @@ pub struct D3d12Compositor {
     blurrer: Option<EffectGraph>,
     /// Set once the blur package failed to load, so clips draw unblurred and the warning shows once.
     blur_unavailable: bool,
+    /// Mixes a hidden copy into a region, for censor clips and effect regions. Built the first time
+    /// one is drawn.
+    censor_mixer: Option<EffectGraph>,
     /// A fully transparent image, only ever read. Not in the pool, whose images hold old pictures.
     transparent: Option<ImageId>,
     stills: HashMap<StillKey, CachedStill>,
@@ -908,7 +913,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, transparent: None, stills: HashMap::new(), stills_used: 0, animations: HashMap::new(), text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
+        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, censor_mixer: None, transparent: None, stills: HashMap::new(), stills_used: 0, animations: HashMap::new(), text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
     }
 
     /// Why matting models could not be used, once per model: missing or failing to load. A clip
@@ -1547,6 +1552,124 @@ impl D3d12Compositor {
         Ok(output)
     }
 
+    /// Hides `region` of `base` (or of a black frame when it is [`BLANK_IMAGE`]) into a new image;
+    /// `base` stays the caller's. A blur or blocks of a black frame change nothing, so those give
+    /// [`BLANK_IMAGE`] back.
+    fn hide(&mut self, base: ImageId, region: &CensorRegion, info: &FrameInfo) -> Result<ImageId, String> {
+        let (width, height) = (self.width, self.height);
+        // Strengths are in pixels of a 1080-line frame.
+        let scale = f64::from(height) / 1080.0;
+        let blank = base == BLANK_IMAGE;
+        if blank && !matches!(region.mode, CensorMode::Solid { .. }) {
+            return Ok(BLANK_IMAGE);
+        }
+        let picture = if blank { self.transparent_image()? } else { base };
+        let premultiplied = !blank && self.images[picture.0].premultiplied;
+        let mut color = [0.0; 4];
+        let (mode, block, hidden) = match region.mode {
+            CensorMode::Blur { radius } => {
+                let pixels = radius * scale;
+                let hidden = if pixels >= MIN_BLUR_PIXELS { Some(self.blurred_copy(picture, pixels, info)?) } else { None };
+                (0.0, 1.0, hidden)
+            }
+            CensorMode::Pixelate { block } => (1.0, (block * scale).max(1.0), None),
+            CensorMode::Solid { color: rgba } => {
+                let alpha = f64::from(rgba[3]) / 255.0;
+                let part = |value: u8| f64::from(value) / 255.0 * if premultiplied { alpha } else { 1.0 };
+                color = [part(rgba[0]), part(rgba[1]), part(rgba[2]), alpha];
+                (2.0, 1.0, None)
+            }
+        };
+        let release_hidden = |this: &mut Self| {
+            if let Some(hidden) = hidden {
+                this.release_image(hidden);
+            }
+        };
+        let mixer = match &mut self.censor_mixer {
+            Some(mixer) => mixer,
+            empty => match load_censor_mixer(&self.gpu.context) {
+                Ok(mixer) => empty.insert(mixer),
+                Err(message) => {
+                    release_hidden(self);
+                    return Err(message);
+                }
+            },
+        };
+        let rect = region.rect;
+        let feather = region.feather.clamp(0.0, 1.0) * (rect.width * f64::from(width)).min(rect.height * f64::from(height)) / 2.0;
+        let numbers = [
+            ("x", rect.x), ("y", rect.y), ("width", rect.width.max(0.0)), ("height", rect.height.max(0.0)), ("rotation", region.rotation), ("feather", feather),
+            ("ellipse", if region.shape == RegionShape::Ellipse { 1.0 } else { 0.0 }), ("opacity", region.opacity.clamp(0.0, 1.0)), ("mode", mode), ("block", block),
+            ("red", color[0]), ("green", color[1]), ("blue", color[2]), ("alpha", color[3]), ("blank", if blank { 1.0 } else { 0.0 }),
+        ];
+        for (name, value) in numbers {
+            if let Err(e) = mixer.set_param(name, &[value]) {
+                release_hidden(self);
+                return Err(format!("censor mix.{name}: {e}"));
+            }
+        }
+        let output = match self.acquire() {
+            Ok(output) => output,
+            Err(message) => {
+                release_hidden(self);
+                return Err(message);
+            }
+        };
+        let second = hidden.unwrap_or(picture);
+        let mixer = self.censor_mixer.as_mut().expect("built above");
+        let mut inputs = [self.images[picture.0].frame(width, height), self.images[second.0].frame(width, height)];
+        let result = Self::run_graph(&self.gpu, mixer, &mut inputs, &mut self.images, output, width, height, info);
+        self.images[picture.0].fence_value = inputs[0].fence_value.max(inputs[1].fence_value);
+        self.images[second.0].fence_value = self.images[second.0].fence_value.max(inputs[1].fence_value);
+        release_hidden(self);
+        if let Err(message) = result {
+            self.release_image(output);
+            return Err(message);
+        }
+        self.images[output.0].premultiplied = premultiplied;
+        Ok(output)
+    }
+
+    /// A blurred copy of `image` by `radius` pixels; `image` stays the caller's. A radius past what
+    /// the blur package takes runs it several times, which adds up as the square root of the sum of
+    /// the squares.
+    fn blurred_copy(&mut self, image: ImageId, radius: f64, info: &FrameInfo) -> Result<ImageId, String> {
+        if self.blurrer.is_none() {
+            self.blurrer = Some(load_blur(&self.gpu.context, &self.paths)?);
+        }
+        let (width, height) = (self.width, self.height);
+        let passes = (radius / MAX_BLUR_PASS).powi(2).ceil().clamp(1.0, MAX_BLUR_PASSES);
+        let each = (radius / passes.sqrt()).min(MAX_BLUR_PASS);
+        let mut current = image;
+        for _ in 0..passes as u32 {
+            let blurrer = self.blurrer.as_mut().expect("loaded above");
+            let step = blurrer.set_param("radius", &[each]).map_err(|e| format!("blur.radius: {e}")).and_then(|()| self.acquire());
+            let output = match step {
+                Ok(output) => output,
+                Err(message) => {
+                    if current != image {
+                        self.release_image(current);
+                    }
+                    return Err(message);
+                }
+            };
+            let blurrer = self.blurrer.as_mut().expect("loaded above");
+            let mut inputs = [self.images[current.0].frame(width, height)];
+            let result = Self::run_graph(&self.gpu, blurrer, &mut inputs, &mut self.images, output, width, height, info);
+            self.images[current.0].fence_value = inputs[0].fence_value;
+            self.images[output.0].premultiplied = self.images[image.0].premultiplied;
+            if current != image {
+                self.release_image(current);
+            }
+            if let Err(message) = result {
+                self.release_image(output);
+                return Err(message);
+            }
+            current = output;
+        }
+        Ok(current)
+    }
+
     /// [`Self::place`] without the blur.
     fn place_sharp(&mut self, picture: ImageId, transform: ClipTransform, source_aspect: f64, margin: (f64, f64), through_alpha: bool, info: &FrameInfo) -> Result<ImageId, String> {
         let (width, height) = (self.width, self.height);
@@ -1733,6 +1856,19 @@ fn writes_alpha(gpu: &Gpu, graph: &mut EffectGraph, input_count: usize, info: &F
     result.unwrap_or(true)
 }
 
+/// The region effect `effect` hides through `region`, in parts of the picture before it is placed.
+/// The package's strength is in output pixels; a region counts in pixels of a 1080-line frame.
+fn region_of(effect: &ProjectEffect, region: EffectRegion, height: u32) -> CensorRegion {
+    let to_1080 = 1080.0 / f64::from(height.max(1));
+    let mode = match EffectRegion::mode_of(&effect.package, &effect.params).unwrap_or_default() {
+        CensorMode::Blur { radius } => CensorMode::Blur { radius: radius * to_1080 },
+        CensorMode::Pixelate { block } => CensorMode::Pixelate { block: block * to_1080 },
+        solid => solid,
+    };
+    let rect = PlacedRect { x: region.cx - region.w / 2.0, y: region.cy - region.h / 2.0, width: region.w, height: region.h };
+    CensorRegion { rect, rotation: region.angle, shape: region.shape, feather: region.feather, mode, opacity: 1.0 }
+}
+
 fn load_overlay(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<EffectGraph, String> {
     let path = package_path(paths, "packages/gpufx/ffmpeg/overlay")?;
     let mut effect = open_effect(context, &path, "overlay")?;
@@ -1758,6 +1894,16 @@ fn load_blur(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<EffectGr
     let path = package_path(paths, "packages/gpufx/ffmpeg/gaussian-blur")?;
     let mut holder = Some(open_effect(context, &path, "gaussian-blur")?);
     EffectGraph::parse("blur", |_| Ok(("blur".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("blur graph: {e}"))
+}
+
+/// The largest radius one run of the gaussian blur package takes.
+const MAX_BLUR_PASS: f64 = 48.0;
+/// The most runs of the blur for one censor blur.
+const MAX_BLUR_PASSES: f64 = 8.0;
+
+fn load_censor_mixer(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
+    let mut holder = Some(censor_mix_effect(context)?);
+    EffectGraph::parse("censor", |_| Ok(("censor".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("censor mix graph: {e}"))
 }
 
 fn load_rotator(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
@@ -1824,6 +1970,15 @@ impl Compositor for D3d12Compositor {
         self.composite_impl(base, top, at)
     }
 
+    fn censor(&mut self, base: ImageId, region: &CensorRegion, at: FrameContext) -> Result<ImageId, RenderError> {
+        let info = Self::info(at);
+        let output = self.hide(base, region, &info).map_err(RenderError)?;
+        if output == BLANK_IMAGE {
+            return Ok(output);
+        }
+        self.checked_output(output)
+    }
+
     fn blank(&mut self) -> Result<ImageId, RenderError> {
         self.blank_impl()
     }
@@ -1849,7 +2004,14 @@ impl D3d12Compositor {
     /// [`Compositor::prepare_clip`] once the matte, if any, is done: `matted` is the cut-out
     /// picture at the project size that stands for the frame.
     #[allow(clippy::too_many_arguments)]
-    fn prepare_picture(&mut self, key: ClipKey, frame: &mut SourceFrame, effects: &[ProjectEffect], matted: Option<ImageId>, transform: ClipTransform, clock: ClipClock, info: FrameInfo) -> Result<ImageId, RenderError> {
+    fn prepare_picture(&mut self, key: ClipKey, frame: &mut SourceFrame, all_effects: &[ProjectEffect], matted: Option<ImageId>, transform: ClipTransform, clock: ClipClock, info: FrameInfo) -> Result<ImageId, RenderError> {
+        // An effect limited to a region does not go into the graph: it hides its region of the
+        // picture the graph made, before the picture is placed, so the region is in parts of the
+        // picture and stays on the clip. Mixing through a shape after the graph is the one step
+        // every hiding effect shares, and it is the step censor clips already take.
+        let regional: Vec<CensorRegion> = all_effects.iter().filter_map(|effect| Some(region_of(effect, effect.region?, self.height))).collect();
+        let plain: Vec<ProjectEffect> = if regional.is_empty() { Vec::new() } else { all_effects.iter().filter(|effect| effect.region.is_none()).cloned().collect() };
+        let effects: &[ProjectEffect] = if regional.is_empty() { all_effects } else { &plain };
         let matted_input = matted.map(|image| self.images[image.0].frame(self.width, self.height));
         let (input, output) = input_then_output(|| matted_input.map_or_else(|| frame.input(), Ok), || self.acquire())?;
         let (width, height) = (self.width, self.height);
@@ -1924,6 +2086,19 @@ impl D3d12Compositor {
         }
         if matted.is_none() {
             frame.raise_fence_value(inputs[0].fence_value);
+        }
+        let mut output = output;
+        for region in &regional {
+            match self.hide(output, region, &info) {
+                Ok(hidden) => {
+                    self.release_image(output);
+                    output = hidden;
+                }
+                Err(message) => {
+                    self.release_image(output);
+                    return Err(RenderError(message));
+                }
+            }
         }
         let placed = match self.place(output, transform, source_aspect, margin, has_alpha, &info) {
             Ok(placed) => placed,
@@ -2142,6 +2317,104 @@ mod tests {
         assert_eq!(draw(0.0), (255, 0), "no blur leaves the edge as it is");
         let (left, right) = draw(MAX_BLUR_FRACTION);
         assert!(left < 250 && right > 5, "the largest blur, 8 pixels at this height, mixes both sides of the edge: {left} {right}");
+    }
+
+    /// A compositor of 640x360 on hardware, or `None` without one.
+    fn censor_rig() -> Option<D3d12Compositor> {
+        let (gpu, _) = overlay_on_hardware()?;
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        Some(D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), 640, 360).expect("a compositor"))
+    }
+
+    /// Hides `region` of a picture whose pixel (x, y) is `paint(x, y)`, and reads the result.
+    fn hidden(compositor: &mut D3d12Compositor, paint: impl Fn(u32, u32) -> [u8; 4], region: CensorRegion) -> Vec<u8> {
+        let (width, height) = (compositor.width, compositor.height);
+        let rgba = (0..width * height).flat_map(|i| paint(i % width, i / width)).collect();
+        let picture = StillPicture { width, height, rgba, has_alpha: false };
+        let image = ImageId(compositor.images.push(Image::upload(&compositor.gpu, &picture).expect("an upload")));
+        let output = compositor.hide(image, &region, &FrameInfo::new(0.0, 0)).expect("hidden");
+        let mut rgba = Vec::new();
+        compositor.read(output, &mut rgba).expect("read");
+        compositor.release(output);
+        compositor.release(image);
+        rgba
+    }
+
+    /// The middle half of the frame, upright and sharp.
+    fn middle_region(mode: CensorMode) -> CensorRegion {
+        CensorRegion { rect: PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }, rotation: 0.0, shape: RegionShape::Rect, feather: 0.0, mode, opacity: 1.0 }
+    }
+
+    fn red(rgba: &[u8], x: u32, y: u32) -> u8 {
+        rgba[((y * 640 + x) * 4) as usize]
+    }
+
+    fn stripes(x: u32, _y: u32) -> [u8; 4] {
+        if x % 2 == 0 { [255, 255, 255, 255] } else { [0, 0, 0, 255] }
+    }
+
+    #[test]
+    fn a_pixelated_region_is_blocks_inside_and_the_picture_outside() {
+        let Some(mut compositor) = censor_rig() else { return };
+        // 48 pixels of a 1080-line frame are 16 at 360 lines.
+        let rgba = hidden(&mut compositor, stripes, middle_region(CensorMode::Pixelate { block: 48.0 }));
+        for x in 160..176 {
+            assert_eq!(red(&rgba, x, 176), red(&rgba, 160, 176), "one block, one colour, at x {x}");
+        }
+        let inside = red(&rgba, 170, 180);
+        assert!((100..=155).contains(&inside), "the mean of the stripes: {inside}");
+        for x in 0..8 {
+            assert_eq!(red(&rgba, x, 180), stripes(x, 180)[0], "outside, the stripes as they were");
+            assert_eq!(red(&rgba, 320 + x, 40), stripes(320 + x, 40)[0], "above the region too");
+        }
+    }
+
+    #[test]
+    fn a_blurred_region_softens_an_edge_only_inside() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let edge = |x: u32, _y: u32| if x < 320 { [255, 255, 255, 255] } else { [0, 0, 0, 255] };
+        let rgba = hidden(&mut compositor, edge, middle_region(CensorMode::Blur { radius: 60.0 }));
+        let (left, right) = (red(&rgba, 319, 180), red(&rgba, 320, 180));
+        assert!(left < 230 && right > 25, "the edge is mixed inside: {left} {right}");
+        assert_eq!((red(&rgba, 319, 20), red(&rgba, 320, 20)), (255, 0), "and sharp above the region");
+    }
+
+    #[test]
+    fn a_feathered_edge_goes_smoothly_and_an_ellipse_leaves_its_corners() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        let black = CensorMode::Solid { color: [0, 0, 0, 255] };
+        let rgba = hidden(&mut compositor, white, CensorRegion { feather: 1.0, ..middle_region(black) });
+        let row: Vec<u8> = (160..=320).step_by(8).map(|x| red(&rgba, x, 180)).collect();
+        assert!(row.windows(2).all(|pair| pair[1] <= pair[0]), "darker toward the middle: {row:?}");
+        assert!(row[0] > 240 && *row.last().unwrap() < 15, "{row:?}");
+        assert!(row.iter().filter(|value| (40..=215).contains(*value)).count() >= 4, "with steps between: {row:?}");
+
+        let rgba = hidden(&mut compositor, white, CensorRegion { shape: RegionShape::Ellipse, ..middle_region(black) });
+        assert_eq!(red(&rgba, 320, 180), 0, "the middle is hidden");
+        assert_eq!(red(&rgba, 165, 95), 255, "a corner of the box is outside the ellipse");
+        assert_eq!(red(&rgba, 175, 180), 0, "the left of the ellipse is inside");
+    }
+
+    #[test]
+    fn a_turned_region_and_a_region_over_nothing() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        let square = CensorRegion { rect: PlacedRect { x: 0.4, y: 0.3, width: 0.225, height: 0.4 }, ..middle_region(CensorMode::Solid { color: [0, 0, 0, 255] }) };
+        // A square of 144 pixels turned 45 degrees: its upright corner is outside, its middle inside.
+        let rgba = hidden(&mut compositor, white, CensorRegion { rotation: 45.0, ..square });
+        let left = (square.rect.x * 640.0) as u32 + 3;
+        let top = (square.rect.y * 360.0) as u32 + 3;
+        assert_eq!(red(&rgba, left, top), 255, "the upright corner is outside the turned square");
+        assert_eq!(red(&rgba, left + 69, top + 69), 0);
+
+        let output = compositor.hide(BLANK_IMAGE, &middle_region(CensorMode::Solid { color: [255, 0, 0, 255] }), &FrameInfo::new(0.0, 0)).expect("hidden");
+        let mut rgba = Vec::new();
+        compositor.read(output, &mut rgba).expect("read");
+        compositor.release(output);
+        assert_eq!(&rgba[((180 * 640 + 320) * 4) as usize..][..3], [255, 0, 0], "a box of colour over nothing");
+        assert_eq!(&rgba[..3], [0, 0, 0], "black around it");
+        assert!(matches!(compositor.hide(BLANK_IMAGE, &middle_region(CensorMode::Blur { radius: 10.0 }), &FrameInfo::new(0.0, 0)), Ok(BLANK_IMAGE)));
     }
 
     /// Acquires `count` images at once, gives them back and ends the frame.
