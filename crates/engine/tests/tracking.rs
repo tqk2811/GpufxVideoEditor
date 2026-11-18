@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use engine::{
-    delete_clip, layers_at_frame, remove_track, set_follow, set_track_sample, split_clip, validate, AcceptAll, CensorContent, CensorMode, ClipKey, ClipPlacement, ClipProperty, EditError, EffectRegion, Follow, Keyframe, LayerContent, MotionTrack, Project, RegionShape, Time, TrackKind, TrackLink,
+    add_clip, delete_clip, layers_at_frame, move_clip, remove_track, set_follow, set_track_sample, split_clip, validate, AcceptAll, CensorContent, CensorMode, ClipKey, ClipPlacement, ClipProperty, EditError, EffectRegion, Follow, Keyframe, LayerContent, MotionTrack, Project, RegionShape, Time, TrackKind, TrackLink,
     TrackSample, ValidationError,
 };
 
@@ -242,4 +242,39 @@ fn the_new_fields_round_trip_and_are_left_out_when_absent() {
     assert_eq!(back, p);
     assert!(text.contains(r#""track_id":7"#) && text.contains(r#""kind":"solid""#), "{text}");
     assert_eq!(Time::ZERO, back.tracks[1].clips[0].follow.unwrap().link.anchor_source_time);
+}
+
+#[test]
+fn moving_the_reference_clip_to_another_track_keeps_the_follow() {
+    let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
+    p.tracks.push(track(Vec::new(), Vec::new()));
+    let moved = move_clip(&p, ClipKey { track: 0, clip: 0 }, 2, t(0)).unwrap();
+    let follow = moved.tracks[1].clips[0].follow.expect("kept");
+    assert_eq!((follow.ref_track, follow.ref_clip), (2, 0));
+    close(middle(&moved, 30), middle(&p, 30));
+}
+
+#[test]
+fn a_copy_put_before_the_reference_does_not_take_the_follow() {
+    let mut p = rig(clip("a.mp4", 3 * SECOND, 0, 2 * SECOND), 0);
+    p.tracks[1].clips[0].start = t(3 * SECOND);
+    assert!(validate(&p, &AcceptAll).is_empty(), "{:?}", validate(&p, &AcceptAll));
+    let copied = add_clip(&p, 0, clip("a.mp4", 0, 0, 2 * SECOND)).unwrap();
+    assert_eq!(copied.tracks[1].clips[0].follow.expect("kept").ref_clip, 1, "still the clip at 3 s");
+}
+
+#[test]
+fn a_reference_clip_cannot_follow_and_says_so() {
+    let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
+    p.tracks.push(track(vec![clip("a.mp4", 0, 0, 2 * SECOND)], Vec::new()));
+    let follow = Follow { link: link(0), ref_track: 2, ref_clip: 0, offset: [0.0, 0.0] };
+    let Err(EditError::Invalid(errors)) = set_follow(&p, ClipKey { track: 0, clip: 0 }, Some(follow)) else { panic!("refused") };
+    let ValidationError::InvalidFollow { problem, .. } = &errors[0] else { panic!("{errors:?}") };
+    assert!(problem.contains("reference of clip 0 on track 1"), "{problem}");
+}
+
+#[test]
+fn validation_refuses_an_anchor_the_reference_clip_does_not_show() {
+    let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 3 * SECOND);
+    assert!(validate(&p, &AcceptAll).iter().any(|error| matches!(error, ValidationError::InvalidFollow { .. })));
 }

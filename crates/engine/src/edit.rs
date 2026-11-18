@@ -192,10 +192,10 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
-fn finish(mut project: Project) -> Result<Project, EditError> {
+fn finish(before: &Project, mut project: Project) -> Result<Project, EditError> {
     // Follows are kept on their reference by the source time of their anchor, whatever the command
     // did to the clip indices (see [`Project::repair_follows`]).
-    project.repair_follows();
+    project.repair_follows(before);
     let errors = validate(&project, &AcceptAll);
     if errors.is_empty() {
         Ok(project)
@@ -334,7 +334,7 @@ pub fn add_track(project: &Project, kind: TrackKind) -> Result<Project, EditErro
         hidden: false,
         subtitle: None,
     });
-    finish(next)
+    finish(project, next)
 }
 
 /// Removes `track` with its clips and transitions; the tracks above move down one place. Refused
@@ -353,7 +353,7 @@ pub fn remove_track(project: &Project, track: usize) -> Result<Project, EditErro
             }
         }
     }
-    finish(next)
+    finish(project, next)
 }
 
 /// Appends a subtitle track above the others holding `clips`, as one command: an import of a
@@ -371,7 +371,7 @@ pub fn add_subtitle_track(project: &Project, subtitle: SubtitleTrack, clips: Vec
         }
     }
     next.tracks.push(target);
-    finish(next)
+    finish(project, next)
 }
 
 /// The new look of one clip of a track, for [`restyle_track`].
@@ -405,21 +405,21 @@ pub fn restyle_track(project: &Project, track: usize, subtitle: Option<SubtitleT
             clip.placement = Some(placement);
         }
     }
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets whether every edit of `track` is refused.
 pub fn set_track_locked(project: &Project, track: usize, locked: bool) -> Result<Project, EditError> {
     let mut next = project.clone();
     track_mut(&mut next, track)?.locked = locked;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets whether `track` is left out of the picture and the sound.
 pub fn set_track_hidden(project: &Project, track: usize, hidden: bool) -> Result<Project, EditError> {
     let mut next = project.clone();
     track_mut(&mut next, track)?.hidden = hidden;
-    finish(next)
+    finish(project, next)
 }
 
 /// Adds a clip to `track` at its own `start`. Refuses a position taken by another clip; use
@@ -439,7 +439,7 @@ pub fn add_clip(project: &Project, track: usize, clip: Clip) -> Result<Project, 
     }
     target.clips.push(clip);
     sort_track(target);
-    finish(next)
+    finish(project, next)
 }
 
 /// Adds a text clip showing `text` to `track`, from `start` for `duration`. Refused like
@@ -482,7 +482,7 @@ pub fn set_text(project: &Project, key: ClipKey, text: TextContent) -> Result<Pr
     }
     let mut next = project.clone();
     clip_mut(&mut next, key)?.text = Some(text);
-    finish(next)
+    finish(project, next)
 }
 
 /// Replaces the preset animations of a clip. Its time on the timeline changes only with its holds
@@ -506,7 +506,7 @@ pub fn set_animation_report(project: &Project, key: ClipKey, animation: ClipAnim
         }
     }
     retime_animation(track, key.clip, animation).ok_or(EditError::TimeOverflow { key })?;
-    finish(next).map(|next| (next, removed))
+    finish(project, next).map(|next| (next, removed))
 }
 
 /// Gives clip `clip` of `track` its new animation and ripples the change of its holds: the clip
@@ -558,7 +558,7 @@ pub fn move_clip(
     let start = nearest_free_start(target, ignore, clip.duration, desired_start)
         .ok_or(EditError::NoRoom { track: target_track })?;
     if same_track && start == clip.start {
-        return finish(project.clone());
+        return finish(project, project.clone());
     }
     let mut next = project.clone();
     let mut moved = remove_clip_at(&mut next.tracks[key.track], key.clip);
@@ -567,7 +567,7 @@ pub fn move_clip(
     destination.clips.push(moved);
     sort_track(destination);
     sort_track(&mut next.tracks[key.track]);
-    finish(next)
+    finish(project, next)
 }
 
 fn has_transition_after(track: &Track, clip: usize) -> bool {
@@ -600,7 +600,7 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
     if new_start == clip.start {
-        return finish(project.clone());
+        return finish(project, project.clone());
     }
     let track = &project.tracks[key.track];
     if has_transition_before(track, key.clip) {
@@ -611,7 +611,7 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     let new_start = clip.snapped_start(new_start);
     let delta = new_start.checked_sub(clip.start).ok_or(overflow.clone())?;
     if new_start == clip.start {
-        return finish(project.clone());
+        return finish(project, project.clone());
     }
     // A still has the same picture at every time, so its edge can go anywhere and it keeps no offset.
     // A karaoke text keeps one, since its word times count in it (see keeps_karaoke_time).
@@ -653,7 +653,7 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     changed.duration = duration;
     changed.shift_keyframes(Time::from_ticks(-delta.ticks()));
     sort_track(target);
-    finish(next)
+    finish(project, next)
 }
 
 /// Changes where in the source a clip begins, leaving its position on the timeline and the last
@@ -668,7 +668,7 @@ pub fn trim_source_in(project: &Project, key: ClipKey, new_source_in: Time) -> R
     if clip.is_still() {
         let mut next = project.clone();
         next.tracks[key.track].clips[key.clip].source_in = Time::ZERO;
-        return finish(next);
+        return finish(project, next);
     }
     let overflow = EditError::TimeOverflow { key };
     let to_first_frame = new_source_in == Time::ZERO;
@@ -676,7 +676,7 @@ pub fn trim_source_in(project: &Project, key: ClipKey, new_source_in: Time) -> R
     let grid = clip.speed_grid();
     let delta = Time::from_ticks(wanted.div_euclid(grid).saturating_add(i64::from(wanted.rem_euclid(grid) != 0)).saturating_mul(grid));
     if delta == Time::ZERO && (!to_first_frame || clip.source_in == Time::ZERO) {
-        return finish(project.clone());
+        return finish(project, project.clone());
     }
     let track = &project.tracks[key.track];
     if has_transition_before(track, key.clip) {
@@ -703,7 +703,7 @@ pub fn trim_source_in(project: &Project, key: ClipKey, new_source_in: Time) -> R
     if !clip.plays_reversed() {
         changed.shift_keyframes(Time::from_ticks(-delta.ticks()));
     }
-    finish(next)
+    finish(project, next)
 }
 
 /// Moves the end edge of a clip to `new_end`. Whether the source has that much media is for the
@@ -712,7 +712,7 @@ pub fn trim_end(project: &Project, key: ClipKey, new_end: Time) -> Result<Projec
     unlocked(project, key.track)?;
     let clip = clip_of(project, key)?;
     if clip.end() == Some(new_end) {
-        return finish(project.clone());
+        return finish(project, project.clone());
     }
     let track = &project.tracks[key.track];
     if has_transition_after(track, key.clip) {
@@ -741,7 +741,7 @@ pub fn trim_end(project: &Project, key: ClipKey, new_end: Time) -> Result<Projec
         }
         changed.source_in = source_in;
     }
-    finish(next)
+    finish(project, next)
 }
 
 /// Whether a cut `offset` ticks into `clip` keeps the second half on the source positions it had.
@@ -861,7 +861,7 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
         }
     }
     sort_track(target);
-    finish(next)
+    finish(project, next)
 }
 
 /// Deletes a clip and the transitions touching it.
@@ -870,7 +870,7 @@ pub fn delete_clip(project: &Project, key: ClipKey) -> Result<Project, EditError
     clip_of(project, key)?;
     let mut next = project.clone();
     remove_clip_at(&mut next.tracks[key.track], key.clip);
-    finish(next)
+    finish(project, next)
 }
 
 /// Appends an effect to a clip.
@@ -878,7 +878,7 @@ pub fn add_effect(project: &Project, key: ClipKey, effect: Effect) -> Result<Pro
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.effects.push(effect);
-    finish(next)
+    finish(project, next)
 }
 
 /// Removes effect `effect` of a clip.
@@ -890,7 +890,7 @@ pub fn remove_effect(project: &Project, key: ClipKey, effect: usize) -> Result<P
         return Err(EditError::EffectNotFound { key, effect });
     }
     clip.effects.remove(effect);
-    finish(next)
+    finish(project, next)
 }
 
 /// Adds a transition. Its clips must touch, and validation decides everything else about it,
@@ -924,7 +924,7 @@ pub fn add_transition_report(project: &Project, track: usize, transition: Transi
     }
     target.transitions.push(transition);
     target.transitions.sort_by_key(|tr| tr.after_clip);
-    finish(next).map(|next| (next, released))
+    finish(project, next).map(|next| (next, released))
 }
 
 /// Removes the transition after clip `after_clip`.
@@ -942,7 +942,7 @@ pub fn remove_transition(
         .position(|tr| tr.after_clip == after_clip)
         .ok_or(EditError::TransitionNotFound { track, after_clip })?;
     target.transitions.remove(index);
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets the audio gain of a clip, in decibels.
@@ -950,7 +950,7 @@ pub fn set_gain(project: &Project, key: ClipKey, gain_db: f64) -> Result<Project
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.gain_db = gain_db;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets the noise reduction of a clip. A strength outside 0 to 1 is refused as invalid.
@@ -958,7 +958,7 @@ pub fn set_denoise(project: &Project, key: ClipKey, denoise: ClipDenoise) -> Res
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.denoise = denoise;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets the pitch shift and voice effect of a clip. A shift beyond an octave is refused as
@@ -967,7 +967,7 @@ pub fn set_voice(project: &Project, key: ClipKey, voice: ClipVoice) -> Result<Pr
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.voice = voice;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets the AI background removal of a clip. Values out of range are refused as invalid.
@@ -975,7 +975,7 @@ pub fn set_matte(project: &Project, key: ClipKey, matte: ClipMatte) -> Result<Pr
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.matte = matte;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets whether a clip plays its source backwards. The clip keeps its place, length, source range
@@ -989,7 +989,7 @@ pub fn set_reverse(project: &Project, key: ClipKey, reverse: bool) -> Result<Pro
     }
     let mut next = project.clone();
     clip_mut(&mut next, key)?.reverse = reverse;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets whether a clip is left out of the mix.
@@ -997,7 +997,7 @@ pub fn set_muted(project: &Project, key: ClipKey, muted: bool) -> Result<Project
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.muted = muted;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets the audio fades of a clip.
@@ -1012,7 +1012,7 @@ pub fn set_fades(
     let clip = clip_mut(&mut next, key)?;
     clip.fade_in = fade_in;
     clip.fade_out = fade_out;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets the playback speed of a clip, keeping the part of the source it plays: the timeline length
@@ -1029,7 +1029,7 @@ pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project,
     let mut next = project.clone();
     if !speed_in_range(speed) {
         clip_mut(&mut next, key)?.speed = speed;
-        return finish(next);
+        return finish(project, next);
     }
     let milli = speed_milli(speed);
     let track = &project.tracks[key.track];
@@ -1064,7 +1064,7 @@ pub fn set_speed(project: &Project, key: ClipKey, speed: f64) -> Result<Project,
         }
     });
     sort_track(&mut next.tracks[key.track]);
-    finish(next)
+    finish(project, next)
 }
 
 /// Changes the size of the output frames.
@@ -1072,7 +1072,7 @@ pub fn set_output_size(project: &Project, width: u32, height: u32) -> Result<Pro
     let mut next = project.clone();
     next.output.width = width;
     next.output.height = height;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets where a clip sits in the frame; `None` puts it back to fit the frame, and so also drops the
@@ -1085,7 +1085,7 @@ pub fn set_placement(project: &Project, key: ClipKey, placement: Option<ClipPlac
     if placement.is_none() {
         clip.motion.keyframes.retain(|property, _| !property.is_placement());
     }
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets the static opacity of a clip, from 0 to 1. A clip with opacity keyframes ignores it.
@@ -1093,7 +1093,7 @@ pub fn set_opacity(project: &Project, key: ClipKey, opacity: f64) -> Result<Proj
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.motion.opacity = opacity;
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets the static rotation of a clip, in clockwise degrees. A clip with rotation keyframes ignores it.
@@ -1101,7 +1101,7 @@ pub fn set_rotation(project: &Project, key: ClipKey, rotation: f64) -> Result<Pr
     unlocked(project, key.track)?;
     let mut next = project.clone();
     clip_mut(&mut next, key)?.motion.rotation = rotation;
-    finish(next)
+    finish(project, next)
 }
 
 /// Whether `at`, in ticks from the start of the clip, is inside it. The end does not count: no
@@ -1127,7 +1127,7 @@ pub fn set_keyframe(project: &Project, key: ClipKey, target: &KeyframeTarget, at
     }
     let keys = clip.keyframes_mut(target).ok_or(not_an_effect(key, target))?;
     upsert_keyframe(keys, at, value, easing);
-    finish(next)
+    finish(project, next)
 }
 
 fn not_an_effect(key: ClipKey, target: &KeyframeTarget) -> EditError {
@@ -1153,7 +1153,7 @@ pub fn remove_keyframe(project: &Project, key: ClipKey, target: &KeyframeTarget,
         keys.clear();
     }
     clip.prune_keyframes();
-    finish(next)
+    finish(project, next)
 }
 
 /// Sets `property` of a clip to `value`: a keyframe at `at` when it has keyframes, otherwise its
@@ -1172,7 +1172,7 @@ pub fn set_motion_value(project: &Project, key: ClipKey, property: ClipProperty,
             return Err(EditError::KeyframeOutsideClip { key, at });
         }
         upsert_keyframe(clip.keyframes_mut(&KeyframeTarget::Property(property)).expect("a property always has a list"), at, value, None);
-        return finish(next);
+        return finish(project, next);
     }
     match property {
         ClipProperty::Opacity => clip.motion.opacity = value,
@@ -1189,7 +1189,7 @@ pub fn set_motion_value(project: &Project, key: ClipKey, property: ClipProperty,
             }
         }
     }
-    finish(next)
+    finish(project, next)
 }
 
 /// Puts the clip at `placement` at `at`: each number with keyframes gets a keyframe there, the
@@ -1224,7 +1224,7 @@ pub fn set_placement_at(project: &Project, key: ClipKey, at: Time, placement: Cl
         }
     }
     clip.placement = Some(base);
-    finish(next)
+    finish(project, next)
 }
 
 /// How much narrower than the static width the picture is at `at`, when the width has keyframes, so
@@ -1265,7 +1265,7 @@ pub fn set_effect_params_at(project: &Project, key: ClipKey, effect: usize, para
         };
     }
     target.params = merged;
-    finish(next)
+    finish(project, next)
 }
 
 /// Changes the output frame rate, reduced (60/2 is stored as 30/1). Anything outside 1 to 60 fps
@@ -1273,7 +1273,7 @@ pub fn set_effect_params_at(project: &Project, key: ClipKey, effect: usize, para
 pub fn set_frame_rate(project: &Project, frame_rate: FrameRate) -> Result<Project, EditError> {
     let mut next = project.clone();
     next.output.frame_rate = FrameRate::new(frame_rate.num, frame_rate.den);
-    finish(next)
+    finish(project, next)
 }
 
 /// Replaces the parameters of effect `effect` of a clip.
@@ -1290,7 +1290,7 @@ pub fn set_effect_params(
         .get_mut(effect)
         .ok_or(EditError::EffectNotFound { key, effect })?
         .params = params;
-    finish(next)
+    finish(project, next)
 }
 
 /// Replaces the parameters and the duration of the transition after clip `after_clip`.
@@ -1311,7 +1311,7 @@ pub fn set_transition_params(
         .ok_or(EditError::TransitionNotFound { track, after_clip })?;
     transition.params = params;
     transition.duration = duration;
-    finish(next)
+    finish(project, next)
 }
 
 /// The index a marker at `at` gets among `markers`: after every marker at or before it.
@@ -1326,7 +1326,7 @@ pub fn add_marker_report(project: &Project, marker: Marker) -> Result<(Project, 
     let mut next = project.clone();
     let index = marker_slot(&next.markers, marker.at);
     next.markers.insert(index, marker);
-    finish(next).map(|next| (next, index))
+    finish(project, next).map(|next| (next, index))
 }
 
 /// [`add_marker_report`] without the index.
@@ -1341,7 +1341,7 @@ pub fn remove_marker(project: &Project, marker: usize) -> Result<Project, EditEr
     }
     let mut next = project.clone();
     next.markers.remove(marker);
-    finish(next)
+    finish(project, next)
 }
 
 /// Moves marker `marker` to `at` and gives the project with the index it now has, the markers
@@ -1351,14 +1351,14 @@ pub fn move_marker_report(project: &Project, marker: usize, at: Time) -> Result<
         return Err(EditError::MarkerNotFound { marker });
     }
     if project.markers[marker].at == at {
-        return finish(project.clone()).map(|next| (next, marker));
+        return finish(project, project.clone()).map(|next| (next, marker));
     }
     let mut next = project.clone();
     let mut moved = next.markers.remove(marker);
     moved.at = at;
     let index = marker_slot(&next.markers, at);
     next.markers.insert(index, moved);
-    finish(next).map(|next| (next, index))
+    finish(project, next).map(|next| (next, index))
 }
 
 /// [`move_marker_report`] without the index.
@@ -1372,7 +1372,7 @@ pub fn set_marker(project: &Project, marker: usize, label: String, color: Option
     let target = next.markers.get_mut(marker).ok_or(EditError::MarkerNotFound { marker })?;
     target.label = label;
     target.color = color;
-    finish(next)
+    finish(project, next)
 }
 
 /// Replaces the beats of the source of clip `key`, which count in that source's time, so every
@@ -1394,7 +1394,7 @@ pub fn set_source_beats(project: &Project, source: &str, beats: ClipBeats) -> Re
     } else if next.beats.get(source).is_none_or(|kept| **kept != beats) {
         next.beats.insert(source.to_owned(), std::sync::Arc::new(beats));
     }
-    finish(next)
+    finish(project, next)
 }
 
 /// A censor clip hiding with `censor` from `start` for `duration`, its box at `placement`.
@@ -1415,7 +1415,7 @@ pub fn set_censor(project: &Project, key: ClipKey, censor: CensorContent) -> Res
     }
     let mut next = project.clone();
     clip_mut(&mut next, key)?.censor = Some(censor);
-    finish(next)
+    finish(project, next)
 }
 
 /// Makes clip `key` follow a motion track, or stop following with `None`. Refused when the follow
@@ -1425,8 +1425,8 @@ pub fn set_follow(project: &Project, key: ClipKey, follow: Option<Follow>) -> Re
     clip_of(project, key)?;
     if let Some(follow) = &follow {
         let problem = project.follow_problem(follow, key.track, key.clip).or_else(|| {
-            let reference = &project.tracks[follow.ref_track].clips[follow.ref_clip];
-            (!reference.plays_source(follow.link.anchor_source_time)).then(|| "the reference clip does not show the anchor".to_owned())
+            let (track, clip) = project.follower_of(key.track, key.clip)?;
+            Some(format!("this clip is the reference of clip {clip} on track {track}, which follows it, and a reference clip cannot follow a track"))
         });
         if let Some(problem) = problem {
             return Err(EditError::Invalid(vec![ValidationError::InvalidFollow { track: key.track, clip: key.clip, problem }]));
@@ -1434,7 +1434,7 @@ pub fn set_follow(project: &Project, key: ClipKey, follow: Option<Follow>) -> Re
     }
     let mut next = project.clone();
     clip_mut(&mut next, key)?.follow = follow;
-    finish(next)
+    finish(project, next)
 }
 
 /// Limits effect `effect` of clip `key` to `region`, or gives it the whole picture with `None`.
@@ -1443,7 +1443,7 @@ pub fn set_effect_region(project: &Project, key: ClipKey, effect: usize, region:
     let mut next = project.clone();
     let clip = clip_mut(&mut next, key)?;
     clip.effects.get_mut(effect).ok_or(EditError::EffectNotFound { key, effect })?.region = region;
-    finish(next)
+    finish(project, next)
 }
 
 /// Adds `track`, or replaces the motion track with its id.
@@ -1453,7 +1453,7 @@ pub fn set_motion_track(project: &Project, track: MotionTrack) -> Result<Project
         Some(slot) => *slot = track,
         None => next.motion_tracks.push(track),
     }
-    finish(next)
+    finish(project, next)
 }
 
 /// Removes the motion track `id`; what followed it stays where it was placed.
@@ -1461,14 +1461,14 @@ pub fn remove_motion_track(project: &Project, id: u32) -> Result<Project, EditEr
     let mut next = project.clone();
     let index = next.motion_tracks.iter().position(|track| track.id == id).ok_or(EditError::MotionTrackNotFound { id })?;
     next.motion_tracks.remove(index);
-    finish(next)
+    finish(project, next)
 }
 
 /// Adds `sample` to motion track `id`, or replaces its sample at the same source time.
 pub fn set_track_sample(project: &Project, id: u32, sample: TrackSample) -> Result<Project, EditError> {
     let mut next = project.clone();
     next.motion_tracks.iter_mut().find(|track| track.id == id).ok_or(EditError::MotionTrackNotFound { id })?.upsert(sample);
-    finish(next)
+    finish(project, next)
 }
 
 /// Snapshot undo and redo over a project, keeping at most `depth` undo steps.

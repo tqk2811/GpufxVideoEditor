@@ -415,8 +415,9 @@ impl EffectRegion {
     }
 
     /// How the region hides, for an effect of `package` with `params`, or `None` when the package
-    /// takes no region. The strength is the package's own parameter, in output pixels of a
-    /// 1080-line frame.
+    /// takes no region. The strength is the package's own parameter as the package takes it, in
+    /// pixels of the output frame; the compositor turns it into pixels of a 1080-line frame for the
+    /// region (see [`CensorMode`]).
     pub fn mode_of(package: &str, params: &Map<String, Value>) -> Option<CensorMode> {
         let name = package.rsplit(['/', '\\']).next().unwrap_or(package);
         let (_, param) = REGION_EFFECTS.iter().find(|(known, _)| *known == name)?;

@@ -129,6 +129,17 @@ impl FollowPose {
         let ry = (sine * vx + cosine * vy) * self.scale;
         [self.to[0] + rx / aspect, self.to[1] + ry]
     }
+
+    /// The point of the frame that [`FollowPose::map`] takes to `point`: undoes the pose.
+    pub fn unmap(&self, point: [f64; 2], aspect: f64) -> [f64; 2] {
+        let scale = if self.scale.abs() > 1.0e-12 { self.scale } else { 1.0 };
+        let vx = (point[0] - self.to[0]) * aspect / scale;
+        let vy = (point[1] - self.to[1]) / scale;
+        let (sine, cosine) = self.rotation.to_radians().sin_cos();
+        let rx = cosine * vx + sine * vy;
+        let ry = -sine * vx + cosine * vy;
+        [self.from[0] + rx / aspect, self.from[1] + ry]
+    }
 }
 
 /// The object at one moment: middle, size and angle.
@@ -276,36 +287,55 @@ impl Project {
             return Some(format!("the reference clip shows {}, not the tracked {}", reference.source, motion.media_path));
         }
         if reference.follow.is_some() {
-            return Some("the reference clip follows a track itself".to_owned());
+            return Some(format!("the reference clip {} on track {} follows a track itself; a reference clip cannot follow", follow.ref_clip, follow.ref_track));
+        }
+        if !reference.plays_source(follow.link.anchor_source_time) {
+            return Some("the reference clip does not show the anchor".to_owned());
         }
         None
     }
 
-    /// Whether `follow` still holds its anchor through its reference clip.
-    fn follow_holds(&self, follow: &Follow) -> Option<bool> {
-        let motion = self.motion_track(follow.link.track_id)?;
-        let reference = self.tracks.get(follow.ref_track)?.clips.get(follow.ref_clip)?;
-        Some(reference.source == motion.media_path && reference.plays_source(follow.link.anchor_source_time))
+    /// The clip that follows with the clip at (`track`, `clip`) as its reference, if one does.
+    pub fn follower_of(&self, track: usize, clip: usize) -> Option<(usize, usize)> {
+        self.tracks.iter().enumerate().find_map(|(t, other)| {
+            other.clips.iter().position(|c| c.follow.is_some_and(|follow| (follow.ref_track, follow.ref_clip) == (track, clip))).map(|c| (t, c))
+        })
     }
 
-    /// After an edit: points every follow at the clip of its reference track that shows its
-    /// anchor (the piece of a split, the clip renumbered by a move or a delete), and drops the
-    /// follows whose anchor no clip of that track shows any more, or whose track is gone. Also drops
-    /// the tracks of effect regions that no longer exist or no longer match their clip.
-    pub(crate) fn repair_follows(&mut self) {
+    /// After an edit from `before`: points every follow at the clip that shows its anchor (the
+    /// piece of a split, the clip renumbered by a move, a delete or an insert, or moved to another
+    /// track), and drops the follows whose anchor no clip shows any more, or whose track is gone.
+    /// The reference indices of a follow count in `before`, whose reference clip played the anchor
+    /// at some timeline time: of the clips that show the anchor now, the one that plays it nearest
+    /// that time wins, then one on the same track, so a copy put in front of the reference does not
+    /// take the follow by its index. Also drops the tracks of effect regions that no longer exist or
+    /// no longer match their clip.
+    pub(crate) fn repair_follows(&mut self, before: &Project) {
         for t in 0..self.tracks.len() {
             for c in 0..self.tracks[t].clips.len() {
                 let clip = &self.tracks[t].clips[c];
                 if let Some(follow) = clip.follow {
-                    let repaired = if self.follow_holds(&follow) == Some(true) {
-                        Some(follow)
-                    } else {
-                        self.motion_track(follow.link.track_id).and_then(|motion| {
-                            let candidates = self.tracks.get(follow.ref_track)?;
-                            let found = candidates.clips.iter().enumerate().position(|(i, other)| (follow.ref_track, i) != (t, c) && other.source == motion.media_path && other.plays_source(follow.link.anchor_source_time))?;
-                            Some(Follow { ref_clip: found, ..follow })
-                        })
-                    };
+                    let repaired = self.motion_track(follow.link.track_id).and_then(|motion| {
+                        let anchor = follow.link.anchor_source_time;
+                        let old = before.tracks.get(follow.ref_track).and_then(|track| track.clips.get(follow.ref_clip)).filter(|old| old.source == motion.media_path && old.plays_source(anchor));
+                        // Without the old reference, the clip at the same place stands for it.
+                        let old = old.or_else(|| self.tracks.get(follow.ref_track).and_then(|track| track.clips.get(follow.ref_clip)));
+                        let wanted = old.map(|old| old.timeline_time_of(anchor).ticks());
+                        let mut best: Option<((i64, bool, bool), usize, usize)> = None;
+                        for (i, track) in self.tracks.iter().enumerate() {
+                            for (j, other) in track.clips.iter().enumerate() {
+                                if (i, j) == (t, c) || other.follow.is_some() || other.source != motion.media_path || !other.plays_source(anchor) {
+                                    continue;
+                                }
+                                let distance = wanted.map_or(0, |time| (other.timeline_time_of(anchor).ticks() - time).saturating_abs());
+                                let rank = (distance, i != follow.ref_track, (i, j) != (follow.ref_track, follow.ref_clip));
+                                if best.is_none_or(|(known, _, _)| rank < known) {
+                                    best = Some((rank, i, j));
+                                }
+                            }
+                        }
+                        best.map(|(_, i, j)| Follow { ref_track: i, ref_clip: j, ..follow })
+                    });
                     self.tracks[t].clips[c].follow = repaired;
                 }
                 let source = self.tracks[t].clips[c].source.clone();
@@ -327,6 +357,10 @@ impl Project {
         let motion = self.motion_track(follow.link.track_id)?;
         let track = self.tracks.get(follow.ref_track)?;
         let reference = track.clips.get(follow.ref_clip)?;
+        // Past the ends of the reference clip `t` is not held at its ends on purpose: the source
+        // time goes on by the clip's speed, so a follower longer than the piece of a split it
+        // refers to goes on moving through the other piece, which shows the same source. The track
+        // itself is held past its first and last samples (see [`MotionTrack::point_at`]).
         let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
         let anchor_time = reference.timeline_time_of(follow.link.anchor_source_time);
         let place = |time: Time| -> Option<(TrackPoint, ClipTransform)> {
