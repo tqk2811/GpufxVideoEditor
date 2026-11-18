@@ -123,7 +123,26 @@ Các điểm dưới đây do phiên làm P2 tự chọn khi user vắng, chờ 
 - Bake ghi keyframe X/Y ở mọi frame output, Width khi bám scale, Rotation khi bám xoay. Clip dài hơn 4096 frame thì giãn bước. Animation preset của text sau khi bake chạy sau chuyển động thay vì trước.
 - Dải độ tin cậy trên timeline vẽ cho track đang chọn của file. Một sample tô màu khoảng ±0,25 giây nguồn quanh nó; dưới 0,5 là đỏ.
 
+## Khoá khung theo vật (ổn định theo track)
+
+Ngược với bám: clip video không đứng yên để sticker chạy theo vật, mà cả khung hình chạy ngược lại để vật đứng yên trên màn hình. Vật nghiêng thì cả khung nghiêng theo chiều ngược lại.
+
+- **Dữ liệu:** `Clip.lock: Option<TrackLock>`. `TrackLock` gồm một `TrackLink` (track của chính file nguồn của clip, thời điểm neo theo giờ nguồn, `follow_scale` là giữ cỡ vật, `follow_rotation` là giữ góc vật, làm mượt) và `zoom` (mặc định 1, từ 0,1 đến 8). Vị trí vật luôn được giữ; cỡ và góc chỉ giữ khi bật, mặc định tắt cho khớp Q8.
+- **Render:** `Project::lock_pose` tính chỗ vật hiện ra trên khung output lúc `t` và lúc neo qua transform riêng của clip (placement, keyframe, animation), rồi trả `FollowPose` đưa vật từ chỗ hiện tại về chỗ lúc neo, quay và co giãn quanh vật. `schedule::lock_transform` đặt pose đó vào `ClipTransform.follow`, cộng góc vào `rotation`, nên renderer không cần đổi gì.
+- **Overlay bám trên clip đã khoá:** `follow_pose` và `clip_frame_mapping` lấy transform của clip tham chiếu đã gồm khoá, nên sticker bám vật vẫn nằm trên vật (vật đứng yên thì sticker cũng đứng yên), khung tracker trên preview cũng trùng vật.
+- **Sửa clip:** khoá tính theo giờ nguồn nên split, trim, đổi speed, chạy ngược đều giữ khoá trên mọi mảnh, kể cả mảnh không chứa thời điểm neo. Xoá track hoặc track không còn đúng file thì khoá bị bỏ. Một clip không thể vừa bám vừa khoá.
+- **Bake:** `bake_lock` ghi keyframe X/Y, Width khi giữ cỡ hoặc có zoom, Rotation khi giữ góc. `track_bake_keyframes` bake khoá khi clip đang khoá.
+- **Giao diện:** trong mục Tracking của clip video có nút "Khoá khung theo vật" (neo tại đầu phát, dùng track đang chọn), khi đã khoá thì có hai ô giữ cỡ, giữ góc, thanh Phóng thêm, nút Bake và Bỏ khoá.
+- **Agent và MCP:** `clip_lock_set`, `clip_lock_clear`.
+
+Lựa chọn tạm (chờ user duyệt):
+
+- Mép lộ ra khi khung chạy không tự phóng to để lấp; người dùng tự kéo "Phóng thêm". Phần lộ ra cho thấy track bên dưới (thường là nền đen).
+- Khung chỉnh vị trí (placement) trên preview của clip đã khoá vẫn vẽ ở chỗ đặt gốc, chưa gồm khoá; kéo khung là sửa chỗ đặt gốc.
+- Clip có animation preset thì bake khoá chỉ gần đúng, vì animation chạy chồng lên keyframe sau khi bake.
+
 ## Rủi ro
+
 
 - **Compositor:** chưa có adjustment layer, phải đổi cách chồng layer. Đây là phần tốn công nhất và ảnh hưởng tới transition.
 - **Readback GPU sang CPU:** tracker chạy offline nên tốc độ chấp nhận được, nhưng ảnh xám phải đúng góc xoay hiển thị và chuyển HDR về SDR.
