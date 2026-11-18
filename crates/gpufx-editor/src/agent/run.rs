@@ -532,6 +532,16 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             })
             .map_err(refused)?,
         AgentEdit::ClipFollowClear { clip } => state.apply_agent_command(|project| engine::set_follow(project, clip.into(), None)).map_err(refused)?,
+        AgentEdit::ClipLockSet { clip, track_id, at, lock_scale, lock_rotation, zoom, smooth } => state
+            .apply_agent_command(|project| {
+                let shown = current_clip(project, clip)?;
+                let at = at.unwrap_or(shown.start);
+                let anchor_source_time = shown.source_time_at(at.saturating_sub(shown.start)).max(Time::ZERO);
+                let link = engine::TrackLink { track_id, anchor_source_time, follow_scale: lock_scale, follow_rotation: lock_rotation, smooth };
+                engine::set_lock(project, clip.into(), Some(engine::TrackLock { link, zoom: zoom.unwrap_or(1.0) }))
+            })
+            .map_err(refused)?,
+        AgentEdit::ClipLockClear { clip } => state.apply_agent_command(|project| engine::set_lock(project, clip.into(), None)).map_err(refused)?,
         AgentEdit::TrackSetSample { track_id, clip, sample } => {
             let id = match (track_id, clip) {
                 (Some(id), _) => {
@@ -564,8 +574,8 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         }
         AgentEdit::TrackSmooth { track_id, smooth } => state.apply_agent_command(|project| engine::set_track_smooth(project, track_id, smooth)).map_err(refused)?,
         AgentEdit::TrackBakeKeyframes { clip } => {
-            let aspect = current_clip(state.project(), clip).map(|shown| state.clip_aspect(shown)).map_err(|error| AgentError::from_edit(&error))?;
-            state.apply_agent_command(|project| engine::bake_follow(project, clip.into(), aspect)).map_err(refused)?
+            let (aspect, locked) = current_clip(state.project(), clip).map(|shown| (state.clip_aspect(shown), shown.follow.is_none() && shown.lock.is_some())).map_err(|error| AgentError::from_edit(&error))?;
+            state.apply_agent_command(|project| if locked { engine::bake_lock(project, clip.into(), aspect) } else { engine::bake_follow(project, clip.into(), aspect) }).map_err(refused)?
         }
         AgentEdit::TransitionAdd { track, after_clip, package, duration, params } => {
             let transition = Transition { after_clip, package, duration: duration.unwrap_or(DEFAULT_TRANSITION_DURATION), params };
@@ -1565,6 +1575,16 @@ mod tests {
         assert_eq!((followed.ref_track, followed.ref_clip, followed.link.anchor_source_time), (0, 0, Time::ZERO));
         edit(&mut host, AgentEdit::ClipFollowClear { clip: censor_clip }).expect("clear");
         assert!(host.state.project().tracks[censor_clip.track].clips[0].follow.is_none());
+
+        let lock = |track_id, zoom| AgentEdit::ClipLockSet { clip: video, track_id, at: Some(Time::from_ticks(45_000)), lock_scale: true, lock_rotation: false, zoom, smooth: 0.0 };
+        assert_eq!(code(edit(&mut host, lock(id + 5, None))), "invalid_project");
+        assert_eq!(code(edit(&mut host, lock(id, Some(50.0)))), "invalid_project");
+        edit(&mut host, lock(id, Some(1.5))).expect("lock");
+        let locked = host.state.project().tracks[0].clips[0].lock.expect("set");
+        assert_eq!((locked.link.track_id, locked.link.anchor_source_time, locked.link.follow_scale, locked.zoom), (id, Time::from_ticks(45_000), true, 1.5));
+        edit(&mut host, AgentEdit::ClipLockClear { clip: video }).expect("clear lock");
+        assert!(host.state.project().tracks[0].clips[0].lock.is_none());
+
     }
 
     #[test]

@@ -202,6 +202,12 @@ pub enum AgentEdit {
     ClipFollowSet { clip: ClipRef, track_id: u32, reference: ClipRef, at: Option<Time>, follow_scale: bool, follow_rotation: bool, smooth: f64 },
     /// Stops `clip` following a motion track.
     ClipFollowClear { clip: ClipRef },
+    /// Locks the frame of video clip `clip` to motion track `track_id` of its own source, anchored
+    /// at the source time it shows at timeline time `at` (its start when absent): the object stays
+    /// where it is at the anchor and the frame moves against it. `zoom` absent: 1.
+    ClipLockSet { clip: ClipRef, track_id: u32, at: Option<Time>, lock_scale: bool, lock_rotation: bool, zoom: Option<f64>, smooth: f64 },
+    /// Ends the lock of `clip`.
+    ClipLockClear { clip: ClipRef },
     /// Adds or replaces a sample of motion track `track_id`, or starts a new track of the source
     /// of `clip` with it when `track_id` is absent. Answers the track id.
     TrackSetSample { track_id: Option<u32>, clip: Option<ClipRef>, sample: engine::TrackSample },
@@ -211,7 +217,8 @@ pub enum AgentEdit {
     TrackCreate { clip: ClipRef, at: Option<Time>, sample: engine::TrackSample },
     /// Sets the smoothing of everything that follows motion track `track_id`, in seconds of source.
     TrackSmooth { track_id: u32, smooth: f64 },
-    /// Turns the follow of `clip` into keyframes and drops the follow.
+    /// Turns the follow of `clip`, or its lock when it has one, into keyframes and drops it.
+
     TrackBakeKeyframes { clip: ClipRef },
 }
 
