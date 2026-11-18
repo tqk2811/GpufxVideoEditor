@@ -29,10 +29,11 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-use engine::{unit_ranges, AnimationPose, TextUnit};
+use engine::karaoke::word_ranges;
+use engine::{unit_ranges, AnimationPose, Rgba, TextUnit, WordStyle};
 
 use super::paint::{draw_inner_shadows, text_texture_stamps, wants_glyph_map, GlyphEntry, GlyphMap, GlyphMapBuilder, Textures};
-use super::{draw_background, draw_under, over, text_font_stamp, Layout, Mask, TextContent, TextImage, TextRasterizer, MAX_DIMENSION, MAX_PIXELS};
+use super::{draw_background, draw_mask, draw_under, premultiplied, over, text_font_stamp, Layout, Mask, TextContent, TextImage, TextRasterizer, MAX_DIMENSION, MAX_PIXELS};
 use cosmic_text::SwashContent;
 
 /// How many plans a rasterizer keeps, so a few clips moving at once do not take turns rebuilding.
@@ -248,6 +249,13 @@ impl UnitsPlan {
     /// [`TextRasterizer::rasterize_units`]). The picture is the still picture's size grown by
     /// [`TextImage::margin`] on each side.
     pub fn draw(&self, poses: &[(TextUnit, Vec<AnimationPose>)]) -> TextImage {
+        self.draw_styled(poses, &[])
+    }
+
+    /// As [`Self::draw`], with word `i` of the text filled with the colour of `styles[i]` (see
+    /// [`TextRasterizer::rasterize_words`]); a word past the end of `styles` takes the text's fill.
+    /// The boxes of the styles are not drawn.
+    pub fn draw_styled(&self, poses: &[(TextUnit, Vec<AnimationPose>)], styles: &[WordStyle]) -> TextImage {
         let plan = &*self.0;
         let mut image = plan.blank.clone();
         let (width, height) = (plan.width, plan.height);
@@ -287,6 +295,11 @@ impl UnitsPlan {
                 reach_y = reach_y.max(room - b.1).max(b.3 + room - height as f32);
             }
         }
+        // The colour of each character's word, when it is not the text's.
+        let words = word_ranges(&shaped);
+        let main = plan.text.fill.main_color();
+        let tint: Vec<Option<Rgba>> = sprites.iter().map(|sprite| holding(&words, sprite.start).and_then(|word| styles.get(word)).map(|style| style.color).filter(|color| *color != main)).collect();
+        let mut tinted: Vec<(Rgba, Mask)> = Vec::new();
         let (margin_x, margin_y) = margins(width, height, font_px, reach_x, reach_y);
         let (canvas_width, canvas_height) = (width + 2 * margin_x, height + 2 * margin_y);
         let shift = Affine::translate(margin_x as f32, margin_y as f32);
@@ -301,12 +314,25 @@ impl UnitsPlan {
         // The characters that show whole share one mask, drawn as the still picture's glyphs.
         let mut mask = Mask::new(canvas_width, canvas_height);
         let mut any_whole = false;
-        for (sprite, (map, opacity)) in sprites.iter().zip(&placed) {
+        for ((sprite, (map, opacity)), tint) in sprites.iter().zip(&placed).zip(&tint) {
             if *opacity < 1.0 {
                 continue;
             }
             any_whole = true;
             let map = shift.after(*map);
+            let group = tint.map(|color| match tinted.iter().position(|(known, _)| *known == color) {
+                Some(group) => group,
+                None => {
+                    tinted.push((color, Mask::new(canvas_width, canvas_height)));
+                    tinted.len() - 1
+                }
+            });
+            let mut add = |x: i32, y: i32, a: f32| {
+                mask.add(x, y, a);
+                if let Some(group) = group {
+                    tinted[group].1.add(x, y, a);
+                }
+            };
             match map.whole_shift() {
                 // A character at rest, or moved by whole pixels, is copied as it is.
                 Some((dx, dy)) => {
@@ -314,7 +340,7 @@ impl UnitsPlan {
                         for i in 0..sprite.width {
                             let c = sprite.coverage[j * sprite.width + i];
                             if c > 0 {
-                                mask.add(sprite.x + dx + i as i32, sprite.y + dy + j as i32, f32::from(c) / 255.0);
+                                add(sprite.x + dx + i as i32, sprite.y + dy + j as i32, f32::from(c) / 255.0);
                             }
                         }
                     }
@@ -322,7 +348,7 @@ impl UnitsPlan {
                 None => cover(canvas_width, canvas_height, sprite.rect(), map, |x, y, sx, sy| {
                     let c = sample(&sprite.coverage, sprite.width, sprite.height, sx, sy, coverage_mix);
                     if c > 0 {
-                        mask.add(x as i32, y as i32, f32::from(c) / 255.0);
+                        add(x as i32, y as i32, f32::from(c) / 255.0);
                     }
                 }),
             }
@@ -335,8 +361,8 @@ impl UnitsPlan {
             draw_under(&plan.text, &plan.layers, &mask, &mut canvas, &painter);
         }
         // The fading characters, each with its own layers, at its opacity.
-        let fading: Vec<(&Sprite, Affine, f32)> = sprites.iter().zip(&placed).filter(|(_, (_, opacity))| *opacity > 0.0 && *opacity < 1.0).map(|(sprite, (map, opacity))| (sprite, shift.after(*map), *opacity)).collect();
-        for (sprite, map, opacity) in &fading {
+        let fading: Vec<(&Sprite, Affine, f32, Option<Rgba>)> = sprites.iter().zip(&placed).zip(&tint).filter(|((_, (_, opacity)), _)| *opacity > 0.0 && *opacity < 1.0).map(|((sprite, (map, opacity)), tint)| (sprite, shift.after(*map), *opacity, *tint)).collect();
+        for (sprite, map, opacity, _) in &fading {
             let under = plan.under_of(sprite);
             let rect = sprite.under_rect(plan.room);
             cover(canvas_width, canvas_height, rect, *map, |x, y, sx, sy| {
@@ -347,15 +373,29 @@ impl UnitsPlan {
             });
         }
         if any_whole {
-            painter.draw(&mut canvas, &mask, &plan.text.fill);
+            if tinted.is_empty() {
+                painter.draw(&mut canvas, &mask, &plan.text.fill);
+            } else {
+                // As the still picture: the text's fill where no tinted word lies, each tinted
+                // word its own colour.
+                let mut plain = mask.clone();
+                for (_, tinted) in &tinted {
+                    plain.subtract(tinted);
+                }
+                painter.draw(&mut canvas, &plain, &plan.text.fill);
+                for (color, tinted) in &tinted {
+                    draw_mask(&mut canvas, tinted, premultiplied(*color));
+                }
+            }
             draw_inner_shadows(&mut canvas, &plan.text, &mask, &painter);
         }
         // A fading character has its fill, not its inner shadows.
-        for (sprite, map, opacity) in &fading {
+        for (sprite, map, opacity, tint) in &fading {
             cover(canvas_width, canvas_height, sprite.rect(), *map, |x, y, sx, sy| {
                 let c = sample(&sprite.coverage, sprite.width, sprite.height, sx, sy, coverage_mix);
                 if c > 0 {
-                    over(&mut canvas[y * canvas_width + x], painter.color_at(&plan.text.fill, x, y), f32::from(c) / 255.0 * opacity);
+                    let color = tint.map_or_else(|| painter.color_at(&plan.text.fill, x, y), premultiplied);
+                    over(&mut canvas[y * canvas_width + x], color, f32::from(c) / 255.0 * opacity);
                 }
             });
         }

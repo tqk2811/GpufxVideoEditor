@@ -648,6 +648,28 @@ fn a_karaoke_word_takes_its_colour_and_the_others_keep_theirs() {
 }
 
 #[test]
+fn a_scaled_karaoke_word_keeps_its_colour_and_grows_where_it_stands() {
+    let Some(mut r) = rasterizer() else { return };
+    let text = karaoke_text("HHH HHH", engine::KaraokeMode::Scale);
+    let white = engine::WordStyle { color: [255, 255, 255, 255], background: None };
+    let red = engine::WordStyle { color: [255, 0, 0, 255], background: None };
+    let plan = r.prepare_units(&text, HEIGHT, 1.0);
+    let rest = engine::AnimationPose::IDENTITY;
+    let at_rest = plan.draw_styled(&[(engine::TextUnit::Word, vec![rest, rest])], &[white, red]);
+    let still = r.rasterize_words(&text, HEIGHT, 1.0, &[white, red]);
+    assert_eq!(red_and_white_columns(&at_rest), red_and_white_columns(&still), "at rest the words are coloured as in the still picture");
+    let grown = plan.draw_styled(&[(engine::TextUnit::Word, vec![rest, engine::AnimationPose { scale: 1.2, ..rest }])], &[white, red]);
+    let (reds, whites) = red_and_white_columns(&grown);
+    let shift = grown.margin.0;
+    let (still_reds, still_whites) = red_and_white_columns(&still);
+    assert_eq!(whites.iter().map(|x| x - shift).collect::<Vec<_>>(), still_whites, "the white word stays where it was");
+    let (red_width, still_red_width) = (reds.iter().max().unwrap() - reds.iter().min().unwrap(), still_reds.iter().max().unwrap() - still_reds.iter().min().unwrap());
+    assert!(red_width * 10 > still_red_width * 11, "the red word grows: {red_width} from {still_red_width}");
+    let middle = |columns: &[u32]| (columns.iter().min().unwrap() + columns.iter().max().unwrap()) / 2;
+    assert!((middle(&reds) - shift).abs_diff(middle(&still_reds)) <= 2, "around its own middle");
+}
+
+#[test]
 fn karaoke_words_are_found_after_a_case_change_that_lengthens_the_text() {
     let Some(mut r) = rasterizer() else { return };
     // "ß" becomes "SS", so the second word starts two bytes later in the shaped text.
