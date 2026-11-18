@@ -596,7 +596,11 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
     let karaoke = keeps_karaoke_time(clip);
     // A reversed clip plays its source range from the top down: its start edge shows the end of
     // the range, so trimming it moves that end and source_in stays.
-    let mut source_in = if clip.is_still() && !karaoke {
+    let mut source_in = if clip.may_be_animated() {
+        // Provisional: an animated picture goes on from the same frame, and its edge can still be
+        // pulled out past its first frame, where the loop starts.
+        clip.source_in.checked_add(clip.source_offset(delta)).ok_or(overflow.clone())?.max(Time::ZERO)
+    } else if clip.is_still() && !karaoke {
         Time::ZERO
     } else if clip.plays_reversed() {
         clip.source_in
@@ -797,7 +801,7 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     second.start = clip.start.saturating_add(offset);
     // A still keeps no offset, as in trim_start, but a karaoke text does.
     let first_span = clip.source_offset(offset.saturating_sub(hold_start));
-    second.source_in = if clip.is_still() && !karaoke { Time::ZERO } else { clip.source_in.saturating_add(first_span) };
+    second.source_in = if clip.is_still() && !karaoke && !clip.may_be_animated() { Time::ZERO } else { clip.source_in.saturating_add(first_span) };
     second.duration = rest;
     // A reversed clip plays the top of its range first: the first half keeps the top, from
     // `source_end - first_span`, and the second half goes on below it.

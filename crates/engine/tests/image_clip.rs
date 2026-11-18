@@ -87,3 +87,26 @@ fn a_file_with_an_image_loads_and_saves_without_new_fields() {
     assert!(!saved.contains("image"), "no field is added: {saved}");
     assert!(saved.contains(r#""version":1"#));
 }
+
+// Provisional, until the user settles it: a WebP may be animated, so its clip keeps a source
+// offset as a video does, and a cut or a trimmed left edge goes on from the same frame instead of
+// starting the loop again. A still WebP shows the same picture at any offset.
+#[test]
+fn a_cut_webp_sticker_goes_on_from_the_same_frame() {
+    let timeline = project(TrackKind::Video, vec![clip("fire.webp", 10, 6)]);
+    let cut = engine::split_clip(&timeline, KEY, seconds(12)).expect("a cut");
+    let clips = &cut.tracks[0].clips;
+    assert_eq!((clips[0].source_in, clips[1].source_in), (Time::ZERO, seconds(2)));
+    assert!(validate(&cut, &AcceptAll).is_empty());
+}
+
+#[test]
+fn the_left_edge_of_a_webp_sticker_keeps_its_offset_and_stops_it_at_zero() {
+    let timeline = project(TrackKind::Video, vec![clip("fire.webp", 10, 6)]);
+    let later = trim_start(&timeline, KEY, seconds(13)).expect("a trim");
+    let later_clip = &later.tracks[0].clips[0];
+    assert_eq!((later_clip.start, later_clip.source_in, later_clip.duration), (seconds(13), seconds(3), seconds(3)));
+    let earlier = trim_start(&later, KEY, seconds(4)).expect("no first frame limits an image");
+    let earlier_clip = &earlier.tracks[0].clips[0];
+    assert_eq!((earlier_clip.start, earlier_clip.source_in, earlier_clip.duration), (seconds(4), Time::ZERO, seconds(12)));
+}

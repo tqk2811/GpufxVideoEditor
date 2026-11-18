@@ -1429,6 +1429,14 @@ impl Clip {
         is_image_source(&self.source)
     }
 
+    /// Whether the clip shows a picture that may be animated, a WebP, so it keeps a source offset
+    /// through a cut or a trim of its left edge as a video does (see [`crate::trim_start`]). Told
+    /// by the extension, without reading the file on the edit thread: a still WebP shows the same
+    /// picture at any offset, so it loses nothing. Provisional until the user settles it.
+    pub fn may_be_animated(&self) -> bool {
+        self.is_image() && !self.is_text() && self.source.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("webp"))
+    }
+
     /// Whether the clip shows text, rasterized into a still picture.
     pub fn is_text(&self) -> bool {
         self.text.is_some()
