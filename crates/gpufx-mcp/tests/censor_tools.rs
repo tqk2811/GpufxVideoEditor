@@ -87,3 +87,41 @@ fn track_run_follows_an_object_through_the_file_as_one_undo_step() {
     assert_eq!(project_of(&mut session).motion_tracks[0].samples.len(), 1, "one undo step takes the run back");
     assert_eq!(call_err(&mut session, "track_status", json!({"job": 99})).code, "job_not_found");
 }
+
+#[test]
+fn track_create_runs_both_ways_then_smooth_and_bake_reach_the_follower() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let clip = moving_square_clip();
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    let added = call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": clip, "start": 0, "duration": 180_000}));
+    // At 1 s (frame 30) the square's middle is at x = 40 + 60 + 32.
+    let created = call_ok(&mut session, "track_create", json!({"expected_revision": revision(&added), "clip": {"track": 0, "clip": 0}, "at": 90_000, "cx": 132.0 / 320.0, "cy": 92.0 / 180.0, "w": 0.2, "h": 64.0 / 180.0}));
+    let id = created["track_id"].as_u64().expect("an id");
+    assert_eq!(created["source_time"], 90_000);
+    assert_eq!(call_err(&mut session, "track_create", json!({"expected_revision": revision(&created), "clip": {"track": 0, "clip": 0}, "at": 900_000, "cx": 0.5, "cy": 0.5, "w": 0.1, "h": 0.1})).code, "invalid_params");
+    let run = call_ok(&mut session, "track_run", json!({"expected_revision": revision(&created), "track_id": id, "direction": "both", "rotation": false}));
+    assert_eq!(run["state"], "done", "{run}");
+    assert_eq!(run["count"], 29, "frames 31 to 59");
+    assert_eq!(run["backward"]["state"], "done", "{run}");
+    assert_eq!(run["backward"]["count"], 30, "frames 29 down to 0");
+    let samples = project_of(&mut session).motion_tracks[0].samples.clone();
+    assert_eq!(samples.len(), 60);
+    let first = samples[0];
+    assert!(((first.cx - 72.0 / 320.0) * 320.0).abs() < 1.0, "{first:?}");
+
+    let now = revision(&call_ok(&mut session, "project_get", json!({})));
+    let censor = call_ok(&mut session, "censor_add", json!({"expected_revision": now, "start": 0, "duration": 180_000}));
+    let followed = call_ok(&mut session, "clip_follow_set", json!({"expected_revision": revision(&censor), "clip": {"track": 1, "clip": 0}, "track_id": id, "reference": {"track": 0, "clip": 0}}));
+    let smoothed = call_ok(&mut session, "track_smooth", json!({"expected_revision": revision(&followed), "track_id": id, "smooth": 0.25}));
+    assert_eq!(project_of(&mut session).tracks[1].clips[0].follow.expect("follows").link.smooth, 0.25);
+    assert_eq!(call_err(&mut session, "track_smooth", json!({"expected_revision": revision(&smoothed), "track_id": id, "smooth": 9.0})).code, "invalid_project");
+    let baked = call_ok(&mut session, "track_bake_keyframes", json!({"expected_revision": revision(&smoothed), "clip": {"track": 1, "clip": 0}}));
+    let project = project_of(&mut session);
+    let overlay = &project.tracks[1].clips[0];
+    assert!(overlay.follow.is_none());
+    let xs = &overlay.motion.keyframes[&engine::ClipProperty::X];
+    assert!(xs.len() >= 60 && xs.last().unwrap().value > xs[0].value + 0.2, "the box moves right: {} .. {}", xs[0].value, xs.last().unwrap().value);
+    assert_eq!(call_err(&mut session, "track_bake_keyframes", json!({"expected_revision": revision(&baked), "clip": {"track": 1, "clip": 0}})).code, "not_following");
+    call_ok(&mut session, "undo", json!({"expected_revision": revision(&baked)}));
+    assert!(project_of(&mut session).tracks[1].clips[0].follow.is_some(), "the bake is one undo step");
+}

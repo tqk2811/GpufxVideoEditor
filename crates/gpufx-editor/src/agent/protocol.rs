@@ -205,6 +205,14 @@ pub enum AgentEdit {
     /// Adds or replaces a sample of motion track `track_id`, or starts a new track of the source
     /// of `clip` with it when `track_id` is absent. Answers the track id.
     TrackSetSample { track_id: Option<u32>, clip: Option<ClipRef>, sample: engine::TrackSample },
+    /// Starts a new motion track of the source of `clip` with one sample placed by hand: the box
+    /// `sample` (its `source_time` ignored) at the source time `clip` shows at timeline time `at`
+    /// (its start when absent). Answers the track id.
+    TrackCreate { clip: ClipRef, at: Option<Time>, sample: engine::TrackSample },
+    /// Sets the smoothing of everything that follows motion track `track_id`, in seconds of source.
+    TrackSmooth { track_id: u32, smooth: f64 },
+    /// Turns the follow of `clip` into keyframes and drops the follow.
+    TrackBakeKeyframes { clip: ClipRef },
 }
 
 /// Which output frame to capture.
@@ -255,7 +263,7 @@ pub enum AgentRequest {
     /// (by default the last sample placed by hand going forward, the first going backward),
     /// `forward` (default) or `backward`, up to the next sample placed by hand, the end of the file
     /// or a lost frame; `rotation` (default true) follows the object's turn. The samples are written
-    /// as one undo step when it ends. A session without a window waits and answers the outcome; an
+    /// as one undo step when it ends. `both` tracks forwards, then backwards from the same sample. A session without a window waits and answers the outcome; an
     /// open window answers the job at once, for [`AgentRequest::TrackStatus`].
     TrackRun {
         expected_revision: u64,

@@ -746,6 +746,14 @@ impl Session {
             crate::matting_models::start_download(model);
         }
         self.matte_downloads_finished();
+        if let Some(ask) = self.state.ui.track_run_request.take() {
+            // The preview's paths: a tracker run reads the proxy when there is one.
+            let media = self.state.project().motion_track(ask.track_id).map(|track| track.media_path.clone());
+            if let Some(media) = media {
+                let path = self.preview_paths.video_decode_path(&media);
+                self.state.run_track_ask(path, ask);
+            }
+        }
         if let Some(track) = self.state.ui.subtitle_export_request.take() {
             self.begin_task(Request::ExportSubtitles { track });
         }

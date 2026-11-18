@@ -157,8 +157,24 @@ pub struct EditorState {
     pub track_reports: std::collections::BTreeMap<u64, crate::tracking::RunReport>,
     /// The tracker job started last.
     pub last_track_job: Option<u64>,
+    /// Backward runs waiting for a forward run of the same track to end, by the forward job
+    /// (see [`Self::start_tracking_both`]).
+    track_chain: Vec<ChainedRun>,
+    /// The backward job each forward job of [`Self::start_tracking_both`] went on with.
+    pub chained_track_jobs: std::collections::BTreeMap<u64, u64>,
     /// The snap points of the drag or press going on, built once rather than every frame.
     snap_cache: RefCell<Option<SnapCache>>,
+}
+
+/// A backward tracker run that starts once forward job `after` has ended.
+#[derive(Debug, Clone)]
+struct ChainedRun {
+    after: u64,
+    decode_path: PathBuf,
+    track_id: u32,
+    /// The source time of the sample both runs start from.
+    from: Time,
+    rotation: bool,
 }
 
 /// What a set of snap points was built for.
@@ -374,6 +390,13 @@ pub struct UiState {
     pub packages: crate::ui::package_manager::PackageManagerUi,
     /// Whether a save also copies the packs the project uses into `<project>.packages`.
     pub save_with_packs: bool,
+    /// The video clip whose preview takes a box drawn for a new motion track.
+    pub tracking_pick: Option<ClipKey>,
+    /// The motion track the inspector, the preview and the timeline show, when it is of the
+    /// selected clip's file.
+    pub motion_track: Option<u32>,
+    /// The tracker run the inspector asked for; the window starts it with the preview's paths.
+    pub track_run_request: Option<crate::track_edit::TrackRunAsk>,
 }
 
 /// An autosave left behind by an editor that did not close cleanly.
@@ -618,6 +641,8 @@ impl EditorState {
             tracking: crate::tracking::TrackRunner::default(),
             track_reports: std::collections::BTreeMap::new(),
             last_track_job: None,
+            track_chain: Vec::new(),
+            chained_track_jobs: std::collections::BTreeMap::new(),
             snap_cache: RefCell::new(None),
         }
     }
@@ -966,7 +991,7 @@ impl EditorState {
     }
 
     /// Runs a command. A refusal goes to the status line and the result is false.
-    fn run<F>(&mut self, command: F) -> bool
+    pub(crate) fn run<F>(&mut self, command: F) -> bool
     where
         F: FnOnce(&Project) -> Result<Project, EditError>,
     {
@@ -1887,12 +1912,60 @@ impl EditorState {
     /// [`crate::tracking::RunRequest::for_track`] for the default) in `direction`, reading
     /// `decode_path` (the file of the track, or its proxy). Answers the job id.
     pub fn start_tracking(&mut self, decode_path: PathBuf, track_id: u32, from: Option<Time>, direction: crate::tracking::Direction, rotation: bool) -> Result<u64, String> {
-        use crate::tracking::{FileFrames, FrameSource, RunRequest};
+        let request = self.track_request(track_id, from, direction, rotation)?;
+        self.start_track_request(decode_path, request)
+    }
+
+    /// The run of motion track `track_id` from its sample at `from`, see
+    /// [`crate::tracking::RunRequest::for_track`].
+    pub fn track_request(&self, track_id: u32, from: Option<Time>, direction: crate::tracking::Direction, rotation: bool) -> Result<crate::tracking::RunRequest, String> {
         let track = self.project().motion_track(track_id).ok_or_else(|| EditError::MotionTrackNotFound { id: track_id }.to_string())?;
-        let request = RunRequest::for_track(track, from, direction, rotation)?;
+        crate::tracking::RunRequest::for_track(track, from, direction, rotation)
+    }
+
+    /// Starts `request`, reading `decode_path`. Answers the job id.
+    pub fn start_track_request(&mut self, decode_path: PathBuf, request: crate::tracking::RunRequest) -> Result<u64, String> {
+        use crate::tracking::{FileFrames, FrameSource};
         let id = self.tracking.start(request, move || FileFrames::open(&decode_path).map(|frames| Box::new(frames) as Box<dyn FrameSource>))?;
         self.last_track_job = Some(id);
         Ok(id)
+    }
+
+    /// Tracks motion track `track_id` both ways from its sample at `from` (by default the last
+    /// sample placed by hand): forwards first, then, once that run is written, backwards from the
+    /// same sample, as [`Self::poll_tracking`] starts it. One track takes one run at a time, so the
+    /// two cannot go together. A forward run that is stopped, fails or no longer fits does not go
+    /// on. Answers the forward job.
+    pub fn start_tracking_both(&mut self, decode_path: PathBuf, track_id: u32, from: Option<Time>, rotation: bool) -> Result<u64, String> {
+        let request = self.track_request(track_id, from, crate::tracking::Direction::Forward, rotation)?;
+        let start = request.start.source_time;
+        let job = self.start_track_request(decode_path.clone(), request)?;
+        self.track_chain.push(ChainedRun { after: job, decode_path, track_id, from: start, rotation });
+        Ok(job)
+    }
+
+    /// Whether a backward run waits for forward job `job` to end.
+    pub fn has_chained_run(&self, job: u64) -> bool {
+        self.track_chain.iter().any(|chained| chained.after == job)
+    }
+
+    /// Starts the backward run that waited for job `id`, when its outcome lets it go on.
+    fn go_on_with_chain(&mut self, id: u64, outcome: &str) {
+        let Some(index) = self.track_chain.iter().position(|chained| chained.after == id) else { return };
+        let chained = self.track_chain.remove(index);
+        if !matches!(outcome, "done" | "lost") {
+            return;
+        }
+        let started = self.track_request(chained.track_id, Some(chained.from), crate::tracking::Direction::Backward, chained.rotation).and_then(|request| self.start_track_request(chained.decode_path, request));
+        match started {
+            Ok(job) => {
+                self.chained_track_jobs.insert(id, job);
+                while self.chained_track_jobs.len() > MAX_TRACK_REPORTS {
+                    self.chained_track_jobs.pop_first();
+                }
+            }
+            Err(message) => self.status = Status::Error(Message::TrackingFailed(message)),
+        }
     }
 
     /// Writes the samples of finished tracker runs, each as one undo step, says so on the status
@@ -1913,6 +1986,7 @@ impl EditorState {
                             self.status = Status::Error(Message::TrackingStale);
                             let report = crate::tracking::RunReport { track_id, outcome: "stale", count: 0, last: None, message: Some(error.to_string()) };
                             self.keep_track_report(id, report);
+                            self.go_on_with_chain(id, "stale");
                             continue;
                         }
                     };
@@ -1942,7 +2016,9 @@ impl EditorState {
                     crate::tracking::RunReport { track_id, outcome: "failed", count: 0, last: None, message: Some(message) }
                 }
             };
+            let outcome = report.outcome;
             self.keep_track_report(id, report);
+            self.go_on_with_chain(id, outcome);
         }
         self.tracking.running()
     }

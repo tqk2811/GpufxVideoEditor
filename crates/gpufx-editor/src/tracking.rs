@@ -101,6 +101,9 @@ pub struct RunRequest {
     /// The source time of the next sample placed by hand that way, where the run stops before.
     pub stop: Option<Time>,
     pub rotation: bool,
+    /// The most frames the run steps through after its start ([`MAX_RUN_FRAMES`] when absent):
+    /// 1 tracks a single frame.
+    pub limit: Option<usize>,
 }
 
 impl RunRequest {
@@ -123,7 +126,7 @@ impl RunRequest {
             Direction::Forward => samples.iter().find(|s| s.manual && s.source_time > start.source_time).map(|s| s.source_time),
             Direction::Backward => samples.iter().rev().find(|s| s.manual && s.source_time < start.source_time).map(|s| s.source_time),
         };
-        Ok(Self { track_id: track.id, media_path: track.media_path.clone(), start, direction, stop, rotation })
+        Ok(Self { track_id: track.id, media_path: track.media_path.clone(), start, direction, stop, rotation, limit: None })
     }
 }
 
@@ -146,7 +149,8 @@ pub fn run_times(request: &RunRequest, rate: Option<(i32, i32)>, length: Option<
     let stop = request.stop.map(|stop| frame_index(stop, rate));
     let mut times = Vec::new();
     let mut index = first;
-    while times.len() < MAX_RUN_FRAMES {
+    let most = request.limit.unwrap_or(MAX_RUN_FRAMES).min(MAX_RUN_FRAMES);
+    while times.len() < most {
         index += match request.direction {
             Direction::Forward => 1,
             Direction::Backward => -1,
@@ -510,6 +514,8 @@ mod tests {
         assert_eq!(backward.stop, Some(Time::ZERO));
         assert_eq!(run_times(&backward, Some((30, 1)), None).1, (1..20).rev().map(|i| frame_time(i, (30, 1))).collect::<Vec<_>>());
         assert!(RunRequest::for_track(&t, Some(Time::from_ticks(7)), Direction::Forward, true).is_err());
+        let one = RunRequest { limit: Some(1), ..RunRequest::for_track(&t, Some(Time::ZERO), Direction::Forward, true).unwrap() };
+        assert_eq!(run_times(&one, Some((30, 1)), None).1, vec![frame_time(1, (30, 1))], "a single frame");
     }
 
     #[test]

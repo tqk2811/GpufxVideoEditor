@@ -544,6 +544,24 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             };
             result.insert("track_id".to_owned(), Value::from(id));
         }
+        AgentEdit::TrackCreate { clip, at, sample } => {
+            let shown = current_clip(state.project(), clip).map_err(|error| AgentError::from_edit(&error))?.clone();
+            let at = at.unwrap_or(shown.start);
+            if at < shown.start || at >= shown.start.saturating_add(shown.duration) {
+                return Err(AgentError::new("invalid_params", "at is outside the clip"));
+            }
+            let source_time = shown.source_time_at(at.saturating_sub(shown.start)).max(Time::ZERO);
+            let id = state.project().next_motion_track_id();
+            let track = engine::MotionTrack { id, media_path: shown.source.clone(), aspect: state.clip_aspect(&shown), samples: vec![engine::TrackSample { source_time, confidence: 1.0, manual: true, ..sample }] };
+            state.apply_agent_command(|project| engine::set_motion_track(project, track)).map_err(refused)?;
+            result.insert("track_id".to_owned(), Value::from(id));
+            result.insert("source_time".to_owned(), Value::from(source_time.ticks()));
+        }
+        AgentEdit::TrackSmooth { track_id, smooth } => state.apply_agent_command(|project| engine::set_track_smooth(project, track_id, smooth)).map_err(refused)?,
+        AgentEdit::TrackBakeKeyframes { clip } => {
+            let aspect = current_clip(state.project(), clip).map(|shown| state.clip_aspect(shown)).map_err(|error| AgentError::from_edit(&error))?;
+            state.apply_agent_command(|project| engine::bake_follow(project, clip.into(), aspect)).map_err(refused)?
+        }
         AgentEdit::TransitionAdd { track, after_clip, package, duration, params } => {
             let transition = Transition { after_clip, package, duration: duration.unwrap_or(DEFAULT_TRANSITION_DURATION), params };
             let mut released = Vec::new();
@@ -753,9 +771,10 @@ fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef, retry:
 /// Starts a tracker run; a session without a window waits for it and answers its outcome.
 fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Option<Time>, direction: Option<String>, rotation: Option<bool>) -> Result<Value, AgentError> {
     writable(host, expected)?;
+    let both = direction.as_deref() == Some("both");
     let direction = match direction.as_deref() {
-        None => crate::tracking::Direction::Forward,
-        Some(code) => crate::tracking::Direction::from_code(code).ok_or_else(|| AgentError::new("invalid_params", format!("direction {code}: forward or backward")))?,
+        None | Some("both") => crate::tracking::Direction::Forward,
+        Some(code) => crate::tracking::Direction::from_code(code).ok_or_else(|| AgentError::new("invalid_params", format!("direction {code}: forward, backward or both")))?,
     };
     let paths = host.paths();
     let wait = host.mode() == "file";
@@ -767,11 +786,28 @@ fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Opt
         return Err(AgentError::new("busy", format!("motion track {track_id} is being tracked by job {job}")));
     }
     let path = paths.video_decode_path(&track.media_path);
-    let job = state.start_tracking(path, track_id, from, direction, rotation.unwrap_or(true)).map_err(|message| AgentError::new("invalid_params", message))?;
+    let rotation = rotation.unwrap_or(true);
+    let started = if both { state.start_tracking_both(path, track_id, from, rotation) } else { state.start_tracking(path, track_id, from, direction, rotation) };
+    let job = started.map_err(|message| AgentError::new("invalid_params", message))?;
     if wait {
         state.tracking.wait(job);
+        if both {
+            // Writes the forward run, which starts the backward one.
+            state.poll_tracking();
+            if let Some(back) = state.chained_track_jobs.get(&job).copied() {
+                state.tracking.wait(back);
+            }
+        }
     }
-    track_status(state, Some(job))
+    let mut answer = track_status(state, Some(job))?;
+    if both {
+        answer["backward"] = match state.chained_track_jobs.get(&job).copied() {
+            Some(back) => track_status(state, Some(back))?,
+            None if state.has_chained_run(job) => json!({"state": "queued"}),
+            None => json!({"state": "not_started"}),
+        };
+    }
+    Ok(answer)
 }
 
 /// Where tracker job `job` (the last one when absent) stands; writes finished runs first.

@@ -1,0 +1,491 @@
+//! What the editor does with motion tracks for a person: picking an object, boxes placed by hand,
+//! asking the window for tracker runs, overlays that follow, censor regions that follow, effect
+//! regions and baking a follow into keyframes. Every change is one undo step, a slider drag one
+//! live edit.
+
+use crate::editor::EditorState;
+use crate::i18n::Message;
+use crate::tracking::Direction;
+use engine::{ClipKey, EditError, EffectRegion, Follow, FrameMapping, MotionTrack, Project, Time, TrackLink, TrackSample};
+
+/// A tracker run the inspector asked for; the window starts it with the file the preview decodes
+/// (the proxy when there is one), see [`EditorState::run_track_ask`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackRunAsk {
+    pub track_id: u32,
+    /// The source time of the sample to start from; `None` for the default of
+    /// [`crate::tracking::RunRequest::for_track`].
+    pub from: Option<Time>,
+    pub direction: Direction,
+    /// At most this many frames (1 for "Track 1 frame").
+    pub limit: Option<usize>,
+}
+
+/// A box below this size, in parts of the picture, is a click rather than a box.
+pub const MIN_BOX_SIDE: f64 = 0.01;
+/// Below this confidence a sample counts as lost (red on the timeline).
+pub const LOW_CONFIDENCE: f64 = 0.5;
+
+/// The clip that shows the tracked file for an overlay at timeline time `at`: of the clips of
+/// `media` that follow nothing, other than `overlay`, the one playing at `at`, else the nearest.
+pub fn reference_clip(project: &Project, media: &str, at: Time, overlay: Option<ClipKey>) -> Option<ClipKey> {
+    let mut best: Option<(i64, ClipKey)> = None;
+    for (t, track) in project.tracks.iter().enumerate() {
+        for (c, clip) in track.clips.iter().enumerate() {
+            let key = ClipKey { track: t, clip: c };
+            if clip.source != media || clip.follow.is_some() || Some(key) == overlay {
+                continue;
+            }
+            let end = clip.start.saturating_add(clip.duration);
+            let distance = if at < clip.start { clip.start.ticks() - at.ticks() } else if at >= end { at.ticks() - end.ticks() + 1 } else { 0 };
+            if best.is_none_or(|(known, _)| distance < known) {
+                best = Some((distance, key));
+            }
+        }
+    }
+    best.map(|(_, key)| key)
+}
+
+/// The follow of an overlay through reference clip `reference` of `project`, anchored at the
+/// moment of the reference nearest timeline time `at`: there the overlay stands where it is
+/// placed, so attaching never moves it at that moment (no offset needed).
+pub fn follow_at(project: &Project, track_id: u32, reference: ClipKey, at: Time, follow_scale: bool, follow_rotation: bool) -> Option<Follow> {
+    let clip = project.tracks.get(reference.track)?.clips.get(reference.clip)?;
+    let last = clip.start.saturating_add(clip.duration).saturating_sub(Time::from_ticks(1)).max(clip.start);
+    let time = at.clamp(clip.start, last);
+    let anchor_source_time = clip.source_time_at(time.saturating_sub(clip.start)).max(Time::ZERO);
+    project.motion_track(track_id)?;
+    // A new follower takes the smoothing the others of the track share.
+    let smooth = track_smooth(project, track_id);
+    let link = TrackLink { track_id, anchor_source_time, follow_scale, follow_rotation, smooth };
+    Some(Follow { link, ref_track: reference.track, ref_clip: reference.clip, offset: [0.0, 0.0] })
+}
+
+/// The smoothing the followers of motion track `track_id` share (the first one found), 0 without any.
+pub fn track_smooth(project: &Project, track_id: u32) -> f64 {
+    project
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .find_map(|clip| {
+            clip.follow.filter(|follow| follow.link.track_id == track_id).map(|follow| follow.link.smooth).or_else(|| clip.effects.iter().find_map(|effect| effect.region.and_then(|region| region.link).filter(|link| link.track_id == track_id).map(|link| link.smooth)))
+        })
+        .unwrap_or(0.0)
+}
+
+/// The sample of `track` within `tolerance` of source time `at`, the nearest.
+pub fn sample_near(track: &MotionTrack, at: Time, tolerance: Time) -> Option<TrackSample> {
+    let next = track.samples.partition_point(|s| s.source_time < at);
+    [next.checked_sub(1), Some(next)]
+        .into_iter()
+        .flatten()
+        .filter_map(|i| track.samples.get(i))
+        .filter(|s| (s.source_time.ticks() - at.ticks()).abs() <= tolerance.ticks())
+        .min_by_key(|s| (s.source_time.ticks() - at.ticks()).abs())
+        .copied()
+}
+
+/// The upright box in parts of the frame around the four corners of `sample` drawn with `mapping`:
+/// left, top, width and height.
+pub fn frame_box(mapping: &FrameMapping, sample: &TrackSample) -> [f64; 4] {
+    let corners = box_corners(sample).map(|corner| mapping.to_frame(corner));
+    let (mut low, mut high) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for [x, y] in corners {
+        low = [low[0].min(x), low[1].min(y)];
+        high = [high[0].max(x), high[1].max(y)];
+    }
+    [low[0], low[1], high[0] - low[0], high[1] - low[1]]
+}
+
+/// The corners of the box of `sample` in parts of its picture, clockwise from the top left, turned
+/// by its angle (the picture taken as square, as the tracker turns boxes in pixels only roughly).
+pub fn box_corners(sample: &TrackSample) -> [[f64; 2]; 4] {
+    let (sine, cosine) = sample.angle.to_radians().sin_cos();
+    let (hw, hh) = (sample.w / 2.0, sample.h / 2.0);
+    [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(|[x, y]| [sample.cx + cosine * x - sine * y, sample.cy + sine * x + cosine * y])
+}
+
+impl EditorState {
+    /// The motion tracks of source file `media`.
+    pub fn motion_tracks_of(&self, media: &str) -> Vec<&MotionTrack> {
+        self.project().motion_tracks.iter().filter(|track| track.media_path == media).collect()
+    }
+
+    /// The motion track the inspector works on for clip `key`: the chosen one when it is of the
+    /// clip's file, else the first track of that file.
+    pub fn motion_track_for(&self, key: ClipKey) -> Option<&MotionTrack> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        let tracks = self.motion_tracks_of(&clip.source);
+        tracks.iter().find(|track| Some(track.id) == self.ui.motion_track).or(tracks.first()).copied()
+    }
+
+    /// Chooses motion track `id` for the inspector, the preview and the timeline.
+    pub fn choose_motion_track(&mut self, id: Option<u32>) {
+        self.ui.motion_track = id;
+    }
+
+    /// How clip `key`, a picture of the shape of its source, lies in the frame at the playhead,
+    /// and the source time it shows there; `None` when the playhead is off the clip.
+    pub fn clip_frame_now(&self, key: ClipKey) -> Option<(FrameMapping, Time)> {
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
+        let at = self.playhead();
+        if at < clip.start || at >= clip.start.saturating_add(clip.duration) {
+            return None;
+        }
+        let mapping = self.project().clip_frame_mapping(key.track, key.clip, at, self.clip_aspect(clip))?;
+        Some((mapping, clip.source_time_at(at.saturating_sub(clip.start)).max(Time::ZERO)))
+    }
+
+    /// How far, in source time, a sample may be from the frame clip `key` shows to count as on it:
+    /// half an output frame at the clip's speed.
+    pub fn sample_tolerance(&self, key: ClipKey) -> Time {
+        let speed = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map_or(1.0, |clip| clip.speed);
+        let frame = self.project().output.frame_rate.frame_duration().ticks() as f64;
+        Time::from_ticks((frame * speed / 2.0).ceil() as i64)
+    }
+
+    /// Starts or ends drawing a box for a new motion track on the preview, for video clip `key`.
+    pub fn toggle_track_pick(&mut self, key: ClipKey) {
+        self.ui.tracking_pick = if self.ui.tracking_pick == Some(key) { None } else { Some(key) };
+    }
+
+    /// Starts a motion track of the file of clip `key` with the box drawn on the preview: `rect`
+    /// is left, top, width and height in parts of the frame, at the playhead. One undo step; the
+    /// new track is chosen and the drawing ends.
+    pub fn create_motion_track(&mut self, key: ClipKey, rect: [f64; 4]) -> Option<u32> {
+        self.ui.tracking_pick = None;
+        let (mapping, source_time) = self.clip_frame_now(key)?;
+        let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?.clone();
+        let a = mapping.to_source([rect[0], rect[1]]);
+        let b = mapping.to_source([rect[0] + rect[2], rect[1] + rect[3]]);
+        let (w, h) = ((b[0] - a[0]).abs(), (b[1] - a[1]).abs());
+        if w < MIN_BOX_SIDE || h < MIN_BOX_SIDE {
+            return None;
+        }
+        let id = self.project().next_motion_track_id();
+        let sample = TrackSample { source_time, cx: (a[0] + b[0]) / 2.0, cy: (a[1] + b[1]) / 2.0, w, h, angle: 0.0, confidence: 1.0, manual: true };
+        let track = MotionTrack { id, media_path: clip.source.clone(), aspect: self.clip_aspect(&clip), samples: vec![sample] };
+        if self.run(|project| engine::set_motion_track(project, track)) {
+            self.ui.motion_track = Some(id);
+            self.status_info(Message::TrackCreated);
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    /// Moves or resizes the box of motion track `id` while it is dragged: the box becomes a sample
+    /// placed by hand at its source time, which the tracker starts from and stops before. The
+    /// release makes it one undo step.
+    pub fn live_track_sample(&mut self, id: u32, sample: TrackSample) {
+        let sample = TrackSample { confidence: 1.0, manual: true, ..sample };
+        self.live_edit(|project| engine::set_track_sample(project, id, sample));
+    }
+
+    /// Removes motion track `id`; what followed it stays where it was placed. One undo step.
+    pub fn delete_motion_track(&mut self, id: u32) {
+        if self.run(|project| engine::remove_motion_track(project, id)) && self.ui.motion_track == Some(id) {
+            self.ui.motion_track = None;
+        }
+    }
+
+    /// Asks the window for a tracker run of motion track `id` for clip `key`: from the sample on
+    /// the frame at the playhead when there is one, else from the default sample.
+    pub fn ask_track_run(&mut self, key: ClipKey, id: u32, direction: Direction, limit: Option<usize>) {
+        let tolerance = self.sample_tolerance(key);
+        let from = self.clip_frame_now(key).and_then(|(_, at)| self.project().motion_track(id).and_then(|track| sample_near(track, at, tolerance))).map(|sample| sample.source_time);
+        self.ui.track_run_request = Some(TrackRunAsk { track_id: id, from, direction, limit });
+    }
+
+    /// Starts the run `ask` reading `decode_path`; a refusal goes to the status line.
+    pub fn run_track_ask(&mut self, decode_path: std::path::PathBuf, ask: TrackRunAsk) {
+        let started = self.track_request(ask.track_id, ask.from, ask.direction, true).and_then(|request| self.start_track_request(decode_path, crate::tracking::RunRequest { limit: ask.limit, ..request }));
+        if let Err(message) = started {
+            self.report_error(Message::TrackingFailed(message));
+        }
+    }
+
+    /// The progress of the run on motion track `id`, 0 to 1, while one goes.
+    pub fn track_progress(&self, id: u32) -> Option<f32> {
+        let job = self.tracking.running_on(id)?;
+        match self.tracking.status(job) {
+            Some(crate::tracking::RunState::Running { done, total }) => Some(if total == 0 { 0.0 } else { done as f32 / total as f32 }),
+            _ => Some(1.0),
+        }
+    }
+
+    /// Stops the run on motion track `id`; it writes what it made.
+    pub fn stop_track_run(&mut self, id: u32) {
+        if let Some(job) = self.tracking.running_on(id) {
+            self.tracking.cancel(job);
+        }
+    }
+
+    /// Moves the smoothing slider of motion track `id`, for everything that follows it.
+    pub fn live_track_smooth(&mut self, id: u32, smooth: f64) {
+        self.live_edit(|project| engine::set_track_smooth(project, id, smooth));
+    }
+
+    /// Makes overlay `key` follow motion track `track_id`, seen through the clip of its file at
+    /// the playhead (or the nearest), anchored at the playhead: position only by default. One undo
+    /// step.
+    pub fn follow_motion_track(&mut self, key: ClipKey, track_id: u32) {
+        let Some(media) = self.project().motion_track(track_id).map(|track| track.media_path.clone()) else { return };
+        let at = self.playhead();
+        let Some(reference) = reference_clip(self.project(), &media, at, Some(key)) else {
+            self.status_info(Message::FollowNoReference);
+            return;
+        };
+        let Some(follow) = follow_at(self.project(), track_id, reference, at, false, false) else { return };
+        self.run(|project| engine::set_follow(project, key, Some(follow)));
+    }
+
+    /// Turns following the scale or the turn of the object on or off for overlay `key`.
+    pub fn set_follow_options(&mut self, key: ClipKey, follow_scale: bool, follow_rotation: bool) {
+        let Some(follow) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.follow) else { return };
+        let link = TrackLink { follow_scale, follow_rotation, ..follow.link };
+        self.run(|project| engine::set_follow(project, key, Some(Follow { link, ..follow })));
+    }
+
+    /// Stops overlay `key` following its track.
+    pub fn clear_follow(&mut self, key: ClipKey) {
+        self.run(|project| engine::set_follow(project, key, None));
+    }
+
+    /// Turns the follow of overlay `key` into keyframes, see [`engine::bake_follow`].
+    pub fn bake_follow(&mut self, key: ClipKey) {
+        let Some(aspect) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map(|clip| self.clip_aspect(clip)) else { return };
+        if self.run(|project| engine::bake_follow(project, key, aspect)) {
+            self.status_info(Message::FollowBaked);
+        }
+    }
+
+    /// Adds a censor region over the box of motion track `track_id` at the playhead, following it,
+    /// for as long as the clip of the track's file that shows it, as one undo step, and selects it.
+    pub fn add_censor_following(&mut self, track_id: u32) {
+        if self.edits_blocked() {
+            return;
+        }
+        let Some(track) = self.project().motion_track(track_id).cloned() else { return };
+        let at = self.playhead();
+        let Some(reference) = reference_clip(self.project(), &track.media_path, at, None) else {
+            self.status_info(Message::FollowNoReference);
+            return;
+        };
+        let Some(clip) = self.project().tracks.get(reference.track).and_then(|lane| lane.clips.get(reference.clip)).cloned() else { return };
+        let last = clip.start.saturating_add(clip.duration).saturating_sub(Time::from_ticks(1)).max(clip.start);
+        let time = at.clamp(clip.start, last);
+        let source_time = clip.source_time_at(time.saturating_sub(clip.start)).max(Time::ZERO);
+        let (Some(point), Some(mapping)) = (track.point_at(source_time, 0.0), self.project().clip_frame_mapping(reference.track, reference.clip, time, track.aspect)) else { return };
+        let sample = TrackSample { source_time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false };
+        let [x, y, w, h] = frame_box(&mapping, &sample);
+        let (width, height) = self.output_pixels();
+        let range = engine::CENSOR_ASPECT_RANGE;
+        let aspect = (w * f64::from(width) / (h * f64::from(height)).max(1.0e-9)).clamp(*range.start(), *range.end());
+        let censor = engine::CensorContent { aspect, ..engine::CensorContent::default() };
+        let placement = engine::ClipPlacement { x, y, width: w.clamp(engine::MIN_PLACEMENT_WIDTH, engine::MAX_PLACEMENT_WIDTH) };
+        let (start, duration) = (clip.start, clip.duration);
+        let choice = crate::media::choose_track(self.project(), engine::TrackKind::Sticker, duration, start);
+        let lane = match choice {
+            crate::media::TrackChoice::Existing(index) => index,
+            crate::media::TrackChoice::New => self.project().tracks.len(),
+        };
+        let added = self.run(|project| {
+            let with_track = if choice == crate::media::TrackChoice::New { engine::add_track(project, engine::TrackKind::Sticker)? } else { project.clone() };
+            let next = engine::add_censor_clip(&with_track, lane, start, duration, censor, Some(placement))?;
+            let key = engine::clip_at(&next, lane, start).ok_or(EditError::TrackNotFound { track: lane })?;
+            let follow = follow_at(&next, track_id, reference, time, false, false).ok_or(EditError::MotionTrackNotFound { id: track_id })?;
+            engine::set_follow(&next, key, Some(follow))
+        });
+        if added {
+            self.select(engine::clip_at(self.project(), lane, start));
+            self.status_info(Message::CensorAdded);
+        }
+    }
+
+    /// Limits effect `effect` of the selected clip to `region`, or gives it the whole picture.
+    pub fn set_effect_region(&mut self, effect: usize, region: Option<EffectRegion>) {
+        let Some(key) = self.selection() else { return };
+        self.run(|project| engine::set_effect_region(project, key, effect, region));
+    }
+
+    /// Moves a slider of the region of effect `effect` of the selected clip.
+    pub fn live_effect_region(&mut self, effect: usize, region: EffectRegion) {
+        let Some(key) = self.selection() else { return };
+        self.live_edit(|project| engine::set_effect_region(project, key, effect, Some(region)));
+    }
+
+    /// Makes the region of effect `effect` of the selected clip move with motion track `track_id`
+    /// from the frame at the playhead (the clip's first frame when the playhead is off it), or
+    /// stay put with `None`.
+    pub fn link_effect_region(&mut self, effect: usize, track_id: Option<u32>) {
+        let Some(key) = self.selection() else { return };
+        let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
+        let Some(mut region) = clip.effects.get(effect).and_then(|effect| effect.region) else { return };
+        region.link = track_id.map(|track_id| {
+            let last = clip.start.saturating_add(clip.duration).saturating_sub(Time::from_ticks(1)).max(clip.start);
+            let time = self.playhead().clamp(clip.start, last);
+            let anchor_source_time = clip.source_time_at(time.saturating_sub(clip.start)).max(Time::ZERO);
+            TrackLink { track_id, anchor_source_time, follow_scale: false, follow_rotation: false, smooth: track_smooth(self.project(), track_id) }
+        });
+        self.run(|project| engine::set_effect_region(project, key, effect, Some(region)));
+    }
+
+    fn status_info(&mut self, message: Message) {
+        self.report_info(message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::{ClipPlacement, TrackKind, TICKS_PER_SECOND};
+
+    const SECOND: i64 = TICKS_PER_SECOND;
+
+    fn sample(seconds: i64, cx: f64) -> TrackSample {
+        TrackSample { source_time: Time::from_ticks(seconds * SECOND), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: true }
+    }
+
+    /// A video clip of `a.mp4` over 4 s on track 0, a motion track of it going from the left
+    /// quarter to the right quarter over 2 s, and a sticker on track 1 over the same 4 s.
+    fn rigged() -> EditorState {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Video);
+        state.add_clip_from_file(0, std::path::Path::new("a.mp4"));
+        let mut project = state.project().clone();
+        project.tracks[0].clips[0].duration = Time::from_ticks(4 * SECOND);
+        project.motion_tracks.push(MotionTrack { id: 1, media_path: "a.mp4".into(), aspect: 16.0 / 9.0, samples: vec![sample(0, 0.25), sample(2, 0.75)] });
+        let mut sticker = engine::censor_clip(Time::ZERO, Time::from_ticks(4 * SECOND), engine::CensorContent::default(), Some(ClipPlacement { x: 0.1, y: 0.1, width: 0.2 }));
+        sticker.censor = Some(engine::CensorContent::default());
+        let mut stickers = engine::Track { kind: TrackKind::Sticker, ..project.tracks[0].clone() };
+        stickers.clips = vec![sticker];
+        stickers.transitions.clear();
+        project.tracks.push(stickers);
+        state.replace_project(project, None);
+        state
+    }
+
+    fn overlay_x(state: &EditorState, at: Time) -> f64 {
+        let project = state.project();
+        let clip = &project.tracks[1].clips[0];
+        let mut transform = clip.transform_at(at.saturating_sub(clip.start));
+        if let Some(follow) = &clip.follow {
+            engine::follow_transform(project, follow, &mut transform, at);
+        }
+        transform.rect(16.0 / 9.0, clip.censor.unwrap().aspect).x
+    }
+
+    #[test]
+    fn attaching_at_the_playhead_keeps_the_overlay_there_then_moves_it_with_the_object() {
+        let mut state = rigged();
+        let key = ClipKey { track: 1, clip: 0 };
+        let at = Time::from_ticks(SECOND);
+        state.set_playhead(at);
+        let before = overlay_x(&state, at);
+        state.follow_motion_track(key, 1);
+        let follow = state.project().tracks[1].clips[0].follow.expect("follows");
+        assert_eq!((follow.ref_track, follow.ref_clip, follow.offset), (0, 0, [0.0, 0.0]));
+        assert_eq!(follow.link.anchor_source_time, at, "anchored at the playhead");
+        assert!(!follow.link.follow_scale && !follow.link.follow_rotation, "position only by default");
+        assert!((overlay_x(&state, at) - before).abs() < 1e-9, "no jump at the playhead");
+        // Half a second later the object went an eighth of the frame right.
+        assert!((overlay_x(&state, Time::from_ticks(3 * SECOND / 2)) - before - 0.125).abs() < 1e-6);
+        state.set_follow_options(key, true, true);
+        let follow = state.project().tracks[1].clips[0].follow.unwrap();
+        assert!(follow.link.follow_scale && follow.link.follow_rotation);
+        state.undo();
+        state.undo();
+        assert!(state.project().tracks[1].clips[0].follow.is_none(), "each step undoes");
+    }
+
+    #[test]
+    fn baking_keeps_where_the_overlay_shows_and_undoes_in_one_step() {
+        let mut state = rigged();
+        let key = ClipKey { track: 1, clip: 0 };
+        state.set_playhead(Time::ZERO);
+        state.follow_motion_track(key, 1);
+        let at = Time::from_ticks(SECOND);
+        let shown = overlay_x(&state, at);
+        state.bake_follow(key);
+        let clip = &state.project().tracks[1].clips[0];
+        assert!(clip.follow.is_none() && clip.motion.has_keyframes(engine::ClipProperty::X));
+        assert!((overlay_x(&state, at) - shown).abs() < 1e-6);
+        state.undo();
+        assert!(state.project().tracks[1].clips[0].follow.is_some());
+    }
+
+    #[test]
+    fn a_censor_following_the_object_covers_its_box() {
+        let mut state = rigged();
+        state.set_playhead(Time::ZERO);
+        state.add_censor_following(1);
+        let key = state.selection().expect("the new region is selected");
+        let clip = &state.project().tracks[key.track].clips[key.clip];
+        assert!(clip.is_censor());
+        assert_eq!(clip.follow.expect("follows").link.track_id, 1);
+        let placement = clip.placement.expect("placed");
+        // The clip fills the frame, so the box is 0.1 wide around 0.25.
+        assert!((placement.x - 0.2).abs() < 1e-6 && (placement.width - 0.1).abs() < 1e-6, "{placement:?}");
+        state.undo();
+        assert_eq!(state.project().tracks.iter().map(|track| track.clips.len()).sum::<usize>(), 2, "one undo step");
+    }
+
+    #[test]
+    fn a_drawn_box_starts_a_track_with_a_sample_placed_by_hand() {
+        let mut state = rigged();
+        let key = ClipKey { track: 0, clip: 0 };
+        state.set_playhead(Time::from_ticks(SECOND / 2));
+        state.toggle_track_pick(key);
+        assert_eq!(state.ui.tracking_pick, Some(key));
+        assert!(state.create_motion_track(key, [0.4, 0.4, 0.005, 0.2]).is_none(), "too thin to be a box");
+        state.toggle_track_pick(key);
+        let id = state.create_motion_track(key, [0.4, 0.4, 0.2, 0.2]).expect("a new track");
+        assert_eq!(state.ui.tracking_pick, None);
+        assert_eq!(state.motion_track_for(key).map(|track| track.id), Some(id));
+        let track = state.project().motion_track(id).unwrap();
+        let first = track.samples[0];
+        assert!(first.manual && first.source_time == Time::from_ticks(SECOND / 2));
+        assert!((first.cx - 0.5).abs() < 1e-9 && (first.w - 0.2).abs() < 1e-9, "{first:?}");
+        // Editing the box on a tracked frame places a sample by hand there.
+        state.live_track_sample(1, TrackSample { cx: 0.3, manual: false, confidence: 0.2, ..sample(2, 0.75) });
+        state.commit_live();
+        let fixed = state.project().motion_track(1).unwrap().samples[1];
+        assert!(fixed.manual && fixed.confidence == 1.0 && fixed.cx == 0.3);
+        state.delete_motion_track(id);
+        assert!(state.project().motion_track(id).is_none());
+    }
+
+    #[test]
+    fn a_run_starts_from_the_sample_on_the_frame_at_the_playhead() {
+        let mut state = rigged();
+        let key = ClipKey { track: 0, clip: 0 };
+        state.set_playhead(Time::from_ticks(2 * SECOND));
+        state.ask_track_run(key, 1, Direction::Forward, Some(1));
+        assert_eq!(state.ui.track_run_request, Some(TrackRunAsk { track_id: 1, from: Some(Time::from_ticks(2 * SECOND)), direction: Direction::Forward, limit: Some(1) }));
+        state.set_playhead(Time::from_ticks(SECOND));
+        state.ask_track_run(key, 1, Direction::Backward, None);
+        assert_eq!(state.ui.track_run_request.unwrap().from, None, "no sample there: the default one");
+    }
+
+    #[test]
+    fn smoothing_and_a_region_link_reach_the_project() {
+        let mut state = rigged();
+        let key = ClipKey { track: 1, clip: 0 };
+        state.follow_motion_track(key, 1);
+        state.live_track_smooth(1, 0.5);
+        state.commit_live();
+        assert_eq!(track_smooth(state.project(), 1), 0.5);
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        let mut project = state.project().clone();
+        project.tracks[0].clips[0].effects.push(engine::Effect { package: "pixelate".into(), params: Default::default(), keyframes: Default::default(), region: None });
+        state.replace_project(project, None);
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        state.set_effect_region(0, Some(EffectRegion { shape: engine::RegionShape::Ellipse, cx: 0.25, cy: 0.5, w: 0.2, h: 0.2, angle: 0.0, feather: 0.2, link: None }));
+        state.link_effect_region(0, Some(1));
+        let region = state.project().tracks[0].clips[0].effects[0].region.expect("a region");
+        assert_eq!(region.link.map(|link| link.track_id), Some(1));
+        state.link_effect_region(0, None);
+        assert!(state.project().tracks[0].clips[0].effects[0].region.unwrap().link.is_none());
+    }
+}
