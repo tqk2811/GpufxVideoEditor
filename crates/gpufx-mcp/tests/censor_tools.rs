@@ -1,5 +1,5 @@
 //! The censor and tracking tools on a [`FileSession`]: censor_add, track_set_sample,
-//! clip_follow_set, clip_follow_clear, clip_lock_set, clip_lock_clear and track_run.
+//! clip_follow_set, clip_follow_clear, clip_lock_set, clip_lock_clear, track_run and censor_faces.
 
 mod common;
 
@@ -138,4 +138,42 @@ fn track_create_runs_both_ways_then_smooth_and_bake_reach_the_follower() {
     assert_eq!(call_err(&mut session, "track_bake_keyframes", json!({"expected_revision": revision(&baked), "clip": {"track": 1, "clip": 0}})).code, "not_following");
     call_ok(&mut session, "undo", json!({"expected_revision": revision(&baked)}));
     assert!(project_of(&mut session).tracks[1].clips[0].follow.is_some(), "the bake is one undo step");
+}
+
+#[test]
+fn censor_faces_refuses_what_is_not_a_video_and_finds_the_faces_of_one() {
+    let _lock = gpu_lock();
+    // The face detector built in the FFmpegGpuFilter checkout, when there is one.
+    let built = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter/build/packages/gpufx_ai_tracking");
+    if built.join("yunet-2023mar.zip").is_file() && std::env::var_os(gpufx_editor::tracking_models::TRACKING_MODELS_ENV).is_none() {
+        std::env::set_var(gpufx_editor::tracking_models::TRACKING_MODELS_ENV, &built);
+    }
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    assert_eq!(call_err(&mut session, "censor_faces_status", json!({})).code, "job_not_found");
+    let (clip_a, _) = clip_paths();
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    let now = revision(&call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": clip_a, "start": 0, "duration": 180_000})));
+    let added = call_ok(&mut session, "censor_add", json!({"expected_revision": now, "start": 0, "duration": 180_000}));
+    let now = revision(&added);
+    let region = json!({"track": 1, "clip": 0});
+    assert_eq!(call_err(&mut session, "censor_faces", json!({"expected_revision": now, "clip": region})).code, "invalid_params", "a censor region is not a video");
+    let video = json!({"track": 0, "clip": 0});
+    assert_eq!(call_err(&mut session, "censor_faces", json!({"expected_revision": now, "clip": video, "mode": "smear"})).code, "invalid_params");
+    assert_eq!(call_err(&mut session, "censor_faces", json!({"expected_revision": now, "clip": video, "feather": 3.0})).code, "invalid_params");
+    if gpufx_editor::tracking_models::installed(gpufx_editor::tracking_models::TrackingModel::FaceDetector, &gpufx_editor::project_file::package_roots()).is_none() {
+        assert_eq!(call_err(&mut session, "censor_faces", json!({"expected_revision": now, "clip": video})).code, "invalid_params", "no model");
+        eprintln!("skipping the face detector: yunet-2023mar.zip is not built");
+        return;
+    }
+    let answer = call(&mut session, "censor_faces", json!({"expected_revision": now, "clip": video, "shape": "rect", "mode": "pixelate"}));
+    match answer {
+        // a machine without a GPU
+        Ok(failed) if failed["state"] == "failed" => assert!(std::env::var_os("GPUFX_REQUIRE_GPU").is_none() && failed["message"].as_str().unwrap_or("").contains("GPU"), "{failed}"),
+        Ok(done) => {
+            assert_eq!(done["state"], "done", "{done}");
+            assert_eq!(done["faces"].as_u64(), Some(done["track_ids"].as_array().unwrap().len() as u64));
+            assert_eq!(call_ok(&mut session, "censor_faces_status", json!({}))["state"], "done");
+        }
+        Err(error) => panic!("{error:?}"),
+    }
 }

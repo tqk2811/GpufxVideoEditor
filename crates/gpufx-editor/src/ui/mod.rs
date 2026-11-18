@@ -82,6 +82,10 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     if state.poll_tracking() {
         root.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
+    // Finished face censor jobs write their regions.
+    if state.poll_face_censor() {
+        root.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    }
     track_fullscreen_activity(root.ctx(), state);
     handle_shortcuts(root.ctx(), state, requests);
     if state.ui.fullscreen {

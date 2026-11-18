@@ -12,6 +12,7 @@ pub mod dpi_window;
 pub mod editor;
 pub mod effect_previews;
 pub mod export;
+pub mod face_censor;
 pub mod font_install;
 pub mod font_library;
 pub mod i18n;

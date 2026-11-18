@@ -153,6 +153,9 @@ pub struct EditorState {
     /// Object tracker runs in the background; the samples of a finished one are written as one
     /// undo step by [`Self::poll_tracking`].
     pub tracking: crate::tracking::TrackRunner,
+    /// Automatic face censor jobs in the background; a finished one writes its censor regions as one
+    /// undo step in [`Self::poll_face_censor`].
+    pub faces: crate::face_censor::FaceCensorJobs,
     /// What finished runs did, by job id; the last [`MAX_TRACK_REPORTS`].
     pub track_reports: std::collections::BTreeMap<u64, crate::tracking::RunReport>,
     /// The tracker job started last.
@@ -402,12 +405,15 @@ pub struct UiState {
     pub motion_track: Option<u32>,
     /// The tracker run the inspector asked for; the window starts it with the preview's paths.
     pub track_run_request: Option<crate::track_edit::TrackRunAsk>,
+    /// The video clip whose faces the inspector asked to censor; the window starts the job with
+    /// the preview's paths.
+    pub face_censor_request: Option<ClipKey>,
     /// The tracker the inspector's runs use.
     pub track_mode: crate::tracking::TrackMode,
-    /// The robust tracker's model is to be imported from a zip the user picks.
+    /// A model of tracking is to be imported from a zip the user picks (which one is read from the zip).
     pub tracking_model_import_request: bool,
-    /// The robust tracker's model is to be downloaded.
-    pub tracking_model_fetch_request: bool,
+    /// A model of tracking is to be downloaded.
+    pub tracking_model_fetch_request: Option<crate::tracking_models::TrackingModel>,
 }
 
 /// An autosave left behind by an editor that did not close cleanly.
@@ -651,6 +657,7 @@ impl EditorState {
             beats: BeatDetector::default(),
             beat_requests: Vec::new(),
             tracking: crate::tracking::TrackRunner::default(),
+            faces: crate::face_censor::FaceCensorJobs::default(),
             track_reports: std::collections::BTreeMap::new(),
             last_track_job: None,
             track_chain: Vec::new(),

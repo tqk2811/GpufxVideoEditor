@@ -115,7 +115,7 @@ pub enum Arrival {
     /// A matting model was imported or downloaded, or failed to be.
     MatteModelInstalled { load: u64, result: Result<PathBuf, String> },
     /// The robust tracker's model was imported, or failed to be.
-    TrackingModelInstalled { load: u64, result: Result<PathBuf, String> },
+    TrackingModelInstalled { load: u64, result: Result<(crate::tracking_models::TrackingModel, PathBuf), String> },
     LibraryItemProbed { load: u64, item: MediaItem, target: LibraryTarget, result: Result<MediaProbe, String> },
     /// The thread of a task panicked, so it will never deliver a result.
     TaskFailed { task: TaskId, message: String },
@@ -477,7 +477,8 @@ impl Tasks {
                 }
                 self.drop_load(state);
                 match result {
-                    Ok(_) => state.report_info(Message::TrackModelInstalled),
+                    Ok((crate::tracking_models::TrackingModel::NanoTrack, _)) => state.report_info(Message::TrackModelInstalled),
+                    Ok((crate::tracking_models::TrackingModel::FaceDetector, _)) => state.report_info(Message::FaceModelInstalled),
                     Err(problem) => state.report_error(Message::MatteImportFailed(problem)),
                 }
                 Action::Nothing

@@ -76,7 +76,7 @@ impl TrackFrame {
     }
 
     /// The RGBA picture, made from the gray one when there is none.
-    fn rgba(&self) -> std::borrow::Cow<'_, [u8]> {
+    pub(crate) fn rgba(&self) -> std::borrow::Cow<'_, [u8]> {
         match &self.rgba {
             Some(rgba) => std::borrow::Cow::Borrowed(rgba),
             None => std::borrow::Cow::Owned(
@@ -200,7 +200,7 @@ impl RunRequest {
     pub fn with_mode(self, mode: TrackMode, package_roots: &[PathBuf]) -> Result<Self, String> {
         let model = match mode {
             TrackMode::Fast => None,
-            TrackMode::Robust => Some(crate::tracking_models::installed(package_roots).ok_or_else(|| {
+            TrackMode::Robust => Some(crate::tracking_models::installed(crate::tracking_models::TrackingModel::NanoTrack, package_roots).ok_or_else(|| {
                 "the robust tracker needs the NanoTrack model: download it or import its zip in the Tracking section of the inspector".to_owned()
             })?),
         };
@@ -487,7 +487,7 @@ static TRACKING_GPU: Mutex<Option<Arc<gpufx_core::GpuContext>>> = Mutex::new(Non
 
 /// The GPU of the robust tracker: one device for every run of the session, made on first use and
 /// made again after a GPU error dropped it.
-fn tracking_gpu() -> Result<Arc<gpufx_core::GpuContext>, String> {
+pub(crate) fn tracking_gpu() -> Result<Arc<gpufx_core::GpuContext>, String> {
     let mut context = TRACKING_GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(context) = context.as_ref() {
         return Ok(context.clone());
@@ -499,7 +499,7 @@ fn tracking_gpu() -> Result<Arc<gpufx_core::GpuContext>, String> {
 
 /// Drops the kept device after `error` if it is a GPU error (a lost device would fail every
 /// later run otherwise), so the next run makes a new one.
-fn forget_tracking_gpu(error: &gpufx_core::Error) {
+pub(crate) fn forget_tracking_gpu(error: &gpufx_core::Error) {
     if matches!(error, gpufx_core::Error::Gpu(_)) {
         *TRACKING_GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
@@ -530,7 +530,7 @@ struct RobustTracker {
     lost_below: f64,
 }
 
-fn rgba_image(rgba: &[u8], width: usize, height: usize) -> gpufx_core::Image<'_> {
+pub(crate) fn rgba_image(rgba: &[u8], width: usize, height: usize) -> gpufx_core::Image<'_> {
     gpufx_core::Image { data: rgba, width: width as u32, height: height as u32, stride: width as u32 * 4 }
 }
 

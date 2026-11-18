@@ -830,6 +830,59 @@ fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Opt
     Ok(answer)
 }
 
+/// Starts the automatic face censor of video `clip`; a session without a window waits for it and
+/// answers its outcome.
+fn censor_faces<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef, shape: Option<engine::RegionShape>, feather: Option<f64>, mode: Option<engine::CensorMode>) -> Result<Value, AgentError> {
+    writable(host, expected)?;
+    let paths = host.decode_paths();
+    let wait = host.mode() == "file";
+    let state = host.state();
+    current_clip(state.project(), clip).map_err(|error| AgentError::from_edit(&error))?;
+    if state.is_track_locked(clip.track) {
+        return Err(AgentError::from_edit(&engine::EditError::TrackLocked { track: clip.track }));
+    }
+    let defaults = crate::face_censor::FaceCensorStyle::default();
+    let style = crate::face_censor::FaceCensorStyle { shape: shape.unwrap_or(defaults.shape), feather: feather.unwrap_or(defaults.feather), mode: mode.unwrap_or(defaults.mode) };
+    if let Some(problem) = (engine::CensorContent { shape: style.shape, aspect: 1.0, feather: style.feather, mode: style.mode }).problem() {
+        return Err(AgentError::new("invalid_params", problem));
+    }
+    let key: ClipKey = clip.into();
+    if let Some(job) = state.faces.running_on(key) {
+        return Err(AgentError::new("busy", format!("the faces of track {}, clip {} are being found by job {job}", clip.track, clip.clip)));
+    }
+    let request = state.face_request(key, style).map_err(|message| AgentError::new("invalid_params", message))?;
+    let path = paths.video_decode_path(&request.media_path);
+    let job = state.start_face_censor(path, request).map_err(|message| AgentError::new("invalid_params", message))?;
+    if wait {
+        state.faces.wait(job);
+    }
+    censor_faces_status(state, Some(job))
+}
+
+/// Where face censor job `job` (the last one when absent) stands; writes finished jobs first.
+fn censor_faces_status(state: &mut EditorState, job: Option<u64>) -> Result<Value, AgentError> {
+    let Some(job) = job.or(state.faces.last_job) else {
+        return Err(AgentError::new("job_not_found", "no face censor job was started"));
+    };
+    state.poll_face_censor();
+    if let Some(status) = state.faces.status(job) {
+        // Finished but not written yet: edits wait for a drag or an export.
+        let (done, total) = match status {
+            crate::face_censor::FaceState::Running { done, total } => (done, total),
+            _ => (1, 1),
+        };
+        return Ok(json!({"job": job, "state": "running", "done": done, "total": total}));
+    }
+    let Some(report) = state.faces.reports.get(&job) else {
+        return Err(AgentError::new("job_not_found", format!("no face censor job {job}")));
+    };
+    let mut answer = json!({"job": job, "state": report.outcome, "clip": {"track": report.clip.track, "clip": report.clip.clip}, "faces": report.faces, "track_ids": report.track_ids});
+    if let Some(message) = &report.message {
+        answer["message"] = Value::from(message.clone());
+    }
+    Ok(answer)
+}
+
 /// Where tracker job `job` (the last one when absent) stands; writes finished runs first.
 fn track_status(state: &mut EditorState, job: Option<u64>) -> Result<Value, AgentError> {
     let Some(job) = job.or(state.last_track_job) else {
@@ -1115,6 +1168,15 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
                 state.tracking.cancel(job);
             }
             track_status(state, job)
+        }
+        AgentRequest::CensorFaces { expected_revision, clip, shape, feather, mode } => censor_faces(host, expected_revision, clip, shape, feather, mode),
+        AgentRequest::CensorFacesStatus { job } => censor_faces_status(host.state(), job),
+        AgentRequest::CensorFacesCancel { job } => {
+            let state = host.state();
+            if let Some(job) = job.or(state.faces.last_job) {
+                state.faces.cancel(job);
+            }
+            censor_faces_status(state, job)
         }
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),

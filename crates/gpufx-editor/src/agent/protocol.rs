@@ -285,6 +285,23 @@ pub enum AgentRequest {
     TrackStatus { job: Option<u64> },
     /// Stops tracker job `job` (the last one when absent); it writes the samples made so far.
     TrackCancel { job: Option<u64> },
+    /// Finds every face in video `clip` (the part of its file it shows, the preview proxy when
+    /// there is one) with the face detector, joins them into face tracks, and adds a motion track
+    /// and a censor region following it per face, as one undo step when the job ends. `shape`,
+    /// `feather` and `mode` style the regions (ellipse, 0.3 and a blur by default). A session
+    /// without a window waits and answers the outcome; an open window answers the job at once, for
+    /// [`AgentRequest::CensorFacesStatus`].
+    CensorFaces {
+        expected_revision: u64,
+        clip: ClipRef,
+        shape: Option<engine::RegionShape>,
+        feather: Option<f64>,
+        mode: Option<engine::CensorMode>,
+    },
+    /// Where face censor job `job` (the last one when absent) stands.
+    CensorFacesStatus { job: Option<u64> },
+    /// Stops face censor job `job` (the last one when absent); it then adds nothing.
+    CensorFacesCancel { job: Option<u64> },
     Edit { expected_revision: u64, edit: AgentEdit },
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },

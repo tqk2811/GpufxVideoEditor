@@ -39,6 +39,7 @@ pub(super) fn tracking_rows(ui: &mut egui::Ui, state: &mut EditorState, key: Cli
     if ui.selectable_label(picking, label).on_hover_text(language.t(Message::TrackPickHint)).clicked() {
         state.toggle_track_pick(key);
     }
+    face_censor_rows(ui, state, key);
     let tracks: Vec<MotionTrack> = state.motion_tracks_of(source).into_iter().cloned().collect();
     let Some(current) = state.motion_track_for(key).cloned() else {
         ui.colored_label(theme::text_dim(), language.t(Message::TrackNone));
@@ -93,6 +94,33 @@ pub(super) fn tracking_rows(ui: &mut egui::Ui, state: &mut EditorState, key: Cli
     ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackHintFix)).color(theme::text_dim()).small()).wrap());
 }
 
+/// The automatic face censor of video clip `key`: its button, or the progress of its job, and the
+/// download or import of the face detector model when it is missing.
+fn face_censor_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) {
+    let language = state.language();
+    if let Some(progress) = state.faces.progress_on(key) {
+        ui.horizontal(|ui| {
+            let text = language.t(Message::FaceCensorRunning((progress * 100.0).round() as u32));
+            ui.add(egui::ProgressBar::new(progress).desired_width((ui.available_width() - 70.0).max(40.0)).text(text));
+            if ui.button(language.t(Message::TrackStop)).clicked() {
+                if let Some(job) = state.faces.running_on(key) {
+                    state.faces.cancel(job);
+                }
+            }
+        });
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        return;
+    }
+    let model = crate::tracking_models::TrackingModel::FaceDetector;
+    let installed = crate::tracking_models::installed(model, &crate::project_file::package_roots()).is_some();
+    if ui.add_enabled(installed, egui::Button::new(language.t(Message::FaceCensor))).on_hover_text(language.t(Message::FaceCensorHint)).on_disabled_hover_text(language.t(Message::FaceModelMissing)).clicked() {
+        state.ui.face_censor_request = Some(key);
+    }
+    if !installed {
+        model_rows(ui, state, model, Message::FaceModelMissing);
+    }
+}
+
 /// The tracker choice and, for the robust tracker without its model, the download or import.
 fn mode_rows(ui: &mut egui::Ui, state: &mut EditorState) {
     let language = state.language();
@@ -104,12 +132,19 @@ fn mode_rows(ui: &mut egui::Ui, state: &mut EditorState) {
             }
         }
     });
-    if state.ui.track_mode != TrackMode::Robust || crate::tracking_models::installed(&crate::project_file::package_roots()).is_some() {
+    let model = crate::tracking_models::TrackingModel::NanoTrack;
+    if state.ui.track_mode != TrackMode::Robust || crate::tracking_models::installed(model, &crate::project_file::package_roots()).is_some() {
         return;
     }
-    ui.colored_label(theme::text_dim(), language.t(Message::TrackModelMissing));
+    model_rows(ui, state, model, Message::TrackModelMissing);
+}
+
+/// What says `model` is missing (`missing`), and its download with progress, or its import.
+fn model_rows(ui: &mut egui::Ui, state: &mut EditorState, model: crate::tracking_models::TrackingModel, missing: Message) {
+    let language = state.language();
+    ui.colored_label(theme::text_dim(), language.t(missing));
     let downloads = crate::tracking_models::downloads();
-    match downloads.status(()) {
+    match downloads.status(model) {
         Some(crate::model_download::DownloadStatus::Running(progress)) => {
             let (received, total) = progress.snapshot();
             ui.horizontal(|ui| {
@@ -117,7 +152,7 @@ fn mode_rows(ui: &mut egui::Ui, state: &mut EditorState) {
                 let text = format!("{} {}", language.t(Message::MatteFetching), crate::model_download::format_progress(received, total));
                 ui.add(egui::ProgressBar::new(fraction).desired_width((ui.available_width() - 80.0).max(40.0)).text(text));
                 if ui.button(language.t(Message::MatteFetchCancel)).clicked() {
-                    downloads.cancel(());
+                    downloads.cancel(model);
                 }
             });
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
@@ -132,8 +167,8 @@ fn mode_rows(ui: &mut egui::Ui, state: &mut EditorState) {
             };
             ui.horizontal(|ui| {
                 let label = if failed { Message::MatteFetchRetry } else { Message::MatteFetch };
-                if ui.add_enabled(crate::tracking_models::source().enabled(), egui::Button::new(language.t(label))).on_disabled_hover_text(language.t(Message::MatteFetchUnavailable)).clicked() {
-                    state.ui.tracking_model_fetch_request = true;
+                if ui.add_enabled(crate::tracking_models::source(model).enabled(), egui::Button::new(language.t(label))).on_disabled_hover_text(language.t(Message::MatteFetchUnavailable)).clicked() {
+                    state.ui.tracking_model_fetch_request = Some(model);
                 }
                 if ui.button(language.t(Message::MatteImportZip)).clicked() {
                     state.ui.tracking_model_import_request = true;

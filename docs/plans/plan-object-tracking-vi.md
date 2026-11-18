@@ -107,7 +107,7 @@ Chỉ dùng mã và model có giấy phép MIT, Apache hoặc BSD. Tự viết t
 | P1 | Tracker cổ điển (KLT + similarity + NCC phục hồi, có confidence); worker đọc frame qua decoder hoặc proxy, readback ảnh xám, tiến độ và huỷ | module mới `engine/src/tracking/` hoặc crate `gpufx-track`; `gpufx-editor/src/tracking.rs` | Chuỗi ảnh tổng hợp (ô vuông dịch, xoay, scale), sai số dưới 1 px; test huỷ |
 | P2 | Trải nghiệm: vẽ khung, track tiến/lùi, sửa tay, làm mượt, gắn overlay, undo, bake keyframe, tool agent/MCP, i18n | `ui/inspector.rs`, `ui/placement.rs`, `ui/player.rs`, timeline, `agent/*`, `gpufx-mcp/src/tools.rs` | Test logic gắn và offset, test lệnh agent |
 | P3 | Tracker NN (NanoTrack): thêm op vào `gpufx-core/nn` trên nhánh của submodule FFmpegGpuFilter (báo phiên ffmpeggpufilter trước); release model; tổng quát `matting_models.rs` thành bộ tải model chung; chế độ Nhanh/Bền | submodule FFmpegGpuFilter, `matting_models.rs` | So từng op với model gốc; so khung bao trên clip mẫu |
-| P4 (tuỳ chọn) | Tự động che mặt (detector + ghép theo IoU), tracking phối cảnh 4 góc | như P3 | |
+| P4 (tuỳ chọn) | Tự động che mặt (detector + ghép theo IoU), tracking phối cảnh 4 góc. Phần 1 (che mặt) đã làm, xem mục "Tự động che mặt" | như P3; `gpufx-core/nn/face.rs`, `engine/src/faces.rs`, `gpufx-editor/src/face_censor.rs` | So từng đầu ra với onnxruntime; test ghép IoU; test đầu cuối với detector giả và với YuNet thật |
 
 ## Lựa chọn UX tạm ở P2
 
@@ -135,6 +135,25 @@ Các điểm dưới đây do phiên làm P3 tự chọn khi user vắng, chờ 
 - Chế độ chọn trong inspector là cài đặt của phiên, không lưu vào project; tool `track_run` mặc định `fast`.
 - Tracker Bền dùng một GPU device riêng cho mọi lần chạy trong phiên, tạo khi chạy lần đầu, không dùng chung device của preview.
 - Đọc frame vẫn ở 360 dòng như tracker cổ điển.
+
+## Tự động che mặt (P4 phần 1)
+
+- **Model:** YuNet `face_detection_yunet_2023mar.onnx` của [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet), giấy phép MIT (README của thư mục ghi mọi file trong đó, gồm cả trọng số, theo MIT), ghim ở commit `eb9f4f2d` kèm sha256. Gói `gpufx_ai_tracking/yunet-2023mar.zip` gồm `model.json`, `weights.bin`, `io.json` (role `face_detector`), `LICENSE`, `README.md`; phát hành chung release `models-tracking-v1` với NanoTrack.
+- **Chạy model:** `scripts/convert-tracking-models.py` cắt graph trước các Reshape ở đầu ra (bỏ nhánh landmark), pnnx với hai cỡ ảnh để Resize đi theo tỉ lệ, rồi `gpufx-nnconv`. Không cần thêm op. `FaceDetector` của gpufx-core co cạnh dài của frame về 640, đệm số 0 tới bội 32, chạy trên GPU, đọc về các map của stride 8, 16, 32, giải mã khung và NMS trên CPU. Test so từng đầu ra với onnxruntime (CPU reference và GPU) và so khung tìm được trên một frame của ảnh mẫu OpenCV Zoo.
+- **Ghép theo IoU:** `engine::faces::face_tracks` gán khung của mỗi frame cho đường đang mở theo IoU lớn nhất trước. Khung không đường nào nhận thì mở đường mới. Đường lỡ quá `max_gap` frame liền thì đóng. Đường ngắn hoặc điểm trung bình thấp bị bỏ.
+- **Luồng chạy:** worker đọc frame như tracker (proxy nếu có, 360 dòng), có tiến độ và huỷ. Khi xong, mỗi đường thành một `MotionTrack` (sample có confidence là điểm của detector) và một clip che vùng bám theo nó, tất cả trong một bước undo.
+- **Giao diện và agent:** nút "Tự động che mặt" trong mục Tracking của clip video, có thanh tiến độ và nút dừng, kèm tải hoặc import model khi chưa có. Tool `censor_faces` (bất đồng bộ như `track_run`), `censor_faces_status`, `censor_faces_cancel`.
+
+Lựa chọn tạm (chờ user duyệt):
+
+- Dò tối đa 10 frame mỗi giây nguồn; các frame giữa lấy nội suy của motion track.
+- Ngưỡng điểm 0,6, NMS 0,3. Ghép: IoU từ 0,3, cho lỡ tối đa 5 lần dò liền, giữ đường có từ 5 lần dò và điểm trung bình từ 0,7.
+- Vùng che to gấp 1,3 lần khung mặt quanh tâm, hình elip, feather 0,3, chế độ blur bán kính 30. Bám vị trí và cỡ (không bám xoay), làm mượt 0,15 giây.
+- Vùng che kéo dài từ lần dò đầu tới lần dò cuối của mặt cộng thêm một bước dò, cắt trong khoảng của clip.
+- Huỷ giữa chừng thì không thêm gì, kể cả các mặt đã dò được.
+- Model YuNet nằm cùng thư mục `gpufx_ai_tracking` và dùng chung bộ tải của tracker; `tracking_models.rs` nay quản lý cả hai model.
+- Dùng chung GPU device với tracker Bền.
+- Ảnh mẫu của golden test (`largest_selfie.jpg` của OpenCV Zoo) chỉ được script tải về `build/` để test, không đưa vào repo hay gói.
 
 ## Khoá khung theo vật (ổn định theo track)
 

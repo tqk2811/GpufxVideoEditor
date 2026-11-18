@@ -247,6 +247,8 @@ impl Session {
         state.visuals.get_mut().set_waker(Arc::new(move || visuals_window.request_redraw()));
         let tracking_window = session_window.clone();
         state.tracking.set_waker(Arc::new(move || tracking_window.request_redraw()));
+        let faces_window = session_window.clone();
+        state.faces.set_waker(Arc::new(move || faces_window.request_redraw()));
         let previews_window = session_window.clone();
         state.previews.get_mut().start_for_editor(package_roots.clone(), Arc::new(move || previews_window.request_redraw()));
         let audio_library = spawn_audio_scan(package_roots.clone(), window_for_scan.clone());
@@ -751,8 +753,8 @@ impl Session {
         if std::mem::take(&mut self.state.ui.tracking_model_import_request) {
             self.begin_task(Request::ImportTrackingModel);
         }
-        if std::mem::take(&mut self.state.ui.tracking_model_fetch_request) {
-            crate::tracking_models::start_download();
+        if let Some(model) = self.state.ui.tracking_model_fetch_request.take() {
+            crate::tracking_models::start_download(model);
         }
         self.tracking_downloads_finished();
         if let Some(ask) = self.state.ui.track_run_request.take() {
@@ -761,6 +763,16 @@ impl Session {
             if let Some(media) = media {
                 let path = self.preview_paths.video_decode_path(&media);
                 self.state.run_track_ask(path, ask);
+            }
+        }
+        if let Some(key) = self.state.ui.face_censor_request.take() {
+            // The preview's paths: the faces are found on the proxy when there is one.
+            let started = self.state.face_request(key, crate::face_censor::FaceCensorStyle::default()).and_then(|request| {
+                let path = self.preview_paths.video_decode_path(&request.media_path);
+                self.state.start_face_censor(path, request)
+            });
+            if let Err(message) = started {
+                self.state.report_error(Message::FaceCensorFailed(message));
             }
         }
         if let Some(track) = self.state.ui.subtitle_export_request.take() {
@@ -1140,9 +1152,12 @@ impl Session {
 
     /// Handles a download of the robust tracker's model that ended.
     fn tracking_downloads_finished(&mut self) {
-        for (_, outcome) in crate::tracking_models::downloads().take_finished() {
+        for (model, outcome) in crate::tracking_models::downloads().take_finished() {
             match outcome {
-                crate::model_download::DownloadOutcome::Installed(_) => self.state.report_info(Message::TrackModelInstalled),
+                crate::model_download::DownloadOutcome::Installed(_) => self.state.report_info(match model {
+                    crate::tracking_models::TrackingModel::NanoTrack => Message::TrackModelInstalled,
+                    crate::tracking_models::TrackingModel::FaceDetector => Message::FaceModelInstalled,
+                }),
                 crate::model_download::DownloadOutcome::Failed(problem) => self.state.report_error(Message::MatteImportFailed(problem)),
                 crate::model_download::DownloadOutcome::Cancelled => {}
             }

@@ -21,6 +21,7 @@ pub mod audio_schedule;
 pub mod beats;
 pub mod denoise;
 pub mod edit;
+pub mod faces;
 pub mod frame_rate;
 pub mod karaoke;
 pub mod keyframe;

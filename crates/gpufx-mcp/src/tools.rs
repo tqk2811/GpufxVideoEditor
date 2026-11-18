@@ -971,6 +971,7 @@ params!(ExportStartParams { out: PathBuf, #[serde(default)] overwrite: bool, cod
 params!(ExportJobParams { job: Option<u64> });
 params!(TrackRunParams { expected_revision: u64, track_id: u32, from: Option<i64>, direction: Option<String>, rotation: Option<bool>, mode: Option<String> });
 params!(TrackJobParams { job: Option<u64> });
+params!(CensorFacesParams { expected_revision: u64, clip: ClipParam, shape: Option<String>, feather: Option<f64>, mode: Option<String>, strength: Option<f64>, color: Option<[u8; 4]> });
 params!(TrackCreateParams { expected_revision: u64, clip: ClipParam, at: Option<i64>, cx: f64, cy: f64, w: f64, h: f64, angle: Option<f64> });
 params!(TrackSmoothParams { expected_revision: u64, track_id: u32, smooth: f64 });
 params!(FrameCaptureParams { time: Option<i64>, frame: Option<i64>, max_width: Option<u32> });
@@ -1024,18 +1025,30 @@ fn edit(expected_revision: u64, edit: AgentEdit) -> Result<AgentRequest, AgentEr
     Ok(AgentRequest::Edit { expected_revision, edit })
 }
 
+/// The shape of a censor region by name.
+fn censor_shape(shape: Option<&str>) -> Result<Option<engine::RegionShape>, AgentError> {
+    match shape {
+        None => Ok(None),
+        Some("rect") => Ok(Some(engine::RegionShape::Rect)),
+        Some("ellipse") => Ok(Some(engine::RegionShape::Ellipse)),
+        Some(other) => Err(AgentError::new("invalid_params", format!("shape {other:?}: rect or ellipse"))),
+    }
+}
+
+/// The mode of a censor region by name, with its strength and colour; `None` when nothing is given.
+fn censor_mode(mode: Option<&str>, strength: Option<f64>, color: Option<[u8; 4]>) -> Result<Option<engine::CensorMode>, AgentError> {
+    match mode {
+        None if strength.is_none() && color.is_none() => Ok(None),
+        None | Some("blur") => Ok(Some(engine::CensorMode::Blur { radius: strength.unwrap_or(30.0) })),
+        Some("pixelate") => Ok(Some(engine::CensorMode::Pixelate { block: strength.unwrap_or(24.0) })),
+        Some("solid") => Ok(Some(engine::CensorMode::Solid { color: color.unwrap_or([0, 0, 0, 255]) })),
+        Some(other) => Err(AgentError::new("invalid_params", format!("mode {other:?}: blur, pixelate or solid"))),
+    }
+}
+
 fn censor_add(p: CensorAddParams) -> Result<AgentRequest, AgentError> {
-    let shape = match p.shape.as_deref() {
-        None | Some("rect") => engine::RegionShape::Rect,
-        Some("ellipse") => engine::RegionShape::Ellipse,
-        Some(other) => return Err(AgentError::new("invalid_params", format!("shape {other:?}: rect or ellipse"))),
-    };
-    let mode = match p.mode.as_deref() {
-        None | Some("blur") => engine::CensorMode::Blur { radius: p.strength.unwrap_or(30.0) },
-        Some("pixelate") => engine::CensorMode::Pixelate { block: p.strength.unwrap_or(24.0) },
-        Some("solid") => engine::CensorMode::Solid { color: p.color.unwrap_or([0, 0, 0, 255]) },
-        Some(other) => return Err(AgentError::new("invalid_params", format!("mode {other:?}: blur, pixelate or solid"))),
-    };
+    let shape = censor_shape(p.shape.as_deref())?.unwrap_or(engine::RegionShape::Rect);
+    let mode = censor_mode(p.mode.as_deref(), p.strength, p.color)?.unwrap_or_default();
     let defaults = engine::CensorContent::default();
     let censor = engine::CensorContent { shape, aspect: p.aspect.unwrap_or(defaults.aspect), feather: p.feather.unwrap_or(defaults.feather), mode };
     edit(p.expected_revision, AgentEdit::CensorAdd { track: p.track, start: ticks(p.start), duration: ticks(p.duration), placement: p.placement.map(Into::into), censor })
@@ -1132,6 +1145,9 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("track_set_sample", "Adds or replaces (same source_time) a sample of a motion track: where an object is in the source file at source_time (ticks of the source, not of the timeline): middle cx, cy and size w, h in parts of the source picture, angle in clockwise degrees (0), confidence 0 to 1 (1). Give track_id, or clip (a clip showing the file) to start a new track of that file with this sample. Tracks belong to the file, so every clip of it shares them. Returns track_id.", TrackSampleParams, track_set_sample),
         tool!("track_run", "Runs the object tracker on a motion track: from its sample at source time from (ticks of the source; by default the last sample placed by hand going forward, the first going backward) frame by frame through the file (its preview proxy when it has one), direction forward (default), backward, or both (forward, then backward from the same sample once the forward run is written; the answer then has backward, the state of the second job), until the next sample placed by hand, the end of the file, or a frame where the object is lost. Corners inside the box are followed by pyramidal Lucas-Kanade flow and a RANSAC similarity fit (move, scale and, with rotation true, the default, turn); a template search finds the object again after a short loss. mode fast (default) is that classical tracker on the CPU; mode robust runs NanoTrack, a Siamese network on the GPU that holds on through blur, deformation and short occlusions, keeps the box upright at the start sample's angle (rotation is ignored) and needs its model installed (else invalid_params). Every frame gets a sample with a confidence (0 to 1); a lost frame ends the run with a sample under 0.5, marked for a fix by hand: place a sample there with track_set_sample and run again. The samples are written as one undo step when the run ends, replacing earlier tracker samples in its span but never samples placed by hand. Without a window it waits and returns the outcome as track_status does; in the open window (live mode) it returns {job, state: running} at once. Refused with busy while the track is being tracked and invalid_params when there is no sample at from.", TrackRunParams, |p| Ok(AgentRequest::TrackRun { expected_revision: p.expected_revision, track_id: p.track_id, from: p.from.map(ticks), direction: p.direction, rotation: p.rotation, mode: p.mode })),
         tool!("track_status", "The state of a tracker job (the last one when job is absent): running with done and total frames, or done, lost, cancelled or failed with track_id, count (samples written) and last (the last sample, for lost the one to fix), and message for failed. A finished run's samples are written before it answers.", TrackJobParams, |p| Ok(AgentRequest::TrackStatus { job: p.job })),
+        tool!("censor_faces", "Censors every face of a video clip automatically: the YuNet face detector runs on the part of the clip's file the clip shows (its preview proxy when it has one), at most 10 frames a second; the faces are joined frame to frame by overlap (IoU) into face tracks, dropping short or unsure ones; each face track becomes a motion track of the file and a censor region on a sticker track that follows it (scale included, smoothed), 1.3 times the face box, over the time the face is seen; all of it one undo step when the job ends. shape: ellipse (default) or rect. feather: soft edge, 0 to 1 (0.3 by default). mode: blur (default; strength is the radius, 0 to 120, 30 by default), pixelate (strength is the block, 1 to 200) or solid (color). Needs the face detector model installed (else invalid_params); refused with invalid_params for a clip that is not a video and busy while the clip's faces are being found. Without a window it waits and returns the outcome as censor_faces_status does; in the open window (live mode) it returns {job, state: running} at once.", CensorFacesParams, |p| Ok(AgentRequest::CensorFaces { expected_revision: p.expected_revision, clip: p.clip.into(), shape: censor_shape(p.shape.as_deref())?, feather: p.feather, mode: censor_mode(p.mode.as_deref(), p.strength, p.color)? })),
+        tool!("censor_faces_status", "The state of a face censor job (the last one when job is absent): running with done and total frames, or done (faces: how many regions were added, track_ids: their motion tracks; 0 when no face was found), cancelled (nothing added), stale (the clip changed meanwhile, nothing added) or failed with message. A finished job's regions are written before it answers.", TrackJobParams, |p| Ok(AgentRequest::CensorFacesStatus { job: p.job })),
+        tool!("censor_faces_cancel", "Stops a face censor job (the last one when job is absent); it adds nothing. Returns its state as censor_faces_status does.", TrackJobParams, |p| Ok(AgentRequest::CensorFacesCancel { job: p.job })),
         tool!("track_cancel", "Stops a tracker job (the last one when job is absent); the samples made so far are written. Returns its state as track_status does.", TrackJobParams, |p| Ok(AgentRequest::TrackCancel { job: p.job })),
         tool!("clip_follow_set", "Makes clip follow motion track track_id as it is seen through reference, a clip showing the tracked file: at timeline time at (reference's start when absent) the clip stands where it is placed, and from there it moves by how far the object moved, through the trim, speed, direction, place and transform of reference. follow_scale and follow_rotation (false) also scale and turn it with the object; smooth (0 to 2 seconds of source, 0) evens out the track. The clip's own keyframes add to the motion. A split, trim or delete of reference keeps the follow on the clip that shows the anchor, or drops it. Refused with invalid_project when the track, the reference or the anchor does not fit.", FollowSetParams, |p| edit(p.expected_revision, AgentEdit::ClipFollowSet { clip: p.clip.into(), track_id: p.track_id, reference: p.reference.into(), at: p.at.map(ticks), follow_scale: p.follow_scale, follow_rotation: p.follow_rotation, smooth: p.smooth.unwrap_or(0.0) })),
         tool!("track_create", "Starts a new motion track of the file clip shows, with one box placed by hand: middle cx, cy and size w, h in parts of the source picture, angle in clockwise degrees (0), at the source time clip shows at timeline time at (ticks; clip's start when absent). Tracks belong to the file, so every clip of it shares them. Returns track_id and source_time; then run track_run on it.", TrackCreateParams, track_create),
