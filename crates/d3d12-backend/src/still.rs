@@ -185,6 +185,9 @@ pub fn still_thumbnail(path: &Path, height: u32) -> Result<ThumbnailImage, Strin
 pub const MAX_ANIMATION_BYTES: u64 = 512 * 1024 * 1024;
 /// How long a frame with a delay of this many milliseconds or less is shown instead, as browsers
 /// do: some files say 0 and mean "as fast as the player likes", which would be a frozen picture.
+/// The longest side the canvas of an animated picture may have, tighter than a still's pixels:
+/// the canvas, a frame of it and the finished frame are all in memory while it is decoded.
+pub const MAX_ANIMATION_SIDE: u32 = 4096;
 const SHORTEST_FRAME_MS: u64 = 10;
 /// What such a frame lasts.
 const DEFAULT_FRAME_MS: u64 = 100;
@@ -196,14 +199,21 @@ pub struct AnimatedPicture {
     /// The time each frame ends, in milliseconds from the start of the loop; the last one is the
     /// length of the loop.
     pub ends_ms: Vec<u64>,
+    /// How many times the loop plays before the last frame stays; 0 is forever.
+    pub loops: u32,
 }
 
 impl AnimatedPicture {
-    /// The frame shown `ticks` (1/90000 s) after the clip starts, the animation looping forever.
+    /// The frame shown `ticks` (1/90000 s) after the clip starts: the loop repeats [`Self::loops`]
+    /// times, or forever, and then the last frame stays.
     pub fn frame_index_at(&self, ticks: i64) -> usize {
         let Some(&length) = self.ends_ms.last().filter(|length| **length > 0) else { return 0 };
         // Milliseconds rounded down, so a frame starts exactly at its time.
-        let ms = (ticks.max(0) / (engine::TICKS_PER_SECOND / 1000)) as u64 % length;
+        let played = (ticks.max(0) / (engine::TICKS_PER_SECOND / 1000)) as u64;
+        if self.loops != 0 && played >= length.saturating_mul(u64::from(self.loops)) {
+            return self.frames.len() - 1;
+        }
+        let ms = played % length;
         self.ends_ms.partition_point(|end| *end <= ms).min(self.frames.len() - 1)
     }
 }
@@ -219,11 +229,14 @@ pub fn read_animation(path: &Path) -> Result<Option<AnimatedPicture>, String> {
     let data = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
     let Some(animation) = AnimatedWebp::parse(&data).map_err(|e| format!("{shown}: {e}"))? else { return Ok(None) };
     check_pixels(path, (animation.width, animation.height))?;
+    if animation.width.max(animation.height) > MAX_ANIMATION_SIDE {
+        return Err(format!("{shown}: {}x{} is larger than the {MAX_ANIMATION_SIDE} pixels a side an animated picture may have", animation.width, animation.height));
+    }
     let mut limits = Limits::default();
     limits.max_image_width = Some(DECODER_SIDE_LIMIT);
     limits.max_image_height = Some(DECODER_SIDE_LIMIT);
     limits.max_alloc = Some(DECODER_ALLOCATION);
-    let mut picture = AnimatedPicture { frames: Vec::new(), ends_ms: Vec::new() };
+    let mut picture = AnimatedPicture { frames: Vec::new(), ends_ms: Vec::new(), loops: animation.loops };
     let (mut bytes, mut end) = (0u64, 0u64);
     for frame in animation.frames(limits) {
         let frame = frame.map_err(|e| format!("{shown}: {e}"))?;
@@ -415,6 +428,67 @@ mod tests {
                 assert!(close, "frame {index} at ({x}, {y}): {got:?} is not {want:?}");
             }
         }
+    }
+
+    /// The fixture with the loop count of its ANIM chunk set to `loops`, in a new file.
+    fn fixture_looping(dir: &Path, loops: u16) -> std::path::PathBuf {
+        let mut bytes = std::fs::read(animated_fixture()).unwrap();
+        let at = bytes.windows(4).position(|window| window == b"ANIM").expect("an ANIM chunk") + 8 + 4;
+        bytes[at..at + 2].copy_from_slice(&loops.to_le_bytes());
+        let path = dir.join(format!("loops-{loops}.webp"));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn an_animation_that_loops_a_number_of_times_then_holds_its_last_frame() {
+        let dir = scratch("loop-count");
+        let ms = |ms: i64| ms * 90;
+        let twice = read_animation(&fixture_looping(&dir, 2)).unwrap().expect("animated");
+        assert_eq!(twice.frame_index_at(ms(700)), 1, "the second loop plays");
+        assert_eq!(twice.frame_index_at(ms(1_200)), 2, "after two loops of 600 ms the last frame stays");
+        assert_eq!(twice.frame_index_at(ms(60_000)), 2);
+        let forever = read_animation(&fixture_looping(&dir, 0)).unwrap().expect("animated");
+        assert_eq!(forever.frame_index_at(ms(1_200)), 0, "0 loops forever");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_still_webp_with_junk_after_it_or_a_long_riff_size_is_a_still() {
+        let dir = scratch("junk");
+        let path = dir.join("junk.webp");
+        let mut bytes = Vec::new();
+        let image = checker();
+        WebPEncoder::new_lossless(&mut bytes).write_image(image.as_raw(), 3, 2, ExtendedColorType::Rgba8).unwrap();
+        let riff = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        bytes[4..8].copy_from_slice(&(riff + 1000).to_le_bytes());
+        bytes.extend_from_slice(b"JUNK__");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(read_animation(&path).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_animation_with_a_canvas_past_the_animation_limit_is_refused() {
+        let dir = scratch("huge-animation");
+        let path = dir.join("huge.webp");
+        let side = MAX_ANIMATION_SIDE + 2;
+        let mut vp8x = vec![0b10u8, 0, 0, 0];
+        vp8x.extend_from_slice(&(side - 1).to_le_bytes()[..3]);
+        vp8x.extend_from_slice(&(side - 1).to_le_bytes()[..3]);
+        let mut body = b"WEBPVP8X".to_vec();
+        body.extend_from_slice(&10u32.to_le_bytes());
+        body.extend_from_slice(&vp8x);
+        body.extend_from_slice(b"ANMF");
+        body.extend_from_slice(&16u32.to_le_bytes());
+        body.extend_from_slice(&[0; 16]);
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&body);
+        std::fs::write(&path, &bytes).unwrap();
+        let error = read_animation(&path).unwrap_err();
+        assert!(error.contains(&format!("{side}x{side}")), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

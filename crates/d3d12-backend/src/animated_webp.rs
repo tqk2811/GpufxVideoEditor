@@ -21,6 +21,8 @@ pub(crate) struct CanvasFrame {
 pub(crate) struct AnimatedWebp<'a> {
     pub width: u32,
     pub height: u32,
+    /// How many times the animation plays, from `ANIM`; 0 is forever.
+    pub loops: u32,
     frames: Vec<AnmfChunk<'a>>,
 }
 
@@ -71,9 +73,19 @@ impl<'a> AnimatedWebp<'a> {
         let riff_size = u32::from_le_bytes(data[4..8].try_into().expect("four bytes")) as usize;
         let body = &data[12..data.len().min(riff_size.saturating_add(8).max(12))];
         let mut canvas = None;
+        let mut loops = 0;
         let mut frames = Vec::new();
-        for chunk in chunks(body) {
-            let (fourcc, payload) = chunk?;
+        for (index, chunk) in chunks(body).enumerate() {
+            // Until VP8X says the file is animated, a broken chunk is left to the still decoder,
+            // which reads a simple WebP with junk after it, or a RIFF size past the end, well.
+            let (fourcc, payload) = match chunk {
+                Ok(chunk) => chunk,
+                Err(_) if canvas.is_none() => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            if index == 0 && &fourcc != b"VP8X" {
+                return Ok(None);
+            }
             match &fourcc {
                 b"VP8X" if payload.len() >= 10 => {
                     if payload[0] & 0b10 == 0 {
@@ -81,6 +93,7 @@ impl<'a> AnimatedWebp<'a> {
                     }
                     canvas = Some((u24(&payload[4..7]) + 1, u24(&payload[7..10]) + 1));
                 }
+                b"ANIM" if payload.len() >= 6 => loops = u32::from(u16::from_le_bytes([payload[4], payload[5]])),
                 b"ANMF" if payload.len() >= 16 => {
                     let flags = payload[15];
                     frames.push(AnmfChunk {
@@ -107,7 +120,7 @@ impl<'a> AnimatedWebp<'a> {
                 return Err(format!("a {}x{} frame at {},{} is outside the {width}x{height} canvas", frame.width, frame.height, frame.x, frame.y));
             }
         }
-        Ok(Some(Self { width, height, frames }))
+        Ok(Some(Self { width, height, loops, frames }))
     }
 
     /// The frames, each the whole canvas, one at a time; `limits` bound each frame's decode.
@@ -139,6 +152,7 @@ impl<'a> AnimatedWebp<'a> {
             if frame.dispose {
                 disposed = Some((x, y, w, h));
             }
+            // The canvas goes on to the next frame, so the frame shown is a copy of it.
             Ok(CanvasFrame { rgba: canvas.clone(), duration_ms: frame.duration_ms })
         })
     }
