@@ -54,7 +54,7 @@ use crate::frame_rate::FrameRate;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
 use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipMatte, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE, CensorContent, EffectRegion, CENSOR_SOURCE, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
-use crate::tracking::{Follow, MotionTrack, TrackSample};
+use crate::tracking::{Follow, MotionTrack, TrackLock, TrackSample};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -121,6 +121,8 @@ pub enum EditError {
     TrackRunStale { id: u32 },
     /// The clip follows no motion track.
     NotFollowing { key: ClipKey },
+    /// The clip is not locked to a motion track.
+    NotLocked { key: ClipKey },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -186,6 +188,7 @@ impl fmt::Display for EditError {
             TrackRunStale { id } => write!(f, "motion track {id} changed while it was being tracked; the run was not written"),
             MarkerNotFound { marker } => write!(f, "marker {marker} does not exist"),
             NotFollowing { key } => write!(f, "track {}, clip {}: the clip follows no motion track", key.track, key.clip),
+            NotLocked { key } => write!(f, "track {}, clip {}: the clip is not locked to a motion track", key.track, key.clip),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
                 for error in errors {
@@ -477,6 +480,7 @@ pub fn text_clip(start: Time, duration: Time, text: TextContent) -> Clip {
         reverse: false,
         matte: Default::default(),
         follow: None,
+        lock: None,
         censor: None,
     }
 }
@@ -1444,6 +1448,19 @@ pub fn set_follow(project: &Project, key: ClipKey, follow: Option<Follow>) -> Re
     finish(project, next)
 }
 
+/// Locks the picture of clip `key` to a motion track of its own source, or ends the lock with
+/// `None`. Refused when the lock does not hold, see [`Project::lock_problem`].
+pub fn set_lock(project: &Project, key: ClipKey, lock: Option<TrackLock>) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    clip_of(project, key)?;
+    if let Some(problem) = lock.as_ref().and_then(|lock| project.lock_problem(lock, key.track, key.clip)) {
+        return Err(EditError::Invalid(vec![ValidationError::InvalidLock { track: key.track, clip: key.clip, problem }]));
+    }
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.lock = lock;
+    finish(project, next)
+}
+
 /// Limits effect `effect` of clip `key` to `region`, or gives it the whole picture with `None`.
 pub fn set_effect_region(project: &Project, key: ClipKey, effect: usize, region: Option<EffectRegion>) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
@@ -1488,6 +1505,9 @@ pub fn set_track_smooth(project: &Project, id: u32, smooth: f64) -> Result<Proje
             if let Some(follow) = clip.follow.as_mut().filter(|follow| follow.link.track_id == id) {
                 follow.link.smooth = smooth;
             }
+            if let Some(lock) = clip.lock.as_mut().filter(|lock| lock.link.track_id == id) {
+                lock.link.smooth = smooth;
+            }
             for effect in &mut clip.effects {
                 if let Some(link) = effect.region.as_mut().and_then(|region| region.link.as_mut()).filter(|link| link.track_id == id) {
                     link.smooth = smooth;
@@ -1516,8 +1536,28 @@ pub const MAX_BAKED_KEYFRAMES: usize = crate::keyframe::MAX_KEYFRAMES;
 /// the frame bakes to the edge of that range and the clip stops short of where the follow put it.
 pub fn bake_follow(project: &Project, key: ClipKey, source_aspect: f64) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
+    let follow = clip_of(project, key)?.follow.ok_or(EditError::NotFollowing { key })?;
+    let link = follow.link;
+    bake_motion(project, key, source_aspect, link.follow_scale, link.follow_rotation, |transform, t| crate::schedule::follow_transform(project, &follow, transform, t), |clip| clip.follow = None)
+}
+
+/// Turns the lock of clip `key` (a picture of `source_aspect`) into keyframes, as [`bake_follow`]
+/// does a follow: X and Y always, Width when the lock keeps the scale or zooms, Rotation when it
+/// keeps the angle; then the lock goes. The pose is worked out with the clip's preset animations,
+/// which then move on top of the keyframes, so a locked clip with a preset animation bakes close
+/// to, not exactly at, where the lock put it.
+pub fn bake_lock(project: &Project, key: ClipKey, source_aspect: f64) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let lock = clip_of(project, key)?.lock.ok_or(EditError::NotLocked { key })?;
+    let link = lock.link;
+    bake_motion(project, key, source_aspect, link.follow_scale || lock.zoom != 1.0, link.follow_rotation, |transform, t| crate::schedule::lock_transform(project, key.track, key.clip, transform, t), |clip| clip.lock = None)
+}
+
+/// Writes X, Y (and Width with `scale`, Rotation with `rotation`) keyframes of clip `key` at its
+/// output frames, each where `apply` moves its own transform at that time, then lets `done` take
+/// the motion off the clip.
+fn bake_motion(project: &Project, key: ClipKey, source_aspect: f64, scale: bool, rotation: bool, apply: impl Fn(&mut crate::keyframe::ClipTransform, Time), done: impl FnOnce(&mut Clip)) -> Result<Project, EditError> {
     let clip = clip_of(project, key)?;
-    let follow = clip.follow.ok_or(EditError::NotFollowing { key })?;
     let output_aspect = f64::from(project.output.width) / f64::from(project.output.height.max(1));
     let rate = project.output.frame_rate;
     let first = rate.frame_at(clip.start).max(0);
@@ -1535,7 +1575,7 @@ pub fn bake_follow(project: &Project, key: ClipKey, source_aspect: f64) -> Resul
     for t in times {
         let offset = t.saturating_sub(clip.start);
         let mut transform = clip.transform_at(offset);
-        crate::schedule::follow_transform(project, &follow, &mut transform, t);
+        apply(&mut transform, t);
         let rect = transform.rect(output_aspect, source_aspect);
         let values = [
             rect.x.clamp(-MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_OFFSET),
@@ -1549,16 +1589,17 @@ pub fn bake_follow(project: &Project, key: ClipKey, source_aspect: f64) -> Resul
     }
     let mut next = project.clone();
     let target = clip_mut(&mut next, key)?;
-    let [x, y, width, rotation] = baked;
+    let [x, y, width, turn] = baked;
     target.motion.keyframes.insert(ClipProperty::X, x);
     target.motion.keyframes.insert(ClipProperty::Y, y);
-    if follow.link.follow_scale {
+    if scale {
         target.motion.keyframes.insert(ClipProperty::Width, width);
     }
-    if follow.link.follow_rotation {
-        target.motion.keyframes.insert(ClipProperty::Rotation, rotation);
+    if rotation {
+        target.motion.keyframes.insert(ClipProperty::Rotation, turn);
     }
-    target.follow = None;
+    done(target);
+
     finish(project, next)
 }
 

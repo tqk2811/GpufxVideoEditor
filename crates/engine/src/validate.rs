@@ -366,6 +366,8 @@ pub enum ValidationError {
     InvalidMotionTrack { track: usize, problem: String },
     /// The `follow` of a clip is not usable; `problem` says why.
     InvalidFollow { track: usize, clip: usize, problem: String },
+    /// The `lock` of a clip is not usable; `problem` says why.
+    InvalidLock { track: usize, clip: usize, problem: String },
     /// A censor clip is not usable; `problem` says why.
     InvalidCensor { track: usize, clip: usize, problem: String },
     /// The region of an effect is not usable; `problem` says why.
@@ -484,6 +486,7 @@ impl fmt::Display for ValidationError {
             InvalidBeats { source, problem } => write!(f, "beats of {source:?}: {problem}"),
             InvalidMotionTrack { track, problem } => write!(f, "motion track {track}: {problem}"),
             InvalidFollow { track, clip, problem } => write!(f, "track {track}, clip {clip}: follow: {problem}"),
+            InvalidLock { track, clip, problem } => write!(f, "track {track}, clip {clip}: lock: {problem}"),
             InvalidCensor { track, clip, problem } => write!(f, "track {track}, clip {clip}: censor: {problem}"),
             InvalidEffectRegion { track, clip, effect, problem } => write!(f, "track {track}, clip {clip}, effect {effect}: region: {problem}"),
             FadesExceedClip { track, clip, fade_in, fade_out, duration } => write!(
@@ -854,6 +857,11 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             if let Some(follow) = &clip.follow {
                 if let Some(problem) = project.follow_problem(follow, t, c) {
                     errors.push(InvalidFollow { track: t, clip: c, problem });
+                }
+            }
+            if let Some(lock) = &clip.lock {
+                if let Some(problem) = project.lock_problem(lock, t, c) {
+                    errors.push(InvalidLock { track: t, clip: c, problem });
                 }
             }
             for (e, effect) in clip.effects.iter().enumerate() {

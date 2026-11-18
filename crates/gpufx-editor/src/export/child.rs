@@ -295,7 +295,7 @@ mod tests {
     }
 
     fn project(source: &str, package: &str) -> Project {
-        let clip = Clip { source: source.into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(9000), effects: vec![Effect { package: package.into(), params: Map::new(), keyframes: Default::default(), region: None }], gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, censor: None };
+        let clip = Clip { source: source.into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(9000), effects: vec![Effect { package: package.into(), params: Map::new(), keyframes: Default::default(), region: None }], gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, lock: None, censor: None };
         Project { version: SUPPORTED_VERSION, output: Output { width: 16, height: 16, frame_rate: engine::FrameRate::whole(30), audio: None }, tracks: vec![Track { kind: TrackKind::Video, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: true, subtitle: None }], markers: Vec::new(), beats: Default::default(), motion_tracks: Vec::new() }
     }
 

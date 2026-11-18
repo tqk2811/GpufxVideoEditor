@@ -162,15 +162,18 @@ pub fn layers_at_frame(project: &Project, frame: i64) -> Vec<Layer<'_>> {
         .iter()
         .enumerate()
         .filter(|(_, track)| !track.is_audio() && !track.hidden)
-        .filter_map(|(i, track)| content_at(track, t).map(|content| Layer { track: i, content: with_follow(project, content, t) }))
+        .filter_map(|(i, track)| content_at(track, t).map(|content| Layer { track: i, content: with_follow(project, i, content, t) }))
         .collect()
 }
 
-/// `content` with the clips that follow a motion track moved where the track puts them at `t`.
-fn with_follow<'a>(project: &'a Project, content: LayerContent<'a>, t: Time) -> LayerContent<'a> {
+/// `content` of track `track` with the clips that follow a motion track moved where the track puts
+/// them at `t`, and the clips locked to one moved against it.
+fn with_follow<'a>(project: &'a Project, track: usize, content: LayerContent<'a>, t: Time) -> LayerContent<'a> {
     let follow = |mut sample: SourceSample<'a>| {
         if let Some(follow) = &sample.model.follow {
             follow_transform(project, follow, &mut sample.transform, t);
+        } else if sample.model.lock.is_some() {
+            lock_transform(project, track, sample.clip, &mut sample.transform, t);
         }
         sample
     };
@@ -192,6 +195,26 @@ pub fn follow_transform(project: &Project, follow: &crate::tracking::Follow, tra
         transform.rotates |= follow.link.follow_rotation;
         transform.follow = Some(pose);
     }
+}
+
+/// Moves `transform`, that of clip `clip` of track `track` which locks to a motion track, against
+/// the track at timeline time `t` (see [`Project::lock_pose`]). Leaves it as it is without a lock
+/// or when the track cannot be read.
+pub fn lock_transform(project: &Project, track: usize, clip: usize, transform: &mut ClipTransform, t: Time) {
+    let Some(lock) = project.tracks.get(track).and_then(|lane| lane.clips.get(clip)).and_then(|c| c.lock) else { return };
+    transform.rotates |= lock.link.follow_rotation;
+    if let Some(pose) = project.lock_pose(track, clip, t) {
+        transform.rotation += pose.rotation;
+        transform.follow = Some(pose);
+    }
+}
+
+/// The transform of clip `clip` of track `track` at timeline time `t` as it is drawn: its preset
+/// animations and its lock included, not a follow.
+pub(crate) fn placed_transform_at(project: &Project, track: usize, clip: usize, t: Time) -> ClipTransform {
+    let mut transform = clip_transform_at(&project.tracks[track], clip, t);
+    lock_transform(project, track, clip, &mut transform, t);
+    transform
 }
 
 /// The transform of clip `clip` of `track` at timeline time `t`, its preset animations included.

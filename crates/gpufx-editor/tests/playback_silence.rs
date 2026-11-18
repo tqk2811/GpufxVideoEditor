@@ -14,7 +14,7 @@ use gpufx_editor::playback::thread::{fill_device_buffer, PreparingThread};
 
 fn track(kind: TrackKind, source: &str, seconds: i64) -> Track {
     let duration = Time::from_seconds(seconds).expect("a valid length");
-    let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, censor: None };
+    let clip = Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, lock: None, censor: None };
     Track { kind, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }
 }
 

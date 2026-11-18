@@ -277,6 +277,11 @@ pub struct Clip {
     /// where its place and keyframes put it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow: Option<crate::tracking::Follow>,
+    /// Moves the whole picture against a motion track of its own source, so the tracked object
+    /// stays where it was at the anchor while the rest of the frame moves. Absent: no lock. A clip
+    /// cannot both follow and lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<crate::tracking::TrackLock>,
     /// What a censor region hides and how. Present only on censor clips, whose `source` is
     /// [`CENSOR_SOURCE`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1783,7 +1788,7 @@ pub(crate) mod tests_support {
 
     /// A plain clip of one second at the start of the timeline.
     pub(crate) fn clip() -> Clip {
-        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, censor: None }
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, lock: None, censor: None }
     }
 }
 
