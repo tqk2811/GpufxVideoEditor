@@ -171,13 +171,19 @@ pub struct CensorRegion {
     pub mode: CensorMode,
     /// How much of the change shows, 0 to 1.
     pub opacity: f64,
+    /// The four corners of the box (top-left, top-right, bottom-right, bottom-left, in the same
+    /// parts as `rect`) when it lies in perspective on a planar track: the shape is then the box
+    /// warped onto this quadrilateral, and `rect` and `rotation` are not used for the shape.
+    pub quad: Option<[[f64; 2]; 4]>,
 }
 
 impl CensorRegion {
-    /// The region of censor clip `sample` at this frame, for a frame of `output_aspect`.
+    /// The region of censor clip `sample` at this frame, for a frame of `output_aspect`. A censor
+    /// clip following a track in perspective (a corner pin) gives its pinned corners.
     pub fn of(sample: &SourceSample<'_>, censor: &CensorContent, output_aspect: f64) -> CensorRegion {
         let rect = sample.transform.rect(output_aspect, censor.aspect);
-        CensorRegion { rect, rotation: sample.transform.rotation, shape: censor.shape, feather: censor.feather, mode: censor.mode, opacity: sample.transform.opacity.clamp(0.0, 1.0) }
+        let quad = sample.transform.pinned_corners(sample.transform.unfollowed_rect(output_aspect, censor.aspect), output_aspect);
+        CensorRegion { rect, rotation: sample.transform.rotation, shape: censor.shape, feather: censor.feather, mode: censor.mode, opacity: sample.transform.opacity.clamp(0.0, 1.0), quad }
     }
 }
 
@@ -191,6 +197,12 @@ fn regions_now<'a>(project: &Project, sample: &SourceSample<'_>, effects: Cow<'a
     for effect in &mut effects {
         let Some(region) = effect.region.as_mut() else { continue };
         let Some(link) = region.link.take() else { continue };
+        if region.perspective {
+            if let Some(corners) = crate::tracking::follow_region_quad(project, sample.model, &link, RegionBox { cx: region.cx, cy: region.cy, w: region.w, h: region.h, angle: region.angle }, t) {
+                region.corners = Some(corners);
+                continue;
+            }
+        }
         let moved = follow_region(project, sample.model, &link, RegionBox { cx: region.cx, cy: region.cy, w: region.w, h: region.h, angle: region.angle }, t);
         (region.cx, region.cy, region.w, region.h, region.angle) = (moved.cx, moved.cy, moved.w, moved.h, moved.angle);
     }

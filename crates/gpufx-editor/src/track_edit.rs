@@ -771,7 +771,7 @@ mod tests {
         project.tracks[0].clips[0].effects.push(engine::Effect { package: "pixelate".into(), params: Default::default(), keyframes: Default::default(), region: None });
         state.replace_project(project, None);
         state.select(Some(ClipKey { track: 0, clip: 0 }));
-        state.set_effect_region(0, Some(EffectRegion { shape: engine::RegionShape::Ellipse, cx: 0.25, cy: 0.5, w: 0.2, h: 0.2, angle: 0.0, feather: 0.2, link: None }));
+        state.set_effect_region(0, Some(EffectRegion { shape: engine::RegionShape::Ellipse, cx: 0.25, cy: 0.5, w: 0.2, h: 0.2, angle: 0.0, feather: 0.2, link: None, perspective: false, corners: None }));
         state.link_effect_region(0, Some(1));
         let region = state.project().tracks[0].clips[0].effects[0].region.expect("a region");
         assert_eq!(region.link.map(|link| link.track_id), Some(1));

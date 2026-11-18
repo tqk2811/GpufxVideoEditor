@@ -285,7 +285,7 @@ fn validation_names_bad_tracks_follows_censors_and_regions() {
     assert!(validate(&p, &AcceptAll).is_empty());
 
     let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
-    let region = EffectRegion { shape: RegionShape::Ellipse, cx: 0.5, cy: 0.5, w: 0.2, h: 0.2, angle: 0.0, feather: 0.5, link: Some(link(0)) };
+    let region = EffectRegion { shape: RegionShape::Ellipse, cx: 0.5, cy: 0.5, w: 0.2, h: 0.2, angle: 0.0, feather: 0.5, link: Some(link(0)), perspective: false, corners: None };
     p.tracks[0].clips[0].effects.push(engine::Effect { region: Some(region), ..effect("gaussian-blur") });
     assert!(validate(&p, &AcceptAll).is_empty());
     p.tracks[0].clips[0].effects.push(engine::Effect { region: Some(region), ..effect("mix") });
@@ -303,7 +303,7 @@ fn the_new_fields_round_trip_and_are_left_out_when_absent() {
 
     let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
     p.tracks[1].clips.push(engine::censor_clip(t(2 * SECOND), t(SECOND), CensorContent { shape: RegionShape::Ellipse, mode: CensorMode::Solid { color: [1, 2, 3, 255] }, ..Default::default() }, Some(ClipPlacement { x: 0.1, y: 0.1, width: 0.3 })));
-    p.tracks[0].clips[0].effects.push(engine::Effect { region: Some(EffectRegion { shape: RegionShape::Rect, cx: 0.5, cy: 0.5, w: 0.2, h: 0.1, angle: 10.0, feather: 0.0, link: None }), ..effect("pixelate") });
+    p.tracks[0].clips[0].effects.push(engine::Effect { region: Some(EffectRegion { shape: RegionShape::Rect, cx: 0.5, cy: 0.5, w: 0.2, h: 0.1, angle: 10.0, feather: 0.0, link: None, perspective: false, corners: None }), ..effect("pixelate") });
     let text = serde_json::to_string(&p).unwrap();
     let back = Project::from_json(&text).unwrap();
     assert_eq!(back, p);

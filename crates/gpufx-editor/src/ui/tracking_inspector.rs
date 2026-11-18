@@ -11,7 +11,7 @@ use engine::{ClipKey, EffectRegion, MotionTrack, RegionShape, MAX_FOLLOW_SMOOTH,
 
 /// The region a blur or pixelate effect takes when it is first limited: a third of the picture
 /// in the middle, soft edged.
-const DEFAULT_REGION: EffectRegion = EffectRegion { shape: RegionShape::Rect, cx: 0.5, cy: 0.5, w: 0.3, h: 0.3, angle: 0.0, feather: 0.2, link: None };
+const DEFAULT_REGION: EffectRegion = EffectRegion { shape: RegionShape::Rect, cx: 0.5, cy: 0.5, w: 0.3, h: 0.3, angle: 0.0, feather: 0.2, link: None, perspective: false, corners: None };
 
 /// A labelled slider with a number field. Whether it changed.
 fn number_row(ui: &mut egui::Ui, label: &str, value: &mut f64, range: std::ops::RangeInclusive<f64>, decimals: usize, suffix: &str) -> bool {
@@ -302,4 +302,11 @@ pub(super) fn region_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipK
             }
         }
     });
+    // A region linked to a planar track may lie on it in perspective.
+    if tracks.iter().any(|track| Some(track.id) == linked && track.is_planar()) {
+        let mut perspective = region.perspective;
+        if ui.checkbox(&mut perspective, language.t(Message::FollowPerspective)).changed() {
+            state.set_effect_region(index, Some(EffectRegion { perspective, ..region }));
+        }
+    }
 }

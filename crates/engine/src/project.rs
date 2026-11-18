@@ -394,6 +394,17 @@ pub struct EffectRegion {
     /// A motion track of the clip's own source the region moves with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<crate::tracking::TrackLink>,
+    /// With a link to a planar track: the region's corners follow the object's four corners in
+    /// perspective (the box warped by the homography from the object's corners at the anchor to
+    /// its corners now), so the region lies on the tracked surface. Ignored for a track without
+    /// four corners, which moves the box as before.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub perspective: bool,
+    /// The corners of the region (top-left, top-right, bottom-right, bottom-left of the box, parts
+    /// of the picture) once a perspective link has moved it, set only on the copy the renderer
+    /// draws (see `render::regions_now`); never saved.
+    #[serde(skip)]
+    pub corners: Option<[[f64; 2]; 4]>,
 }
 
 /// The effect packages that take a region (by the last part of their name), with the parameter

@@ -192,3 +192,43 @@ fn between_two_samples_whose_mean_folds_the_corners_of_the_nearer_sample_hold() 
     let smoothed = track.quad_at(t(SECOND), 1.0).unwrap();
     assert!(engine::tracker::homography::is_convex(&smoothed.map(|[x, y]| [x * ASPECT, y])), "{smoothed:?}");
 }
+
+#[test]
+fn a_censor_clip_following_in_perspective_hides_the_object_quadrilateral() {
+    let mut p = rig(true);
+    let censor = engine::CensorContent { aspect: 1.0, ..engine::CensorContent::default() };
+    p.tracks[1].clips[0].censor = Some(censor);
+    let layers = layers_at_frame(&p, 30);
+    let layer = layers.iter().find(|layer| layer.track == 1).expect("the censor clip shows");
+    let LayerContent::Clip(sample) = layer.content else { panic!("no transition") };
+    let region = engine::CensorRegion::of(&sample, &censor, ASPECT);
+    let middle: [[f64; 2]; 4] = std::array::from_fn(|i| [(AT_ANCHOR[i][0] + LATER[i][0]) / 2.0, (AT_ANCHOR[i][1] + LATER[i][1]) / 2.0]);
+    assert_quad(region.quad.expect("in perspective"), middle);
+    // Without perspective the region stays a turned box.
+    let mut plain = rig(false);
+    plain.tracks[1].clips[0].censor = Some(censor);
+    let layers = layers_at_frame(&plain, 30);
+    let layer = layers.iter().find(|layer| layer.track == 1).unwrap();
+    let LayerContent::Clip(sample) = layer.content else { panic!("no transition") };
+    assert!(engine::CensorRegion::of(&sample, &censor, ASPECT).quad.is_none());
+}
+
+#[test]
+fn an_effect_region_linked_in_perspective_lies_on_the_object_corners() {
+    let p = rig(true);
+    let clip = &p.tracks[0].clips[0];
+    let link = follow(true).link;
+    // The box of the object at the anchor, in parts of the picture.
+    let region = engine::RegionBox { cx: 0.375, cy: (0.25 + BOTTOM) / 2.0, w: 0.25, h: BOTTOM - 0.25, angle: 0.0 };
+    assert_quad(engine::follow_region_quad(&p, clip, &link, region, t(0)).unwrap(), AT_ANCHOR);
+    assert_quad(engine::follow_region_quad(&p, clip, &link, region, t(2 * SECOND - FRAME)).unwrap(), {
+        let k = (2 * SECOND - FRAME) as f64 / (2 * SECOND) as f64;
+        std::array::from_fn(|i| [AT_ANCHOR[i][0] + (LATER[i][0] - AT_ANCHOR[i][0]) * k, AT_ANCHOR[i][1] + (LATER[i][1] - AT_ANCHOR[i][1]) * k])
+    });
+    // A track of boxes alone gives no quadrilateral: the region moves as a box.
+    let mut boxes = rig(true);
+    for sample in &mut boxes.motion_tracks[0].samples {
+        sample.quad = None;
+    }
+    assert!(engine::follow_region_quad(&boxes, &boxes.tracks[0].clips[0], &link, region, t(SECOND)).is_none());
+}

@@ -1601,10 +1601,27 @@ impl D3d12Compositor {
                 }
             },
         };
-        let rect = region.rect;
-        let feather = region.feather.clamp(0.0, 1.0) * (rect.width * f64::from(width) * stretch).min(rect.height * f64::from(height)) / 2.0;
+        // A region in perspective is the box warped onto its quadrilateral: the shader takes each
+        // pixel back into the box through the inverse homography, and measures the edge in pixels
+        // of a box the mean size of the quadrilateral's sides. The bounding box of the corners
+        // stands for the box where only a middle is wanted (the grid of the blocks).
+        let warp = region.quad.and_then(|quad| Some((quad, pin_params(&quad, f64::from(width) * stretch / f64::from(height))?)));
+        let (rect, rotation, box_size) = match warp {
+            Some((quad, _)) => {
+                let side = |a: [f64; 2], b: [f64; 2]| ((b[0] - a[0]) * f64::from(width) * stretch).hypot((b[1] - a[1]) * f64::from(height));
+                let size = ((side(quad[0], quad[1]) + side(quad[3], quad[2])) / 2.0, (side(quad[0], quad[3]) + side(quad[1], quad[2])) / 2.0);
+                let (left, right) = quad.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, r), c| (l.min(c[0]), r.max(c[0])));
+                let (top, bottom) = quad.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(t, b), c| (t.min(c[1]), b.max(c[1])));
+                (PlacedRect { x: left, y: top, width: right - left, height: bottom - top }, 0.0, size)
+            }
+            None => (region.rect, region.rotation, (region.rect.width * f64::from(width) * stretch, region.rect.height * f64::from(height))),
+        };
+        let feather = region.feather.clamp(0.0, 1.0) * box_size.0.min(box_size.1) / 2.0;
+        let h = warp.map_or([0.0; 9], |(_, h)| h);
         let numbers = [
-            ("x", rect.x), ("y", rect.y), ("width", rect.width.max(0.0)), ("height", rect.height.max(0.0)), ("rotation", region.rotation), ("feather", feather),
+            ("x", rect.x), ("y", rect.y), ("width", rect.width.max(0.0)), ("height", rect.height.max(0.0)), ("rotation", rotation), ("feather", feather),
+            ("quad", if warp.is_some() { 1.0 } else { 0.0 }), ("quad_width", box_size.0.max(0.0)), ("quad_height", box_size.1.max(0.0)),
+            ("h0", h[0]), ("h1", h[1]), ("h2", h[2]), ("h3", h[3]), ("h4", h[4]), ("h5", h[5]), ("h6", h[6]), ("h7", h[7]), ("h8", h[8]),
             ("ellipse", if region.shape == RegionShape::Ellipse { 1.0 } else { 0.0 }), ("opacity", region.opacity.clamp(0.0, 1.0)), ("mode", mode), ("block", block),
             ("red", color[0]), ("green", color[1]), ("blue", color[2]), ("alpha", color[3]), ("blank", if blank { 1.0 } else { 0.0 }),
             ("stretch", stretch),
@@ -1907,7 +1924,7 @@ fn region_of(effect: &ProjectEffect, region: EffectRegion, height: u32) -> Censo
         solid => solid,
     };
     let rect = PlacedRect { x: region.cx - region.w / 2.0, y: region.cy - region.h / 2.0, width: region.w, height: region.h };
-    CensorRegion { rect, rotation: region.angle, shape: region.shape, feather: region.feather, mode, opacity: 1.0 }
+    CensorRegion { rect, rotation: region.angle, shape: region.shape, feather: region.feather, mode, opacity: 1.0, quad: region.corners }
 }
 
 /// How many pixels of a picture of `aspect` (width over height) one pixel of a frame of `width` by
@@ -1931,7 +1948,8 @@ fn picture_regions(regions: Vec<CensorRegion>, aspect: f64, margin: (f64, f64), 
                 return region;
             }
             let rect = region.rect;
-            CensorRegion { rect: PlacedRect { x: (rect.x + margin.0) / across, y: (rect.y + margin.1) / down, width: rect.width / across, height: rect.height / down }, ..region }
+            let quad = region.quad.map(|quad| quad.map(|[x, y]| [(x + margin.0) / across, (y + margin.1) / down]));
+            CensorRegion { rect: PlacedRect { x: (rect.x + margin.0) / across, y: (rect.y + margin.1) / down, width: rect.width / across, height: rect.height / down }, quad, ..region }
         })
         .collect();
     (regions, picture_stretch(whole_aspect, width, height))
@@ -2462,7 +2480,7 @@ mod tests {
 
     /// The middle half of the frame, upright and sharp.
     fn middle_region(mode: CensorMode) -> CensorRegion {
-        CensorRegion { rect: PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }, rotation: 0.0, shape: RegionShape::Rect, feather: 0.0, mode, opacity: 1.0 }
+        CensorRegion { rect: PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }, rotation: 0.0, shape: RegionShape::Rect, feather: 0.0, mode, opacity: 1.0, quad: None }
     }
 
     fn red(rgba: &[u8], x: u32, y: u32) -> u8 {
@@ -2535,6 +2553,34 @@ mod tests {
         assert_eq!(&rgba[((180 * 640 + 320) * 4) as usize..][..3], [255, 0, 0], "a box of colour over nothing");
         assert_eq!(&rgba[..3], [0, 0, 0], "black around it");
         assert!(matches!(compositor.hide(BLANK_IMAGE, &middle_region(CensorMode::Blur { radius: 10.0 }), 1.0, &FrameInfo::new(0.0, 0)), Ok(BLANK_IMAGE)));
+    }
+
+    #[test]
+    fn a_region_in_perspective_hides_its_quadrilateral_not_its_bounding_box() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        let quad = [[0.3, 0.2], [0.7, 0.35], [0.7, 0.65], [0.3, 0.8]];
+        let at = |x: f64, y: f64| ((x * 640.0) as u32, (y * 360.0) as u32);
+        let rgba = hidden(&mut compositor, white, CensorRegion { quad: Some(quad), ..middle_region(CensorMode::Solid { color: [0, 0, 0, 255] }) });
+        let (x, y) = at(0.5, 0.5);
+        assert_eq!(red(&rgba, x, y), 0, "the middle of the quadrilateral is hidden");
+        let (x, y) = at(0.33, 0.25);
+        assert_eq!(red(&rgba, x, y), 0, "inside near the tall side");
+        // Inside the bounding box and inside the rectangle the region's rect would give, but above
+        // the slanted top side.
+        let (x, y) = at(0.68, 0.25);
+        assert_eq!(red(&rgba, x, y), 255, "above the slanted side");
+        let (x, y) = at(0.68, 0.75);
+        assert_eq!(red(&rgba, x, y), 255, "below the slanted side");
+        // The ellipse in perspective leaves the corners of the quadrilateral.
+        let rgba = hidden(&mut compositor, white, CensorRegion { quad: Some(quad), shape: RegionShape::Ellipse, ..middle_region(CensorMode::Solid { color: [0, 0, 0, 255] }) });
+        let (x, y) = at(0.32, 0.25);
+        assert_eq!(red(&rgba, x, y), 255, "a corner is outside the ellipse");
+        let (x, y) = at(0.5, 0.5);
+        assert_eq!(red(&rgba, x, y), 0);
+        // On the picture of an effect region with a margin, the corners move with the margin.
+        let (regions, _) = picture_regions(vec![CensorRegion { quad: Some(quad), ..middle_region(CensorMode::Solid { color: [0, 0, 0, 255] }) }], 16.0 / 9.0, (0.25, 0.0), 640, 360);
+        assert_eq!(regions[0].quad.unwrap()[0], [(0.3 + 0.25) / 1.5, 0.2]);
     }
 
     #[test]

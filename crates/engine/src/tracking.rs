@@ -668,6 +668,23 @@ pub fn follow_region(project: &Project, clip: &Clip, link: &TrackLink, region: R
     RegionBox { cx, cy, w: region.w * scale, h: region.h * scale, angle: region.angle + rotation }
 }
 
+/// The corners of `region` (parts of the picture of `clip`, top-left, top-right, bottom-right,
+/// bottom-left of the turned box) carried in perspective by the planar track `link` names at
+/// timeline time `t`: through the homography from the object's four corners at the anchor to its
+/// corners now. `None` when the track is not planar, cannot be read, or the corners fix no map.
+pub fn follow_region_quad(project: &Project, clip: &Clip, link: &TrackLink, region: RegionBox, t: Time) -> Option<Quad> {
+    let motion = project.motion_track(link.track_id).filter(|motion| motion.is_planar())?;
+    let now = clip.source_time_at(t.saturating_sub(clip.start)).max(Time::ZERO);
+    let (from, to) = (motion.quad_at(link.anchor_source_time, link.smooth)?, motion.quad_at(now, link.smooth)?);
+    let warp = crate::tracker::homography::Homography::from_quads(&from, &to)?;
+    let corners = box_corners(region.cx, region.cy, region.w, region.h, region.angle, motion.aspect);
+    let mut moved = [[0.0; 2]; 4];
+    for (out, corner) in moved.iter_mut().zip(corners) {
+        *out = warp.apply(corner)?;
+    }
+    Some(moved)
+}
+
 /// Where the picture of one clip lies in the output frame at one moment: its placed rectangle
 /// (parts of the frame) turned `rotation` clockwise degrees around its middle. It takes a point of
 /// the picture (parts of its width and height, as a [`TrackSample`] is) to the frame and back.

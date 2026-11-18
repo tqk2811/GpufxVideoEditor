@@ -2,7 +2,8 @@
 //! region of its clip.
 //!
 //! It mixes the picture with a changed copy of it through a rectangle or an ellipse, turned and
-//! with a soft edge. The changed copy is the second input (a blur made before), blocks of the
+//! with a soft edge, or through that shape warped onto a quadrilateral (a region lying in
+//! perspective on a planar track). The changed copy is the second input (a blur made before), blocks of the
 //! picture made here (pixelate), or one colour. Built in memory, as the alpha packages are, because
 //! it is part of how the compositor works.
 
@@ -36,7 +37,19 @@ const MANIFEST: &str = r#"{
     { "name": "blue", "type": "float", "default": 0, "min": 0, "max": 1 },
     { "name": "alpha", "type": "float", "default": 1, "min": 0, "max": 1 },
     { "name": "blank", "type": "float", "default": 0, "min": 0, "max": 1 },
-    { "name": "stretch", "type": "float", "default": 1, "min": 0.0001, "max": 10000 }
+    { "name": "stretch", "type": "float", "default": 1, "min": 0.0001, "max": 10000 },
+    { "name": "quad", "type": "float", "default": 0, "min": 0, "max": 1 },
+    { "name": "quad_width", "type": "float", "default": 1, "min": 0, "max": 1000000 },
+    { "name": "quad_height", "type": "float", "default": 1, "min": 0, "max": 1000000 },
+    { "name": "h0", "type": "float", "default": 1, "min": -1000000000, "max": 1000000000 },
+    { "name": "h1", "type": "float", "default": 0, "min": -1000000000, "max": 1000000000 },
+    { "name": "h2", "type": "float", "default": 0, "min": -1000000000, "max": 1000000000 },
+    { "name": "h3", "type": "float", "default": 0, "min": -1000000000, "max": 1000000000 },
+    { "name": "h4", "type": "float", "default": 1, "min": -1000000000, "max": 1000000000 },
+    { "name": "h5", "type": "float", "default": 0, "min": -1000000000, "max": 1000000000 },
+    { "name": "h6", "type": "float", "default": 0, "min": -1000000000, "max": 1000000000 },
+    { "name": "h7", "type": "float", "default": 0, "min": -1000000000, "max": 1000000000 },
+    { "name": "h8", "type": "float", "default": 1, "min": -1000000000, "max": 1000000000 }
   ],
   "groups": [{ "passes": [{ "shader": "shaders/main.wgsl" }] }]
 }"#;
@@ -63,8 +76,24 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let cosine = cos(turn);
     let sine = sin(turn);
     let d = (vec2f(id.xy) + 0.5 - centre) * unit;
-    let local = vec2f(cosine * d.x + sine * d.y, cosine * d.y - sine * d.x);
-    let half = max(size * 0.5, vec2f(0.0001));
+    var local = vec2f(cosine * d.x + sine * d.y, cosine * d.y - sine * d.x);
+    var half = max(size * 0.5, vec2f(0.0001));
+    if (params.quad > 0.5) {
+        // In perspective: the pixel taken back into the box (0 to 1 across it) by the inverse
+        // homography, then measured in pixels of a box of the quadrilateral's mean size. The map
+        // is scaled so the third coordinate is positive inside; past the horizon nothing changes.
+        let f = (vec2f(id.xy) + 0.5) / globals.size;
+        let q = vec3f(
+            params.h0 * f.x + params.h1 * f.y + params.h2,
+            params.h3 * f.x + params.h4 * f.y + params.h5,
+            params.h6 * f.x + params.h7 * f.y + params.h8);
+        if (q.z <= 1e-9) {
+            gpufx_write(id, original);
+            return;
+        }
+        half = max(vec2f(params.quad_width, params.quad_height) * 0.5, vec2f(0.0001));
+        local = (q.xy / q.z - 0.5) * half * 2.0;
+    }
     // How far inside the edge the pixel is, in pixels.
     var inside = 0.0;
     if (params.ellipse > 0.5) {
