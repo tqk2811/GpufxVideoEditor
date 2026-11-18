@@ -866,12 +866,10 @@ fn censor_faces_status(state: &mut EditorState, job: Option<u64>) -> Result<Valu
     };
     state.poll_face_censor();
     if let Some(status) = state.faces.status(job) {
-        // Finished but not written yet: edits wait for a drag or an export.
-        let (done, total) = match status {
-            crate::face_censor::FaceState::Running { done, total } => (done, total),
-            _ => (1, 1),
-        };
-        return Ok(json!({"job": job, "state": "running", "done": done, "total": total}));
+        // Finished but not written yet (edits wait for a drag or an export): "finishing".
+        let (done, total) = state.faces.counts(job).unwrap_or((0, 0));
+        let name = if matches!(status, crate::face_censor::FaceState::Running { .. }) { "running" } else { "finishing" };
+        return Ok(json!({"job": job, "state": name, "done": done, "total": total}));
     }
     let Some(report) = state.faces.reports.get(&job) else {
         return Err(AgentError::new("job_not_found", format!("no face censor job {job}")));

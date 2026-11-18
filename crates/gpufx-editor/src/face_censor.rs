@@ -52,6 +52,9 @@ pub struct FaceRequest {
     /// The video clip whose faces are hidden; checked again before anything is written.
     pub clip: ClipKey,
     pub media_path: String,
+    /// The clip as it was when the job started: a job whose clip differs from it when it ends
+    /// writes nothing.
+    pub shown: ClipShown,
     /// The source span the clip shows: from, and up to (not included).
     pub from: Time,
     pub to: Time,
@@ -59,6 +62,24 @@ pub struct FaceRequest {
     pub tracks: FaceTrackOptions,
     /// The face detector model.
     pub model: PathBuf,
+}
+
+/// What of a clip decides where its faces land on the timeline.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipShown {
+    pub source: String,
+    pub source_in: Time,
+    pub source_span: Time,
+    pub start: Time,
+    pub duration: Time,
+    pub speed: f64,
+    pub reverse: bool,
+}
+
+impl ClipShown {
+    pub fn of(clip: &engine::Clip) -> Self {
+        ClipShown { source: clip.source.clone(), source_in: clip.source_in, source_span: clip.source_span(), start: clip.start, duration: clip.duration, speed: clip.speed, reverse: clip.reverse }
+    }
 }
 
 /// Finds the faces of a frame.
@@ -99,15 +120,19 @@ impl FaceFinder for YuNetFinder {
 }
 
 /// The source times a job looks at: frames of `rate` from `from` up to `to`, at most
-/// [`DETECTIONS_PER_SECOND`] a second, and the step between them.
+/// [`DETECTIONS_PER_SECOND`] a second, and the step between them. A span longer than
+/// [`MAX_DETECTIONS`] such times takes a wider step, so the times still cover all of it.
 pub fn detection_times(from: Time, to: Time, rate: Option<(i32, i32)>) -> (Vec<Time>, Time) {
     let (num, den) = rate.filter(|(num, den)| *num > 0 && *den > 0).unwrap_or(FALLBACK_RATE);
     let fps = f64::from(num) / f64::from(den);
-    let every = (fps / DETECTIONS_PER_SECOND).ceil().max(1.0) as i64;
+    let mut every = (fps / DETECTIONS_PER_SECOND).ceil().max(1.0) as i64;
     let unit = i128::from(den) * i128::from(TICKS_PER_SECOND);
     let frame_time = |index: i64| Time::from_ticks(((i128::from(index) * unit) / i128::from(num)) as i64);
-    // the first frame starting at or after `from`
-    let first = ((i128::from(from.ticks().max(0)) * i128::from(num) + unit - 1) / unit) as i64;
+    // the first frame starting at or after `from`, and the first at or after `to`
+    let first_at = |at: Time| ((i128::from(at.ticks().max(0)) * i128::from(num) + unit - 1) / unit) as i64;
+    let first = first_at(from);
+    let frames = (first_at(to) - first).max(0);
+    every = every.max((frames + MAX_DETECTIONS as i64 - 1) / MAX_DETECTIONS as i64);
     let mut times = Vec::new();
     let mut index = first;
     while times.len() < MAX_DETECTIONS {
@@ -257,6 +282,12 @@ impl FaceCensorJobs {
         })
     }
 
+    /// The detections done and to do of job `id`, also once it has finished.
+    pub fn counts(&self, id: u64) -> Option<(usize, usize)> {
+        let job = self.jobs.get(&id)?;
+        Some((job.shared.done.load(Ordering::Relaxed), job.shared.total.load(Ordering::Relaxed)))
+    }
+
     /// Asks job `id` to stop; it then writes nothing.
     pub fn cancel(&self, id: u64) {
         if let Some(job) = self.jobs.get(&id) {
@@ -339,22 +370,43 @@ fn timeline_span(clip: &engine::Clip, first: Time, last: Time, step: Time) -> Op
     (end > start).then_some((start, end))
 }
 
+/// What [`add_face_censors`] made.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceCensorsAdded {
+    pub project: Project,
+    /// The ids of the motion tracks made, one per face written.
+    pub ids: Vec<u32>,
+    /// The face tracks not written: outside the clip's span, or with no box where it starts.
+    pub skipped: usize,
+}
+
 /// Writes the face tracks `tracks` of `result` to `project`: a motion track of the file for each
 /// and a censor region following it over reference clip `reference`, on sticker tracks with room or
-/// new ones. Output frames are `width` x `height` pixels. Answers the new project and the ids of
-/// the motion tracks made.
-pub fn add_face_censors(project: &Project, reference: ClipKey, result: &FaceResult, tracks: &[Vec<TrackSample>], (width, height): (u32, u32)) -> Result<(Project, Vec<u32>), EditError> {
+/// new ones (not locked or hidden). Output frames are `width` x `height` pixels. A face track that
+/// cannot be placed writes nothing, not even its motion track, and is counted as skipped.
+pub fn add_face_censors(project: &Project, reference: ClipKey, result: &FaceResult, tracks: &[Vec<TrackSample>], (width, height): (u32, u32)) -> Result<FaceCensorsAdded, EditError> {
     let clip = project.tracks.get(reference.track).and_then(|lane| lane.clips.get(reference.clip)).ok_or(EditError::ClipNotFound { key: reference })?.clone();
     let mut next = project.clone();
     let mut ids = Vec::new();
+    let mut skipped = 0;
     for samples in tracks {
-        let (Some(first), Some(last)) = (samples.first(), samples.last()) else { continue };
-        let Some((start, end)) = timeline_span(&clip, first.source_time, last.source_time, result.step) else { continue };
+        let (Some(first), Some(last)) = (samples.first(), samples.last()) else {
+            skipped += 1;
+            continue;
+        };
+        let Some((start, end)) = timeline_span(&clip, first.source_time, last.source_time, result.step) else {
+            skipped += 1;
+            continue;
+        };
         let id = next.next_motion_track_id();
         let track = MotionTrack { id, media_path: result.request.media_path.clone(), aspect: result.aspect, samples: samples.clone() };
-        next = engine::set_motion_track(&next, track.clone())?;
         let source_time = clip.source_time_at(start.saturating_sub(clip.start)).max(Time::ZERO);
-        let (Some(point), Some(mapping)) = (track.point_at(source_time, 0.0), next.clip_frame_mapping(reference.track, reference.clip, start, track.aspect)) else { continue };
+        // the box where the region starts, found before anything of this face is written
+        let (Some(point), Some(mapping)) = (track.point_at(source_time, 0.0), next.clip_frame_mapping(reference.track, reference.clip, start, track.aspect)) else {
+            skipped += 1;
+            continue;
+        };
+        next = engine::set_motion_track(&next, track.clone())?;
         let sample = TrackSample { source_time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false };
         let [x, y, w, h] = crate::track_edit::frame_box(&mapping, &sample);
         let (cx, cy, w, h) = (x + w / 2.0, y + h / 2.0, w * CENSOR_MARGIN, h * CENSOR_MARGIN);
@@ -377,7 +429,7 @@ pub fn add_face_censors(project: &Project, reference: ClipKey, result: &FaceResu
         next = engine::set_follow(&next, key, Some(follow))?;
         ids.push(id);
     }
-    Ok((next, ids))
+    Ok(FaceCensorsAdded { project: next, ids, skipped })
 }
 
 impl EditorState {
@@ -388,11 +440,14 @@ impl EditorState {
         if clip.is_still() {
             return Err(format!("track {}, clip {} is not a video", key.track, key.clip));
         }
+        if self.is_track_locked(key.track) {
+            return Err(EditError::TrackLocked { track: key.track }.to_string());
+        }
         let model = crate::tracking_models::installed(TrackingModel::FaceDetector, &crate::project_file::package_roots())
             .ok_or_else(|| "the face censor needs the face detector model: download it or import its zip in the Tracking section of the inspector".to_owned())?;
         let from = clip.source_in.max(Time::ZERO);
         let to = from.saturating_add(clip.source_span());
-        Ok(FaceRequest { clip: key, media_path: clip.source.clone(), from, to, style, tracks: FaceTrackOptions::default(), model })
+        Ok(FaceRequest { clip: key, media_path: clip.source.clone(), shown: ClipShown::of(clip), from, to, style, tracks: FaceTrackOptions::default(), model })
     }
 
     /// Starts `request`, reading `decode_path` (the file of the clip, or its proxy). Answers the job id.
@@ -405,7 +460,7 @@ impl EditorState {
     /// Writes the censor regions of finished face jobs, each job as one undo step, says so on the
     /// status line and keeps a report; says whether a job still runs. While edits wait (a drag or
     /// an export) finished jobs wait too. A cancelled job writes nothing. A job whose clip changed
-    /// under it (another file there, or gone) writes nothing either.
+    /// under it (another file there, moved, cut, slowed, reversed, or gone) writes nothing either.
     pub fn poll_face_censor(&mut self) -> bool {
         if self.agent_busy_reason().is_some() {
             return self.faces.running();
@@ -428,7 +483,7 @@ impl EditorState {
     }
 
     fn write_face_censors(&mut self, clip: ClipKey, result: &FaceResult) -> FaceReport {
-        let current = self.project().tracks.get(clip.track).and_then(|lane| lane.clips.get(clip.clip)).is_some_and(|found| found.source == result.request.media_path);
+        let current = self.project().tracks.get(clip.track).and_then(|lane| lane.clips.get(clip.clip)).is_some_and(|found| ClipShown::of(found) == result.request.shown);
         if !current {
             self.report_error(Message::FaceCensorStale);
             return FaceReport { clip, outcome: "stale", faces: 0, track_ids: Vec::new(), message: Some("the clip changed while its faces were found".to_owned()) };
@@ -440,16 +495,19 @@ impl EditorState {
         }
         let pixels = self.output_pixels();
         let mut made = Vec::new();
+        let mut skipped = 0;
         let written = self.run(|project| {
-            let (next, ids) = add_face_censors(project, clip, result, &tracks, pixels)?;
-            made = ids;
-            Ok(next)
+            let added = add_face_censors(project, clip, result, &tracks, pixels)?;
+            made = added.ids;
+            skipped = added.skipped;
+            Ok(added.project)
         });
         if !written {
             return FaceReport { clip, outcome: "failed", faces: 0, track_ids: Vec::new(), message: Some("the censor regions could not be added".to_owned()) };
         }
         self.report_info(Message::FaceCensorDone { count: made.len() });
-        FaceReport { clip, outcome: "done", faces: made.len(), track_ids: made, message: None }
+        let message = (skipped > 0).then(|| format!("{skipped} of {} faces found could not be placed on the clip and were not written", tracks.len()));
+        FaceReport { clip, outcome: "done", faces: made.len(), track_ids: made, message }
     }
 }
 
@@ -499,7 +557,8 @@ mod tests {
     }
 
     fn request(clip: ClipKey) -> FaceRequest {
-        FaceRequest { clip, media_path: "a.mp4".into(), from: Time::ZERO, to: Time::from_ticks(TICKS_PER_SECOND * 2), style: FaceCensorStyle::default(), tracks: FaceTrackOptions::default(), model: PathBuf::new() }
+        let shown = ClipShown { source: "a.mp4".into(), source_in: Time::ZERO, source_span: Time::from_ticks(4 * TICKS_PER_SECOND), start: Time::ZERO, duration: Time::from_ticks(4 * TICKS_PER_SECOND), speed: 1.0, reverse: false };
+        FaceRequest { clip, media_path: "a.mp4".into(), shown, from: Time::ZERO, to: Time::from_ticks(TICKS_PER_SECOND * 2), style: FaceCensorStyle::default(), tracks: FaceTrackOptions::default(), model: PathBuf::new() }
     }
 
     /// A video clip of `a.mp4` over 4 s on track 0.
@@ -563,12 +622,87 @@ mod tests {
         assert_eq!(state.project().tracks.iter().flat_map(|lane| lane.clips.iter()).filter(|clip| clip.is_censor()).count(), 2);
         // the clip shows another file by the time the job ends: nothing is written
         let (mut state, key) = rigged();
-        let id = state.faces.start(FaceRequest { media_path: "b.mp4".into(), ..request(key) }, || Ok(Box::new(Moving) as Box<dyn FrameSource>), || Ok(Box::new(Two) as Box<dyn FaceFinder>)).unwrap();
+        let changed = request(key);
+        let id = state.faces.start(FaceRequest { media_path: "b.mp4".into(), shown: ClipShown { source: "b.mp4".into(), ..changed.shown.clone() }, ..changed }, || Ok(Box::new(Moving) as Box<dyn FrameSource>), || Ok(Box::new(Two) as Box<dyn FaceFinder>)).unwrap();
         state.faces.wait(id);
         let before = state.project().clone();
         state.poll_face_censor();
         assert_eq!(state.faces.reports[&id].outcome, "stale");
         assert_eq!(*state.project(), before);
+    }
+
+    #[test]
+    fn the_request_is_the_clip_as_it_is() {
+        let (state, key) = rigged();
+        let clip = &state.project().tracks[0].clips[0];
+        assert_eq!(ClipShown::of(clip), request(key).shown, "the test request matches the rigged clip");
+    }
+
+    /// The clip is moved, cut or slowed while its faces are found: the faces would land in the
+    /// wrong place, so nothing is written.
+    #[test]
+    fn a_clip_moved_or_cut_during_the_job_gets_nothing() {
+        let edits: [(&str, fn(&mut engine::Clip)); 4] = [
+            ("moved by a clip put before it", |clip| clip.start = Time::from_ticks(TICKS_PER_SECOND)),
+            ("cut in two", |clip| clip.duration = Time::from_ticks(TICKS_PER_SECOND)),
+            ("trimmed at its head", |clip| clip.source_in = Time::from_ticks(TICKS_PER_SECOND)),
+            ("slowed", |clip| clip.speed = 0.5),
+        ];
+        for (what, edit) in edits {
+            let (mut state, key) = rigged();
+            let id = state.faces.start(request(key), || Ok(Box::new(Moving) as Box<dyn FrameSource>), || Ok(Box::new(Told) as Box<dyn FaceFinder>)).unwrap();
+            state.faces.wait(id);
+            let mut project = state.project().clone();
+            edit(&mut project.tracks[0].clips[0]);
+            state.replace_project(project, None);
+            let before = state.project().clone();
+            state.poll_face_censor();
+            assert_eq!(state.faces.reports[&id].outcome, "stale", "{what}");
+            assert_eq!(*state.project(), before, "{what}");
+        }
+    }
+
+    /// A span longer than [`MAX_DETECTIONS`] detections takes a wider step instead of stopping short.
+    #[test]
+    fn a_long_span_is_covered_to_its_end() {
+        let to = Time::from_ticks(TICKS_PER_SECOND * (MAX_DETECTIONS as i64 / 10) * 3);
+        let (times, step) = detection_times(Time::ZERO, to, Some((30, 1)));
+        assert!(times.len() <= MAX_DETECTIONS);
+        let last = *times.last().unwrap();
+        assert!(last < to && last.saturating_add(step) >= to, "last {last:?}, step {step:?}, to {to:?}");
+        assert_eq!(step, Time::from_ticks(TICKS_PER_SECOND * 3 / 10));
+    }
+
+    #[test]
+    fn a_locked_track_is_refused() {
+        let (mut state, key) = rigged();
+        let mut project = state.project().clone();
+        project.tracks[0].locked = true;
+        state.replace_project(project, None);
+        let error = state.face_request(key, FaceCensorStyle::default()).unwrap_err();
+        assert_eq!(error, EditError::TrackLocked { track: 0 }.to_string());
+    }
+
+    /// The regions go on a sticker track that is not locked or hidden, even when that one has room.
+    #[test]
+    fn regions_skip_locked_and_hidden_sticker_tracks() {
+        for hide in [false, true] {
+            let (mut state, key) = rigged();
+            state.add_track(engine::TrackKind::Sticker);
+            let mut project = state.project().clone();
+            if hide {
+                project.tracks[1].hidden = true;
+            } else {
+                project.tracks[1].locked = true;
+            }
+            state.replace_project(project, None);
+            let id = state.faces.start(request(key), || Ok(Box::new(Moving) as Box<dyn FrameSource>), || Ok(Box::new(Told) as Box<dyn FaceFinder>)).unwrap();
+            state.faces.wait(id);
+            state.poll_face_censor();
+            assert_eq!(state.faces.reports[&id].faces, 1);
+            assert!(state.project().tracks[1].clips.is_empty(), "hidden {hide}");
+            assert_eq!(state.project().tracks.len(), 3);
+        }
     }
 
     #[test]

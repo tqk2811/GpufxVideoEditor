@@ -240,11 +240,6 @@ pub(crate) mod tests {
         zip.is_file().then_some(zip)
     }
 
-    /// The built NanoTrack zip.
-    pub(crate) fn built_zip() -> Option<PathBuf> {
-        built_zip_of(TrackingModel::NanoTrack)
-    }
-
     #[test]
     fn fetching_waits_for_the_release_hash() {
         let folder = scratch("off");
