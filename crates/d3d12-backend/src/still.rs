@@ -287,6 +287,67 @@ pub fn read_animation(path: &Path) -> Result<Option<AnimatedPicture>, String> {
     Ok(Some(picture))
 }
 
+/// Bounds on what [`animation_thumbnail`] keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThumbnailLimits {
+    /// The height of each frame; the width keeps the canvas's shape.
+    pub height: u32,
+    /// The most frames kept; the loop ends with the last one kept.
+    pub max_frames: usize,
+    /// The most bytes the kept frames may take together; the loop ends before the frame past it.
+    pub max_bytes: u64,
+}
+
+/// Small frames of `path` for looking at, when it is an animated WebP, or `None` for any other
+/// picture. Each frame is shrunk as soon as it is decoded, so only one canvas is ever full size,
+/// and the loop is cut short at `limits` rather than refused. `cancelled` is asked between frames;
+/// when it says true, the work stops with `Ok(None)`.
+pub fn animation_thumbnail(path: &Path, limits: ThumbnailLimits, cancelled: &dyn Fn() -> bool) -> Result<Option<AnimatedPicture>, String> {
+    let shown = path.display();
+    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("webp")) {
+        return Ok(None);
+    }
+    let data = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
+    let Some(animation) = AnimatedWebp::parse(&data).map_err(|e| format!("{shown}: {e}"))? else { return Ok(None) };
+    check_pixels(path, (animation.width, animation.height))?;
+    if animation.width.max(animation.height) > MAX_ANIMATION_SIDE {
+        return Err(format!("{shown}: {}x{} is larger than the {MAX_ANIMATION_SIDE} pixels a side an animated picture may have", animation.width, animation.height));
+    }
+    let height = limits.height.clamp(1, animation.height.max(1));
+    let aspect = f64::from(animation.width) / f64::from(animation.height.max(1));
+    let width = ((aspect * f64::from(height)).round() as u32).max(1);
+    let mut decoder_limits = Limits::default();
+    decoder_limits.max_image_width = Some(DECODER_SIDE_LIMIT);
+    decoder_limits.max_image_height = Some(DECODER_SIDE_LIMIT);
+    decoder_limits.max_alloc = Some(DECODER_ALLOCATION);
+    let mut picture = AnimatedPicture { frames: Vec::new(), ends_ms: Vec::new(), loops: animation.loops };
+    let (mut bytes, mut end) = (0u64, 0u64);
+    for frame in animation.frames(decoder_limits) {
+        if cancelled() {
+            return Ok(None);
+        }
+        if picture.frames.len() >= limits.max_frames.max(1) {
+            break;
+        }
+        let frame = frame.map_err(|e| format!("{shown}: {e}"))?;
+        let canvas = RgbaImage::from_raw(animation.width, animation.height, frame.rgba).ok_or_else(|| format!("{shown}: a frame of the wrong size"))?;
+        let small = if (width, height) == canvas.dimensions() { canvas } else { image::imageops::resize(&canvas, width, height, FilterType::Triangle) };
+        let rgba = small.into_raw();
+        if !picture.frames.is_empty() && bytes + rgba.len() as u64 > limits.max_bytes {
+            break;
+        }
+        bytes += rgba.len() as u64;
+        end += frame_ms(frame.duration_ms);
+        let has_alpha = rgba.chunks_exact(4).any(|pixel| pixel[3] != 255);
+        picture.frames.push(StillPicture { width, height, rgba, has_alpha });
+        picture.ends_ms.push(end);
+    }
+    if picture.frames.is_empty() {
+        return Err(format!("{shown}: no frame"));
+    }
+    Ok(Some(picture))
+}
+
 /// The bytes of `rgba`, tight rows, in rows of `aligned_row` bytes as a copy to a texture needs.
 pub(crate) fn aligned_rows(rgba: &[u8], row_bytes: usize, aligned_row: usize) -> Vec<u8> {
     let mut aligned = vec![0u8; rgba.len() / row_bytes.max(1) * aligned_row];
@@ -413,6 +474,21 @@ mod tests {
 
     fn animated_fixture() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/animated.webp")
+    }
+
+    #[test]
+    fn an_animation_thumbnail_is_small_keeps_the_timing_and_stops_at_its_limits() {
+        let full = read_animation(&animated_fixture()).unwrap().expect("animated");
+        let limits = ThumbnailLimits { height: 2, max_frames: 64, max_bytes: u64::MAX };
+        let small = animation_thumbnail(&animated_fixture(), limits, &|| false).unwrap().expect("animated");
+        assert_eq!(small.ends_ms, full.ends_ms);
+        assert_eq!(small.loops, full.loops);
+        assert!(small.frames.iter().all(|frame| frame.height == 2 && frame.rgba.len() == (frame.width * 2 * 4) as usize));
+        let one = animation_thumbnail(&animated_fixture(), ThumbnailLimits { max_frames: 1, ..limits }, &|| false).unwrap().expect("animated");
+        assert_eq!(one.ends_ms, full.ends_ms[..1]);
+        let tight = animation_thumbnail(&animated_fixture(), ThumbnailLimits { max_bytes: 1, ..limits }, &|| false).unwrap().expect("animated");
+        assert_eq!(tight.frames.len(), 1, "the first frame is always kept");
+        assert_eq!(animation_thumbnail(&animated_fixture(), limits, &|| true).unwrap(), None);
     }
 
     #[test]
