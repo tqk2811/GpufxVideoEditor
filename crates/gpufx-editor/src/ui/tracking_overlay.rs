@@ -63,7 +63,7 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, pictu
         return;
     }
     let Some(track) = state.motion_track_for(key).cloned() else { return };
-    let Some((mapping, _)) = state.clip_frame_now(key) else { return };
+    let Some((mapping, _)) = state.clip_frame_now_for(key, Some(track.id)) else { return };
     let painter = ui.painter_at(area);
     draw_path(&painter, state, key, &track, &mapping, picture);
     let Some((shown, on_frame)) = state.box_at_playhead(key, &track) else { return };

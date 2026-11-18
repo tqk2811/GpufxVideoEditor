@@ -562,9 +562,17 @@ impl Project {
     /// output frame at timeline time `t`, its keyframes, preset animations and lock applied. A clip
     /// that follows a motion track is taken at its own place, without the motion.
     pub fn clip_frame_mapping(&self, track: usize, clip: usize, t: Time, source_aspect: f64) -> Option<FrameMapping> {
+        self.clip_frame_mapping_for(track, clip, t, source_aspect, None)
+    }
+
+    /// [`Self::clip_frame_mapping`] for drawing or editing the box of motion track `motion_track`:
+    /// when the clip locks to that very track its lock is left out, since the lock is worked out
+    /// from the box itself and would take it back to the anchor whatever an edit does.
+    pub fn clip_frame_mapping_for(&self, track: usize, clip: usize, t: Time, source_aspect: f64, motion_track: Option<u32>) -> Option<FrameMapping> {
         let lane = self.tracks.get(track)?;
-        lane.clips.get(clip)?;
-        let transform = crate::schedule::placed_transform_at(self, track, clip, t);
+        let own = lane.clips.get(clip)?;
+        let unlocked = motion_track.is_some_and(|id| own.lock.is_some_and(|lock| lock.link.track_id == id));
+        let transform = if unlocked { crate::schedule::clip_transform_at(lane, clip, t) } else { crate::schedule::placed_transform_at(self, track, clip, t) };
         let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
         Some(FrameMapping { rect: transform.rect(output_aspect, source_aspect), rotation: transform.rotation, output_aspect })
     }

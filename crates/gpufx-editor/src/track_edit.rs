@@ -136,12 +136,19 @@ impl EditorState {
     /// How clip `key`, a picture of the shape of its source, lies in the frame at the playhead,
     /// and the source time it shows there; `None` when the playhead is off the clip.
     pub fn clip_frame_now(&self, key: ClipKey) -> Option<(FrameMapping, Time)> {
+        self.clip_frame_now_for(key, None)
+    }
+
+    /// [`Self::clip_frame_now`] for drawing or editing the box and path of motion track
+    /// `motion_track`: without the clip's lock when it locks to that track (see
+    /// [`engine::Project::clip_frame_mapping_for`]).
+    pub fn clip_frame_now_for(&self, key: ClipKey, motion_track: Option<u32>) -> Option<(FrameMapping, Time)> {
         let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
         let at = self.playhead();
         if at < clip.start || at >= clip.start.saturating_add(clip.duration) {
             return None;
         }
-        let mapping = self.project().clip_frame_mapping(key.track, key.clip, at, self.clip_aspect(clip))?;
+        let mapping = self.project().clip_frame_mapping_for(key.track, key.clip, at, self.clip_aspect(clip), motion_track)?;
         Some((mapping, clip.source_time_at(at.saturating_sub(clip.start)).max(Time::ZERO)))
     }
 
@@ -607,6 +614,25 @@ mod tests {
         let (shown, on_frame) = state.box_at_playhead(key, &track).unwrap();
         assert_eq!((shown.source_time, on_frame), (Time::from_ticks(SECOND), None));
         assert_eq!(snap_to_frame(Time::from_ticks(SECOND / 24 * 3 + 7), (24, 1)), Time::from_ticks(SECOND / 8));
+    }
+
+    #[test]
+    fn the_box_of_the_track_a_clip_locks_to_is_drawn_without_the_lock() {
+        let mut state = rigged();
+        let key = ClipKey { track: 0, clip: 0 };
+        state.set_playhead(Time::from_ticks(2 * SECOND));
+        let (plain, _) = state.clip_frame_now(key).unwrap();
+        let mut project = state.project().clone();
+        let link = engine::TrackLink { track_id: 1, anchor_source_time: Time::ZERO, follow_scale: true, follow_rotation: true, smooth: 0.0 };
+        project.tracks[0].clips[0].lock = Some(engine::TrackLock { link, zoom: 1.5 });
+        state.replace_project(project, None);
+        let (locked, _) = state.clip_frame_now(key).unwrap();
+        assert_ne!(locked, plain, "the picture itself is drawn locked");
+        // The box of track 1 drives the lock, so it is drawn and dragged in the clip's own place:
+        // a drag then moves the sample by just as much, not through the lock it changes.
+        let (for_box, _) = state.clip_frame_now_for(key, Some(1)).unwrap();
+        assert_eq!(for_box, plain);
+        assert_eq!(state.clip_frame_now_for(key, Some(2)).unwrap().0, locked, "another track keeps the lock");
     }
 
     #[test]
