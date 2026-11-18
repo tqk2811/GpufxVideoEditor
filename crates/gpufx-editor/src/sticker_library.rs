@@ -132,7 +132,7 @@ fn read_pack(root: &Path, folder: &Path, library: &mut StickerLibrary) -> Option
         };
         // This scan runs off the UI thread, and only reads each file's header.
         let size = still_dimensions(&path).ok();
-        // Only an animated WebP's chunks are read for its timing; no frame is decoded.
+        // Only an animated WebP's chunks or a GIF's blocks are read for its timing; no frame is decoded.
         let animation = animation_timing(&path).ok().flatten();
         stickers.push(LibrarySticker { source, name: item.name, tags: item.tags, category: item.category, size, animation });
     }

@@ -12,6 +12,7 @@ use crate::layout::grid_columns;
 use crate::media::{MediaItem, MediaKind};
 use crate::proxy::ProxyStatus;
 use crate::sticker_library::LibrarySticker;
+use crate::sticker_motion::MotionView;
 use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStylePack};
 use crate::packages::{duplicated_names, filter_entries, list_label, short_name, PackageEntry, PackageKind, PickerState};
 use crate::timecode::format_duration;
@@ -180,18 +181,24 @@ fn sticker_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<Ui
     let width = (ui.available_width() - ui.spacing().scroll.allocated_width()).max(1.0);
     let (columns, side) = picker_grid(width);
     let mut chosen = None;
+    // Taken out for the drawing, which borrows the rest of the state, and put back below.
+    let mut hover = std::mem::take(&mut state.ui.sticker_hover);
+    let now = ui.ctx().input(|input| input.time);
+    hover.begin_frame();
     egui::ScrollArea::vertical().id_salt("sticker-grid").auto_shrink([false, false]).show_rows(ui, side + TILE_CAPTION, found.len().div_ceil(columns), |ui, rows| {
         for row in rows {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = TILE_GAP;
                 for sticker in &found[row_tiles(row, columns, found.len())] {
-                    if sticker_tile(ui, state, sticker, side) {
+                    if sticker_tile(ui, state, sticker, side, &mut hover, now) {
                         chosen = Some(sticker.media_item());
                     }
                 }
             });
         }
     });
+    hover.end_frame();
+    state.ui.sticker_hover = hover;
     sticker_problems(ui, state);
     if let Some(item) = chosen {
         state.add_media_to_selected_track(&item);
@@ -323,16 +330,18 @@ fn sticker_problems(ui: &mut egui::Ui, state: &EditorState) {
 }
 
 /// One square tile of the Sticker tab: the picture on a checker-free dark background, its name below.
-/// Can be dragged onto a track like any media. True on a double click.
-fn sticker_tile(ui: &mut egui::Ui, state: &EditorState, sticker: &LibrarySticker, side: f32) -> bool {
+/// Can be dragged onto a track like any media. An animated sticker plays while the pointer stays on
+/// it. True on a double click.
+fn sticker_tile(ui: &mut egui::Ui, state: &EditorState, sticker: &LibrarySticker, side: f32, hover: &mut TileHover, now: f64) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(side, side + TILE_CAPTION), Sense::click_and_drag());
     response.dnd_set_drag_payload(sticker.media_item());
     let painter = ui.painter_at(rect);
     let radius = CornerRadius::same(theme::CONTROL_RADIUS);
     let picture = Rect::from_min_size(rect.min, Vec2::splat(side));
     painter.rect_filled(picture, radius, theme::thumb_bg());
+    let moving = if sticker.is_animated() { sticker_motion_frame(ui.ctx(), state, sticker, hover.observe(&sticker.source, response.hovered(), now)) } else { None };
     // Only a tile scrolled into view asks for its picture, which a worker makes off the UI thread.
-    let poster = ui.is_rect_visible(picture).then(|| state.visuals.borrow_mut().poster(&sticker.source, None)).flatten();
+    let poster = moving.or_else(|| ui.is_rect_visible(picture).then(|| state.visuals.borrow_mut().poster(&sticker.source, None)).flatten());
     match poster {
         Some((texture, aspect)) => {
             let fitted = Rect::from_center_size(picture.center(), fit_size(picture.shrink(6.0).size(), aspect));
@@ -352,6 +361,33 @@ fn sticker_tile(ui: &mut egui::Ui, state: &EditorState, sticker: &LibrarySticker
     let response = response.on_hover_text(sticker_tooltip(sticker, state.language()));
     // A single click is too easy to make by accident, so adding needs a double click.
     response.double_clicked()
+}
+
+/// The frame an animated sticker shows for `hover`, with its aspect, and the repaint that brings the
+/// next one; `None` keeps the poster: the pointer has not settled yet or the frames are not ready.
+fn sticker_motion_frame(ctx: &egui::Context, state: &EditorState, sticker: &LibrarySticker, hover: Hover) -> Option<(egui::TextureId, f32)> {
+    let elapsed = match hover {
+        Hover::Idle => return None,
+        Hover::Waiting { remaining } => {
+            ctx.request_repaint_after(Duration::from_secs_f64(remaining));
+            return None;
+        }
+        Hover::Playing { elapsed } => elapsed,
+    };
+    match state.sticker_motion.borrow_mut().want(&sticker.source, || state.source_file(&sticker.source)) {
+        MotionView::Ready(frames) => {
+            let (texture, next_in) = frames.at(elapsed);
+            if let Some(next_in) = next_in {
+                ctx.request_repaint_after(Duration::from_secs_f64(next_in));
+            }
+            Some((texture.id(), frames.aspect))
+        }
+        MotionView::Loading => {
+            ctx.request_repaint_after(Duration::from_secs_f64(BUSY_REPAINT));
+            None
+        }
+        MotionView::Unavailable => None,
+    }
 }
 
 fn sticker_tooltip(sticker: &LibrarySticker, language: Language) -> String {

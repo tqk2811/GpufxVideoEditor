@@ -138,6 +138,8 @@ pub struct EditorState {
     pub visuals: RefCell<ClipVisuals>,
     /// Previews of the effect packages; asked for while drawing, so behind a cell.
     pub previews: RefCell<PreviewManager>,
+    /// The moving pictures of hovered animated stickers; asked for while drawing, so behind a cell.
+    pub sticker_motion: RefCell<crate::sticker_motion::StickerMotion>,
     /// The shapes of the pictures of text clips; asked for while drawing, so behind a cell.
     pub text_shapes: RefCell<TextShapes>,
     language: Language,
@@ -345,6 +347,8 @@ pub struct UiState {
     pub tile_hover: crate::effect_previews::play::TileHover,
     /// The same for the effect grid of the inspector's Effects tab.
     pub effect_tile_hover: crate::effect_previews::play::TileHover,
+    /// The sticker tile the pointer stays on, by source.
+    pub sticker_hover: crate::effect_previews::play::TileHover,
     /// How often a changed project is autosaved, in seconds; zero is off.
     pub autosave_seconds: u64,
     /// Autosaves of editors that did not close cleanly, offered for recovery at start.
@@ -595,6 +599,7 @@ impl EditorState {
             ui: UiState::default(),
             visuals: RefCell::new(ClipVisuals::default()),
             previews: RefCell::new(PreviewManager::default()),
+            sticker_motion: RefCell::new(Default::default()),
             text_shapes: RefCell::new(TextShapes::default()),
             language: Language::default(),
             beats: BeatDetector::default(),
