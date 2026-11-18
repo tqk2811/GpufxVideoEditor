@@ -1465,8 +1465,21 @@ pub fn set_lock(project: &Project, key: ClipKey, lock: Option<TrackLock>) -> Res
 }
 
 /// Limits effect `effect` of clip `key` to `region`, or gives it the whole picture with `None`.
+/// A link to a motion track that does not exist or is of another file is refused here, since
+/// [`finish`] would otherwise drop it as a link left behind by an edit.
 pub fn set_effect_region(project: &Project, key: ClipKey, effect: usize, region: Option<EffectRegion>) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
+    if let Some(link) = region.and_then(|region| region.link) {
+        let source = &clip_of(project, key)?.source;
+        let problem = match project.motion_track(link.track_id) {
+            None => Some(format!("no motion track {}", link.track_id)),
+            Some(motion) if motion.media_path != *source => Some(format!("motion track {} is of {}, not of the clip's source", link.track_id, motion.media_path)),
+            Some(_) => None,
+        };
+        if let Some(problem) = problem {
+            return Err(EditError::Invalid(vec![ValidationError::InvalidEffectRegion { track: key.track, clip: key.clip, effect, problem }]));
+        }
+    }
     let mut next = project.clone();
     let clip = clip_mut(&mut next, key)?;
     clip.effects.get_mut(effect).ok_or(EditError::EffectNotFound { key, effect })?.region = region;

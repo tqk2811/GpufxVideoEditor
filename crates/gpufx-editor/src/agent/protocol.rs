@@ -161,6 +161,13 @@ pub enum AgentEdit {
     ClipDelete { clip: ClipRef },
     EffectAdd { clip: ClipRef, package: String, params: Map<String, Value> },
     EffectRemove { clip: ClipRef, effect: usize },
+    /// Limits effect `effect` of `clip` (a blur or pixelate) to `region`, in parts of the clip's
+    /// picture. With `track_id` the region moves with that motion track of the clip's own source,
+    /// anchored at the source time the clip shows at timeline time `at` (its start when absent);
+    /// `follow_scale`, `follow_rotation` and `perspective` say how.
+    EffectRegionSet { clip: ClipRef, effect: usize, region: engine::EffectRegion, track_id: Option<u32>, at: Option<Time>, follow_scale: bool, follow_rotation: bool, perspective: bool },
+    /// Gives effect `effect` of `clip` the whole picture again.
+    EffectRegionClear { clip: ClipRef, effect: usize },
     TransitionAdd { track: usize, after_clip: usize, package: String, duration: Option<Time>, params: Map<String, Value> },
     TransitionRemove { track: usize, after_clip: usize },
     ClipSetGain { clip: ClipRef, gain_db: f64 },

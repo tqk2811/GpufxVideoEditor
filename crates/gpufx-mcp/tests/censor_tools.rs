@@ -205,3 +205,32 @@ fn censor_faces_refuses_what_is_not_a_video_and_finds_the_faces_of_one() {
         Err(error) => panic!("{error:?}"),
     }
 }
+
+#[test]
+fn effect_region_set_limits_a_blur_and_links_it_to_a_planar_track_in_perspective() {
+    let _lock = gpu_lock();
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let (clip_a, _) = clip_paths();
+    let video = json!({"track": 0, "clip": 0});
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    let now = revision(&call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": clip_a, "start": 0, "duration": 180_000})));
+    let now = revision(&call_ok(&mut session, "effect_add", json!({"expected_revision": now, "clip": video, "package": "invert"})));
+    let now = revision(&call_ok(&mut session, "effect_add", json!({"expected_revision": now, "clip": video, "package": "pixelate"})));
+    // An effect that hides nothing takes no region; a bad index is not found.
+    assert_eq!(call_err(&mut session, "effect_region_set", json!({"expected_revision": now, "clip": video, "effect": 0, "cx": 0.5, "cy": 0.5, "w": 0.2, "h": 0.2})).code, "invalid_project");
+    assert_eq!(call_err(&mut session, "effect_region_set", json!({"expected_revision": now, "clip": video, "effect": 5, "cx": 0.5, "cy": 0.5, "w": 0.2, "h": 0.2})).code, "effect_not_found");
+    assert_eq!(call_err(&mut session, "effect_region_set", json!({"expected_revision": now, "clip": video, "effect": 1, "shape": "star", "cx": 0.5, "cy": 0.5, "w": 0.2, "h": 0.2})).code, "invalid_params");
+    let set = call_ok(&mut session, "effect_region_set", json!({"expected_revision": now, "clip": video, "effect": 1, "shape": "ellipse", "cx": 0.4, "cy": 0.5, "w": 0.2, "h": 0.3, "angle": 10.0, "feather": 0.5}));
+    let region = project_of(&mut session).tracks[0].clips[0].effects[1].region.expect("a region");
+    assert_eq!((region.shape, region.cx, region.cy, region.w, region.h, region.angle, region.feather, region.link), (engine::RegionShape::Ellipse, 0.4, 0.5, 0.2, 0.3, 10.0, 0.5, None));
+    // Linked to a planar track, in perspective, anchored at one second.
+    let started = call_ok(&mut session, "track_set_sample", json!({"expected_revision": revision(&set), "clip": video, "source_time": 0, "quad": [[0.3, 0.3], [0.5, 0.3], [0.5, 0.7], [0.3, 0.7]]}));
+    let id = started["track_id"].as_u64().expect("an id");
+    assert_eq!(call_err(&mut session, "effect_region_set", json!({"expected_revision": revision(&started), "clip": video, "effect": 1, "cx": 0.4, "cy": 0.5, "w": 0.2, "h": 0.4, "track_id": id + 3})).code, "invalid_project");
+    let linked = call_ok(&mut session, "effect_region_set", json!({"expected_revision": revision(&started), "clip": video, "effect": 1, "cx": 0.4, "cy": 0.5, "w": 0.2, "h": 0.4, "track_id": id, "at": 90_000, "perspective": true}));
+    let region = project_of(&mut session).tracks[0].clips[0].effects[1].region.expect("a region");
+    let link = region.link.expect("linked");
+    assert_eq!((link.track_id, link.anchor_source_time.ticks(), region.perspective, region.shape), (id as u32, 90_000, true, engine::RegionShape::Rect));
+    call_ok(&mut session, "effect_region_clear", json!({"expected_revision": revision(&linked), "clip": video, "effect": 1}));
+    assert!(project_of(&mut session).tracks[0].clips[0].effects[1].region.is_none());
+}

@@ -541,6 +541,19 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 engine::set_lock(project, clip.into(), Some(engine::TrackLock { link, zoom: zoom.unwrap_or(1.0), perspective }))
             })
             .map_err(refused)?,
+        AgentEdit::EffectRegionSet { clip, effect, region, track_id, at, follow_scale, follow_rotation, perspective } => state
+            .apply_agent_command(|project| {
+                let shown = current_clip(project, clip)?;
+                let link = track_id.map(|track_id| {
+                    let at = at.unwrap_or(shown.start);
+                    let anchor_source_time = shown.source_time_at(at.saturating_sub(shown.start)).max(Time::ZERO);
+                    engine::TrackLink { track_id, anchor_source_time, follow_scale, follow_rotation, smooth: crate::track_edit::track_smooth(project, track_id) }
+                });
+                let region = engine::EffectRegion { link, perspective: perspective && link.is_some(), corners: None, ..region };
+                engine::set_effect_region(project, clip.into(), effect, Some(region))
+            })
+            .map_err(refused)?,
+        AgentEdit::EffectRegionClear { clip, effect } => state.apply_agent_command(|project| engine::set_effect_region(project, clip.into(), effect, None)).map_err(refused)?,
         AgentEdit::ClipLockClear { clip } => state.apply_agent_command(|project| engine::set_lock(project, clip.into(), None)).map_err(refused)?,
         AgentEdit::TrackSetSample { track_id, clip, sample } => {
             let id = match (track_id, clip) {
