@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn lost_samples_are_red_and_hand_placed_ones_yellow() {
-        let sample = TrackSample { source_time: Time::ZERO, cx: 0.5, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 0.2, manual: false };
+        let sample = TrackSample { source_time: Time::ZERO, cx: 0.5, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 0.2, manual: false, quad: None };
         assert_eq!(sample_color(&sample), LOST_COLOR);
         assert_eq!(sample_color(&TrackSample { manual: true, ..sample }), MANUAL_COLOR);
         assert_eq!(sample_color(&TrackSample { confidence: 0.9, ..sample }), TRACKED_COLOR);

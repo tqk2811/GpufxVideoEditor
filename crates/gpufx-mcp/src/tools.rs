@@ -1055,12 +1055,12 @@ fn censor_add(p: CensorAddParams) -> Result<AgentRequest, AgentError> {
 }
 
 fn track_set_sample(p: TrackSampleParams) -> Result<AgentRequest, AgentError> {
-    let sample = engine::TrackSample { source_time: ticks(p.source_time), cx: p.cx, cy: p.cy, w: p.w, h: p.h, angle: p.angle.unwrap_or(0.0), confidence: p.confidence.unwrap_or(1.0), manual: true };
+    let sample = engine::TrackSample { source_time: ticks(p.source_time), cx: p.cx, cy: p.cy, w: p.w, h: p.h, angle: p.angle.unwrap_or(0.0), confidence: p.confidence.unwrap_or(1.0), manual: true, quad: None };
     edit(p.expected_revision, AgentEdit::TrackSetSample { track_id: p.track_id, clip: p.clip.map(Into::into), sample })
 }
 
 fn track_create(p: TrackCreateParams) -> Result<AgentRequest, AgentError> {
-    let sample = engine::TrackSample { source_time: engine::Time::ZERO, cx: p.cx, cy: p.cy, w: p.w, h: p.h, angle: p.angle.unwrap_or(0.0), confidence: 1.0, manual: true };
+    let sample = engine::TrackSample { source_time: engine::Time::ZERO, cx: p.cx, cy: p.cy, w: p.w, h: p.h, angle: p.angle.unwrap_or(0.0), confidence: 1.0, manual: true, quad: None };
     edit(p.expected_revision, AgentEdit::TrackCreate { clip: p.clip.into(), at: p.at.map(ticks), sample })
 }
 

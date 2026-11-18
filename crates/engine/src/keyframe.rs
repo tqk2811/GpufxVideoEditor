@@ -259,6 +259,10 @@ pub struct ClipTransform {
     /// How a clip that follows a motion track moves now, after everything above (see
     /// [`crate::tracking`]). Its rotation is already counted in `rotation`.
     pub follow: Option<FollowPose>,
+    /// The corner pin of a clip that follows a planar track in perspective, in parts of the output
+    /// frame (see [`crate::Project::follow_pin`]): when set, the picture is drawn warped by it
+    /// rather than placed by `follow` (see [`ClipTransform::pinned_corners`]).
+    pub pin: Option<crate::tracker::homography::Homography>,
 }
 
 impl Default for ClipTransform {
@@ -270,7 +274,7 @@ impl Default for ClipTransform {
 impl ClipTransform {
     /// A clip with no motion at all at `placement`.
     pub fn still(placement: Option<ClipPlacement>) -> Self {
-        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0, stretch: [1.0, 1.0], blur: 0.0, follow: None }
+        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0, stretch: [1.0, 1.0], blur: 0.0, follow: None, pin: None }
     }
 
     /// This transform with `pose` of a preset animation on top.
@@ -321,6 +325,30 @@ impl ClipTransform {
         rect
     }
 
+    /// The four corners of the picture in the output frame (parts of it; top-left, top-right,
+    /// bottom-right, bottom-left of the picture) when it is corner pinned: the corners of `rect`,
+    /// its place without the follow (see [`Self::unfollowed_rect`]), turned by its own rotation,
+    /// then warped by the pin. `None` without a pin or when a corner goes behind the view.
+    pub fn pinned_corners(self, rect: PlacedRect, output_aspect: f64) -> Option<[[f64; 2]; 4]> {
+        let pin = self.pin?;
+        let own = self.rotation - self.follow.map_or(0.0, |pose| pose.rotation);
+        let (sine, cosine) = own.to_radians().sin_cos();
+        let (mx, my) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let mut corners = [[0.0; 2]; 4];
+        for (corner, [u, v]) in corners.iter_mut().zip([[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]]) {
+            let (dx, dy) = (u * rect.width * output_aspect, v * rect.height);
+            let turned = [mx + (cosine * dx - sine * dy) / output_aspect, my + sine * dx + cosine * dy];
+            *corner = pin.apply(turned)?;
+        }
+        Some(corners)
+    }
+
+    /// The rectangle of the picture without the motion of a follow ([`Self::rect`] of the same
+    /// transform with no `follow`): where a corner pinned picture stands before the pin.
+    pub fn unfollowed_rect(self, output_aspect: f64, source_aspect: f64) -> PlacedRect {
+        Self { follow: None, ..self }.rect(output_aspect, source_aspect)
+    }
+
     /// The numbers the place of the clip has now, for a source of `source_aspect`.
     pub fn placement_now(self, output_aspect: f64, source_aspect: f64) -> ClipPlacement {
         let rect = self.rect(output_aspect, source_aspect);
@@ -345,6 +373,7 @@ impl Clip {
             stretch: [1.0, 1.0],
             blur: 0.0,
             follow: None,
+            pin: None,
         }
     }
 

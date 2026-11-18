@@ -1,0 +1,133 @@
+//! Planar (four corner) tracks: their data, and overlays that follow them in perspective (corner
+//! pin).
+
+mod common;
+
+use common::*;
+use engine::{layers_at_frame, set_follow, ClipKey, ClipPlacement, Follow, LayerContent, MotionTrack, Project, TrackKind, TrackLink, TrackSample};
+
+const SECOND: i64 = 90_000;
+const FRAME: i64 = 3_000;
+const ASPECT: f64 = 16.0 / 9.0;
+
+/// The square sticker's place at the anchor: x 0.25 to 0.5, y 0.25 to 0.25 + 0.25 * ASPECT.
+const BOTTOM: f64 = 0.25 + 0.25 * ASPECT;
+const AT_ANCHOR: [[f64; 2]; 4] = [[0.25, 0.25], [0.5, 0.25], [0.5, BOTTOM], [0.25, BOTTOM]];
+/// The object two seconds later: a trapezoid, its right side shorter.
+const LATER: [[f64; 2]; 4] = [[0.35, 0.2], [0.7, 0.3], [0.7, 0.6], [0.3, 0.75]];
+
+fn planar(seconds: f64, quad: [[f64; 2]; 4]) -> TrackSample {
+    TrackSample::from_quad(t((seconds * SECOND as f64) as i64), quad, ASPECT, 1.0, false)
+}
+
+fn planar_track() -> MotionTrack {
+    MotionTrack { id: 7, media_path: "a.mp4".into(), aspect: ASPECT, samples: vec![planar(0.0, AT_ANCHOR), planar(2.0, LATER)] }
+}
+
+fn follow(perspective: bool) -> Follow {
+    Follow { link: TrackLink { track_id: 7, anchor_source_time: t(0), follow_scale: false, follow_rotation: false, smooth: 0.0 }, ref_track: 0, ref_clip: 0, offset: [0.0, 0.0], perspective }
+}
+
+/// A full-frame video clip of `a.mp4` on track 0 and a square sticker following it on track 1,
+/// standing exactly on the object at the anchor.
+fn rig(perspective: bool) -> Project {
+    let mut sticker = clip("s.png", 0, 0, 2 * SECOND);
+    sticker.placement = Some(ClipPlacement { x: 0.25, y: 0.25, width: 0.25 });
+    sticker.follow = Some(follow(perspective));
+    let mut stickers = track(vec![sticker], Vec::new());
+    stickers.kind = TrackKind::Sticker;
+    let mut p = project(FRAME, vec![track(vec![clip("a.mp4", 0, 0, 2 * SECOND)], Vec::new()), stickers]);
+    p.motion_tracks.push(planar_track());
+    p
+}
+
+fn sticker_transform(p: &Project, frame: i64) -> engine::ClipTransform {
+    let layers = layers_at_frame(p, frame);
+    let layer = layers.iter().find(|layer| layer.track == 1).expect("the sticker shows");
+    let LayerContent::Clip(sample) = layer.content else { panic!("no transition") };
+    sample.transform
+}
+
+fn assert_quad(actual: [[f64; 2]; 4], expected: [[f64; 2]; 4]) {
+    for (a, e) in actual.iter().zip(&expected) {
+        assert!((a[0] - e[0]).abs() < 1e-6 && (a[1] - e[1]).abs() < 1e-6, "{actual:?} != {expected:?}");
+    }
+}
+
+#[test]
+fn a_perspective_follower_has_its_corners_on_the_object_corners() {
+    let p = rig(true);
+    for (frame, k) in [(0, 0.0), (30, 0.5), (45, 0.75)] {
+        let transform = sticker_transform(&p, frame);
+        let corners = transform.pinned_corners(transform.unfollowed_rect(ASPECT, 1.0), ASPECT).expect("pinned");
+        let expected: [[f64; 2]; 4] = std::array::from_fn(|i| [AT_ANCHOR[i][0] + (LATER[i][0] - AT_ANCHOR[i][0]) * k, AT_ANCHOR[i][1] + (LATER[i][1] - AT_ANCHOR[i][1]) * k]);
+        assert_quad(corners, expected);
+    }
+}
+
+#[test]
+fn the_offset_shifts_the_pinned_corners_and_a_plain_follow_has_no_pin() {
+    let mut p = rig(true);
+    p.tracks[1].clips[0].follow.as_mut().unwrap().offset = [0.1, -0.05];
+    let transform = sticker_transform(&p, 30);
+    let corners = transform.pinned_corners(transform.unfollowed_rect(ASPECT, 1.0), ASPECT).unwrap();
+    let middle: [[f64; 2]; 4] = std::array::from_fn(|i| [(AT_ANCHOR[i][0] + LATER[i][0]) / 2.0 + 0.1, (AT_ANCHOR[i][1] + LATER[i][1]) / 2.0 - 0.05]);
+    assert_quad(corners, middle);
+    assert!(sticker_transform(&rig(false), 30).pin.is_none());
+}
+
+#[test]
+fn the_reference_clip_place_carries_the_pin() {
+    let mut p = rig(true);
+    // The reference clip shrunk to the right half of the frame, top aligned.
+    p.tracks[0].clips[0].placement = Some(ClipPlacement { x: 0.5, y: 0.0, width: 0.5 });
+    let reference = |q: [[f64; 2]; 4]| q.map(|[x, y]| [0.5 + x * 0.5, y * 0.5]);
+    let pin = p.follow_pin(&follow(true), t(2 * SECOND - FRAME)).unwrap();
+    let anchor = reference(AT_ANCHOR);
+    let near_end: [[f64; 2]; 4] = std::array::from_fn(|i| {
+        let k = (2 * SECOND - FRAME) as f64 / (2 * SECOND) as f64;
+        [AT_ANCHOR[i][0] + (LATER[i][0] - AT_ANCHOR[i][0]) * k, AT_ANCHOR[i][1] + (LATER[i][1] - AT_ANCHOR[i][1]) * k]
+    });
+    assert_quad(anchor.map(|c| pin.apply(c).unwrap()), reference(near_end));
+}
+
+#[test]
+fn a_track_of_boxes_gives_the_corners_of_its_turned_boxes() {
+    let mut track = planar_track();
+    track.samples = vec![TrackSample { source_time: t(0), cx: 0.5, cy: 0.5, w: 0.2, h: 0.2 * ASPECT, angle: 90.0, confidence: 1.0, manual: false, quad: None }];
+    assert!(!track.is_planar());
+    let quad = track.quad_at(t(0), 0.0).unwrap();
+    // A square turned a quarter clockwise: its top-left corner is now at the top right.
+    assert_quad(quad, [[0.6, 0.5 - 0.1 * ASPECT], [0.6, 0.5 + 0.1 * ASPECT], [0.4, 0.5 + 0.1 * ASPECT], [0.4, 0.5 - 0.1 * ASPECT]]);
+}
+
+#[test]
+fn quads_round_trip_validate_and_are_left_out_when_absent() {
+    let p = rig(true);
+    let text = serde_json::to_string(&p).unwrap();
+    assert!(text.contains(r#""quad":[[0.25,0.25]"#) && text.contains(r#""perspective":true"#), "{text}");
+    let back = Project::from_json(&text).unwrap();
+    assert!(back.tracks[1].clips[0].follow.unwrap().perspective);
+    assert_quad(back.motion_tracks[0].samples[1].quad.unwrap(), LATER);
+    let plain = rig(false);
+    let mut plain_track = plain.clone();
+    plain_track.motion_tracks[0].samples.iter_mut().for_each(|s| s.quad = None);
+    let text = serde_json::to_string(&plain_track).unwrap();
+    assert!(!text.contains("quad") && !text.contains("perspective"), "{text}");
+
+    let mut bad = planar_track();
+    bad.samples[1].quad = Some([LATER[0], LATER[2], LATER[1], LATER[3]]);
+    assert!(bad.problem().unwrap().contains("convex"), "{:?}", bad.problem());
+    bad.samples[1].quad = Some([[f64::NAN, 0.0], LATER[1], LATER[2], LATER[3]]);
+    assert!(bad.problem().is_some());
+    assert!(planar_track().problem().is_none());
+}
+
+#[test]
+fn set_follow_accepts_a_perspective_follow() {
+    let mut p = rig(true);
+    p.tracks[1].clips[0].follow = None;
+    let key = ClipKey { track: 1, clip: 0 };
+    let p = set_follow(&p, key, Some(follow(true))).unwrap();
+    assert!(p.tracks[1].clips[0].follow.unwrap().perspective);
+}

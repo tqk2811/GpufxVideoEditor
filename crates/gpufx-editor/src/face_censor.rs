@@ -407,7 +407,7 @@ pub fn add_face_censors(project: &Project, reference: ClipKey, result: &FaceResu
             continue;
         };
         next = engine::set_motion_track(&next, track.clone())?;
-        let sample = TrackSample { source_time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false };
+        let sample = TrackSample { source_time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false, quad: None };
         let [x, y, w, h] = crate::track_edit::frame_box(&mapping, &sample);
         let (cx, cy, w, h) = (x + w / 2.0, y + h / 2.0, w * CENSOR_MARGIN, h * CENSOR_MARGIN);
         let range = engine::CENSOR_ASPECT_RANGE;

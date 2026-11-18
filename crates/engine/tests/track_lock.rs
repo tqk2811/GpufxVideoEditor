@@ -15,7 +15,7 @@ const ASPECT: f64 = 16.0 / 9.0;
 const KEY: ClipKey = ClipKey { track: 0, clip: 0 };
 
 fn sample(seconds: f64, cx: f64, cy: f64, size: f64, angle: f64) -> TrackSample {
-    TrackSample { source_time: t((seconds * SECOND as f64) as i64), cx, cy, w: size, h: size, angle, confidence: 1.0, manual: false }
+    TrackSample { source_time: t((seconds * SECOND as f64) as i64), cx, cy, w: size, h: size, angle, confidence: 1.0, manual: false, quad: None }
 }
 
 /// The object goes from the left quarter to the right quarter and down a little over two seconds
@@ -146,7 +146,7 @@ fn an_overlay_following_the_locked_clip_stays_on_the_object() {
     let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), lock(0, true, true));
     let mut sticker = clip("s.png", 0, 0, 2 * SECOND);
     sticker.placement = Some(ClipPlacement { x: 0.2, y: 0.3, width: 0.1 });
-    sticker.follow = Some(Follow { link: TrackLink { track_id: 7, anchor_source_time: t(0), follow_scale: true, follow_rotation: true, smooth: 0.0 }, ref_track: 0, ref_clip: 0, offset: [0.0, 0.0] });
+    sticker.follow = Some(Follow { link: TrackLink { track_id: 7, anchor_source_time: t(0), follow_scale: true, follow_rotation: true, smooth: 0.0 }, ref_track: 0, ref_clip: 0, offset: [0.0, 0.0], perspective: false });
     let mut stickers = track(vec![sticker], Vec::new());
     stickers.kind = TrackKind::Sticker;
     p.tracks.push(stickers);
@@ -187,7 +187,7 @@ fn locks_that_do_not_hold_are_refused() {
     // A clip cannot follow and lock at once, either way round.
     let mut both = project(FRAME, vec![track(vec![clip("a.mp4", 0, 0, 2 * SECOND)], Vec::new()), track(vec![clip("a.mp4", 0, 0, 2 * SECOND)], Vec::new())]);
     both.motion_tracks.push(moving_track());
-    let follow = Follow { link: TrackLink { track_id: 7, anchor_source_time: t(0), follow_scale: false, follow_rotation: false, smooth: 0.0 }, ref_track: 0, ref_clip: 0, offset: [0.0, 0.0] };
+    let follow = Follow { link: TrackLink { track_id: 7, anchor_source_time: t(0), follow_scale: false, follow_rotation: false, smooth: 0.0 }, ref_track: 0, ref_clip: 0, offset: [0.0, 0.0], perspective: false };
     let following = set_follow(&both, ClipKey { track: 1, clip: 0 }, Some(follow)).unwrap();
     assert!(matches!(set_lock(&following, ClipKey { track: 1, clip: 0 }, Some(lock(0, false, false))), Err(EditError::Invalid(_))));
     let locked = set_lock(&both, ClipKey { track: 1, clip: 0 }, Some(lock(0, false, false))).unwrap();
@@ -261,7 +261,7 @@ fn a_split_piece_without_the_anchor_reads_its_place_inside_itself() {
 
 #[test]
 fn a_reference_may_lock_but_may_not_follow() {
-    let follow_of = |ref_track: usize| Follow { link: TrackLink { track_id: 7, anchor_source_time: t(0), follow_scale: false, follow_rotation: false, smooth: 0.0 }, ref_track, ref_clip: 0, offset: [0.0, 0.0] };
+    let follow_of = |ref_track: usize| Follow { link: TrackLink { track_id: 7, anchor_source_time: t(0), follow_scale: false, follow_rotation: false, smooth: 0.0 }, ref_track, ref_clip: 0, offset: [0.0, 0.0], perspective: false };
     // A sticker following the locked video: fine.
     let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), lock(0, false, false));
     let mut sticker = clip("s.png", 0, 0, 2 * SECOND);

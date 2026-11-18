@@ -13,7 +13,7 @@ const FRAME: i64 = 3_000;
 const ASPECT: f64 = 16.0 / 9.0;
 
 fn sample(seconds: f64, cx: f64, cy: f64) -> TrackSample {
-    TrackSample { source_time: t((seconds * SECOND as f64) as i64), cx, cy, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: false }
+    TrackSample { source_time: t((seconds * SECOND as f64) as i64), cx, cy, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: false, quad: None }
 }
 
 /// The object goes from the left quarter to the right quarter over the first two seconds of
@@ -35,7 +35,7 @@ fn sticker(start: i64, duration: i64) -> engine::Clip {
 /// A video clip of `a.mp4` on track 0 and a sticker following it on track 1, from 0 for 2 s.
 fn rig(reference: engine::Clip, anchor: i64) -> Project {
     let mut overlay = sticker(0, 2 * SECOND);
-    overlay.follow = Some(Follow { link: link(anchor), ref_track: 0, ref_clip: 0, offset: [0.0, 0.0] });
+    overlay.follow = Some(Follow { link: link(anchor), ref_track: 0, ref_clip: 0, offset: [0.0, 0.0], perspective: false });
     let mut stickers = track(vec![overlay], Vec::new());
     stickers.kind = TrackKind::Sticker;
     let mut p = project(FRAME, vec![track(vec![reference], Vec::new()), stickers]);
@@ -174,7 +174,7 @@ fn set_follow_refuses_what_does_not_hold() {
     let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
     let key = ClipKey { track: 1, clip: 0 };
     let bad = |follow: Follow| matches!(set_follow(&p, key, Some(follow)), Err(EditError::Invalid(errors)) if matches!(errors[0], ValidationError::InvalidFollow { .. }));
-    let good = Follow { link: link(0), ref_track: 0, ref_clip: 0, offset: [0.0, 0.0] };
+    let good = Follow { link: link(0), ref_track: 0, ref_clip: 0, offset: [0.0, 0.0], perspective: false };
     assert!(bad(Follow { link: TrackLink { track_id: 9, ..link(0) }, ..good }), "no such track");
     assert!(bad(Follow { link: link(3 * SECOND), ..good }), "anchor not shown");
     assert!(bad(Follow { ref_track: 1, ..good }), "itself");
@@ -334,7 +334,7 @@ fn a_copy_put_before_the_reference_does_not_take_the_follow() {
 fn a_reference_clip_cannot_follow_and_says_so() {
     let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
     p.tracks.push(track(vec![clip("a.mp4", 0, 0, 2 * SECOND)], Vec::new()));
-    let follow = Follow { link: link(0), ref_track: 2, ref_clip: 0, offset: [0.0, 0.0] };
+    let follow = Follow { link: link(0), ref_track: 2, ref_clip: 0, offset: [0.0, 0.0], perspective: false };
     let Err(EditError::Invalid(errors)) = set_follow(&p, ClipKey { track: 0, clip: 0 }, Some(follow)) else { panic!("refused") };
     let ValidationError::InvalidFollow { problem, .. } = &errors[0] else { panic!("{errors:?}") };
     assert!(problem.contains("reference of clip 0 on track 1"), "{problem}");

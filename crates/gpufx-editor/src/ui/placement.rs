@@ -381,11 +381,11 @@ mod tests {
         state.add_track(engine::TrackKind::Video);
         state.add_clip_from_file(0, std::path::Path::new("a.mp4"));
         let mut project = state.project().clone();
-        let sample = |seconds: i64, cx: f64| engine::TrackSample { source_time: engine::Time::from_ticks(seconds * engine::TICKS_PER_SECOND), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: false };
+        let sample = |seconds: i64, cx: f64| engine::TrackSample { source_time: engine::Time::from_ticks(seconds * engine::TICKS_PER_SECOND), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: false, quad: None };
         project.motion_tracks.push(engine::MotionTrack { id: 1, media_path: "a.mp4".into(), aspect: 16.0 / 9.0, samples: vec![sample(0, 0.25), sample(2, 0.75)] });
         let link = engine::TrackLink { track_id: 1, anchor_source_time: engine::Time::ZERO, follow_scale: false, follow_rotation: false, smooth: 0.0 };
         let mut censor = engine::censor_clip(engine::Time::ZERO, engine::Time::from_ticks(engine::TICKS_PER_SECOND), engine::CensorContent::default(), Some(ClipPlacement { x: 0.1, y: 0.1, width: 0.2 }));
-        censor.follow = Some(engine::Follow { link, ref_track: 0, ref_clip: 0, offset: [0.0, 0.0] });
+        censor.follow = Some(engine::Follow { link, ref_track: 0, ref_clip: 0, offset: [0.0, 0.0], perspective: false });
         let mut stickers = engine::Track { kind: engine::TrackKind::Sticker, ..project.tracks[0].clone() };
         stickers.clips = vec![censor];
         stickers.transitions.clear();

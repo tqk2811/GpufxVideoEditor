@@ -192,8 +192,9 @@ fn with_follow<'a>(project: &'a Project, track: usize, content: LayerContent<'a>
 pub fn follow_transform(project: &Project, follow: &crate::tracking::Follow, transform: &mut ClipTransform, t: Time) {
     if let Some(pose) = project.follow_pose(follow, t) {
         transform.rotation += pose.rotation;
-        transform.rotates |= follow.link.follow_rotation;
+        transform.rotates |= follow.link.follow_rotation || follow.perspective;
         transform.follow = Some(pose);
+        transform.pin = project.follow_pin(follow, t);
     }
 }
 

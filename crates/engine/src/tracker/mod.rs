@@ -12,14 +12,17 @@
 //! Written from the papers named in each module; no code of other trackers was used.
 
 pub mod features;
+pub mod homography;
 pub mod flow;
 pub mod image;
+pub mod planar;
 pub mod similarity;
 pub mod template;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub use image::{GrayImage, Pyramid};
+pub use planar::{PlanarTracker, Quad};
 pub use similarity::Similarity;
 
 use crate::time::Time;
@@ -73,6 +76,29 @@ impl TrackBox {
             angle: (self.angle + 180.0).rem_euclid(360.0) - 180.0,
             confidence: confidence.clamp(0.0, 1.0),
             manual: false,
+            quad: None,
+        }
+    }
+}
+
+/// The corners of `quad` (parts of a picture of `width` x `height` pixels) in pixels, pixel
+/// centres at whole numbers as in [`TrackBox::from_sample`].
+pub fn quad_pixels(quad: &Quad, width: usize, height: usize) -> Quad {
+    let (width, height) = (width as f64, height as f64);
+    quad.map(|[x, y]| [x * width - 0.5, y * height - 0.5])
+}
+
+impl TrackStep {
+    /// The sample of this step at `source_time`, for a picture of `width` x `height` pixels: with
+    /// its corners for a planar step.
+    pub fn to_sample(&self, width: usize, height: usize, source_time: Time) -> TrackSample {
+        match self.quad {
+            Some(quad) => {
+                let (w, h) = (width as f64, height as f64);
+                let parts = quad.map(|[x, y]| [(x + 0.5) / w, (y + 0.5) / h]);
+                TrackSample::from_quad(source_time, parts, w / h.max(1.0), self.confidence.clamp(0.0, 1.0), false)
+            }
+            None => self.area.to_sample(width, height, source_time, self.confidence),
         }
     }
 }
@@ -129,7 +155,7 @@ impl Default for TrackerOptions {
 pub const LOST_CONFIDENCE: f64 = 0.5;
 
 /// The relative sizes the search tries.
-const SEARCH_SCALES: [f64; 5] = [0.85, 0.93, 1.0, 1.08, 1.18];
+pub(crate) const SEARCH_SCALES: [f64; 5] = [0.85, 0.93, 1.0, 1.08, 1.18];
 
 /// What one step found.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -141,6 +167,9 @@ pub struct TrackStep {
     pub lost: bool,
     /// Found by the search rather than by the flow.
     pub recovered: bool,
+    /// The four corners in pixels (top-left, top-right, bottom-right, bottom-left), for a planar
+    /// step ([`PlanarTracker`]); `area` then stands for them.
+    pub quad: Option<Quad>,
 }
 
 /// Follows one box from frame to frame.
@@ -175,7 +204,7 @@ impl Tracker {
             let confidence = template::ncc(&self.template, &patch).max(0.0) * agreeing.sqrt();
             if confidence >= self.options.lost_threshold {
                 self.accept(next, area, motion, &patch, confidence);
-                return TrackStep { area, confidence, lost: false, recovered: false };
+                return TrackStep { area, confidence, lost: false, recovered: false, quad: None };
             }
             best_unsure = confidence;
         }
@@ -186,10 +215,10 @@ impl Tracker {
         if score >= self.options.recover_threshold {
             let patch = template::sample_patch(&next, &found);
             self.accept(next, found, Similarity::IDENTITY, &patch, score);
-            return TrackStep { area: found, confidence: score, lost: false, recovered: true };
+            return TrackStep { area: found, confidence: score, lost: false, recovered: true, quad: None };
         }
         let confidence = best_unsure.max(score).clamp(0.0, (self.options.lost_threshold - 1.0e-3).max(0.0));
-        TrackStep { area: self.area, confidence, lost: true, recovered: false }
+        TrackStep { area: self.area, confidence, lost: true, recovered: false, quad: None }
     }
 
     fn accept(&mut self, next: Pyramid, area: TrackBox, motion: Similarity, patch: &[f32], confidence: f64) {

@@ -528,7 +528,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 let at = at.unwrap_or(shown.start);
                 let anchor_source_time = shown.source_time_at(at.saturating_sub(shown.start)).max(Time::ZERO);
                 let link = engine::TrackLink { track_id, anchor_source_time, follow_scale, follow_rotation, smooth };
-                engine::set_follow(project, clip.into(), Some(engine::Follow { link, ref_track: reference.track, ref_clip: reference.clip, offset: [0.0, 0.0] }))
+                engine::set_follow(project, clip.into(), Some(engine::Follow { link, ref_track: reference.track, ref_clip: reference.clip, offset: [0.0, 0.0], perspective: false }))
             })
             .map_err(refused)?,
         AgentEdit::ClipFollowClear { clip } => state.apply_agent_command(|project| engine::set_follow(project, clip.into(), None)).map_err(refused)?,
@@ -1315,7 +1315,7 @@ mod tests {
         let mut host = FakeHost::new("file");
         host.decode = Some(Arc::new(ProjectPaths::new(Path::new("Z:/gpufx-preview-decodes/unsaved.json"), Vec::new())));
         let mut project = host.state.project().clone();
-        let sample = engine::TrackSample { source_time: Time::ZERO, cx: 0.5, cy: 0.5, w: 0.2, h: 0.2, angle: 0.0, confidence: 1.0, manual: true };
+        let sample = engine::TrackSample { source_time: Time::ZERO, cx: 0.5, cy: 0.5, w: 0.2, h: 0.2, angle: 0.0, confidence: 1.0, manual: true, quad: None };
         project.motion_tracks.push(engine::MotionTrack { id: 1, media_path: "missing.mp4".into(), aspect: 16.0 / 9.0, samples: vec![sample] });
         host.state.replace_project(project, None);
         let now = host.state.revision();
@@ -1627,7 +1627,7 @@ mod tests {
         assert!(host.state.project().tracks[censor_clip.track].clips[0].placement.is_some(), "placed in the middle");
 
         let video = ClipRef { track: 0, clip: 0 };
-        let sample = |at: i64, cx: f64| engine::TrackSample { source_time: Time::from_ticks(at), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: true };
+        let sample = |at: i64, cx: f64| engine::TrackSample { source_time: Time::from_ticks(at), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: true, quad: None };
         assert_eq!(code(edit(&mut host, AgentEdit::TrackSetSample { track_id: None, clip: None, sample: sample(0, 0.2) })), "invalid_params");
         let started = edit(&mut host, AgentEdit::TrackSetSample { track_id: None, clip: Some(video), sample: sample(0, 0.2) }).expect("new track");
         let id = started["track_id"].as_u64().unwrap() as u32;

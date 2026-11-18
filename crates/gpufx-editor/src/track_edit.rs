@@ -58,7 +58,7 @@ pub fn follow_at(project: &Project, track_id: u32, reference: ClipKey, at: Time,
     // A new follower takes the smoothing the others of the track share.
     let smooth = track_smooth(project, track_id);
     let link = TrackLink { track_id, anchor_source_time, follow_scale, follow_rotation, smooth };
-    Some(Follow { link, ref_track: reference.track, ref_clip: reference.clip, offset: [0.0, 0.0] })
+    Some(Follow { link, ref_track: reference.track, ref_clip: reference.clip, offset: [0.0, 0.0], perspective: false })
 }
 
 /// The smoothing the followers of motion track `track_id` share (the first one found), 0 without any.
@@ -178,7 +178,7 @@ impl EditorState {
         let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
         let time = self.source_rate(&clip.source).map_or(now, |rate| snap_to_frame(now, rate));
         let point = track.point_at(time, 0.0)?;
-        Some((TrackSample { source_time: time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false }, None))
+        Some((TrackSample { source_time: time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false, quad: None }, None))
     }
 
     /// Starts or ends drawing a box for a new motion track on the preview, for video clip `key`.
@@ -223,7 +223,7 @@ impl EditorState {
             return None;
         }
         let id = self.project().next_motion_track_id();
-        let sample = TrackSample { source_time, cx: (a[0] + b[0]) / 2.0, cy: (a[1] + b[1]) / 2.0, w, h, angle: 0.0, confidence: 1.0, manual: true };
+        let sample = TrackSample { source_time, cx: (a[0] + b[0]) / 2.0, cy: (a[1] + b[1]) / 2.0, w, h, angle: 0.0, confidence: 1.0, manual: true, quad: None };
         let track = MotionTrack { id, media_path: clip.source.clone(), aspect: self.clip_aspect(&clip), samples: vec![sample] };
         if self.run(|project| engine::set_motion_track(project, track)) {
             self.ui.motion_track = Some(id);
@@ -377,7 +377,7 @@ impl EditorState {
         let time = at.clamp(clip.start, last);
         let source_time = clip.source_time_at(time.saturating_sub(clip.start)).max(Time::ZERO);
         let (Some(point), Some(mapping)) = (track.point_at(source_time, 0.0), self.project().clip_frame_mapping(reference.track, reference.clip, time, track.aspect)) else { return };
-        let sample = TrackSample { source_time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false };
+        let sample = TrackSample { source_time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false, quad: None };
         let [x, y, w, h] = frame_box(&mapping, &sample);
         let (width, height) = self.output_pixels();
         let range = engine::CENSOR_ASPECT_RANGE;
@@ -444,7 +444,7 @@ mod tests {
     const SECOND: i64 = TICKS_PER_SECOND;
 
     fn sample(seconds: i64, cx: f64) -> TrackSample {
-        TrackSample { source_time: Time::from_ticks(seconds * SECOND), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: true }
+        TrackSample { source_time: Time::from_ticks(seconds * SECOND), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: true, quad: None }
     }
 
     /// A video clip of `a.mp4` over 4 s on track 0, a motion track of it going from the left

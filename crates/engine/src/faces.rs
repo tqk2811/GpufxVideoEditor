@@ -66,7 +66,7 @@ struct Path {
 }
 
 fn sample(at: Time, face: &FaceDetection) -> TrackSample {
-    TrackSample { source_time: at, cx: face.cx, cy: face.cy, w: face.w, h: face.h, angle: 0.0, confidence: face.score.clamp(0.0, 1.0), manual: false }
+    TrackSample { source_time: at, cx: face.cx, cy: face.cy, w: face.w, h: face.h, angle: 0.0, confidence: face.score.clamp(0.0, 1.0), manual: false, quad: None }
 }
 
 /// The face tracks of `frames` (in source time order), longest first: each a list of samples

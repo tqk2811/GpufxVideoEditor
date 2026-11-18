@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use d3d12_backend::{probe_media, probe_video_format, FrameSampler};
-use engine::tracker::{template, track_frames, GrayImage, Pyramid, RunEnd, StepTracker, TrackBox, TrackStep, Tracker, TrackerOptions};
+use engine::tracker::{quad_pixels, template, track_frames, GrayImage, PlanarTracker, Pyramid, RunEnd, StepTracker, TrackBox, TrackStep, Tracker, TrackerOptions};
 use engine::{MotionTrack, Time, TrackSample, TICKS_PER_SECOND};
 
 /// The height of the frames the tracker sees.
@@ -434,6 +434,12 @@ fn run(request: &RunRequest, source: &mut dyn FrameSource, shared: &Shared) -> R
     let (width, height) = (first.gray.width, first.gray.height);
     let area = TrackBox::from_sample(&request.start, width, height);
     let mut tracker = match (request.mode, &request.model) {
+        // A start with four corners is followed in perspective; only the classical tracker does
+        // that (the robust one finds upright boxes, so it follows the box of the corners).
+        (TrackMode::Fast, _) if request.start.quad.is_some() => {
+            let quad = quad_pixels(&request.start.quad.expect("checked above"), width, height);
+            RunTracker::Planar(Box::new(PlanarTracker::new(first.gray, quad, TrackerOptions::default())))
+        }
         (TrackMode::Fast, _) => RunTracker::Fast(Box::new(Tracker::new(first.gray, area, TrackerOptions { rotation: request.rotation, ..TrackerOptions::default() }))),
         (TrackMode::Robust, Some(model)) => RunTracker::Robust(Box::new(RobustTracker::new(model, &first, area)?)),
         (TrackMode::Robust, None) => return Err("the robust tracker needs the NanoTrack model".to_owned()),
@@ -457,13 +463,14 @@ fn run(request: &RunRequest, source: &mut dyn FrameSource, shared: &Shared) -> R
             return Err(error.clone());
         }
     }
-    let samples = steps.iter().zip(&shown).map(|(step, at)| step.area.to_sample(width, height, *at, step.confidence)).collect();
+    let samples = steps.iter().zip(&shown).map(|(step, at)| step.to_sample(width, height, *at)).collect();
     Ok(finished(samples, end))
 }
 
 /// The tracker of a run.
 enum RunTracker {
     Fast(Box<Tracker>),
+    Planar(Box<PlanarTracker>),
     Robust(Box<RobustTracker>),
 }
 
@@ -471,6 +478,7 @@ impl StepTracker<TrackFrame> for RunTracker {
     fn step(&mut self, frame: TrackFrame) -> TrackStep {
         match self {
             RunTracker::Fast(tracker) => tracker.step(frame.gray),
+            RunTracker::Planar(tracker) => tracker.step(frame.gray),
             RunTracker::Robust(tracker) => tracker.step(frame),
         }
     }
@@ -557,7 +565,7 @@ impl RobustTracker {
     }
 
     fn step(&mut self, frame: TrackFrame) -> TrackStep {
-        let lost = |area| TrackStep { area, confidence: 0.0, lost: true, recovered: false };
+        let lost = |area| TrackStep { area, confidence: 0.0, lost: true, recovered: false, quad: None };
         let rgba = frame.rgba();
         let before = self.nano.rect();
         let found = match self.nano.update(&rgba_image(&rgba, frame.gray.width, frame.gray.height)) {
@@ -586,7 +594,7 @@ impl RobustTracker {
             }
         }
         self.area = area;
-        TrackStep { area, confidence, lost: false, recovered: false }
+        TrackStep { area, confidence, lost: false, recovered: false, quad: None }
     }
 }
 
@@ -708,7 +716,7 @@ mod tests {
     }
 
     fn start(at_frame: i64, left: f64, manual: bool) -> TrackSample {
-        TrackSample { source_time: frame_time(at_frame, (30, 1)), cx: (left + 15.0) / 160.0, cy: 45.0 / 90.0, w: 30.0 / 160.0, h: 30.0 / 90.0, angle: 0.0, confidence: 1.0, manual }
+        TrackSample { source_time: frame_time(at_frame, (30, 1)), cx: (left + 15.0) / 160.0, cy: 45.0 / 90.0, w: 30.0 / 160.0, h: 30.0 / 90.0, angle: 0.0, confidence: 1.0, manual, quad: None }
     }
 
     fn track(samples: Vec<TrackSample>) -> MotionTrack {
@@ -959,7 +967,7 @@ mod tests {
             let t = i / 30.0;
             ((80.0 + 160.0 * t).floor() + 31.5, (150.0 + 40.0 * (2.0 * t).sin()).floor() + 23.5)
         };
-        let start = TrackSample { source_time: Time::ZERO, cx: (80.0 + 32.0) / 640.0, cy: (150.0 + 24.0) / 360.0, w: 64.0 / 640.0, h: 48.0 / 360.0, angle: 0.0, confidence: 1.0, manual: true };
+        let start = TrackSample { source_time: Time::ZERO, cx: (80.0 + 32.0) / 640.0, cy: (150.0 + 24.0) / 360.0, w: 64.0 / 640.0, h: 48.0 / 360.0, angle: 0.0, confidence: 1.0, manual: true, quad: None };
         let track = MotionTrack { id: 5, media_path: clip.to_string_lossy().into_owned(), aspect: 16.0 / 9.0, samples: vec![start] };
         let fast = RunRequest::for_track(&track, None, Direction::Forward, false).unwrap();
         let mut requests = vec![fast.clone()];

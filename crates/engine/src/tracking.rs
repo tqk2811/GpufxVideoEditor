@@ -20,6 +20,8 @@ pub const MAX_TRACK_SAMPLES: usize = 432_000;
 pub const MAX_FOLLOW_SMOOTH: f64 = 2.0;
 /// The largest offset of a follow, in parts of the frame.
 pub const MAX_FOLLOW_OFFSET: f64 = 8.0;
+/// The farthest a corner of a quad may lie, in parts of the picture (it may leave the picture).
+pub const MAX_QUAD_COORDINATE: f64 = 8.0;
 
 /// The path of one object through one source file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,6 +58,42 @@ pub struct TrackSample {
     /// Placed by the user rather than the tracker.
     #[serde(default, skip_serializing_if = "is_false")]
     pub manual: bool,
+    /// The four corners of a flat object followed in perspective (a planar track), in parts of
+    /// the source picture width and height, in the order top-left, top-right, bottom-right,
+    /// bottom-left of the object. The box above then stands for them (see
+    /// [`crate::tracker::planar::quad_box`]), so whatever reads only the box still works.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quad: Option<Quad>,
+}
+
+/// Four corners (top-left, top-right, bottom-right, bottom-left), in parts of a picture.
+pub type Quad = [[f64; 2]; 4];
+
+impl TrackSample {
+    /// Its corners in parts of the picture, for a picture of `aspect` (width over height): the
+    /// quad, or the corners of the turned box.
+    pub fn corners(&self, aspect: f64) -> Quad {
+        if let Some(quad) = self.quad {
+            return quad;
+        }
+        box_corners(self.cx, self.cy, self.w, self.h, self.angle, aspect)
+    }
+
+    /// The sample whose box stands for `quad` (parts of a picture of `aspect`), with the quad.
+    pub fn from_quad(source_time: Time, quad: Quad, aspect: f64, confidence: f64, manual: bool) -> Self {
+        let aspect = if aspect.is_finite() && aspect > 0.0 { aspect } else { 1.0 };
+        let pixels = quad.map(|[x, y]| [x * aspect, y]);
+        let area = crate::tracker::planar::quad_box(&pixels);
+        Self { source_time, cx: area.cx / aspect, cy: area.cy, w: area.w / aspect, h: area.h, angle: area.angle, confidence, manual, quad: Some(quad) }
+    }
+}
+
+/// The corners of a box (middle, size in parts of a picture of `aspect`, clockwise degrees) in the
+/// order of a [`Quad`].
+pub fn box_corners(cx: f64, cy: f64, w: f64, h: f64, angle: f64, aspect: f64) -> Quad {
+    let aspect = if aspect.is_finite() && aspect > 0.0 { aspect } else { 1.0 };
+    let area = crate::tracker::TrackBox { cx: cx * aspect, cy, w: w * aspect, h, angle };
+    crate::tracker::planar::box_quad(&area).map(|[x, y]| [x / aspect, y])
 }
 
 fn full_confidence() -> f64 {
@@ -106,6 +144,12 @@ pub struct Follow {
     /// Extra shift of the overlay, in parts of the frame width and height.
     #[serde(default, skip_serializing_if = "is_zero_pair")]
     pub offset: [f64; 2],
+    /// Pin the overlay's four corners to the object's four corners in perspective (corner pin):
+    /// the overlay is warped by the homography that takes the object's corners at the anchor to
+    /// its corners now. Scale and rotation then come with it, whatever `follow_scale` and
+    /// `follow_rotation` say. A track without quads gives the corners of its turned box.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub perspective: bool,
 }
 
 /// The largest extra zoom of a lock.
@@ -235,6 +279,56 @@ impl MotionTrack {
         Some(TrackPoint { cx: lerp(a.cx, b.cx), cy: lerp(a.cy, b.cy), w: lerp(a.w, b.w), h: lerp(a.h, b.h), angle: a.angle + wrap_degrees(b.angle - a.angle) * k })
     }
 
+    /// Whether any sample has four corners (a planar track).
+    pub fn is_planar(&self) -> bool {
+        self.samples.iter().any(|sample| sample.quad.is_some())
+    }
+
+    /// The object's four corners at source time `at` (parts of the source picture): interpolated
+    /// between the corners of the samples around it (held at the ends), then smoothed over `smooth`
+    /// seconds when that is above 0, as [`Self::point_at`] does the box. `None` without samples.
+    pub fn quad_at(&self, at: Time, smooth: f64) -> Option<Quad> {
+        let samples = &self.samples;
+        if samples.is_empty() {
+            return None;
+        }
+        let corners = |s: &TrackSample| s.corners(self.aspect);
+        if smooth > 0.0 && smooth.is_finite() {
+            let sigma = smooth * TICKS_PER_SECOND as f64;
+            let reach = Time::from_ticks((sigma * 3.0).ceil() as i64);
+            let low = samples.partition_point(|s| s.source_time < at.saturating_sub(reach));
+            let high = samples.partition_point(|s| s.source_time <= at.saturating_add(reach));
+            if high > low {
+                let mut sum = [[0.0; 2]; 4];
+                let mut total = 0.0;
+                for sample in &samples[low..high] {
+                    let d = (sample.source_time.ticks() - at.ticks()) as f64 / sigma;
+                    let weight = (-0.5 * d * d).exp();
+                    for (slot, corner) in sum.iter_mut().zip(corners(sample)) {
+                        slot[0] += weight * corner[0];
+                        slot[1] += weight * corner[1];
+                    }
+                    total += weight;
+                }
+                if total > 0.0 {
+                    return Some(sum.map(|[x, y]| [x / total, y / total]));
+                }
+            }
+        }
+        let next = samples.partition_point(|s| s.source_time <= at);
+        if next == 0 {
+            return Some(corners(&samples[0]));
+        }
+        if next == samples.len() {
+            return Some(corners(&samples[next - 1]));
+        }
+        let (a, b) = (&samples[next - 1], &samples[next]);
+        let span = (b.source_time.ticks() - a.source_time.ticks()) as f64;
+        let k = (at.ticks() - a.source_time.ticks()) as f64 / span;
+        let (qa, qb) = (corners(a), corners(b));
+        Some(std::array::from_fn(|i| [qa[i][0] + (qb[i][0] - qa[i][0]) * k, qa[i][1] + (qb[i][1] - qa[i][1]) * k]))
+    }
+
     /// Adds `sample`, or replaces the one at the same source time, keeping the order.
     pub fn upsert(&mut self, sample: TrackSample) {
         match self.samples.binary_search_by_key(&sample.source_time, |s| s.source_time) {
@@ -267,6 +361,15 @@ impl MotionTrack {
             }
             if !(0.0..=1.0).contains(&s.confidence) {
                 return Some(format!("sample {i}: confidence {} not from 0 to 1", s.confidence));
+            }
+            if let Some(quad) = &s.quad {
+                if !quad.iter().flatten().all(|v| v.is_finite() && v.abs() <= MAX_QUAD_COORDINATE) {
+                    return Some(format!("sample {i}: quad corners must be finite and within {MAX_QUAD_COORDINATE}"));
+                }
+                let pixels = quad.map(|[x, y]| [x * self.aspect, y]);
+                if !crate::tracker::homography::is_convex(&pixels) {
+                    return Some(format!("sample {i}: the quad must be convex with its corners in order"));
+                }
             }
         }
         None
@@ -469,9 +572,37 @@ impl Project {
         let (point, transform) = place(t)?;
         let (from, from_size, from_angle) = to_output(anchor_point, anchor_transform, output_aspect, motion.aspect);
         let (to, to_size, to_angle) = to_output(point, transform, output_aspect, motion.aspect);
-        let scale = if follow.link.follow_scale && from_size > 0.0 { to_size / from_size } else { 1.0 };
-        let rotation = if follow.link.follow_rotation { to_angle - from_angle } else { 0.0 };
+        // A corner pin brings scale and rotation with it; the pose then stands for it where only a
+        // placed rectangle is wanted (a gizmo, a box on the preview).
+        let scale = if (follow.link.follow_scale || follow.perspective) && from_size > 0.0 { to_size / from_size } else { 1.0 };
+        let rotation = if follow.link.follow_rotation || follow.perspective { to_angle - from_angle } else { 0.0 };
         Some(FollowPose { from, to: [to[0] + follow.offset[0], to[1] + follow.offset[1]], scale, rotation })
+    }
+}
+
+impl Project {
+    /// The corner pin of a clip following `follow` with [`Follow::perspective`] at timeline time
+    /// `t`: the homography, in parts of the output frame, that takes the object's corners as shown
+    /// at the anchor to its corners as shown now (through the reference clip's place, keyframes,
+    /// animations and lock at each moment), then shifts by the follow's offset. `None` without
+    /// `perspective`, when the track cannot be read or the corners do not fix a map.
+    pub fn follow_pin(&self, follow: &Follow, t: Time) -> Option<crate::tracker::homography::Homography> {
+        if !follow.perspective {
+            return None;
+        }
+        let motion = self.motion_track(follow.link.track_id)?;
+        let reference = self.tracks.get(follow.ref_track)?.clips.get(follow.ref_clip)?;
+        let anchor_time = reference.timeline_time_of(follow.link.anchor_source_time);
+        let shown = |time: Time| -> Option<Quad> {
+            let source = reference.source_time_at(time.saturating_sub(reference.start)).max(Time::ZERO);
+            let quad = motion.quad_at(source, follow.link.smooth)?;
+            let mapping = self.clip_frame_mapping(follow.ref_track, follow.ref_clip, time, motion.aspect)?;
+            Some(quad.map(|corner| mapping.to_frame(corner)))
+        };
+        let (from, to) = (shown(anchor_time)?, shown(t)?);
+        let pin = crate::tracker::homography::Homography::from_quads(&from, &to)?;
+        let shift = crate::tracker::homography::Homography { m: [1.0, 0.0, follow.offset[0], 0.0, 1.0, follow.offset[1], 0.0, 0.0, 1.0] };
+        Some(shift.after(&pin))
     }
 }
 

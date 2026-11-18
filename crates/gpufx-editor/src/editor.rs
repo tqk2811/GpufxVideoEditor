@@ -5550,7 +5550,7 @@ lines"));
     }
 
     fn box_at(source_time: Time, cx: f64, manual: bool) -> engine::TrackSample {
-        engine::TrackSample { source_time, cx, cy: 0.5, w: 0.2, h: 0.3, angle: 0.0, confidence: 1.0, manual }
+        engine::TrackSample { source_time, cx, cy: 0.5, w: 0.2, h: 0.3, angle: 0.0, confidence: 1.0, manual, quad: None }
     }
 
     /// A state with motion track 3 on `a.mp4`, its box placed by hand at the start, and a finished
