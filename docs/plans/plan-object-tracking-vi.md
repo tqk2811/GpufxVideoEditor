@@ -2,7 +2,7 @@
 
 Mục tiêu: người dùng chọn một vật trong clip video. Sticker, text hoặc vùng che (blur, pixelate, hộp màu) gắn vào vật đó và tự di chuyển theo, có thể bám cả scale và góc xoay. Tham khảo: Tracking của CapCut, Motion tracking của DaVinci Resolve, Motion Tracker của Shotcut, tracker OpenCV trong Kdenlive.
 
-Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). P0 và P1 đã xong: tracker cổ điển ở `crates/engine/src/tracker/`, worker nền ở `crates/gpufx-editor/src/tracking.rs`, tool `track_run`, `track_status`, `track_cancel`. Tiếp theo là P2.
+Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). P0 và P1 đã xong: tracker cổ điển ở `crates/engine/src/tracker/`, worker nền ở `crates/gpufx-editor/src/tracking.rs`, tool `track_run`, `track_status`, `track_cancel`. P2 đã xong: mục Tracking trong inspector của clip video (`ui/tracking_inspector.rs`), vẽ quỹ đạo và sửa khung trên preview (`ui/tracking_overlay.rs`), dải độ tin cậy trên timeline, thao tác ở `track_edit.rs`, tool `track_create`, `track_smooth`, `track_bake_keyframes`, `track_run` với `direction: both`. Tiếp theo là P3.
 
 ## Hiện trạng
 
@@ -108,6 +108,20 @@ Chỉ dùng mã và model có giấy phép MIT, Apache hoặc BSD. Tự viết t
 | P2 | Trải nghiệm: vẽ khung, track tiến/lùi, sửa tay, làm mượt, gắn overlay, undo, bake keyframe, tool agent/MCP, i18n | `ui/inspector.rs`, `ui/placement.rs`, `ui/player.rs`, timeline, `agent/*`, `gpufx-mcp/src/tools.rs` | Test logic gắn và offset, test lệnh agent |
 | P3 | Tracker NN (NanoTrack): thêm op vào `gpufx-core/nn` trên nhánh của submodule FFmpegGpuFilter (báo phiên ffmpeggpufilter trước); release model; tổng quát `matting_models.rs` thành bộ tải model chung; chế độ Nhanh/Bền | submodule FFmpegGpuFilter, `matting_models.rs` | So từng op với model gốc; so khung bao trên clip mẫu |
 | P4 (tuỳ chọn) | Tự động che mặt (detector + ghép theo IoU), tracking phối cảnh 4 góc | như P3 | |
+
+## Lựa chọn UX tạm ở P2
+
+Các điểm dưới đây do phiên làm P2 tự chọn khi user vắng, chờ user duyệt.
+
+- Track 1 frame chạy tiến một frame từ sample ở frame của đầu phát; đầu phát không tự nhảy theo.
+- Các nút track bắt đầu từ sample nằm trên frame của đầu phát (lệch tối đa nửa frame output theo speed). Không có sample ở đó thì dùng sample mặc định của `track_run`.
+- Kéo góc khung trên preview luôn đổi kích thước theo trục của ảnh, bỏ qua góc xoay. Khung đã xoay thì chỉ kéo di chuyển được.
+- Quỹ đạo vẽ bằng vị trí của clip tại đầu phát, nên khi clip có keyframe vị trí thì đoạn xa đầu phát chỉ gần đúng.
+- Làm mượt đặt cho cả track: mọi overlay và vùng effect bám track đó dùng chung một giá trị, `track_smooth` cũng vậy.
+- "Thêm vùng che bám vật" nằm trong mục Tracking của clip video. Vùng che dài bằng clip tham chiếu và phủ đúng khung của vật tại đầu phát.
+- Gắn overlay neo tại đầu phát, nên overlay đứng yên ở đó và offset luôn là 0. Clip tham chiếu là clip của file đã track đang phát tại đầu phát, nếu không có thì lấy clip gần nhất.
+- Bake ghi keyframe X/Y ở mọi frame output, Width khi bám scale, Rotation khi bám xoay. Clip dài hơn 4096 frame thì giãn bước. Animation preset của text sau khi bake chạy sau chuyển động thay vì trước.
+- Dải độ tin cậy trên timeline vẽ cho track đang chọn của file. Một sample tô màu khoảng ±0,25 giây nguồn quanh nó; dưới 0,5 là đỏ.
 
 ## Rủi ro
 
