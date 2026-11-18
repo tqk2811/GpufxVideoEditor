@@ -36,7 +36,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     draw_picture(ui, area, preview);
     let output = &state.project().output;
     let frame = picture_rect(area, (output.width, output.height));
-    placement::show(ui, state, area, frame);
+    // While a box is drawn for a new motion track, the placement frame steps aside.
+    if !super::tracking_overlay::picking(state) {
+        placement::show(ui, state, area, frame);
+    }
+    super::tracking_overlay::show(ui, state, area, frame);
     handle_picture_drop(ui, state, frame);
     painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::border()));
     ui.scope_builder(UiBuilder::new().max_rect(controls.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, controls));

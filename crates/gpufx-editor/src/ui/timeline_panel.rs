@@ -31,6 +31,10 @@ const KEYFRAME_MARK_RADIUS: f32 = 3.5;
 const HOLD_HATCH_PITCH: f32 = 6.0;
 /// How far above the bottom edge of a clip its keyframe marks sit.
 const KEYFRAME_MARK_MARGIN: f32 = 5.0;
+/// How tall the confidence strip of a motion track is at the bottom of a clip.
+const TRACK_STRIP_HEIGHT: f32 = 3.0;
+/// How far, in seconds of source, a sample colours the strip around it.
+const TRACK_STRIP_REACH: f64 = 0.25;
 const CLIP_RADIUS: u8 = 4;
 const ZOOM_SLIDER_WIDTH: f32 = 130.0;
 const PLAYHEAD_MARKER: f32 = 6.0;
@@ -583,7 +587,7 @@ fn draw_rows(ui: &egui::Ui, state: &EditorState, tracks_rect: Rect) {
             let rect = span_rect(state, tracks_rect, row, clip.start, clip.start.saturating_add(clip.duration));
             if rect.intersects(tracks_rect) {
                 let dragged = state.drag.is_some_and(|drag| drag.key == key);
-                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, hidden: track.hidden, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second(), beats: state.project().clip_beats(clip) });
+                draw_clip(&painter, &ClipPaint { clip, kind: track.kind, rect, clip_area: tracks_rect, selected: state.selection() == Some(key), dragged, hidden: track.hidden, visuals: Some(&state.visuals), pixels_per_second: state.view.pixels_per_second(), beats: state.project().clip_beats(clip), motion: state.motion_track_for(key) });
             }
         }
         draw_transitions(&painter, state, tracks_rect, row, t, track);
@@ -607,6 +611,8 @@ pub struct ClipPaint<'a> {
     pub pixels_per_second: f64,
     /// The beats of the clip's source, when some were found.
     pub beats: Option<&'a engine::ClipBeats>,
+    /// The motion track of the clip's source that is chosen, for its confidence strip.
+    pub motion: Option<&'a engine::MotionTrack>,
 }
 
 impl ClipPaint<'_> {
@@ -659,6 +665,7 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
         draw_keyframe_marks(&text, paint);
     }
     draw_beat_ticks(&text, paint, strip.bottom());
+    draw_track_strip(&text, paint);
     if paint.selected {
         painter.rect_stroke(paint.rect, radius, Stroke::new(2.0, theme::selected()), StrokeKind::Inside);
     }
@@ -722,6 +729,35 @@ fn draw_beat_ticks(painter: &egui::Painter, paint: &ClipPaint<'_>, top: f32) {
         }
         let (height, stroke) = if beat.downbeat { (DOWNBEAT_TICK, Stroke::new(1.5, strong)) } else { (BEAT_TICK, Stroke::new(1.0, color)) };
         painter.line_segment([Pos2::new(x, top), Pos2::new(x, (top + height).min(paint.rect.bottom()))], stroke);
+    }
+}
+
+/// The confidence of the chosen motion track along the bottom of the clip, red where the object
+/// was lost, with a dot at each box placed by hand.
+fn draw_track_strip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
+    let Some(motion) = paint.motion.filter(|motion| !motion.samples.is_empty()) else { return };
+    let clip = paint.clip;
+    let top = paint.rect.bottom() - TRACK_STRIP_HEIGHT;
+    let duration = clip.duration.ticks().max(1) as f64;
+    let visible = painter.clip_rect().x_range();
+    let reach = (TRACK_STRIP_REACH * engine::TICKS_PER_SECOND as f64) as i64;
+    let mut x = visible.min.max(paint.rect.left()).floor();
+    while x < visible.max.min(paint.rect.right()) {
+        let part = f64::from((x - paint.rect.left()) / paint.rect.width().max(f32::MIN_POSITIVE));
+        let source = clip.source_time_at(Time::from_ticks((part * duration) as i64));
+        let near = crate::track_edit::sample_near(motion, source, Time::from_ticks(reach));
+        if let Some(sample) = near {
+            let color = if sample.confidence < crate::track_edit::LOW_CONFIDENCE { Color32::from_rgb(230, 60, 60) } else { Color32::from_rgb(70, 200, 120) };
+            painter.rect_filled(Rect::from_min_max(Pos2::new(x, top), Pos2::new(x + 1.0, paint.rect.bottom())), CornerRadius::ZERO, color.gamma_multiply(paint.opacity()));
+        }
+        x += 1.0;
+    }
+    for sample in motion.samples.iter().filter(|s| s.manual && clip.plays_source(s.source_time)) {
+        let at = clip.timeline_time_of(sample.source_time).ticks() - clip.start.ticks();
+        let x = paint.rect.left() + paint.rect.width() * (at as f64 / duration) as f32;
+        if visible.contains(x) {
+            painter.circle_filled(Pos2::new(x, top - 1.0), 2.5, Color32::from_rgb(255, 210, 0).gamma_multiply(paint.opacity()));
+        }
     }
 }
 

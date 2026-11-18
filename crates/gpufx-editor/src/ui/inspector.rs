@@ -296,6 +296,15 @@ fn picture_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: 
         placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some() || ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)));
         motion_rows(ui, state, key, clip);
     });
+    let kind = state.project().tracks[key.track].kind;
+    let tracked_video = kind == engine::TrackKind::Video && !clip.is_still() && clip.text.is_none() && clip.censor.is_none() && clip.follow.is_none();
+    if tracked_video {
+        ui.separator();
+        ui.add_enabled_ui(editable, |ui| super::tracking_inspector::tracking_rows(ui, state, key, &clip.source));
+    } else if clip.is_text() || clip.is_censor() || clip.is_still() || clip.follow.is_some() || kind == engine::TrackKind::Sticker {
+        ui.separator();
+        ui.add_enabled_ui(editable, |ui| super::tracking_inspector::follow_rows(ui, state, key, clip));
+    }
     if clip.text.is_none() && clip.censor.is_none() {
         ui.separator();
         ui.add_enabled_ui(editable, |ui| matte_rows(ui, state, &clip.matte));
@@ -848,6 +857,9 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: b
                             ui.colored_label(theme::text_dim(), language.t(Message::PackageParamsUnreadable));
                         }
                     }
+                    if engine::EffectRegion::takes_region(&effect.package) && !clip.is_text() && !clip.is_censor() {
+                        super::tracking_inspector::region_rows(ui, state, key, index, effect.region, &clip.source);
+                    }
                 });
             });
         });
@@ -968,6 +980,30 @@ mod tests {
         frame(&ctx, &mut state);
         let effects = drawn_texts(&ctx, &mut state);
         assert!(effects.contains(&search) && effects.contains(&language.t(Message::ImportPackage)) && !effects.contains(&enter), "{effects:?}");
+    }
+
+    #[test]
+    fn a_video_clip_shows_tracking_and_a_censor_the_follow_picker() {
+        let ctx = egui::Context::default();
+        let mut state = selected_clip();
+        let language = state.language();
+        state.ui.clip_tab = ClipTab::Picture;
+        state.ui.picture_tab = PictureTab::Properties;
+        frame(&ctx, &mut state);
+        let video = drawn_texts(&ctx, &mut state);
+        assert!(video.contains(&language.t(Message::FieldTracking)) && video.contains(&language.t(Message::TrackPick)) && video.contains(&language.t(Message::TrackNone)), "{video:?}");
+        state.set_playhead(Time::ZERO);
+        state.create_motion_track(ClipKey { track: 0, clip: 0 }, [0.4, 0.4, 0.2, 0.2]).expect("a track");
+        frame(&ctx, &mut state);
+        let tracked = drawn_texts(&ctx, &mut state);
+        for message in [Message::TrackForward, Message::TrackBackward, Message::TrackOneFrame, Message::AddCensorFollowing] {
+            assert!(tracked.contains(&language.t(message)), "{tracked:?}");
+        }
+        state.add_censor_at_playhead();
+        state.ui.clip_tab = ClipTab::Picture;
+        frame(&ctx, &mut state);
+        let censor = drawn_texts(&ctx, &mut state);
+        assert!(censor.contains(&language.t(Message::FollowTrack)) && !censor.contains(&language.t(Message::FieldTracking)), "{censor:?}");
     }
 
     #[test]

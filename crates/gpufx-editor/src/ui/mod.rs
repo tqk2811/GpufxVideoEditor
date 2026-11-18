@@ -16,6 +16,8 @@ mod recovery_dialog;
 pub mod theme;
 mod timeline_panel;
 mod top_bar;
+mod tracking_inspector;
+mod tracking_overlay;
 
 use crate::editor::{EditorState, Status};
 use crate::i18n::{Language, Message};
