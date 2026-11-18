@@ -479,8 +479,8 @@ impl Project {
 /// output frame: its middle (parts of the frame), its size (geometric mean of width and height, in
 /// parts of the frame height) and its angle (clockwise degrees).
 fn to_output(point: TrackPoint, transform: ClipTransform, output_aspect: f64, source_aspect: f64) -> ([f64; 2], f64, f64) {
-    // A reference clip never follows, so a pose in `transform` is that of its lock, which moves
-    // the picture and the object with it.
+    // A reference clip never follows ([`Project::follow_problem`] refuses one that does), so a pose
+    // in `transform` is that of its lock, which moves the picture and the object with it.
     let rect = transform.rect(output_aspect, source_aspect);
     let (x, y) = (rect.x + point.cx * rect.width, rect.y + point.cy * rect.height);
     let (mx, my) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);

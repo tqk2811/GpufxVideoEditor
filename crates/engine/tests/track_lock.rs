@@ -258,3 +258,21 @@ fn a_split_piece_without_the_anchor_reads_its_place_inside_itself() {
         assert!(drawn(&split, 0, frame).rect.width.is_finite() && drawn(&split, 0, frame).rect.width > 0.1);
     }
 }
+
+#[test]
+fn a_reference_may_lock_but_may_not_follow() {
+    let follow_of = |ref_track: usize| Follow { link: TrackLink { track_id: 7, anchor_source_time: t(0), follow_scale: false, follow_rotation: false, smooth: 0.0 }, ref_track, ref_clip: 0, offset: [0.0, 0.0] };
+    // A sticker following the locked video: fine.
+    let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), lock(0, false, false));
+    let mut sticker = clip("s.png", 0, 0, 2 * SECOND);
+    sticker.follow = Some(follow_of(1));
+    p.tracks.push(track(vec![clip("a.mp4", 0, 0, 2 * SECOND)], Vec::new()));
+    p.tracks[1].clips[0].follow = Some(follow_of(0));
+    // Track 1 shows the tracked file and follows track 0; track 2 follows track 1.
+    let mut stickers = track(vec![sticker], Vec::new());
+    stickers.kind = TrackKind::Sticker;
+    p.tracks.push(stickers);
+    let errors = validate(&p, &AcceptAll);
+    assert!(errors.iter().all(|e| !matches!(e, ValidationError::InvalidFollow { track: 1, .. })), "following a locked clip is fine: {errors:?}");
+    assert!(errors.iter().any(|e| matches!(e, ValidationError::InvalidFollow { track: 2, .. })), "a following clip cannot be a reference: {errors:?}");
+}
