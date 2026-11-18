@@ -774,8 +774,12 @@ fn beats_detect<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef, retry:
 }
 
 /// Starts a tracker run; a session without a window waits for it and answers its outcome.
-fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Option<Time>, direction: Option<String>, rotation: Option<bool>) -> Result<Value, AgentError> {
+fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Option<Time>, direction: Option<String>, rotation: Option<bool>, mode: Option<String>) -> Result<Value, AgentError> {
     writable(host, expected)?;
+    let mode = match mode.as_deref() {
+        None => crate::tracking::TrackMode::Fast,
+        Some(code) => crate::tracking::TrackMode::from_code(code).ok_or_else(|| AgentError::new("invalid_params", format!("mode {code}: fast or robust")))?,
+    };
     let both = direction.as_deref() == Some("both");
     let direction = match direction.as_deref() {
         None | Some("both") => crate::tracking::Direction::Forward,
@@ -792,7 +796,7 @@ fn track_run<H: AgentHost>(host: &mut H, expected: u64, track_id: u32, from: Opt
     }
     let path = paths.video_decode_path(&track.media_path);
     let rotation = rotation.unwrap_or(true);
-    let started = if both { state.start_tracking_both(path, track_id, from, rotation) } else { state.start_tracking(path, track_id, from, direction, rotation) };
+    let started = if both { state.start_tracking_both(path, track_id, from, rotation, mode) } else { state.start_tracking(path, track_id, from, direction, rotation, mode) };
     let job = started.map_err(|message| AgentError::new("invalid_params", message))?;
     if wait {
         state.tracking.wait(job);
@@ -1093,7 +1097,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::SubtitleExport { track, path, overwrite } => subtitle_export(host, track, path.as_deref(), overwrite),
         AgentRequest::MarkersList => Ok(markers_list(host.state().project())),
         AgentRequest::BeatsDetect { expected_revision, clip, retry } => beats_detect(host, expected_revision, clip, retry),
-        AgentRequest::TrackRun { expected_revision, track_id, from, direction, rotation } => track_run(host, expected_revision, track_id, from, direction, rotation),
+        AgentRequest::TrackRun { expected_revision, track_id, from, direction, rotation, mode } => track_run(host, expected_revision, track_id, from, direction, rotation, mode),
         AgentRequest::TrackStatus { job } => track_status(host.state(), job),
         AgentRequest::TrackCancel { job } => {
             let state = host.state();
@@ -1245,10 +1249,13 @@ mod tests {
         project.motion_tracks.push(engine::MotionTrack { id: 1, media_path: "missing.mp4".into(), aspect: 16.0 / 9.0, samples: vec![sample] });
         host.state.replace_project(project, None);
         let now = host.state.revision();
-        let answer = host.run(AgentRequest::TrackRun { expected_revision: now, track_id: 1, from: None, direction: Some("forward".into()), rotation: Some(false) }).expect("an answer");
+        let answer = host.run(AgentRequest::TrackRun { expected_revision: now, track_id: 1, from: None, direction: Some("forward".into()), rotation: Some(false), mode: None }).expect("an answer");
         assert_eq!(answer["state"], "failed", "{answer}");
         let message = answer["message"].as_str().unwrap_or_default();
         assert!(message.contains("gpufx-preview-decodes"), "opened through the decode paths: {message}");
+        let now = host.state.revision();
+        let refused = host.run(AgentRequest::TrackRun { expected_revision: now, track_id: 1, from: None, direction: None, rotation: None, mode: Some("slow".into()) });
+        assert_eq!(code(refused), "invalid_params", "an unknown tracker mode");
     }
 
     /// Writes eight seconds of stereo 16-bit clicks at 120 BPM as a WAV file.

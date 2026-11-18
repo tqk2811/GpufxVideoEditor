@@ -2,7 +2,7 @@
 
 Mục tiêu: người dùng chọn một vật trong clip video. Sticker, text hoặc vùng che (blur, pixelate, hộp màu) gắn vào vật đó và tự di chuyển theo, có thể bám cả scale và góc xoay. Tham khảo: Tracking của CapCut, Motion tracking của DaVinci Resolve, Motion Tracker của Shotcut, tracker OpenCV trong Kdenlive.
 
-Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). P0 và P1 đã xong: tracker cổ điển ở `crates/engine/src/tracker/`, worker nền ở `crates/gpufx-editor/src/tracking.rs`, tool `track_run`, `track_status`, `track_cancel`. P2 đã xong: mục Tracking trong inspector của clip video (`ui/tracking_inspector.rs`), vẽ quỹ đạo và sửa khung trên preview (`ui/tracking_overlay.rs`), dải độ tin cậy trên timeline, thao tác ở `track_edit.rs`, tool `track_create`, `track_smooth`, `track_bake_keyframes`, `track_run` với `direction: both`. Tiếp theo là P3.
+Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). P0 và P1 đã xong: tracker cổ điển ở `crates/engine/src/tracker/`, worker nền ở `crates/gpufx-editor/src/tracking.rs`, tool `track_run`, `track_status`, `track_cancel`. P2 đã xong: mục Tracking trong inspector của clip video (`ui/tracking_inspector.rs`), vẽ quỹ đạo và sửa khung trên preview (`ui/tracking_overlay.rs`), dải độ tin cậy trên timeline, thao tác ở `track_edit.rs`, tool `track_create`, `track_smooth`, `track_bake_keyframes`, `track_run` với `direction: both`. P3 đã xong trên nhánh, trừ release model: op `correlation` và activation `exp` trong `gpufx-core/nn`, `NanoTrack` (`gpufx-core/src/nn/track.rs`, cắt ảnh và giải mã khung bao bằng WGSL), script `scripts/convert-tracking-models.py` của FFmpegGpuFilter, bộ tải model chung `model_download.rs`, model tracker ở `tracking_models.rs`, chế độ Nhanh/Bền trong inspector và tham số `mode` của `track_run`. Còn chờ user tạo release `models-tracking-v1` rồi ghi `sha256_zip`, xem [Lựa chọn tạm ở P3](#lựa-chọn-tạm-ở-p3).
 
 ## Hiện trạng
 
@@ -122,6 +122,19 @@ Các điểm dưới đây do phiên làm P2 tự chọn khi user vắng, chờ 
 - Gắn overlay neo tại đầu phát, nên overlay đứng yên ở đó và offset luôn là 0. Clip tham chiếu là clip của file đã track đang phát tại đầu phát, nếu không có thì lấy clip gần nhất.
 - Bake ghi keyframe X/Y ở mọi frame output, Width khi bám scale, Rotation khi bám xoay. Clip dài hơn 4096 frame thì giãn bước. Animation preset của text sau khi bake chạy sau chuyển động thay vì trước.
 - Dải độ tin cậy trên timeline vẽ cho track đang chọn của file. Một sample tô màu khoảng ±0,25 giây nguồn quanh nó; dưới 0,5 là đỏ.
+
+## Lựa chọn tạm ở P3
+
+Các điểm dưới đây do phiên làm P3 tự chọn khi user vắng, chờ user duyệt.
+
+- Model là NanoTrackV2 của [SiamTrackers](https://github.com/HonglinChu/SiamTrackers/tree/master/NanoTrack) (Apache-2.0, cùng file OpenCV `TrackerNano` dùng), ghim ở commit `8fe6791f`. Gói `gpufx_ai_tracking/nanotrack-v2.zip` gồm `tracker.json`, `backbone/`, `head/`, `LICENSE`, `README.md`.
+- Ảnh vào backbone theo thứ tự BGR, giá trị 0 đến 255, như bản PyTorch gốc (OpenCV đổi sang RGB). Đo trên clip mẫu thì hai thứ tự cho kết quả gần như nhau.
+- Kích thước vùng search là `cạnh template × 255 / 127` (OpenCV chia nguyên ra 2). Phạt cỡ tính theo cỡ khung trước đã nhân tỉ lệ, như bản gốc (OpenCV dùng nhầm toạ độ tâm).
+- Điểm của NanoTrack gần như luôn cao kể cả khi vật đã mất, nên độ tin cậy của chế độ Bền là `điểm × (0,5 + 0,5 × NCC)`, NCC là độ giống của khung với mẫu xám (mẫu cập nhật chậm khi chắc chắn). Dưới 0,25 thì coi là mất dấu và dừng.
+- Chế độ Bền giữ khung đứng thẳng ở góc của sample bắt đầu, bỏ qua tuỳ chọn xoay.
+- Chế độ chọn trong inspector là cài đặt của phiên, không lưu vào project; tool `track_run` mặc định `fast`.
+- Tracker Bền dùng một GPU device riêng cho mọi lần chạy trong phiên, tạo khi chạy lần đầu, không dùng chung device của preview.
+- Đọc frame vẫn ở 360 dòng như tracker cổ điển.
 
 ## Rủi ro
 

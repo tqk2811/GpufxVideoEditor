@@ -6,7 +6,7 @@ use super::numeric::{add_slider, drag_field};
 use super::theme;
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
-use crate::tracking::Direction;
+use crate::tracking::{Direction, TrackMode};
 use engine::{ClipKey, EffectRegion, MotionTrack, RegionShape, MAX_FOLLOW_SMOOTH};
 
 /// The region a blur or pixelate effect takes when it is first limited: a third of the picture
@@ -56,6 +56,7 @@ pub(super) fn tracking_rows(ui: &mut egui::Ui, state: &mut EditorState, key: Cli
             state.delete_motion_track(current.id);
         }
     });
+    mode_rows(ui, state);
     match state.track_progress(current.id) {
         Some(progress) => {
             ui.horizontal(|ui| {
@@ -88,6 +89,56 @@ pub(super) fn tracking_rows(ui: &mut egui::Ui, state: &mut EditorState, key: Cli
         state.add_censor_following(current.id);
     }
     ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackHintFix)).color(theme::text_dim()).small()).wrap());
+}
+
+/// The tracker choice and, for the robust tracker without its model, the download or import.
+fn mode_rows(ui: &mut egui::Ui, state: &mut EditorState) {
+    let language = state.language();
+    ui.horizontal(|ui| {
+        ui.label(language.t(Message::TrackMode));
+        for (mode, label, hint) in [(TrackMode::Fast, Message::TrackModeFast, Message::TrackModeFastHint), (TrackMode::Robust, Message::TrackModeRobust, Message::TrackModeRobustHint)] {
+            if ui.selectable_label(state.ui.track_mode == mode, language.t(label)).on_hover_text(language.t(hint)).clicked() {
+                state.ui.track_mode = mode;
+            }
+        }
+    });
+    if state.ui.track_mode != TrackMode::Robust || crate::tracking_models::installed(&crate::project_file::package_roots()).is_some() {
+        return;
+    }
+    ui.colored_label(theme::text_dim(), language.t(Message::TrackModelMissing));
+    let downloads = crate::tracking_models::downloads();
+    match downloads.status(()) {
+        Some(crate::model_download::DownloadStatus::Running(progress)) => {
+            let (received, total) = progress.snapshot();
+            ui.horizontal(|ui| {
+                let fraction = total.map_or(0.0, |total| received.min(total) as f32 / total.max(1) as f32);
+                let text = format!("{} {}", language.t(Message::MatteFetching), crate::model_download::format_progress(received, total));
+                ui.add(egui::ProgressBar::new(fraction).desired_width((ui.available_width() - 80.0).max(40.0)).text(text));
+                if ui.button(language.t(Message::MatteFetchCancel)).clicked() {
+                    downloads.cancel(());
+                }
+            });
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        status => {
+            let failed = match status {
+                Some(crate::model_download::DownloadStatus::Failed(problem)) => {
+                    ui.colored_label(theme::refused(), language.t(Message::MatteImportFailed(problem)));
+                    true
+                }
+                _ => false,
+            };
+            ui.horizontal(|ui| {
+                let label = if failed { Message::MatteFetchRetry } else { Message::MatteFetch };
+                if ui.add_enabled(crate::tracking_models::source().enabled(), egui::Button::new(language.t(label))).on_disabled_hover_text(language.t(Message::MatteFetchUnavailable)).clicked() {
+                    state.ui.tracking_model_fetch_request = true;
+                }
+                if ui.button(language.t(Message::MatteImportZip)).clicked() {
+                    state.ui.tracking_model_import_request = true;
+                }
+            });
+        }
+    }
 }
 
 /// The follow section of overlay `key`: which track it follows and how, or a picker to start.

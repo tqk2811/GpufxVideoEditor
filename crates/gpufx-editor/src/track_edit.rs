@@ -252,7 +252,7 @@ impl EditorState {
 
     /// Starts the run `ask` reading `decode_path`; a refusal goes to the status line.
     pub fn run_track_ask(&mut self, decode_path: std::path::PathBuf, ask: TrackRunAsk) {
-        let started = self.track_request(ask.track_id, ask.from, ask.direction, true).and_then(|request| self.start_track_request(decode_path, crate::tracking::RunRequest { limit: ask.limit, ..request }));
+        let started = self.track_request(ask.track_id, ask.from, ask.direction, true, self.ui.track_mode).and_then(|request| self.start_track_request(decode_path, crate::tracking::RunRequest { limit: ask.limit, ..request }));
         if let Err(message) = started {
             self.report_error(Message::TrackingFailed(message));
         }

@@ -15,6 +15,7 @@ harness = false
 engine = { path = "../engine" }
 gpufx-text = { path = "../gpufx-text" }
 d3d12-backend = { path = "../d3d12-backend" }
+gpufx-core = { path = "../../external/FFmpegGpuFilter/crates/gpufx-core" }
 # Must stay the wgpu major version gpufx-core uses (30), or the two cannot share types.
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
 

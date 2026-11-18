@@ -178,6 +178,7 @@ struct ChainedRun {
     /// The source time of the sample both runs start from.
     from: Time,
     rotation: bool,
+    mode: crate::tracking::TrackMode,
 }
 
 /// What a set of snap points was built for.
@@ -401,6 +402,12 @@ pub struct UiState {
     pub motion_track: Option<u32>,
     /// The tracker run the inspector asked for; the window starts it with the preview's paths.
     pub track_run_request: Option<crate::track_edit::TrackRunAsk>,
+    /// The tracker the inspector's runs use.
+    pub track_mode: crate::tracking::TrackMode,
+    /// The robust tracker's model is to be imported from a zip the user picks.
+    pub tracking_model_import_request: bool,
+    /// The robust tracker's model is to be downloaded.
+    pub tracking_model_fetch_request: bool,
 }
 
 /// An autosave left behind by an editor that did not close cleanly.
@@ -1930,16 +1937,17 @@ impl EditorState {
     /// Starts tracking motion track `track_id` from its sample at `from` (see
     /// [`crate::tracking::RunRequest::for_track`] for the default) in `direction`, reading
     /// `decode_path` (the file of the track, or its proxy). Answers the job id.
-    pub fn start_tracking(&mut self, decode_path: PathBuf, track_id: u32, from: Option<Time>, direction: crate::tracking::Direction, rotation: bool) -> Result<u64, String> {
-        let request = self.track_request(track_id, from, direction, rotation)?;
+    pub fn start_tracking(&mut self, decode_path: PathBuf, track_id: u32, from: Option<Time>, direction: crate::tracking::Direction, rotation: bool, mode: crate::tracking::TrackMode) -> Result<u64, String> {
+        let request = self.track_request(track_id, from, direction, rotation, mode)?;
         self.start_track_request(decode_path, request)
     }
 
     /// The run of motion track `track_id` from its sample at `from`, see
-    /// [`crate::tracking::RunRequest::for_track`].
-    pub fn track_request(&self, track_id: u32, from: Option<Time>, direction: crate::tracking::Direction, rotation: bool) -> Result<crate::tracking::RunRequest, String> {
+    /// [`crate::tracking::RunRequest::for_track`], with the tracker `mode` (refused when the robust
+    /// tracker's model is not installed).
+    pub fn track_request(&self, track_id: u32, from: Option<Time>, direction: crate::tracking::Direction, rotation: bool, mode: crate::tracking::TrackMode) -> Result<crate::tracking::RunRequest, String> {
         let track = self.project().motion_track(track_id).ok_or_else(|| EditError::MotionTrackNotFound { id: track_id }.to_string())?;
-        crate::tracking::RunRequest::for_track(track, from, direction, rotation)
+        crate::tracking::RunRequest::for_track(track, from, direction, rotation)?.with_mode(mode, &crate::project_file::package_roots())
     }
 
     /// Starts `request`, reading `decode_path`. Answers the job id.
@@ -1955,11 +1963,11 @@ impl EditorState {
     /// same sample, as [`Self::poll_tracking`] starts it. One track takes one run at a time, so the
     /// two cannot go together. A forward run that is stopped, fails or no longer fits does not go
     /// on. Answers the forward job.
-    pub fn start_tracking_both(&mut self, decode_path: PathBuf, track_id: u32, from: Option<Time>, rotation: bool) -> Result<u64, String> {
-        let request = self.track_request(track_id, from, crate::tracking::Direction::Forward, rotation)?;
+    pub fn start_tracking_both(&mut self, decode_path: PathBuf, track_id: u32, from: Option<Time>, rotation: bool, mode: crate::tracking::TrackMode) -> Result<u64, String> {
+        let request = self.track_request(track_id, from, crate::tracking::Direction::Forward, rotation, mode)?;
         let start = request.start.source_time;
         let job = self.start_track_request(decode_path.clone(), request)?;
-        self.track_chain.push(ChainedRun { after: job, decode_path, track_id, from: start, rotation });
+        self.track_chain.push(ChainedRun { after: job, decode_path, track_id, from: start, rotation, mode });
         Ok(job)
     }
 
@@ -1975,7 +1983,7 @@ impl EditorState {
         if !matches!(outcome, "done" | "lost") {
             return;
         }
-        let started = self.track_request(chained.track_id, Some(chained.from), crate::tracking::Direction::Backward, chained.rotation).and_then(|request| self.start_track_request(chained.decode_path, request));
+        let started = self.track_request(chained.track_id, Some(chained.from), crate::tracking::Direction::Backward, chained.rotation, chained.mode).and_then(|request| self.start_track_request(chained.decode_path, request));
         match started {
             Ok(job) => {
                 self.chained_track_jobs.insert(id, job);
@@ -5525,11 +5533,11 @@ lines"));
             (Some((30, 1)), Some(Time::from_ticks(engine::TICKS_PER_SECOND)))
         }
 
-        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(engine::tracker::GrayImage, Time), String> {
+        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(crate::tracking::TrackFrame, Time), String> {
             let (width, height) = (160usize, 90usize);
             let data = (0..width * height).map(|i| ((i % width) as f32 * 0.9).sin() * ((i / width) as f32 * 0.7).cos() * 0.25 + 0.5).collect();
             let frame = at.ticks() * 30 / engine::TICKS_PER_SECOND;
-            Ok((engine::tracker::GrayImage::new(width, height, data), Time::from_ticks((frame * engine::TICKS_PER_SECOND + 29) / 30)))
+            Ok((crate::tracking::TrackFrame::gray(engine::tracker::GrayImage::new(width, height, data)), Time::from_ticks((frame * engine::TICKS_PER_SECOND + 29) / 30)))
         }
     }
 
@@ -5580,7 +5588,7 @@ lines"));
     fn a_chained_backward_run_whose_start_sample_went_is_stale_rather_than_failed() {
         let (mut state, id) = state_with_a_finished_run();
         // The backward run waits for a sample that is not there once the forward run is written.
-        state.track_chain.push(ChainedRun { after: id, decode_path: PathBuf::from("a.mp4"), track_id: 3, from: Time::from_ticks(5), rotation: false });
+        state.track_chain.push(ChainedRun { after: id, decode_path: PathBuf::from("a.mp4"), track_id: 3, from: Time::from_ticks(5), rotation: false, mode: crate::tracking::TrackMode::Fast });
         state.poll_tracking();
         assert_eq!(state.track_reports[&id].outcome, "done");
         assert!(state.chained_track_stale.contains(&id) && !state.chained_track_jobs.contains_key(&id));

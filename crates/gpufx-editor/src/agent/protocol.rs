@@ -271,6 +271,8 @@ pub enum AgentRequest {
         from: Option<Time>,
         direction: Option<String>,
         rotation: Option<bool>,
+        /// `fast` (classical, the default) or `robust` (NanoTrack).
+        mode: Option<String>,
     },
     /// Where tracker job `job` (the last one when absent) stands.
     TrackStatus { job: Option<u64> },

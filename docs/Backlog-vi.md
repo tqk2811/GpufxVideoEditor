@@ -16,6 +16,10 @@ Shader nn của xoá nền chỉ biên dịch được bằng DXC; thiếu `dxco
 
 Preview dùng file proxy (độ phân giải thấp) thì model chạy trên ảnh proxy, nên mặt nạ khác bản export (luôn đọc file gốc); khoá cache theo file giải mã nên hai bên không trộn lẫn. Preview khớp từng pixel với export chỉ khi không dùng proxy và cùng kích thước output. Nên cân nhắc cho clip có xoá nền đọc file gốc, hoặc ghi chú trong giao diện. Ghi ngày 2026-11-17.
 
+### [Vừa] Tạo release `models-tracking-v1` cho model tracker Bền (NanoTrack)
+
+Tracker Bền (`crates/gpufx-editor/src/tracking_models.rs`) tải `nanotrack-v2.zip` từ release `models-tracking-v1` của `tqk2811/FFmpegGpuFilter`, nhưng release chưa có nên `sha256_zip` trong `external/FFmpegGpuFilter/packages/gpufx_ai_tracking/nanotrack-v2/source.json` còn rỗng và nút tải bị tắt; người dùng chỉ nhập zip được. Cần user tạo release: chạy `scripts/convert-tracking-models.py` của FFmpegGpuFilter, upload `build/packages/gpufx_ai_tracking/nanotrack-v2.zip`, ghi SHA-256 của nó vào `sha256_zip` (submodule packages), rồi cập nhật con trỏ submodule. Ghi ngày 2026-11-18.
+
 ### [Vừa] Giải mã ảnh không huỷ được và ảnh hỏng được giải mã lại mỗi lần render
 
 `crates/d3d12-backend/src/compositor.rs` `load_still` (khối gọi `read_still` và `Image::upload`) và `open_decoder` chạy đồng bộ, bỏ qua cờ abort/closing; `Image::upload` chờ `PollType::Wait` không có timeout. Ảnh lớn hoặc GPU kẹt làm preview và lệnh đóng phải chờ hết. Ảnh hỏng không có negative cache nên mỗi lần render lại đọc và giải mã file từ đầu. Nên kiểm cờ trước khi giải mã, thêm timeout chờ, và nhớ lỗi theo dấu (cỡ + mtime) của file. Ghi ngày 2026-11-10.

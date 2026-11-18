@@ -199,11 +199,13 @@ impl Session {
         let window_for_scan = window.clone();
         let session_window = window.clone();
         let download_window = window.clone();
+        let tracking_download_window = window.clone();
         crate::matting_models::downloads().set_waker(move || download_window.request_redraw());
-        // What a killed editor left in the models folder.
+        crate::tracking_models::downloads().set_waker(move || tracking_download_window.request_redraw());
+        // What a killed editor left in the models folders.
         std::thread::spawn(|| {
-            if let Some(folder) = crate::matting_models::install_dir() {
-                crate::matting_models::clean_stale_files(&folder, crate::matting_models::STALE_AFTER);
+            for folder in [crate::matting_models::install_dir(), crate::tracking_models::install_dir()].into_iter().flatten() {
+                crate::model_download::clean_stale_files(&folder, crate::model_download::STALE_AFTER);
             }
         });
         let preview = PreviewWorker::spawn(move || D3d12Producer::new(producer_gpu), move || window.request_redraw());
@@ -746,6 +748,13 @@ impl Session {
             crate::matting_models::start_download(model);
         }
         self.matte_downloads_finished();
+        if std::mem::take(&mut self.state.ui.tracking_model_import_request) {
+            self.begin_task(Request::ImportTrackingModel);
+        }
+        if std::mem::take(&mut self.state.ui.tracking_model_fetch_request) {
+            crate::tracking_models::start_download();
+        }
+        self.tracking_downloads_finished();
         if let Some(ask) = self.state.ui.track_run_request.take() {
             // The preview's paths: a tracker run reads the proxy when there is one.
             let media = self.state.project().motion_track(ask.track_id).map(|track| track.media_path.clone());
@@ -982,6 +991,7 @@ impl Session {
             FileDialog::ImportMedia { audio_only: true } => base().add_filter(language.t(Message::FilterAudio), &AUDIO_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportPackage => base().add_filter(language.t(Message::FilterPackage), &["zip"]),
             FileDialog::ImportMatteModel { .. } => base().add_filter(language.t(Message::FilterMatteModel), &["zip"]),
+            FileDialog::ImportTrackingModel => base().add_filter(language.t(Message::FilterTrackingModel), &["zip"]),
             FileDialog::PickFont { .. } => base().add_filter(language.t(Message::FilterFont), &["ttf", "otf", "ttc"]),
             FileDialog::PickTexture { .. } => base().add_filter(language.t(Message::FilterPicture), &["png", "jpg", "jpeg"]),
             FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
@@ -992,7 +1002,7 @@ impl Session {
         };
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
-                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::PickTexture { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::ImportMatteModel { .. } | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
+                FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::PickTexture { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::ImportMatteModel { .. } | FileDialog::ImportTrackingModel | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
                 FileDialog::SaveProject | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
@@ -1062,6 +1072,12 @@ impl Session {
                     Arrival::MatteModelInstalled { load, result }
                 });
             }
+            Action::InstallTrackingModel { load, path } => {
+                self.spawn_task("tracking-model-install", TaskId::Load(load), move || {
+                    let result = crate::tracking_models::install_dir().ok_or_else(|| "LOCALAPPDATA is not set".to_owned()).and_then(|folder| crate::tracking_models::import_zip(&path, &folder));
+                    Arrival::TrackingModelInstalled { load, result }
+                });
+            }
             Action::MatteModelInstalled => {
                 // The compositors remember a missing model: new paths make new ones.
                 self.build_paths();
@@ -1117,6 +1133,18 @@ impl Session {
                 }
                 crate::matting_models::DownloadOutcome::Failed(problem) => self.state.report_error(Message::MatteImportFailed(problem)),
                 crate::matting_models::DownloadOutcome::Cancelled => {}
+            }
+            self.window.request_redraw();
+        }
+    }
+
+    /// Handles a download of the robust tracker's model that ended.
+    fn tracking_downloads_finished(&mut self) {
+        for (_, outcome) in crate::tracking_models::downloads().take_finished() {
+            match outcome {
+                crate::model_download::DownloadOutcome::Installed(_) => self.state.report_info(Message::TrackModelInstalled),
+                crate::model_download::DownloadOutcome::Failed(problem) => self.state.report_error(Message::MatteImportFailed(problem)),
+                crate::model_download::DownloadOutcome::Cancelled => {}
             }
             self.window.request_redraw();
         }

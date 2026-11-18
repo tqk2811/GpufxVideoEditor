@@ -5,6 +5,11 @@
 //! [`FrameSampler`]), then turned gray. Nothing here touches the project: the editor writes the
 //! samples of a finished run as one undo step ([`engine::apply_track_run`]).
 //!
+//! Two trackers ([`TrackMode`]): the classical one of [`engine::tracker`] (fast, on the CPU, follows
+//! turns) and NanoTrack, a Siamese network on the GPU ([`gpufx_core::nn::NanoTrack`], the model of
+//! [`crate::tracking_models`]): slower, but it holds on through blur, deformation and short
+//! occlusions. It keeps the box upright at the angle of the start sample.
+//!
 //! The frames asked for follow the frame rate the file states, but each sample takes the time of
 //! the frame the decoder really showed, and a frame shown twice is stepped over, so a file of
 //! variable frame rate is not given made-up times. Still a limit there: a stretch with more
@@ -12,11 +17,12 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use d3d12_backend::{probe_media, probe_video_format, FrameSampler};
-use engine::tracker::{track_frames, GrayImage, RunEnd, TrackBox, Tracker, TrackerOptions};
+use engine::tracker::{template, track_frames, GrayImage, Pyramid, RunEnd, StepTracker, TrackBox, TrackStep, Tracker, TrackerOptions};
 use engine::{MotionTrack, Time, TrackSample, TICKS_PER_SECOND};
 
 /// The height of the frames the tracker sees.
@@ -30,6 +36,62 @@ const BACKWARD_CHUNK: usize = 16;
 const DECODE_BUDGET: Duration = Duration::from_secs(20);
 /// The frame rate assumed for a file that states none.
 const FALLBACK_RATE: (i32, i32) = (30, 1);
+
+/// Which tracker a run uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrackMode {
+    /// The classical tracker on the CPU.
+    #[default]
+    Fast,
+    /// NanoTrack on the GPU; needs its model ([`crate::tracking_models`]).
+    Robust,
+}
+
+impl TrackMode {
+    pub fn code(self) -> &'static str {
+        match self {
+            TrackMode::Fast => "fast",
+            TrackMode::Robust => "robust",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<Self> {
+        [TrackMode::Fast, TrackMode::Robust].into_iter().find(|mode| mode.code() == code)
+    }
+}
+
+/// A frame as the trackers read it: gray for the classical tracker and the look check, and the
+/// RGBA picture it came from (when there is one) for NanoTrack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackFrame {
+    pub gray: GrayImage,
+    /// `gray.width * gray.height * 4` bytes.
+    pub rgba: Option<Vec<u8>>,
+}
+
+impl TrackFrame {
+    /// A frame known only in gray.
+    pub fn gray(gray: GrayImage) -> Self {
+        Self { gray, rgba: None }
+    }
+
+    /// The RGBA picture, made from the gray one when there is none.
+    fn rgba(&self) -> std::borrow::Cow<'_, [u8]> {
+        match &self.rgba {
+            Some(rgba) => std::borrow::Cow::Borrowed(rgba),
+            None => std::borrow::Cow::Owned(
+                self.gray
+                    .data
+                    .iter()
+                    .flat_map(|v| {
+                        let level = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+                        [level, level, level, 255]
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
 
 /// Which way a run goes through the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,9 +118,9 @@ impl Direction {
 pub trait FrameSource {
     /// The frame rate (frames per second as `num / den`) and the length of the file, when stated.
     fn timing(&self) -> (Option<(i32, i32)>, Option<Time>);
-    /// The frame shown at source time `at`, gray, and the source time of that frame as decoded:
-    /// later than `at` when no frame starts there, earlier past the end of the file.
-    fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String>;
+    /// The frame shown at source time `at` and the source time of that frame as decoded: later
+    /// than `at` when no frame starts there, earlier past the end of the file.
+    fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(TrackFrame, Time), String>;
 }
 
 /// A video file read with [`FrameSampler`] in exact mode.
@@ -83,9 +145,10 @@ impl FrameSource for FileFrames {
         (self.rate, self.length)
     }
 
-    fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String> {
+    fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(TrackFrame, Time), String> {
         let (picture, shown) = self.sampler.timed_picture_at(at, cancelled).map_err(|error| format!("{error:?}"))?;
-        Ok((GrayImage::from_rgba(picture.width as usize, picture.height as usize, &picture.rgba), shown))
+        let gray = GrayImage::from_rgba(picture.width as usize, picture.height as usize, &picture.rgba);
+        Ok((TrackFrame { gray, rgba: Some(picture.rgba) }, shown))
     }
 }
 
@@ -104,6 +167,9 @@ pub struct RunRequest {
     /// The most frames the run steps through after its start ([`MAX_RUN_FRAMES`] when absent):
     /// 1 tracks a single frame.
     pub limit: Option<usize>,
+    pub mode: TrackMode,
+    /// The NanoTrack model for [`TrackMode::Robust`].
+    pub model: Option<PathBuf>,
 }
 
 impl RunRequest {
@@ -126,7 +192,19 @@ impl RunRequest {
             Direction::Forward => samples.iter().find(|s| s.manual && s.source_time > start.source_time).map(|s| s.source_time),
             Direction::Backward => samples.iter().rev().find(|s| s.manual && s.source_time < start.source_time).map(|s| s.source_time),
         };
-        Ok(Self { track_id: track.id, media_path: track.media_path.clone(), start, direction, stop, rotation, limit: None })
+        Ok(Self { track_id: track.id, media_path: track.media_path.clone(), start, direction, stop, rotation, limit: None, mode: TrackMode::Fast, model: None })
+    }
+
+    /// This run with `mode`; [`TrackMode::Robust`] needs the NanoTrack model installed (looked for
+    /// with `package_roots`).
+    pub fn with_mode(self, mode: TrackMode, package_roots: &[PathBuf]) -> Result<Self, String> {
+        let model = match mode {
+            TrackMode::Fast => None,
+            TrackMode::Robust => Some(crate::tracking_models::installed(package_roots).ok_or_else(|| {
+                "the robust tracker needs the NanoTrack model: download it or import its zip in the Tracking section of the inspector".to_owned()
+            })?),
+        };
+        Ok(Self { mode, model, ..self })
     }
 }
 
@@ -353,10 +431,13 @@ fn run(request: &RunRequest, source: &mut dyn FrameSource, shared: &Shared) -> R
         Err(_) if cancelled() => return Ok(finished(Vec::new(), RunEnd::Cancelled)),
         Err(error) => return Err(error),
     };
-    let (width, height) = (first.width, first.height);
+    let (width, height) = (first.gray.width, first.gray.height);
     let area = TrackBox::from_sample(&request.start, width, height);
-    let options = TrackerOptions { rotation: request.rotation, ..TrackerOptions::default() };
-    let mut tracker = Tracker::new(first, area, options);
+    let mut tracker = match (request.mode, &request.model) {
+        (TrackMode::Fast, _) => RunTracker::Fast(Box::new(Tracker::new(first.gray, area, TrackerOptions { rotation: request.rotation, ..TrackerOptions::default() }))),
+        (TrackMode::Robust, Some(model)) => RunTracker::Robust(Box::new(RobustTracker::new(model, &first, area)?)),
+        (TrackMode::Robust, None) => return Err("the robust tracker needs the NanoTrack model".to_owned()),
+    };
     let mut shown = Vec::with_capacity(times.len());
     let frames = Frames {
         source,
@@ -374,6 +455,89 @@ fn run(request: &RunRequest, source: &mut dyn FrameSource, shared: &Shared) -> R
     Ok(finished(samples, end))
 }
 
+/// The tracker of a run.
+enum RunTracker {
+    Fast(Box<Tracker>),
+    Robust(Box<RobustTracker>),
+}
+
+impl StepTracker<TrackFrame> for RunTracker {
+    fn step(&mut self, frame: TrackFrame) -> TrackStep {
+        match self {
+            RunTracker::Fast(tracker) => tracker.step(frame.gray),
+            RunTracker::Robust(tracker) => tracker.step(frame),
+        }
+    }
+}
+
+/// A step of the robust tracker less sure than this is lost: the run stops there.
+pub const ROBUST_LOST_CONFIDENCE: f64 = 0.25;
+
+/// How much of each sure step's look goes into the look the robust tracker checks against.
+const ROBUST_TEMPLATE_RATE: f32 = 0.1;
+
+/// The GPU of the robust tracker: one device for every run of the session, made on first use.
+fn tracking_gpu() -> Result<Arc<gpufx_core::GpuContext>, String> {
+    static CONTEXT: Mutex<Option<Arc<gpufx_core::GpuContext>>> = Mutex::new(None);
+    let mut context = CONTEXT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(context) = context.as_ref() {
+        return Ok(context.clone());
+    }
+    let made = gpufx_core::GpuContext::new(gpufx_core::Backend::Auto).map_err(|error| format!("the robust tracker needs a GPU: {error}"))?;
+    *context = Some(made.clone());
+    Ok(made)
+}
+
+/// NanoTrack, with a check of the box's look: the network's score stays high on almost anything,
+/// so how sure a step is also takes how well the box still looks like the object (NCC of the gray
+/// patch against the remembered look, as the classical tracker does).
+struct RobustTracker {
+    nano: gpufx_core::nn::NanoTrack,
+    /// The angle of the start sample, kept: NanoTrack finds upright boxes.
+    angle: f64,
+    area: TrackBox,
+    template: Vec<f32>,
+}
+
+fn rgba_image(rgba: &[u8], width: usize, height: usize) -> gpufx_core::Image<'_> {
+    gpufx_core::Image { data: rgba, width: width as u32, height: height as u32, stride: width as u32 * 4 }
+}
+
+impl RobustTracker {
+    fn new(model: &Path, first: &TrackFrame, area: TrackBox) -> Result<Self, String> {
+        let mut nano = gpufx_core::nn::NanoTrack::open(tracking_gpu()?, model).map_err(|error| format!("the NanoTrack model failed to load: {error}"))?;
+        let rgba = first.rgba();
+        let rect = gpufx_core::nn::TrackRect { cx: area.cx as f32, cy: area.cy as f32, w: area.w as f32, h: area.h as f32 };
+        nano.init(&rgba_image(&rgba, first.gray.width, first.gray.height), rect).map_err(|error| error.to_string())?;
+        let template = template::sample_patch(&Pyramid::new(first.gray.clone(), 3), &area);
+        Ok(Self { nano, angle: area.angle, area, template })
+    }
+
+    fn step(&mut self, frame: TrackFrame) -> TrackStep {
+        let lost = |area| TrackStep { area, confidence: 0.0, lost: true, recovered: false };
+        let rgba = frame.rgba();
+        let found = match self.nano.update(&rgba_image(&rgba, frame.gray.width, frame.gray.height)) {
+            Ok(found) => found,
+            Err(_) => return lost(self.area),
+        };
+        let rect = found.rect;
+        let area = TrackBox { cx: f64::from(rect.cx), cy: f64::from(rect.cy), w: f64::from(rect.w), h: f64::from(rect.h), angle: self.angle };
+        let patch = template::sample_patch(&Pyramid::new(frame.gray, 3), &area);
+        let look = template::ncc(&self.template, &patch).clamp(0.0, 1.0);
+        let confidence = (f64::from(found.score) * (0.5 + 0.5 * look)).clamp(0.0, 1.0);
+        if confidence < ROBUST_LOST_CONFIDENCE {
+            return TrackStep { confidence, ..lost(self.area) };
+        }
+        if confidence >= engine::tracker::LOST_CONFIDENCE {
+            for (kept, seen) in self.template.iter_mut().zip(&patch) {
+                *kept += (seen - *kept) * ROBUST_TEMPLATE_RATE;
+            }
+        }
+        self.area = area;
+        TrackStep { area, confidence, lost: false, recovered: false }
+    }
+}
+
 /// The frames at `times`, in that order; backwards they are read a chunk at a time in file order.
 /// A frame the decoder shows at the time of the frame before, or the wrong way from it, is stepped
 /// over (a frame held longer than the stated rate); one before the time asked for going forwards
@@ -384,7 +548,7 @@ struct Frames<'a> {
     next: usize,
     direction: Direction,
     /// Frames read ahead with their source times, the next one last.
-    ahead: Vec<(GrayImage, Time)>,
+    ahead: Vec<(TrackFrame, Time)>,
     cancel: &'a AtomicBool,
     /// The source time of the frame given last (the start frame at first).
     last_shown: Time,
@@ -395,7 +559,7 @@ struct Frames<'a> {
 
 impl Frames<'_> {
     /// The next frame read, with the time asked for and the time shown; `None` past `times`.
-    fn read(&mut self) -> Option<Result<(GrayImage, Time, Time), String>> {
+    fn read(&mut self) -> Option<Result<(TrackFrame, Time, Time), String>> {
         if self.next >= self.times.len() {
             return None;
         }
@@ -423,7 +587,7 @@ impl Frames<'_> {
 }
 
 impl Iterator for Frames<'_> {
-    type Item = Result<GrayImage, String>;
+    type Item = Result<TrackFrame, String>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -469,10 +633,10 @@ mod tests {
             (Some((30, 1)), Some(Time::from_ticks(TICKS_PER_SECOND * 2)))
         }
 
-        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String> {
+        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(TrackFrame, Time), String> {
             self.reads.fetch_add(1, Ordering::Relaxed);
             let index = frame_index(at, (30, 1));
-            Ok((self.picture(index as f64), frame_time(index, (30, 1))))
+            Ok((TrackFrame::gray(self.picture(index as f64)), frame_time(index, (30, 1))))
         }
     }
 
@@ -569,7 +733,7 @@ mod tests {
             self.inner.timing()
         }
 
-        fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String> {
+        fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(TrackFrame, Time), String> {
             let (allowed, signal) = &*self.gate;
             let mut allowed = allowed.lock().unwrap();
             while *allowed == 0 && !cancelled() {
@@ -655,12 +819,12 @@ mod tests {
             self.inner.timing()
         }
 
-        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String> {
+        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(TrackFrame, Time), String> {
             // Only even frames exist: the first one at or after `at`, or the last one.
             let last = (self.frames - 1) / 2 * 2;
             let wanted = frame_index(at, (30, 1));
             let index = (wanted + wanted % 2).min(last);
-            Ok((self.inner.picture(index as f64), frame_time(index, (30, 1))))
+            Ok((TrackFrame::gray(self.inner.picture(index as f64)), frame_time(index, (30, 1))))
         }
     }
 
@@ -707,6 +871,7 @@ mod tests {
         let facts = crate::visuals::backend::FfmpegGenerator.inspect(&turned).expect("inspect");
         let mut frames = FileFrames::open(&turned).expect("open");
         let (picture, _) = frames.frame_at(Time::ZERO, &|| false).expect("a frame");
+        let picture = picture.gray;
         assert!(picture.height > picture.width, "upright: {}x{}", picture.width, picture.height);
         let shape = picture.width as f32 / picture.height as f32;
         assert!((shape - facts.aspect).abs() < 0.02, "tracker {shape} and clip {} agree", facts.aspect);
@@ -718,6 +883,69 @@ mod tests {
         assert_eq!(oracle.len(), picture.data.len());
         let difference = picture.data.iter().zip(&oracle).map(|(a, b)| (a - f32::from(*b) / 255.0).abs()).sum::<f32>() / oracle.len() as f32;
         assert!(difference < 0.05, "turned the way ffmpeg turns it: mean difference {difference}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    /// A sample clip made by ffmpeg: a test pattern 64x48 sliding and bobbing over a still
+    /// textured background, 2 s at 30 fps. Both trackers must keep the box on it: the robust one
+    /// when its model is built (`scripts/convert-tracking-models.py` of FFmpegGpuFilter) and a GPU
+    /// is there.
+    #[test]
+    fn both_trackers_follow_an_object_through_a_sample_clip() {
+        let tool = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/ffmpeg/bin/ffmpeg.exe"));
+        let dir = std::env::temp_dir().join(format!("gpufx-tracking-clip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("sliding.mp4");
+        let status = std::process::Command::new(&tool)
+            .args(["-hide_banner", "-y", "-v", "error", "-f", "lavfi", "-i", "nullsrc=s=640x360:r=30:d=2,geq=lum='128+50*sin(X/9)*cos(Y/7)':cb=128:cr=128", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=30:d=2"])
+            .args(["-filter_complex", "[0][1]overlay=x='80+160*t':y='150+40*sin(2*t)':eval=frame", "-c:v", "libopenh264", "-pix_fmt", "yuv420p", "-b:v", "6M"])
+            .arg(&clip)
+            .status()
+            .expect("ffmpeg runs");
+        assert!(status.success(), "ffmpeg made the clip");
+        // The middle of the pattern at frame `i`, in pixels (pixel centres are whole numbers).
+        let truth = |i: f64| {
+            let t = i / 30.0;
+            ((80.0 + 160.0 * t).floor() + 31.5, (150.0 + 40.0 * (2.0 * t).sin()).floor() + 23.5)
+        };
+        let start = TrackSample { source_time: Time::ZERO, cx: (80.0 + 32.0) / 640.0, cy: (150.0 + 24.0) / 360.0, w: 64.0 / 640.0, h: 48.0 / 360.0, angle: 0.0, confidence: 1.0, manual: true };
+        let track = MotionTrack { id: 5, media_path: clip.to_string_lossy().into_owned(), aspect: 16.0 / 9.0, samples: vec![start] };
+        let fast = RunRequest::for_track(&track, None, Direction::Forward, false).unwrap();
+        let mut requests = vec![fast.clone()];
+        let model = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter/build/packages/gpufx_ai_tracking/nanotrack-v2.zip");
+        if !model.is_file() {
+            eprintln!("skipping the robust tracker: nanotrack-v2.zip is not built");
+        } else if let Err(error) = tracking_gpu() {
+            assert!(std::env::var_os("GPUFX_REQUIRE_GPU").is_none(), "GPUFX_REQUIRE_GPU is set, but {error}");
+            eprintln!("skipping the robust tracker: {error}");
+        } else {
+            requests.push(RunRequest { mode: TrackMode::Robust, model: Some(model), ..fast });
+        }
+        for request in requests {
+            let mode = request.mode;
+            let path = clip.clone();
+            let mut runner = TrackRunner::default();
+            let id = runner.start(request, move || FileFrames::open(&path).map(|frames| Box::new(frames) as Box<dyn FrameSource>)).unwrap();
+            runner.wait(id);
+            let Some(RunState::Finished(result)) = runner.status(id) else { panic!("{mode:?}: {:?}", runner.status(id)) };
+            assert_eq!(result.end, RunEnd::Finished, "{mode:?}");
+            assert!(result.samples.len() >= 55, "{mode:?}: {} samples", result.samples.len());
+            // NanoTrack places its box from score cells 16 search pixels apart: a few pixels coarser.
+            let (most, mean_most) = if mode == TrackMode::Fast { (3.0, 1.5) } else { (8.0, 4.0) };
+            let (mut worst, mut sum) = (0.0f64, 0.0f64);
+            for sample in &result.samples {
+                let frame = frame_index(sample.source_time, (30, 1)) as f64;
+                let (x, y) = truth(frame);
+                let error = ((sample.cx * 640.0 - 0.5 - x).powi(2) + (sample.cy * 360.0 - 0.5 - y).powi(2)).sqrt();
+                worst = worst.max(error);
+                sum += error;
+                assert!(error < most, "{mode:?} frame {frame}: box at ({}, {}), pattern at ({x}, {y})", sample.cx * 640.0 - 0.5, sample.cy * 360.0 - 0.5);
+                assert!((sample.w * 640.0 - 64.0).abs() < 16.0 && (sample.h * 360.0 - 48.0).abs() < 12.0, "{mode:?} frame {frame}: size {} x {}", sample.w * 640.0, sample.h * 360.0);
+                assert!(sample.confidence >= engine::tracker::LOST_CONFIDENCE, "{mode:?} frame {frame}: confidence {}", sample.confidence);
+            }
+            let mean = sum / result.samples.len() as f64;
+            eprintln!("{mode:?}: worst error {worst:.2} px, mean {mean:.2} px over {} samples", result.samples.len());
+            assert!(mean < mean_most, "{mode:?}: mean error {mean} px");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

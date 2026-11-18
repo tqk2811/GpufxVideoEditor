@@ -36,6 +36,8 @@ pub enum FileDialog {
     ExportSubtitles { track: usize, revision: u64 },
     /// A zip of the matting model `model` to install.
     ImportMatteModel { model: engine::MatteModel },
+    /// A zip of the robust tracker's model to install.
+    ImportTrackingModel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +89,8 @@ pub enum Request {
     ExportSubtitles { track: usize },
     /// The zip of a matting model, through the file dialog.
     ImportMatteModel { model: engine::MatteModel },
+    /// The zip of the robust tracker's model, through the file dialog.
+    ImportTrackingModel,
 }
 
 /// Which task a failure belongs to. A load carries the id it was started with, so the result of
@@ -110,6 +114,8 @@ pub enum Arrival {
     PackageImported { load: u64, path: PathBuf, result: Result<ImportOutcome, ImportProblem> },
     /// A matting model was imported or downloaded, or failed to be.
     MatteModelInstalled { load: u64, result: Result<PathBuf, String> },
+    /// The robust tracker's model was imported, or failed to be.
+    TrackingModelInstalled { load: u64, result: Result<PathBuf, String> },
     LibraryItemProbed { load: u64, item: MediaItem, target: LibraryTarget, result: Result<MediaProbe, String> },
     /// The thread of a task panicked, so it will never deliver a result.
     TaskFailed { task: TaskId, message: String },
@@ -141,6 +147,8 @@ pub enum Action {
     InstallMatteModel { load: u64, model: engine::MatteModel, path: Option<PathBuf> },
     /// A matting model was installed: what looked for models must look again.
     MatteModelInstalled,
+    /// Installs the robust tracker's model from the zip `path`.
+    InstallTrackingModel { load: u64, path: PathBuf },
     /// A sound of the library must be measured before it becomes a clip.
     ProbeLibraryItem { load: u64, item: MediaItem, target: LibraryTarget },
     /// A package was installed: the list must be read again and what was built from it dropped.
@@ -287,6 +295,7 @@ impl Tasks {
             Request::ImportSubtitles => self.start_dialog(FileDialog::ImportSubtitles),
             Request::ExportSubtitles { track } => self.start_dialog(FileDialog::ExportSubtitles { track, revision: state.revision() }),
             Request::ImportMatteModel { model } => self.start_dialog(FileDialog::ImportMatteModel { model }),
+            Request::ImportTrackingModel => self.start_dialog(FileDialog::ImportTrackingModel),
         }
     }
 
@@ -401,6 +410,10 @@ impl Tasks {
                         let load = self.start_load(state, &path, None);
                         Action::InstallMatteModel { load, model, path: Some(path) }
                     }
+                    FileDialog::ImportTrackingModel => {
+                        let load = self.start_load(state, &path, None);
+                        Action::InstallTrackingModel { load, path }
+                    }
                     FileDialog::OpenProject => {
                         let base = self.open_base.take();
                         let load = self.start_load(state, &path, base);
@@ -458,6 +471,17 @@ impl Tasks {
             Arrival::MediaProbed { load, path, result } => self.load_finished(state, load, Finished::Media { path, result }),
             Arrival::DropProbed { load, path, result } => self.load_finished(state, load, Finished::Drop { path, result }),
             Arrival::PackageImported { load, path, result } => self.load_finished(state, load, Finished::Package { path, result }),
+            Arrival::TrackingModelInstalled { load, result } => {
+                if self.load.is_none_or(|running| running.id != load) {
+                    return Action::Nothing;
+                }
+                self.drop_load(state);
+                match result {
+                    Ok(_) => state.report_info(Message::TrackModelInstalled),
+                    Err(problem) => state.report_error(Message::MatteImportFailed(problem)),
+                }
+                Action::Nothing
+            }
             Arrival::MatteModelInstalled { load, result } => {
                 if self.load.is_none_or(|running| running.id != load) {
                     return Action::Nothing;
