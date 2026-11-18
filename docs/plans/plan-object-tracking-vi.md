@@ -1,0 +1,128 @@
+# Kế hoạch: Object tracking (sticker, text, che vùng bám theo vật)
+
+Mục tiêu: người dùng chọn một vật trong clip video. Sticker, text hoặc vùng che (blur, pixelate, hộp màu) gắn vào vật đó và tự di chuyển theo, có thể bám cả scale và góc xoay. Tham khảo: Tracking của CapCut, Motion tracking của DaVinci Resolve, Motion Tracker của Shotcut, tracker OpenCV trong Kdenlive.
+
+Trạng thái: chờ duyệt. Các mục "chờ chốt" ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt) dùng phương án đề xuất làm lựa chọn tạm.
+
+## Hiện trạng
+
+- **Keyframe:** `crates/engine/src/keyframe.rs`.
+  - Keyframe tính bằng tick timeline kể từ đầu clip, và giữ đúng khung nguồn khi trim, split hay đổi speed.
+  - `ClipProperty` gồm X, Y, Width, Opacity, Rotation. Không có Scale riêng: Width đóng vai scale.
+- **Vị trí clip:** `ClipPlacement` (`project.rs`) gồm x, y của góc trái trên và width, tính theo phần của khung hình.
+- **Speed, phát ngược, `source_in`:** ánh xạ thời gian nguồn đã có sẵn (`source_time_at`, `plays_reversed`).
+- **Gizmo trên preview:** `crates/gpufx-editor/src/ui/placement.rs` kéo và đổi kích thước được, dùng lại được để vẽ khung chọn vật.
+- **Effect che vùng có sẵn:** `pixelate`, `gaussian-blur`, `box-blur`, `draw-box`… Tất cả áp lên cả clip, chưa có tham số vùng.
+- **Compositor** (`crates/d3d12-backend/src/compositor.rs`): chỉ đặt từng clip rồi chồng các track theo alpha. Chưa có adjustment layer, chưa có bước đọc ảnh đã chồng của các track bên dưới.
+- **Hạ tầng tính toán:**
+  - Runtime NN viết bằng WGSL trong `gpufx-core/src/nn`, đã dùng cho tách nền.
+  - Tải model: `matting_models.rs` (sha256, tiến độ, huỷ).
+  - Worker nền có tiến độ và huỷ: proxy, beats.
+  - Decoder D3D12VA ra texture GPU, nên tracker phải readback ảnh xám về CPU.
+- **Agent và MCP:** đã có `clip_set_transform`, `keyframe_set`.
+
+## Thiết kế dữ liệu (đề xuất)
+
+### Track lưu riêng theo file nguồn
+
+`Project.tracks: Vec<MotionTrack>`, lưu ở cấp project theo file nguồn, giống cách mốc nhịp nhạc đang lưu.
+
+- `MotionTrack { id, media_path, samples, keyed }`
+- `TrackSample { source_time, cx, cy, w, h, angle, confidence, manual }`
+  - Toạ độ chuẩn hoá theo khung nguồn, đã tính góc xoay hiển thị của file.
+  - `manual` đánh dấu frame do người dùng đặt tay.
+
+Overlay gắn vào track qua `Clip.follow: Option<Follow>`:
+
+- `Follow { track_id, ref_clip, anchor_source_time, offset, follow_scale, follow_rotation, smooth }`
+- Cách tính khi render ở thời điểm t:
+  1. Lấy `ref_clip.source_time_at(t)`.
+  2. Nội suy sample của track tại thời gian nguồn đó.
+  3. Ánh xạ qua placement và transform của clip video, ra toạ độ khung output.
+  4. Cộng offset, rồi cộng keyframe riêng của overlay.
+- Offset được tính lúc gắn, sao cho tại frame gắn overlay đứng yên đúng chỗ.
+- Làm mượt áp lúc đọc (One-Euro hoặc Gaussian theo thời gian nguồn), không ghi đè dữ liệu gốc.
+
+Lý do không bake thành keyframe dày ngay từ đầu:
+- Split, trim, đổi speed, phát ngược và proxy đều giữ đúng vị trí, vì track tính theo thời gian nguồn.
+- Chạy lại tracker hay sửa tay thì không phải bake lại.
+- Nhiều overlay dùng chung được một track.
+- Sửa transform của clip video thì overlay vẫn bám đúng.
+
+Vẫn có lệnh "Bake thành keyframe" cho ai muốn sửa tay từng keyframe.
+
+### Vùng che là một loại clip mới
+
+`ClipKind::Censor { shape: Rect | Ellipse, feather, mode: Blur(r) | Pixelate(block) | Solid(color), follow }`
+
+- Vùng che hoạt động như một adjustment layer, chỉ áp trong vùng của nó. Compositor lấy ảnh đã chồng của các track bên dưới, áp blur hoặc pixelate, rồi trộn lại qua mask hình chữ nhật hoặc elip có feather.
+- Lý do không làm thành effect có tham số vùng trên clip video: cách đó chỉ che được một clip, và vướng khi có transition.
+
+## Thuật toán
+
+Chỉ dùng mã và model có giấy phép MIT, Apache hoặc BSD. Tự viết theo bài báo, không chép mã OpenCV contrib.
+
+- **Pha 1, cổ điển, không cần model:**
+  - Thuật toán chính: KLT, tức optical flow nhiều tầng trên các điểm góc trong khung. Từ các điểm đó ước lượng phép biến đổi similarity (dịch, scale, xoay), loại điểm nhiễu bằng RANSAC.
+  - Phục hồi khi lạc: so khớp mẫu NCC đa tỉ lệ.
+  - Chạy CPU trên ảnh xám đã thu nhỏ, đọc từ proxy nếu có.
+  - Mỗi frame có độ tin cậy (confidence).
+- **Pha 3, model NN:**
+  - Ứng viên: NanoTrack (Apache-2.0, khoảng 1–2 MB, khá chắc về giấy phép) và LightTrack (MIT).
+  - Phải thêm vào runtime WGSL:
+    - cross-correlation depthwise, dùng template làm kernel động lúc chạy;
+    - crop và resize theo vùng;
+    - giải mã khung bao.
+  - Model host trên release của FFmpegGpuFilter (`models-tracking-v1`), giống model tách nền.
+- **Pha 4:**
+  - Detector khuôn mặt YuNet (MIT) hoặc BlazeFace (Apache) để tự động che mặt.
+  - Tracking phối cảnh 4 góc.
+
+## Trải nghiệm người dùng
+
+- **Chọn vật:** inspector của clip video có mục "Tracking" với nút "Chọn vật". Nút này bật chế độ vẽ khung trên preview, dùng lại cơ chế kéo của `placement.rs`.
+- **Chạy tracker:** các nút Track tiến, Track lùi, Track 1 frame và Dừng.
+  - Tracker chạy ở worker nền, có tiến độ và huỷ được.
+  - Preview vẽ đường quỹ đạo.
+  - Timeline có dải màu theo độ tin cậy, và chấm ở những frame đặt tay.
+- **Sửa chỗ lạc:**
+  - Tới frame bị lạc, kéo lại khung để tạo một sample đặt tay, rồi track tiếp.
+  - Tracker chạy từ khung tay ra hai phía, dừng ở khung tay kế tiếp.
+  - Khi độ tin cậy xuống thấp, tracker dừng và đánh dấu đỏ để người dùng sửa.
+- **Gắn overlay:**
+  - "Bám theo track…" trên sticker, text hoặc vùng che.
+  - Menu "Thêm vùng che bám vật".
+  - Mặc định chỉ bám vị trí; scale và xoay là hai checkbox.
+- **Agent và MCP:** `track_create`, `track_run` (bất đồng bộ, trả về id công việc), `track_status`, `track_set_sample`, `track_smooth`, `clip_follow_set`, `clip_follow_clear`, `censor_add`, `track_bake_keyframes`.
+
+## Các pha
+
+| Pha | Phạm vi | Chạm tới | Test |
+|---|---|---|---|
+| P0 | Dữ liệu `MotionTrack`, `Follow`, `ClipKind::Censor` (serde, validate, edit khi split/trim/xoá clip tham chiếu); hàm `follow_transform` trong render/schedule; bước che vùng trong compositor (đọc ảnh các layer dưới, blur/pixelate, mask có feather) | engine: `project.rs`, `render.rs`, `schedule.rs`, `edit.rs`, `validate.rs`; d3d12-backend: `compositor.rs` | Test engine ánh xạ qua split/speed/reverse/`source_in`; test so ảnh mẫu cho vùng che |
+| P1 | Tracker cổ điển (KLT + similarity + NCC phục hồi, có confidence); worker đọc frame qua decoder hoặc proxy, readback ảnh xám, tiến độ và huỷ | module mới `engine/src/tracking/` hoặc crate `gpufx-track`; `gpufx-editor/src/tracking.rs` | Chuỗi ảnh tổng hợp (ô vuông dịch, xoay, scale), sai số dưới 1 px; test huỷ |
+| P2 | Trải nghiệm: vẽ khung, track tiến/lùi, sửa tay, làm mượt, gắn overlay, undo, bake keyframe, tool agent/MCP, i18n | `ui/inspector.rs`, `ui/placement.rs`, `ui/player.rs`, timeline, `agent/*`, `gpufx-mcp/src/tools.rs` | Test logic gắn và offset, test lệnh agent |
+| P3 | Tracker NN (NanoTrack): thêm op vào `gpufx-core/nn` trên nhánh của submodule FFmpegGpuFilter (báo phiên ffmpeggpufilter trước); release model; tổng quát `matting_models.rs` thành bộ tải model chung; chế độ Nhanh/Bền | submodule FFmpegGpuFilter, `matting_models.rs` | So từng op với model gốc; so khung bao trên clip mẫu |
+| P4 (tuỳ chọn) | Tự động che mặt (detector + ghép theo IoU), tracking phối cảnh 4 góc | như P3 | |
+
+## Rủi ro
+
+- **Compositor:** chưa có adjustment layer, phải đổi cách chồng layer. Đây là phần tốn công nhất và ảnh hưởng tới transition.
+- **Readback GPU sang CPU:** tracker chạy offline nên tốc độ chấp nhận được, nhưng ảnh xám phải đúng góc xoay hiển thị và chuyển HDR về SDR.
+- **Clip nền có transform hoặc keyframe riêng:** ánh xạ phải lấy transform của clip nền tại cùng thời điểm.
+- **Vật ra khỏi khung hoặc bị che khuất:** cần ngưỡng độ tin cậy, và quy định overlay làm gì khi lạc: giữ vị trí cuối hay ẩn.
+
+## Câu hỏi cần chốt
+
+| # | Câu hỏi | Đề xuất (tạm dùng tới khi chốt) |
+|---|---|---|
+| Q1 | Lưu track riêng hay bake thành keyframe? | Track riêng, có thêm nút Bake |
+| Q2 | Vùng che là clip overlay hay effect trên clip video? | Clip overlay riêng (adjustment layer chỉ áp trong vùng) |
+| Q3 | Hình dạng vùng che | Chữ nhật và elip có feather ở P0; đa giác vẽ tay để sau |
+| Q4 | P1 bám những gì? | Vị trí, scale và xoay; phối cảnh 4 góc để P4 |
+| Q5 | Có chạy tracker trên proxy khi có proxy không? | Có |
+| Q6 | Model NN ở P3 | NanoTrack, host trên release FFmpegGpuFilter |
+| Q7 | Khi lạc thì làm gì? | Dừng, đánh dấu đỏ để sửa tay |
+| Q8 | Overlay mặc định bám scale và xoay không? | Không, chỉ vị trí; scale và xoay là checkbox |
+| Q9 | Tự động che mặt | Để P4, dùng YuNet |
+| Q10 | Track lưu ở cấp project theo file nguồn hay theo từng clip? | Cấp project theo file nguồn |
