@@ -345,3 +345,44 @@ fn validation_refuses_an_anchor_the_reference_clip_does_not_show() {
     let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 3 * SECOND);
     assert!(validate(&p, &AcceptAll).iter().any(|error| matches!(error, ValidationError::InvalidFollow { .. })));
 }
+
+#[test]
+fn baking_a_follow_writes_keyframes_where_the_follower_showed_and_drops_the_follow() {
+    let mut p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
+    p.tracks[1].clips[0].follow.as_mut().unwrap().link.follow_scale = true;
+    let before: Vec<(f64, f64)> = [0, 15, 30, 59].iter().map(|frame| middle(&p, *frame)).collect();
+    let key = ClipKey { track: 1, clip: 0 };
+    let baked = engine::bake_follow(&p, key, 1.0).unwrap();
+    let clip = &baked.tracks[1].clips[0];
+    assert!(clip.follow.is_none(), "the follow goes");
+    let xs = &clip.motion.keyframes[&ClipProperty::X];
+    assert_eq!(xs.len(), 60, "one keyframe per output frame");
+    assert!(clip.motion.keyframes.contains_key(&ClipProperty::Width), "it followed the scale");
+    assert!(!clip.motion.keyframes.contains_key(&ClipProperty::Rotation), "it did not follow the turn");
+    for (frame, expected) in [0, 15, 30, 59].iter().zip(before) {
+        close(middle(&baked, *frame), expected);
+    }
+    assert!(matches!(engine::bake_follow(&baked, key, 1.0), Err(EditError::NotFollowing { .. })));
+}
+
+#[test]
+fn smoothing_a_track_reaches_every_follower() {
+    let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
+    let smooth = engine::set_track_smooth(&p, 7, 0.5).unwrap();
+    assert_eq!(smooth.tracks[1].clips[0].follow.unwrap().link.smooth, 0.5);
+    assert!(matches!(engine::set_track_smooth(&p, 8, 0.5), Err(EditError::MotionTrackNotFound { id: 8 })));
+    assert!(engine::set_track_smooth(&p, 7, 5.0).is_err(), "past the largest smoothing");
+}
+
+#[test]
+fn a_point_of_the_picture_maps_to_the_frame_and_back() {
+    let mut reference = clip("a.mp4", 0, 0, 2 * SECOND);
+    reference.placement = Some(ClipPlacement { x: 0.1, y: 0.2, width: 0.5 });
+    reference.motion.rotation = 30.0;
+    let p = rig(reference, 0);
+    let mapping = p.clip_frame_mapping(0, 0, Time::ZERO, ASPECT).unwrap();
+    let middle = mapping.to_frame([0.5, 0.5]);
+    assert!((middle[0] - 0.35).abs() < 1e-9 && (middle[1] - 0.45).abs() < 1e-9, "{middle:?}");
+    let back = mapping.to_source(mapping.to_frame([0.2, 0.9]));
+    assert!((back[0] - 0.2).abs() < 1e-9 && (back[1] - 0.9).abs() < 1e-9, "{back:?}");
+}

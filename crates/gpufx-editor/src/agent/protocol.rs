@@ -332,6 +332,7 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::NotCensor { .. } => "not_censor",
         EditError::MotionTrackNotFound { .. } => "motion_track_not_found",
         EditError::TrackRunStale { .. } => "track_run_stale",
+        EditError::NotFollowing { .. } => "not_following",
         EditError::MarkerNotFound { .. } => "marker_not_found",
         EditError::Invalid(_) => "invalid_project",
     }

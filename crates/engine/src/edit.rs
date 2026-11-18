@@ -53,7 +53,7 @@ use crate::audio_schedule::sample_position;
 use crate::frame_rate::FrameRate;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
-use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipMatte, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE, CensorContent, EffectRegion, CENSOR_SOURCE};
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipMatte, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE, CensorContent, EffectRegion, CENSOR_SOURCE, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 use crate::tracking::{Follow, MotionTrack, TrackSample};
 use crate::render::ClipKey;
 use crate::time::Time;
@@ -119,6 +119,8 @@ pub enum EditError {
     /// A tracker run ended after its motion track changed under it: another file, or the sample
     /// it started from moved or went. Its samples would no longer fit, so none are written.
     TrackRunStale { id: u32 },
+    /// The clip follows no motion track.
+    NotFollowing { key: ClipKey },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -183,6 +185,7 @@ impl fmt::Display for EditError {
             MotionTrackNotFound { id } => write!(f, "motion track {id} does not exist"),
             TrackRunStale { id } => write!(f, "motion track {id} changed while it was being tracked; the run was not written"),
             MarkerNotFound { marker } => write!(f, "marker {marker} does not exist"),
+            NotFollowing { key } => write!(f, "track {}, clip {}: the clip follows no motion track", key.track, key.clip),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
                 for error in errors {
@@ -1472,6 +1475,83 @@ pub fn remove_motion_track(project: &Project, id: u32) -> Result<Project, EditEr
 pub fn set_track_sample(project: &Project, id: u32, sample: TrackSample) -> Result<Project, EditError> {
     let mut next = project.clone();
     next.motion_tracks.iter_mut().find(|track| track.id == id).ok_or(EditError::MotionTrackNotFound { id })?.upsert(sample);
+    finish(project, next)
+}
+
+/// Sets the smoothing of everything that follows motion track `id`: the clips that follow it and
+/// the effect regions linked to it, `smooth` seconds of source time (0 is off).
+pub fn set_track_smooth(project: &Project, id: u32, smooth: f64) -> Result<Project, EditError> {
+    project.motion_track(id).ok_or(EditError::MotionTrackNotFound { id })?;
+    let mut next = project.clone();
+    for track in &mut next.tracks {
+        for clip in &mut track.clips {
+            if let Some(follow) = clip.follow.as_mut().filter(|follow| follow.link.track_id == id) {
+                follow.link.smooth = smooth;
+            }
+            for effect in &mut clip.effects {
+                if let Some(link) = effect.region.as_mut().and_then(|region| region.link.as_mut()).filter(|link| link.track_id == id) {
+                    link.smooth = smooth;
+                }
+            }
+        }
+    }
+    finish(project, next)
+}
+
+/// The most keyframes [`bake_follow`] writes for one property.
+pub const MAX_BAKED_KEYFRAMES: usize = crate::keyframe::MAX_KEYFRAMES;
+
+/// Turns the follow of clip `key` (a picture of `source_aspect`) into keyframes: X and Y at every
+/// output frame of the clip (every few frames for a clip longer than [`MAX_BAKED_KEYFRAMES`]
+/// frames), Width too when it follows the scale and Rotation when it follows the turn, each set
+/// to where the clip shows with the follow; then the follow goes. The keyframes it writes replace
+/// those of the same properties. A preset animation of a text clip moves on top as before, only
+/// now after the motion rather than before it.
+pub fn bake_follow(project: &Project, key: ClipKey, source_aspect: f64) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let clip = clip_of(project, key)?;
+    let follow = clip.follow.ok_or(EditError::NotFollowing { key })?;
+    let output_aspect = f64::from(project.output.width) / f64::from(project.output.height.max(1));
+    let rate = project.output.frame_rate;
+    let first = rate.frame_at(clip.start).max(0);
+    let end = clip.start.saturating_add(clip.duration);
+    let count = (rate.frames_before(end) - first).max(1) as usize;
+    let step = count.div_ceil(MAX_BAKED_KEYFRAMES - 1).max(1);
+    let mut times: Vec<Time> = (0..count).step_by(step).filter_map(|i| rate.frame_start(first + i as i64)).map(|t| t.max(clip.start)).collect();
+    let last = rate.frame_start(first + count as i64 - 1).unwrap_or(clip.start).max(clip.start);
+    // With frames skipped, the last frame still gets its keyframe.
+    if step > 1 && times.last().is_none_or(|at| *at < last) {
+        times.push(last);
+    }
+    times.dedup();
+    let mut baked: [Vec<Keyframe>; 4] = Default::default();
+    for t in times {
+        let offset = t.saturating_sub(clip.start);
+        let mut transform = clip.transform_at(offset);
+        crate::schedule::follow_transform(project, &follow, &mut transform, t);
+        let rect = transform.rect(output_aspect, source_aspect);
+        let values = [
+            rect.x.clamp(-MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_OFFSET),
+            rect.y.clamp(-MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_OFFSET),
+            rect.width.clamp(MIN_PLACEMENT_WIDTH, MAX_PLACEMENT_WIDTH),
+            transform.rotation.clamp(-crate::keyframe::MAX_ROTATION, crate::keyframe::MAX_ROTATION),
+        ];
+        for (keys, value) in baked.iter_mut().zip(values) {
+            keys.push(Keyframe { at: offset, value, easing: Easing::Linear });
+        }
+    }
+    let mut next = project.clone();
+    let target = clip_mut(&mut next, key)?;
+    let [x, y, width, rotation] = baked;
+    target.motion.keyframes.insert(ClipProperty::X, x);
+    target.motion.keyframes.insert(ClipProperty::Y, y);
+    if follow.link.follow_scale {
+        target.motion.keyframes.insert(ClipProperty::Width, width);
+    }
+    if follow.link.follow_rotation {
+        target.motion.keyframes.insert(ClipProperty::Rotation, rotation);
+    }
+    target.follow = None;
     finish(project, next)
 }
 

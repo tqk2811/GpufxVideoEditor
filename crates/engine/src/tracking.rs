@@ -424,3 +424,52 @@ pub fn follow_region(project: &Project, clip: &Clip, link: &TrackLink, region: R
     let [cx, cy] = pose.map([region.cx, region.cy], aspect);
     RegionBox { cx, cy, w: region.w * scale, h: region.h * scale, angle: region.angle + rotation }
 }
+
+/// Where the picture of one clip lies in the output frame at one moment: its placed rectangle
+/// (parts of the frame) turned `rotation` clockwise degrees around its middle. It takes a point of
+/// the picture (parts of its width and height, as a [`TrackSample`] is) to the frame and back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameMapping {
+    pub rect: crate::project::PlacedRect,
+    pub rotation: f64,
+    /// Width over height of the output frame.
+    pub output_aspect: f64,
+}
+
+impl FrameMapping {
+    /// The point of the frame that shows point `point` of the picture.
+    pub fn to_frame(&self, point: [f64; 2]) -> [f64; 2] {
+        let rect = self.rect;
+        let (x, y) = (rect.x + point[0] * rect.width, rect.y + point[1] * rect.height);
+        let (mx, my) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (sine, cosine) = self.rotation.to_radians().sin_cos();
+        let (dx, dy) = ((x - mx) * self.output_aspect, y - my);
+        [mx + (cosine * dx - sine * dy) / self.output_aspect, my + sine * dx + cosine * dy]
+    }
+
+    /// The point of the picture shown at point `point` of the frame: undoes [`FrameMapping::to_frame`].
+    pub fn to_source(&self, point: [f64; 2]) -> [f64; 2] {
+        let rect = self.rect;
+        let (mx, my) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+        let (sine, cosine) = self.rotation.to_radians().sin_cos();
+        let (dx, dy) = ((point[0] - mx) * self.output_aspect, point[1] - my);
+        let (x, y) = (mx + (cosine * dx + sine * dy) / self.output_aspect, my - sine * dx + cosine * dy);
+        let width = if rect.width.abs() > 1.0e-12 { rect.width } else { 1.0 };
+        let height = if rect.height.abs() > 1.0e-12 { rect.height } else { 1.0 };
+        [(x - rect.x) / width, (y - rect.y) / height]
+    }
+}
+
+impl Project {
+    /// How the picture of clip `clip` of track `track`, a source of `source_aspect`, lies in the
+    /// output frame at timeline time `t`, its keyframes and preset animations applied. A clip that
+    /// follows a motion track is taken at its own place, without the motion.
+    pub fn clip_frame_mapping(&self, track: usize, clip: usize, t: Time, source_aspect: f64) -> Option<FrameMapping> {
+        let lane = self.tracks.get(track)?;
+        lane.clips.get(clip)?;
+        let mut transform = crate::schedule::clip_transform_at(lane, clip, t);
+        transform.follow = None;
+        let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
+        Some(FrameMapping { rect: transform.rect(output_aspect, source_aspect), rotation: transform.rotation, output_aspect })
+    }
+}
