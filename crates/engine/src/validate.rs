@@ -2,7 +2,7 @@
 
 use crate::keyframe::{keyframes_problem, ClipProperty, MAX_ROTATION};
 use crate::frame_rate::FrameRate;
-use crate::project::{speed_in_range, Clip, Project, TextContent, TextOutline, TextPaint, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINES, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOWS, MAX_TEXT_SHADOW_BLUR, MAX_TEXT_SHADOW_DISTANCE, TEXT_TEXTURE_SCALE_RANGE, MAX_TEXTURE_CELLS, GLOW_FALLOFF_RANGE, MAX_BLOOM_DIR, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source};
+use crate::project::{speed_in_range, Clip, Project, TextContent, TextOutline, TextPaint, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINES, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOWS, MAX_TEXT_SHADOW_BLUR, MAX_TEXT_SHADOW_DISTANCE, TEXT_TEXTURE_SCALE_RANGE, MAX_TEXTURE_CELLS, GLOW_FALLOFF_RANGE, MAX_BLOOM_DIR, MAX_GLOW_INTENSITY, MAX_GLOW_RADIUS, MAX_LETTER_SPACING, TEXT_SOURCE, TEXT_WEIGHT_RANGE, MAX_SPEED, MIN_SPEED, MAX_PITCH_SEMITONES, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipBeats, is_image_source, CENSOR_SOURCE, EffectRegion};
 use crate::clip_animation::{find_preset, is_pack_preset, preset_is_per_unit, AnimationGroup, ANIMATION_PRESETS};
 use crate::time::Time;
 use std::collections::HashMap;
@@ -362,6 +362,14 @@ pub enum ValidationError {
         /// Ticks of that clip left for this transition.
         usable: Time,
     },
+    /// A motion track (index in `motion_tracks`) is not usable; `problem` says why.
+    InvalidMotionTrack { track: usize, problem: String },
+    /// The `follow` of a clip is not usable; `problem` says why.
+    InvalidFollow { track: usize, clip: usize, problem: String },
+    /// A censor clip is not usable; `problem` says why.
+    InvalidCensor { track: usize, clip: usize, problem: String },
+    /// The region of an effect is not usable; `problem` says why.
+    InvalidEffectRegion { track: usize, clip: usize, effect: usize, problem: String },
 }
 
 impl fmt::Display for ValidationError {
@@ -474,6 +482,10 @@ impl fmt::Display for ValidationError {
             MarkersOutOfOrder { marker } => write!(f, "marker {marker}: comes before the marker ahead of it; markers must be sorted by time"),
             MarkerLabelTooLong { marker, length } => write!(f, "marker {marker}: the label has {length} characters, more than {MAX_MARKER_LABEL}"),
             InvalidBeats { source, problem } => write!(f, "beats of {source:?}: {problem}"),
+            InvalidMotionTrack { track, problem } => write!(f, "motion track {track}: {problem}"),
+            InvalidFollow { track, clip, problem } => write!(f, "track {track}, clip {clip}: follow: {problem}"),
+            InvalidCensor { track, clip, problem } => write!(f, "track {track}, clip {clip}: censor: {problem}"),
+            InvalidEffectRegion { track, clip, effect, problem } => write!(f, "track {track}, clip {clip}, effect {effect}: region: {problem}"),
             FadesExceedClip { track, clip, fade_in, fade_out, duration } => write!(
                 f,
                 "track {track}, clip {clip}: fade_in {fade_in} plus fade_out {fade_out} is longer than duration {duration}"
@@ -631,6 +643,13 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
         }
     }
 
+    for (m, motion) in project.motion_tracks.iter().enumerate() {
+        let problem = motion.problem().or_else(|| project.motion_tracks[..m].iter().any(|other| other.id == motion.id).then(|| format!("id {} is used twice", motion.id)));
+        if let Some(problem) = problem {
+            errors.push(InvalidMotionTrack { track: m, problem });
+        }
+    }
+
     for (t, track) in project.tracks.iter().enumerate() {
         if let Some(subtitle) = &track.subtitle {
             if track.kind != crate::TrackKind::Text {
@@ -727,6 +746,17 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             } else if clip.source == TEXT_SOURCE {
                 // A text source without its text: nothing to draw, and no file to ask the resolver about.
                 errors.push(EmptyText { track: t, clip: c });
+            } else if clip.source == CENSOR_SOURCE || clip.censor.is_some() {
+                // A censor region names no file either.
+                let problem = match &clip.censor {
+                    None => Some("a censor source without its region".to_owned()),
+                    Some(_) if clip.source != CENSOR_SOURCE => Some(format!("source must be {CENSOR_SOURCE:?}")),
+                    Some(_) if !clip.effects.is_empty() => Some("a censor region takes no effects".to_owned()),
+                    Some(censor) => censor.problem(),
+                };
+                if let Some(problem) = problem {
+                    errors.push(InvalidCensor { track: t, clip: c, problem });
+                }
             } else if track.hidden {
                 // Its structure is still checked below.
             } else if let Some(reason) = resolver.source_problem(&clip.source) {
@@ -821,7 +851,25 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
                     duration: clip.media_duration(),
                 });
             }
+            if let Some(follow) = &clip.follow {
+                if let Some(problem) = project.follow_problem(follow, t, c) {
+                    errors.push(InvalidFollow { track: t, clip: c, problem });
+                }
+            }
             for (e, effect) in clip.effects.iter().enumerate() {
+                if let Some(region) = &effect.region {
+                    let problem = region.problem().or_else(|| (!EffectRegion::takes_region(&effect.package)).then(|| format!("{} takes no region", effect.package))).or_else(|| {
+                        let link = region.link?;
+                        match project.motion_track(link.track_id) {
+                            None => Some(format!("no motion track {}", link.track_id)),
+                            Some(motion) if motion.media_path != clip.source => Some(format!("motion track {} is of {}, not of the clip's source", link.track_id, motion.media_path)),
+                            Some(_) => None,
+                        }
+                    });
+                    if let Some(problem) = problem {
+                        errors.push(InvalidEffectRegion { track: t, clip: c, effect: e, problem });
+                    }
+                }
                 if track.is_audio() {
                     errors.push(AudioTrackEffect {
                         track: t,
@@ -906,6 +954,12 @@ pub fn validate(project: &Project, resolver: &dyn Resolver) -> Vec<ValidationErr
             }
             let a = &track.clips[tr.after_clip];
             let b = &track.clips[tr.after_clip + 1];
+            if a.is_censor() || b.is_censor() {
+                // A censor region changes what is under it; it has no picture to blend into another.
+                let clip = if a.is_censor() { tr.after_clip } else { tr.after_clip + 1 };
+                errors.push(InvalidCensor { track: t, clip, problem: "a censor region takes no transition".to_owned() });
+                continue;
+            }
             if a.end() != Some(b.start) {
                 errors.push(TransitionNotAdjacent {
                     track: t,

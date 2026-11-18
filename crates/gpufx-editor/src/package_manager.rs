@@ -583,14 +583,14 @@ mod tests {
     }
 
     fn clip(source: &str) -> Clip {
-        Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(900), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default() }
+        Clip { source: source.to_owned(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(900), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, censor: None }
     }
 
     fn project_using(effect: &str) -> Project {
         let mut sticker = clip("asset:sticker/mine/images/a.png");
-        sticker.effects.push(Effect { package: effect.to_owned(), params: Default::default(), keyframes: Default::default() });
+        sticker.effects.push(Effect { package: effect.to_owned(), params: Default::default(), keyframes: Default::default(), region: None });
         let track = Track { kind: TrackKind::Video, clips: vec![clip("video.mp4"), sticker], transitions: Vec::new(), locked: false, hidden: false, subtitle: None };
-        Project { version: engine::SUPPORTED_VERSION, output: Output { width: 16, height: 16, frame_rate: engine::FrameRate::whole(30), audio: None }, tracks: vec![track], markers: Vec::new(), beats: Default::default() }
+        Project { version: engine::SUPPORTED_VERSION, output: Output { width: 16, height: 16, frame_rate: engine::FrameRate::whole(30), audio: None }, tracks: vec![track], markers: Vec::new(), beats: Default::default(), motion_tracks: Vec::new() }
     }
 
     #[test]

@@ -19,6 +19,7 @@
 use crate::project::{Clip, ClipPlacement, Effect, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 use crate::clip_animation::{animation_max_scale, animation_rotates, AnimationPose};
 use crate::time::Time;
+use crate::tracking::FollowPose;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::borrow::Cow;
@@ -255,6 +256,9 @@ pub struct ClipTransform {
     pub stretch: [f64; 2],
     /// Blur radius of the placed picture, in parts of the output frame height. 0 is no blur.
     pub blur: f64,
+    /// How a clip that follows a motion track moves now, after everything above (see
+    /// [`crate::tracking`]). Its rotation is already counted in `rotation`.
+    pub follow: Option<FollowPose>,
 }
 
 impl Default for ClipTransform {
@@ -266,7 +270,7 @@ impl Default for ClipTransform {
 impl ClipTransform {
     /// A clip with no motion at all at `placement`.
     pub fn still(placement: Option<ClipPlacement>) -> Self {
-        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0, stretch: [1.0, 1.0], blur: 0.0 }
+        Self { placement, x: None, y: None, width: None, opacity: 1.0, rotation: 0.0, rotates: false, shift: [0.0, 0.0], zoom: 1.0, stretch: [1.0, 1.0], blur: 0.0, follow: None }
     }
 
     /// This transform with `pose` of a preset animation on top.
@@ -307,6 +311,13 @@ impl ClipTransform {
         }
         rect.x += self.shift[0];
         rect.y += self.shift[1];
+        if let Some(pose) = self.follow {
+            let [x, y] = pose.map([rect.x + rect.width / 2.0, rect.y + rect.height / 2.0], output_aspect);
+            rect.width *= pose.scale;
+            rect.height *= pose.scale;
+            rect.x = x - rect.width / 2.0;
+            rect.y = y - rect.height / 2.0;
+        }
         rect
     }
 
@@ -333,6 +344,7 @@ impl Clip {
             zoom: 1.0,
             stretch: [1.0, 1.0],
             blur: 0.0,
+            follow: None,
         }
     }
 
@@ -437,7 +449,7 @@ pub fn effects_at(effects: &[Effect], offset: Time) -> Cow<'_, [Effect]> {
                     params.insert(name.clone(), Value::from(value));
                 }
             }
-            Effect { package: effect.package.clone(), params, keyframes: BTreeMap::new() }
+            Effect { package: effect.package.clone(), params, keyframes: BTreeMap::new(), region: effect.region }
         })
         .collect();
     Cow::Owned(resolved)
@@ -596,7 +608,7 @@ mod tests {
 
     #[test]
     fn keyed_params_of_an_effect_are_filled_in_only_when_there_are_some() {
-        let plain = Effect { package: "a".into(), params: serde_json::Map::new(), keyframes: BTreeMap::new() };
+        let plain = Effect { package: "a".into(), params: serde_json::Map::new(), keyframes: BTreeMap::new(), region: None };
         assert!(matches!(effects_at(std::slice::from_ref(&plain), at(0)), Cow::Borrowed(_)));
         let mut keyed = plain.clone();
         keyed.keyframes.insert("amount".into(), vec![key(0, 0.0, Easing::Linear), key(100, 4.0, Easing::Linear)]);

@@ -117,7 +117,7 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         step(&mut session, "clip_split", json!({"clip": clip0, "at": SECOND}), next)
     };
     expected = {
-        let next = engine::add_effect(&expected, key(0, 0), Effect { package: "invert".into(), params: Map::new(), keyframes: Default::default() }).unwrap();
+        let next = engine::add_effect(&expected, key(0, 0), Effect { package: "invert".into(), params: Map::new(), keyframes: Default::default(), region: None }).unwrap();
         step(&mut session, "effect_add", json!({"clip": clip0, "package": "invert"}), next)
     };
     expected = {

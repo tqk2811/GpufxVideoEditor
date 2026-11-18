@@ -162,8 +162,41 @@ pub fn layers_at_frame(project: &Project, frame: i64) -> Vec<Layer<'_>> {
         .iter()
         .enumerate()
         .filter(|(_, track)| !track.is_audio() && !track.hidden)
-        .filter_map(|(i, track)| content_at(track, t).map(|content| Layer { track: i, content }))
+        .filter_map(|(i, track)| content_at(track, t).map(|content| Layer { track: i, content: with_follow(project, content, t) }))
         .collect()
+}
+
+/// `content` with the clips that follow a motion track moved where the track puts them at `t`.
+fn with_follow<'a>(project: &'a Project, content: LayerContent<'a>, t: Time) -> LayerContent<'a> {
+    let follow = |mut sample: SourceSample<'a>| {
+        if let Some(follow) = &sample.model.follow {
+            follow_transform(project, follow, &mut sample.transform, t);
+        }
+        sample
+    };
+    match content {
+        LayerContent::Clip(sample) => LayerContent::Clip(follow(sample)),
+        LayerContent::Transition { package, params, from, to, progress } => LayerContent::Transition { package, params, from: follow(from), to: follow(to), progress },
+    }
+}
+
+/// Moves `transform`, that of a clip following `follow`, where the motion track puts it at timeline
+/// time `t`: the track is read at the source time the reference clip shows at `t` (its trim, speed
+/// and direction applied), mapped through the place and transform of the reference clip at `t` to
+/// the output frame, and the clip moves by how far the object moved since the anchor. Its own place
+/// and keyframes are where it stands at the anchor, so they add to the motion. Leaves it as it is
+/// when the track cannot be read.
+pub fn follow_transform(project: &Project, follow: &crate::tracking::Follow, transform: &mut ClipTransform, t: Time) {
+    if let Some(pose) = project.follow_pose(follow, t) {
+        transform.rotation += pose.rotation;
+        transform.rotates |= follow.link.follow_rotation;
+        transform.follow = Some(pose);
+    }
+}
+
+/// The transform of clip `clip` of `track` at timeline time `t`, its preset animations included.
+pub(crate) fn clip_transform_at(track: &Track, clip: usize, t: Time) -> ClipTransform {
+    sample_at(track, clip, t).transform
 }
 
 fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {

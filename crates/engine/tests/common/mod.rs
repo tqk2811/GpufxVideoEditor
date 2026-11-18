@@ -27,6 +27,8 @@ pub fn clip(source: &str, start: i64, source_in: i64, duration: i64) -> Clip {
         voice: Default::default(),
         reverse: false,
         matte: Default::default(),
+        follow: None,
+        censor: None,
     }
 }
 
@@ -35,6 +37,7 @@ pub fn effect(package: &str) -> Effect {
         package: package.to_string(),
         params: Default::default(),
         keyframes: Default::default(),
+        region: None,
     }
 }
 
@@ -69,7 +72,7 @@ pub fn project_at(frame_rate: engine::FrameRate, tracks: Vec<Track>) -> Project 
             audio: None,
         },
         tracks,
-        markers: Vec::new(), beats: Default::default(),
+        markers: Vec::new(), beats: Default::default(), motion_tracks: Vec::new(),
     }
 }
 

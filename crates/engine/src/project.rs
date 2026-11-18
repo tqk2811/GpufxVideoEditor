@@ -32,6 +32,10 @@ pub struct Project {
     /// it. Left out of the file when empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub beats: BTreeMap<String, Arc<ClipBeats>>,
+    /// The motion tracks of objects in the source files, which overlays and effect regions follow
+    /// (see [`crate::tracking`]). Left out of the file when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub motion_tracks: Vec<crate::tracking::MotionTrack>,
 }
 
 /// The longest label of a [`Marker`], in characters.
@@ -153,10 +157,11 @@ impl TrackKind {
     /// - text: text clips only.
     pub fn accepts_source(self, source: &str) -> bool {
         let text = source == TEXT_SOURCE;
+        let censor = source == CENSOR_SOURCE;
         match self {
-            TrackKind::Video => !text && !is_sticker_source(source),
-            TrackKind::Audio => !text && !is_image_source(source) && !is_sticker_source(source),
-            TrackKind::Sticker => !text && (is_image_source(source) || is_sticker_source(source)),
+            TrackKind::Video => !text && !censor && !is_sticker_source(source),
+            TrackKind::Audio => !text && !censor && !is_image_source(source) && !is_sticker_source(source),
+            TrackKind::Sticker => !text && (is_image_source(source) || is_sticker_source(source) || source == CENSOR_SOURCE),
             TrackKind::Text => text,
         }
     }
@@ -268,6 +273,160 @@ pub struct Clip {
     /// the file when off.
     #[serde(default, skip_serializing_if = "ClipMatte::is_off")]
     pub matte: ClipMatte,
+    /// Moves the picture with a motion track seen through another clip. Absent: the clip stays
+    /// where its place and keyframes put it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow: Option<crate::tracking::Follow>,
+    /// What a censor region hides and how. Present only on censor clips, whose `source` is
+    /// [`CENSOR_SOURCE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub censor: Option<CensorContent>,
+}
+
+/// The `source` of every censor clip. Like [`TEXT_SOURCE`] it names no file.
+pub const CENSOR_SOURCE: &str = "censor:";
+
+/// The shape of a censor region or of the region of an effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegionShape {
+    #[default]
+    Rect,
+    Ellipse,
+}
+
+/// The largest blur of a censor region, in pixels of a 1080-line frame.
+pub const MAX_CENSOR_BLUR: f64 = 120.0;
+/// The largest block of a pixelated censor region, in pixels of a 1080-line frame.
+pub const MAX_CENSOR_BLOCK: f64 = 200.0;
+/// The narrowest and widest shape (width over height) of a censor region.
+pub const CENSOR_ASPECT_RANGE: std::ops::RangeInclusive<f64> = 0.01..=100.0;
+
+/// How a censor region hides what is under it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", tag = "kind")]
+pub enum CensorMode {
+    /// A blur of `radius` pixels of a 1080-line frame.
+    Blur { radius: f64 },
+    /// Blocks of `block` pixels of a 1080-line frame.
+    Pixelate { block: f64 },
+    /// A box of one colour.
+    Solid { color: Rgba },
+}
+
+impl Default for CensorMode {
+    fn default() -> Self {
+        CensorMode::Blur { radius: 30.0 }
+    }
+}
+
+impl CensorMode {
+    /// Why the mode cannot be used, if it cannot.
+    pub fn problem(self) -> Option<String> {
+        match self {
+            CensorMode::Blur { radius } if !(radius.is_finite() && (0.0..=MAX_CENSOR_BLUR).contains(&radius)) => Some(format!("blur radius {radius} not from 0 to {MAX_CENSOR_BLUR}")),
+            CensorMode::Pixelate { block } if !(block.is_finite() && (1.0..=MAX_CENSOR_BLOCK).contains(&block)) => Some(format!("pixelate block {block} not from 1 to {MAX_CENSOR_BLOCK}")),
+            _ => None,
+        }
+    }
+}
+
+/// A censor region: a clip of a sticker track that changes the picture of the tracks under it
+/// inside its box, as an adjustment layer limited to that box. Its box is placed as a sticker is
+/// ([`Clip::placement`], keyframes, [`Clip::follow`]), with the shape `aspect`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CensorContent {
+    #[serde(default)]
+    pub shape: RegionShape,
+    /// Width over height of the box, in output pixels.
+    pub aspect: f64,
+    /// Softness of the edge, in parts of half the smaller side of the box, 0 to 1.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub feather: f64,
+    #[serde(default)]
+    pub mode: CensorMode,
+}
+
+impl Default for CensorContent {
+    fn default() -> Self {
+        CensorContent { shape: RegionShape::Rect, aspect: 16.0 / 9.0, feather: 0.2, mode: CensorMode::default() }
+    }
+}
+
+impl CensorContent {
+    /// Why the region cannot be drawn, if it cannot.
+    pub fn problem(&self) -> Option<String> {
+        if !(self.aspect.is_finite() && CENSOR_ASPECT_RANGE.contains(&self.aspect)) {
+            return Some(format!("aspect {} not from {} to {}", self.aspect, CENSOR_ASPECT_RANGE.start(), CENSOR_ASPECT_RANGE.end()));
+        }
+        if !(self.feather.is_finite() && (0.0..=1.0).contains(&self.feather)) {
+            return Some(format!("feather {} not from 0 to 1", self.feather));
+        }
+        self.mode.problem()
+    }
+}
+
+/// The part of the picture of its clip an effect is limited to. The effect runs on the placed
+/// picture and its result is mixed with the picture without it through this shape, so the region
+/// stays on the clip through a split or a move. Only the hiding effects take one, see
+/// [`EffectRegion::mode_of`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct EffectRegion {
+    #[serde(default)]
+    pub shape: RegionShape,
+    /// Middle, in parts of the picture width and height.
+    pub cx: f64,
+    pub cy: f64,
+    /// Size, in parts of the picture width and height.
+    pub w: f64,
+    pub h: f64,
+    /// Clockwise degrees.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub angle: f64,
+    /// Softness of the edge, as [`CensorContent::feather`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub feather: f64,
+    /// A motion track of the clip's own source the region moves with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<crate::tracking::TrackLink>,
+}
+
+/// The effect packages that take a region (by the last part of their name), with the parameter
+/// that sets their strength in output pixels.
+pub const REGION_EFFECTS: [(&str, &str); 3] = [("gaussian-blur", "radius"), ("box-blur", "radius"), ("pixelate", "block")];
+
+impl EffectRegion {
+    /// Why the region cannot be used, if it cannot.
+    pub fn problem(&self) -> Option<String> {
+        let finite = [self.cx, self.cy, self.w, self.h, self.angle].iter().all(|v| v.is_finite());
+        if !finite || self.cx.abs() > MAX_PLACEMENT_OFFSET || self.cy.abs() > MAX_PLACEMENT_OFFSET || !(0.0..=MAX_PLACEMENT_WIDTH).contains(&self.w) || !(0.0..=MAX_PLACEMENT_WIDTH).contains(&self.h) {
+            return Some("the box must be finite and within the placement limits".to_owned());
+        }
+        if !(self.feather.is_finite() && (0.0..=1.0).contains(&self.feather)) {
+            return Some(format!("feather {} not from 0 to 1", self.feather));
+        }
+        self.link.and_then(|link| link.problem())
+    }
+
+    /// Whether an effect of `package` may have a region.
+    pub fn takes_region(package: &str) -> bool {
+        let name = package.rsplit(['/', '\\']).next().unwrap_or(package);
+        REGION_EFFECTS.iter().any(|(known, _)| *known == name)
+    }
+
+    /// How the region hides, for an effect of `package` with `params`, or `None` when the package
+    /// takes no region. The strength is the package's own parameter, in output pixels of a
+    /// 1080-line frame.
+    pub fn mode_of(package: &str, params: &Map<String, Value>) -> Option<CensorMode> {
+        let name = package.rsplit(['/', '\\']).next().unwrap_or(package);
+        let (_, param) = REGION_EFFECTS.iter().find(|(known, _)| *known == name)?;
+        let value = params.get(*param).and_then(Value::as_f64);
+        Some(if name == "pixelate" {
+            CensorMode::Pixelate { block: value.unwrap_or(16.0).clamp(1.0, MAX_CENSOR_BLOCK) }
+        } else {
+            CensorMode::Blur { radius: value.unwrap_or(10.0).clamp(0.0, MAX_CENSOR_BLUR) }
+        })
+    }
 }
 
 /// The `source` of every text clip. It names no file and has no extension, so
@@ -1326,6 +1485,9 @@ pub struct Effect {
     /// Numeric parameters that change with time, by name. One of these ignores its static value.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub keyframes: BTreeMap<String, Vec<Keyframe>>,
+    /// Limits the effect to a part of the picture. Absent: the whole picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<EffectRegion>,
 }
 
 /// A transition between clip `after_clip` and the next clip of the same track.
@@ -1445,7 +1607,12 @@ impl Clip {
     /// Whether the clip shows the same picture all the time, an image or text: it has no sound,
     /// no speed and no source length to run out of.
     pub fn is_still(&self) -> bool {
-        self.is_image() || self.is_text()
+        self.is_image() || self.is_text() || self.is_censor()
+    }
+
+    /// Whether the clip is a censor region.
+    pub fn is_censor(&self) -> bool {
+        self.censor.is_some()
     }
 
     /// The still of the first source frame shown before the moving part, set by an enter
@@ -1615,7 +1782,7 @@ pub(crate) mod tests_support {
 
     /// A plain clip of one second at the start of the timeline.
     pub(crate) fn clip() -> Clip {
-        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default() }
+        Clip { source: "a.mp4".into(), start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_ticks(90_000), effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: ClipMotion::default(), text: None, animation: ClipAnimation::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, censor: None }
     }
 }
 

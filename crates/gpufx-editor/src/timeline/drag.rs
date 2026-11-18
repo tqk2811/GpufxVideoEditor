@@ -175,7 +175,7 @@ mod tests {
             version: engine::SUPPORTED_VERSION,
             output: Output { width: 1920, height: 1080, frame_rate: engine::FrameRate::whole(30), audio: None },
             tracks: Vec::new(),
-            markers: Vec::new(), beats: Default::default(),
+            markers: Vec::new(), beats: Default::default(), motion_tracks: Vec::new(),
         };
         let video = add_track(&empty, TrackKind::Video).unwrap();
         let other = add_track(&video, TrackKind::Video).unwrap();

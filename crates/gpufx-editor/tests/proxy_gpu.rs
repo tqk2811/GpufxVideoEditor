@@ -53,6 +53,7 @@ fn one_clip_project(source: &Path, seconds: i64) -> Arc<Project> {
         tracks: vec![Track { kind: TrackKind::Video, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
         markers: Vec::new(),
         beats: Default::default(),
+        motion_tracks: Vec::new(),
     })
 }
 

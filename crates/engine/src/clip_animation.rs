@@ -445,7 +445,7 @@ impl PresetEffect {
     pub fn at(&self, progress: f64) -> Effect {
         let mut params = self.params.clone();
         params.insert(self.progress.clone(), serde_json::Value::from(progress));
-        Effect { package: self.package.clone(), params, keyframes: BTreeMap::new() }
+        Effect { package: self.package.clone(), params, keyframes: BTreeMap::new(), region: None }
     }
 }
 

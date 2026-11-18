@@ -224,6 +224,7 @@ pub fn proxy_project(original: &Path, format: &VideoFormat, duration: Time) -> P
         tracks: vec![Track { kind: TrackKind::Video, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
         markers: Vec::new(),
         beats: Default::default(),
+        motion_tracks: Vec::new(),
     }
 }
 

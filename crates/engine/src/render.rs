@@ -1017,7 +1017,7 @@ mod tests {
 
     #[test]
     fn clip_cache_compares_effect_lists() {
-        let effect = |package: &str| Effect { package: package.to_owned(), params: Map::new(), keyframes: Default::default() };
+        let effect = |package: &str| Effect { package: package.to_owned(), params: Map::new(), keyframes: Default::default(), region: None };
         let mut cache: ClipCache<[Effect], i32> = ClipCache::default();
         cache.get_or_build(key(0), &[effect("blur")], || Ok::<_, ()>(1)).unwrap();
         assert_eq!(*cache.get_or_build(key(0), &[effect("sharpen")], || Ok::<_, ()>(2)).unwrap(), 2);
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[test]
     fn a_failing_preset_effect_leaves_the_clip_drawn_with_its_own_effects() {
-        let effect = |package: &str| Effect { package: package.to_owned(), params: Map::new(), keyframes: Default::default() };
+        let effect = |package: &str| Effect { package: package.to_owned(), params: Map::new(), keyframes: Default::default(), region: None };
         let own = [effect("blur")];
         let mut tried = Vec::new();
         let drawn = with_preset_fallback(&own, vec![effect("gone")], |effects| {

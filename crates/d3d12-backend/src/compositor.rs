@@ -2209,7 +2209,7 @@ mod tests {
         }
         let mut compositor = D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), 64, 36).expect("a compositor");
         let key = ClipKey { track: 0, clip: 0 };
-        let effects = [ProjectEffect { package: "packages/gpufx/ffmpeg/invert".to_owned(), params: Map::new(), keyframes: Default::default() }];
+        let effects = [ProjectEffect { package: "packages/gpufx/ffmpeg/invert".to_owned(), params: Map::new(), keyframes: Default::default(), region: None }];
         let (context, paths) = (compositor.gpu.context.clone(), compositor.paths.clone());
         compositor
             .clip_graphs

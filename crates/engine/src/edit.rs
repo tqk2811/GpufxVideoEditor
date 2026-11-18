@@ -53,7 +53,8 @@ use crate::audio_schedule::sample_position;
 use crate::frame_rate::FrameRate;
 use crate::keyframe::{keyframe_tolerance, nearest_keyframe_inside, sample_keyframes, upsert_keyframe, ClipProperty, Easing, Keyframe, KeyframeTarget};
 use crate::keyframe::ClipMotion;
-use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipMatte, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE};
+use crate::project::{PlacedRect, ClipPlacement, speed_in_range, speed_milli, Clip, ClipAnimation, ClipBeats, ClipDenoise, ClipMatte, ClipVoice, Effect, Marker, Project, SubtitleTrack, TextContent, Track, TrackKind, Transition, SPEED_SCALE, TEXT_SOURCE, CensorContent, EffectRegion, CENSOR_SOURCE};
+use crate::tracking::{Follow, MotionTrack, TrackSample};
 use crate::render::ClipKey;
 use crate::time::Time;
 use crate::validate::{validate, AcceptAll, ValidationError};
@@ -111,6 +112,10 @@ pub enum EditError {
     NotText { key: ClipKey },
     /// The project has no marker at this index.
     MarkerNotFound { marker: usize },
+    /// The clip is no censor region.
+    NotCensor { key: ClipKey },
+    /// The project has no motion track with this id.
+    MotionTrackNotFound { id: u32 },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -171,6 +176,8 @@ impl fmt::Display for EditError {
             KeyframeNotFound { key, at } => write!(f, "track {}, clip {}: no keyframe at {at}", key.track, key.clip),
             NoPlacement { key } => write!(f, "track {}, clip {}: the clip has no placement yet", key.track, key.clip),
             NotText { key } => write!(f, "track {}, clip {}: the clip shows no text", key.track, key.clip),
+            NotCensor { key } => write!(f, "track {}, clip {}: the clip is no censor region", key.track, key.clip),
+            MotionTrackNotFound { id } => write!(f, "motion track {id} does not exist"),
             MarkerNotFound { marker } => write!(f, "marker {marker} does not exist"),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
@@ -185,7 +192,10 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
-fn finish(project: Project) -> Result<Project, EditError> {
+fn finish(mut project: Project) -> Result<Project, EditError> {
+    // Follows are kept on their reference by the source time of their anchor, whatever the command
+    // did to the clip indices (see [`Project::repair_follows`]).
+    project.repair_follows();
     let errors = validate(&project, &AcceptAll);
     if errors.is_empty() {
         Ok(project)
@@ -333,6 +343,16 @@ pub fn remove_track(project: &Project, track: usize) -> Result<Project, EditErro
     unlocked(project, track)?;
     let mut next = project.clone();
     next.tracks.remove(track);
+    // The follows of the tracks above keep their reference; those on the removed track lose it.
+    for clip in next.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+        if let Some(follow) = clip.follow.as_mut() {
+            if follow.ref_track == track {
+                clip.follow = None;
+            } else if follow.ref_track > track {
+                follow.ref_track -= 1;
+            }
+        }
+    }
     finish(next)
 }
 
@@ -449,6 +469,8 @@ pub fn text_clip(start: Time, duration: Time, text: TextContent) -> Clip {
         voice: Default::default(),
         reverse: false,
         matte: Default::default(),
+        follow: None,
+        censor: None,
     }
 }
 
@@ -1372,6 +1394,80 @@ pub fn set_source_beats(project: &Project, source: &str, beats: ClipBeats) -> Re
     } else if next.beats.get(source).is_none_or(|kept| **kept != beats) {
         next.beats.insert(source.to_owned(), std::sync::Arc::new(beats));
     }
+    finish(next)
+}
+
+/// A censor clip hiding with `censor` from `start` for `duration`, its box at `placement`.
+pub fn censor_clip(start: Time, duration: Time, censor: CensorContent, placement: Option<ClipPlacement>) -> Clip {
+    Clip { source: CENSOR_SOURCE.to_owned(), placement, text: None, censor: Some(censor), ..text_clip(start, duration, TextContent::new("", 1.0)) }
+}
+
+/// Adds a censor clip to `track` (a sticker track), refused like [`add_clip`].
+pub fn add_censor_clip(project: &Project, track: usize, start: Time, duration: Time, censor: CensorContent, placement: Option<ClipPlacement>) -> Result<Project, EditError> {
+    add_clip(project, track, censor_clip(start, duration, censor, placement))
+}
+
+/// Replaces how the censor clip `key` hides.
+pub fn set_censor(project: &Project, key: ClipKey, censor: CensorContent) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    if !clip_of(project, key)?.is_censor() {
+        return Err(EditError::NotCensor { key });
+    }
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.censor = Some(censor);
+    finish(next)
+}
+
+/// Makes clip `key` follow a motion track, or stop following with `None`. Refused when the follow
+/// does not hold, see [`Project::follow_problem`].
+pub fn set_follow(project: &Project, key: ClipKey, follow: Option<Follow>) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    clip_of(project, key)?;
+    if let Some(follow) = &follow {
+        let problem = project.follow_problem(follow, key.track, key.clip).or_else(|| {
+            let reference = &project.tracks[follow.ref_track].clips[follow.ref_clip];
+            (!reference.plays_source(follow.link.anchor_source_time)).then(|| "the reference clip does not show the anchor".to_owned())
+        });
+        if let Some(problem) = problem {
+            return Err(EditError::Invalid(vec![ValidationError::InvalidFollow { track: key.track, clip: key.clip, problem }]));
+        }
+    }
+    let mut next = project.clone();
+    clip_mut(&mut next, key)?.follow = follow;
+    finish(next)
+}
+
+/// Limits effect `effect` of clip `key` to `region`, or gives it the whole picture with `None`.
+pub fn set_effect_region(project: &Project, key: ClipKey, effect: usize, region: Option<EffectRegion>) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    let clip = clip_mut(&mut next, key)?;
+    clip.effects.get_mut(effect).ok_or(EditError::EffectNotFound { key, effect })?.region = region;
+    finish(next)
+}
+
+/// Adds `track`, or replaces the motion track with its id.
+pub fn set_motion_track(project: &Project, track: MotionTrack) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    match next.motion_tracks.iter_mut().find(|other| other.id == track.id) {
+        Some(slot) => *slot = track,
+        None => next.motion_tracks.push(track),
+    }
+    finish(next)
+}
+
+/// Removes the motion track `id`; what followed it stays where it was placed.
+pub fn remove_motion_track(project: &Project, id: u32) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    let index = next.motion_tracks.iter().position(|track| track.id == id).ok_or(EditError::MotionTrackNotFound { id })?;
+    next.motion_tracks.remove(index);
+    finish(next)
+}
+
+/// Adds `sample` to motion track `id`, or replaces its sample at the same source time.
+pub fn set_track_sample(project: &Project, id: u32, sample: TrackSample) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    next.motion_tracks.iter_mut().find(|track| track.id == id).ok_or(EditError::MotionTrackNotFound { id })?.upsert(sample);
     finish(next)
 }
 

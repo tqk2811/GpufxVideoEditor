@@ -299,6 +299,8 @@ pub fn edit_error_code(error: &EditError) -> &'static str {
         EditError::KeyframeNotFound { .. } => "keyframe_not_found",
         EditError::NoPlacement { .. } => "no_placement",
         EditError::NotText { .. } => "not_text",
+        EditError::NotCensor { .. } => "not_censor",
+        EditError::MotionTrackNotFound { .. } => "motion_track_not_found",
         EditError::MarkerNotFound { .. } => "marker_not_found",
         EditError::Invalid(_) => "invalid_project",
     }

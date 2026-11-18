@@ -1828,6 +1828,7 @@ mod tests {
             ],
             markers: Vec::new(),
             beats: Default::default(),
+            motion_tracks: Vec::new(),
         };
         let paths = ProjectPaths::new(std::path::Path::new(r"D:\work\p.json"), Vec::new());
         let found = proxy_sources(&project, &paths);

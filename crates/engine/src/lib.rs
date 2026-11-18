@@ -32,6 +32,7 @@ pub mod stretch;
 pub mod clip_animation;
 pub mod per_unit;
 pub mod time;
+pub mod tracking;
 pub mod validate;
 
 pub use audio_clock::{
@@ -44,6 +45,7 @@ pub use audio_schedule::{
     MIX_SAMPLE_RATE,
 };
 pub use edit::{
+    add_censor_clip, censor_clip, set_censor, set_follow, set_effect_region, set_motion_track, remove_motion_track, set_track_sample,
     add_clip, add_effect, add_subtitle_track, add_text_clip, restyle_track, text_clip, ClipRestyle, set_text, set_animation, add_track, remove_track, add_transition, add_transition_report, set_animation_report, ReleasedHold, clip_at, delete_clip, move_clip,
     nearest_free_start, remove_effect, remove_keyframe, remove_transition, set_effect_params, set_effect_params_at, set_fades, set_gain, set_denoise, set_matte, set_voice, add_marker, add_marker_report, remove_marker, move_marker, move_marker_report, set_marker, set_beats, set_source_beats,
     set_frame_rate, set_keyframe, set_motion_value, set_muted, set_opacity, set_output_size, set_placement, set_placement_at, set_reverse, set_rotation, set_speed, set_track_hidden, set_track_locked, set_transition_params, split_clip, trim_end, trim_source_in, trim_start, EditError, EditHistory,
@@ -53,7 +55,7 @@ pub use keyframe::{
     effects_at, keyframe_neighbors, keyframe_tolerance, nearest_keyframe, nearest_keyframe_inside, sample_keyframes, ClipMotion, ClipProperty, ClipTransform, Easing, Keyframe, KeyframeTarget, MAX_KEYFRAMES, MAX_KEYFRAME_TIME, MAX_ROTATION,
 };
 pub use project::{
-    ClipPlacement, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH,
+    ClipPlacement, PlacedRect, CensorContent, CensorMode, EffectRegion, RegionShape, CENSOR_SOURCE, CENSOR_ASPECT_RANGE, MAX_CENSOR_BLOCK, MAX_CENSOR_BLUR, REGION_EFFECTS, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH,
     Beat, ClipBeats, Marker, MAX_BEATS, MAX_MARKER_LABEL, MAX_TEMPO, ClipDenoise, ClipMatte, MatteModel, MAX_MATTE_PIXELS, MAX_MATTE_TEMPORAL, ClipVoice, DenoiseMode, VoiceEffect, VoicePreset, MAX_PITCH_SEMITONES, ROBOT_HZ,
     AudioOutput, Clip, Effect, LoadError, Output, Project, SubtitleTrack, Track, TrackKind, Transition,
     FontRef, Rgba, TextAlign, ClipAnimation, AnimationRef, TextBackground, TextContent, TextOutline, TextShadow, TextInnerShadow, TextPaint, GradientStop, TextTexture, TextureFit, TextImageRef, TexturePackType, polar_to_offset, offset_to_polar, MAX_TEXT_OUTLINES, MAX_TEXT_SHADOWS, MAX_GRADIENT_STOPS, MAX_TEXT_OUTLINE_WIDTH, MAX_TEXT_SHADOW_DISTANCE, MAX_TEXT_SHADOW_BLUR, TEXT_TEXTURE_SCALE_RANGE, MAX_TEXTURE_CELLS, TextGlow
@@ -62,7 +64,7 @@ pub use project::{
 };
 pub use render::{ClipKey, DecoderSpec, RenderError};
 pub use schedule::{
-    frame_count, frame_time, layers_at_frame, ClipClock, Layer, LayerContent, Progress, SourceSample,
+    follow_transform, frame_count, frame_time, layers_at_frame, ClipClock, Layer, LayerContent, Progress, SourceSample,
     PROGRESS_PPM_SCALE,
 };
 pub use clip_animation::{animation_effects, animation_has_per_unit, animation_max_scale, animation_unit_poses, preset_is_per_unit, check_curve, animation_pose, effects_with_animation, PresetEffect, animation_rotates, find_preset, is_pack_preset, pack_presets, preset_pose, set_pack_presets, PackPreset, PackPresets, PACK_PRESET_SEPARATOR, AnimationCurve, AnimationGroup, CurveKey, CurveProperty, Ease, AnimationPose, AnimationPreset, ANIMATION_PRESETS};
@@ -70,4 +72,5 @@ pub use per_unit::{check_per_unit, line_ranges, unit_ranges, PerUnit, RangeSelec
 pub use srt::{format_timestamp, parse_srt, strip_tags, write_srt, SrtCue, SrtDocument, SrtWarning, SrtWarningKind};
 pub use frame_rate::FrameRate;
 pub use time::{Time, TICKS_PER_SECOND};
+pub use tracking::{follow_region, Follow, FollowPose, MotionTrack, RegionBox, TrackLink, TrackPoint, TrackSample, MAX_FOLLOW_OFFSET, MAX_FOLLOW_SMOOTH, MAX_TRACK_SAMPLES};
 pub use validate::{text_style_problems, validate, AcceptAll, Resolver, TextStyleProblem, ValidationError};

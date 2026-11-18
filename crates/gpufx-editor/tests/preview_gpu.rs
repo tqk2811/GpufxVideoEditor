@@ -18,7 +18,7 @@ use gpufx_editor::project_file::{package_roots, project_paths};
 fn clip(name: &str, duration: Time) -> Clip {
     let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-clips")).join(name);
     let source = std::path::absolute(source).expect("absolute path").to_string_lossy().into_owned();
-    Clip { source, start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default() }
+    Clip { source, start: Time::ZERO, source_in: Time::ZERO, duration, effects: Vec::new(), gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, censor: None }
 }
 
 fn project(clips: Vec<Clip>) -> Arc<Project> {
@@ -26,7 +26,7 @@ fn project(clips: Vec<Clip>) -> Arc<Project> {
         version: SUPPORTED_VERSION,
         output: Output { width: 320, height: 180, frame_rate: engine::FrameRate::whole(30), audio: None },
         tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
-        markers: Vec::new(), beats: Default::default(),
+        markers: Vec::new(), beats: Default::default(), motion_tracks: Vec::new(),
     })
 }
 
@@ -184,7 +184,7 @@ fn frames_errors_edits_and_blanks_through_one_producer() {
 
 fn scale_effect(width: i64, height: i64) -> engine::Effect {
     let params = serde_json::json!({ "w": width, "h": height });
-    engine::Effect { package: "packages/gpufx/ffmpeg/scale".to_owned(), params: params.as_object().expect("an object").clone(), keyframes: Default::default() }
+    engine::Effect { package: "packages/gpufx/ffmpeg/scale".to_owned(), params: params.as_object().expect("an object").clone(), keyframes: Default::default(), region: None }
 }
 
 /// A size parameter fixes the sizes gpufx computed, so changing one must rebuild the graph and not
@@ -224,7 +224,7 @@ fn a_failed_update_after_a_size_change_does_not_leave_the_preview_stuck() {
     let frame = producer_frame(&mut producer, &good);
     producer.recycle(frame);
     let bad_params = serde_json::json!({ "w": { "not": "a number" }, "h": 180 });
-    let bad = engine::Effect { package: "packages/gpufx/ffmpeg/scale".to_owned(), params: bad_params.as_object().expect("an object").clone(), keyframes: Default::default() };
+    let bad = engine::Effect { package: "packages/gpufx/ffmpeg/scale".to_owned(), params: bad_params.as_object().expect("an object").clone(), keyframes: Default::default(), region: None };
     let refused = producer.produce(&request(&with_effects(scale_effect(-1, 180), bad), 30));
     assert!(refused.is_err(), "a value that is not a number is an error");
     let fixed = with_effects(scale_effect(-1, 180), scale_effect(320, 180));

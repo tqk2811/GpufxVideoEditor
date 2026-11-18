@@ -86,7 +86,7 @@ mod tests {
             version: engine::SUPPORTED_VERSION,
             output: Output { width: 1920, height: 1080, frame_rate: engine::FrameRate::whole(30), audio: None },
             tracks: Vec::new(),
-            markers: Vec::new(), beats: Default::default(),
+            markers: Vec::new(), beats: Default::default(), motion_tracks: Vec::new(),
         };
         let with_track = add_track(&empty, TrackKind::Video).unwrap();
         let first = add_clip(&with_track, 0, new_clip("a.mp4", Time::ZERO, Time::from_seconds(1).unwrap())).unwrap();

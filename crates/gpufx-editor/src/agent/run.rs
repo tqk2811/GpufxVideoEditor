@@ -497,7 +497,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         }
         AgentEdit::EffectAdd { clip, package, params } => {
             let params = crate::params::without_clip_clock(state.catalog.params_of(&package), params);
-            state.apply_agent_command(|project| engine::add_effect(project, clip.into(), Effect { package, params, keyframes: Default::default() })).map_err(refused)?
+            state.apply_agent_command(|project| engine::add_effect(project, clip.into(), Effect { package, params, keyframes: Default::default(), region: None })).map_err(refused)?
         }
         AgentEdit::EffectRemove { clip, effect } => state.apply_agent_command(|project| engine::remove_effect(project, clip.into(), effect)).map_err(refused)?,
         AgentEdit::TransitionAdd { track, after_clip, package, duration, params } => {

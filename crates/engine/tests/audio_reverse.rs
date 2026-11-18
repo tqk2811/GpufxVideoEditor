@@ -20,6 +20,7 @@ fn project_of(clips: Vec<engine::Clip>) -> Project {
         tracks: vec![Track { kind: TrackKind::Video, clips, transitions: Vec::new(), locked: false, hidden: false, subtitle: None }],
         markers: Vec::new(),
         beats: Default::default(),
+        motion_tracks: Vec::new(),
     }
 }
 

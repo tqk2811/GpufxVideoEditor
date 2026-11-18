@@ -107,7 +107,7 @@ mod tests {
             version: SUPPORTED_VERSION,
             output: Output { width: 16, height: 9, frame_rate, audio: None },
             tracks: Vec::new(),
-            markers: Vec::new(), beats: Default::default(),
+            markers: Vec::new(), beats: Default::default(), motion_tracks: Vec::new(),
         }
     }
 
