@@ -4,7 +4,7 @@
 use crate::editor::EditorState;
 use crate::visuals::SourceView;
 use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
-use engine::{ClipKey, ClipPlacement, ClipTransform, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
+use engine::{ClipKey, ClipPlacement, ClipTransform, FollowPose, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 
 const FRAME_WIDTH: f32 = 1.5;
 const GRIP_SIZE: f32 = 8.0;
@@ -64,6 +64,19 @@ fn resized_placement(start: PlacedRect, grip: Grip, moved: (f64, f64)) -> ClipPl
     limited(start.x + anchor_x * start.width - anchor_x * width, start.y + anchor_y * start.height - anchor_y * height, width)
 }
 
+/// `placement`, a place on screen of a clip that follows a motion track with `pose`, as the place
+/// the clip has at its anchor, which the pose moves: the frame is drawn where the clip shows, and
+/// a drag there edits the place it is moved from. `ratio` is the height over the width of the box,
+/// in parts of the frame.
+fn at_anchor(placement: ClipPlacement, pose: Option<FollowPose>, ratio: f64, output_aspect: f64) -> ClipPlacement {
+    let Some(pose) = pose else { return placement };
+    let scale = if pose.scale > 1.0e-6 { pose.scale } else { 1.0 };
+    let middle = [placement.x + placement.width / 2.0, placement.y + placement.width * ratio / 2.0];
+    let [x, y] = pose.unmap(middle, output_aspect);
+    let width = (placement.width / scale).clamp(MIN_PLACEMENT_WIDTH, MAX_PLACEMENT_WIDTH);
+    limited(x - width / 2.0, y - width * ratio / 2.0, width)
+}
+
 /// `rect`, in parts of the frame, on the screen where the frame is `picture`.
 fn on_screen(rect: PlacedRect, picture: Rect) -> Rect {
     let min = picture.min + Vec2::new(rect.x as f32 * picture.width(), rect.y as f32 * picture.height());
@@ -111,8 +124,9 @@ fn handle_rect(rect: Rect, area: Rect, dragged: bool) -> Rect {
     }
 }
 
-/// The clip the frame belongs to, how it stands at the playhead, and the width over height of its
-/// source. Only a clip that is on screen now and may be edited has a frame.
+/// The clip the frame belongs to, how it stands at the playhead (moved by the motion track it
+/// follows, if any), and the width over height of its source. Only a clip that is on screen now and
+/// may be edited has a frame.
 fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
     let key = state.selection()?;
     let track = state.project().tracks.get(key.track)?;
@@ -122,7 +136,10 @@ fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
     }
     // The resting place, without the text animation's pose: dragging edits the clip's own placement,
     // so the frame stays put while the text moves through its preset.
-    let transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
+    let mut transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
+    if let Some(follow) = &clip.follow {
+        engine::follow_transform(state.project(), follow, &mut transform, state.playhead());
+    }
     if clip.is_text() || clip.is_censor() {
         return Some((key, transform, state.clip_aspect(clip)));
     }
@@ -191,7 +208,8 @@ fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: R
     let corners = turned_corners(frame, transform.rotation);
     let body_id = body_id(scope);
     let body = ui.interact(handle_rect(bounds(corners), area, in_hand(ui.ctx(), body_id)), body_id, Sense::drag());
-    drag(ui, state, key, picture, &body, current, moved_placement);
+    let (pose, ratio) = (transform.follow, current.height / current.width.max(1.0e-9));
+    drag(ui, state, key, picture, &body, current, |start, moved| at_anchor(moved_placement(start, moved), pose, ratio, output_aspect));
     body.on_hover_and_drag_cursor(CursorIcon::Move);
     let painter = ui.painter_at(area);
     let outline = Stroke::new(FRAME_WIDTH, Color32::RED);
@@ -207,7 +225,7 @@ fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: R
         let hit = handle_rect(Rect::from_center_size(center, Vec2::splat(GRIP_HIT_SIZE)), area, in_hand(ui.ctx(), id));
         if hit.is_positive() {
             let response = ui.interact(hit, id, Sense::drag());
-            drag(ui, state, key, picture, &response, current, |start, moved| resized_placement(start, grip, moved));
+            drag(ui, state, key, picture, &response, current, |start, moved| at_anchor(resized_placement(start, grip, moved), pose, ratio, output_aspect));
             response.on_hover_and_drag_cursor(grip.cursor);
         }
         painter.rect_filled(Rect::from_center_size(center, Vec2::splat(GRIP_SIZE)), CornerRadius::ZERO, Color32::RED);
@@ -226,6 +244,22 @@ mod tests {
 
     fn grip(x: f64, y: f64) -> Grip {
         *GRIPS.iter().find(|grip| grip.x == x && grip.y == y).expect("a grip")
+    }
+
+    #[test]
+    fn a_following_clip_is_edited_at_its_anchor() {
+        // The object moved a quarter of the frame right and grew twice since the anchor.
+        let pose = FollowPose { from: [0.5, 0.5], to: [0.75, 0.5], scale: 2.0, rotation: 0.0 };
+        let shown = ClipPlacement { x: 0.65, y: 0.4, width: 0.2 };
+        let home = at_anchor(shown, Some(pose), 1.0, 1.0);
+        assert!(close(home.width, 0.1) && close(home.x, 0.45) && close(home.y, 0.45), "{home:?}");
+        // Drawn with the pose again, the anchor place is where the frame was.
+        let middle = pose.map([home.x + home.width / 2.0, home.y + home.width / 2.0], 1.0);
+        assert!(close(middle[0], 0.75) && close(middle[1], 0.5), "{middle:?}");
+        let turned = FollowPose { rotation: 90.0, scale: 1.0, ..pose };
+        let back = turned.unmap(turned.map([0.6, 0.3], 16.0 / 9.0), 16.0 / 9.0);
+        assert!(close(back[0], 0.6) && close(back[1], 0.3), "{back:?}");
+        assert_eq!(at_anchor(shown, None, 1.0, 1.0), shown);
     }
 
     #[test]
@@ -339,6 +373,30 @@ mod tests {
         pass(&ctx, &mut state, area, vec![]);
         assert!(!state.is_live(), "the release ends the edit");
         assert!(state.can_undo());
+    }
+
+    #[test]
+    fn the_frame_of_a_following_clip_is_where_it_shows() {
+        let mut state = EditorState::default();
+        state.add_track(engine::TrackKind::Video);
+        state.add_clip_from_file(0, std::path::Path::new("a.mp4"));
+        let mut project = state.project().clone();
+        let sample = |seconds: i64, cx: f64| engine::TrackSample { source_time: engine::Time::from_ticks(seconds * engine::TICKS_PER_SECOND), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: false };
+        project.motion_tracks.push(engine::MotionTrack { id: 1, media_path: "a.mp4".into(), aspect: 16.0 / 9.0, samples: vec![sample(0, 0.25), sample(2, 0.75)] });
+        let link = engine::TrackLink { track_id: 1, anchor_source_time: engine::Time::ZERO, follow_scale: false, follow_rotation: false, smooth: 0.0 };
+        let mut censor = engine::censor_clip(engine::Time::ZERO, engine::Time::from_ticks(engine::TICKS_PER_SECOND), engine::CensorContent::default(), Some(ClipPlacement { x: 0.1, y: 0.1, width: 0.2 }));
+        censor.follow = Some(engine::Follow { link, ref_track: 0, ref_clip: 0, offset: [0.0, 0.0] });
+        let mut stickers = engine::Track { kind: engine::TrackKind::Sticker, ..project.tracks[0].clone() };
+        stickers.clips = vec![censor];
+        stickers.transitions.clear();
+        project.tracks.push(stickers);
+        state.replace_project(project, None);
+        state.select(Some(ClipKey { track: 1, clip: 0 }));
+        state.set_playhead(engine::Time::from_ticks(engine::TICKS_PER_SECOND / 2));
+        let (_, transform, aspect) = target(&state).expect("a frame");
+        let rect = transform.rect(16.0 / 9.0, aspect);
+        // Half a second in, the object went an eighth of the frame to the right.
+        assert!(close(rect.x, 0.1 + 0.125), "{rect:?}");
     }
 
     #[test]
