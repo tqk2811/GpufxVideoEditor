@@ -196,8 +196,10 @@ impl RunRequest {
     }
 
     /// This run with `mode`; [`TrackMode::Robust`] needs the NanoTrack model installed (looked for
-    /// with `package_roots`).
+    /// with `package_roots`). A start with four corners always runs [`TrackMode::Fast`] (the planar
+    /// tracker): the robust one finds upright boxes and would drop the perspective.
     pub fn with_mode(self, mode: TrackMode, package_roots: &[PathBuf]) -> Result<Self, String> {
+        let mode = if self.start.quad.is_some() { TrackMode::Fast } else { mode };
         let model = match mode {
             TrackMode::Fast => None,
             TrackMode::Robust => Some(crate::tracking_models::installed(crate::tracking_models::TrackingModel::NanoTrack, package_roots).ok_or_else(|| {
@@ -677,6 +679,17 @@ impl Iterator for Frames<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_robust_run_from_four_corners_runs_the_planar_tracker() {
+        // The robust tracker finds upright boxes and would drop the perspective without a word.
+        let quad = [[0.2, 0.2], [0.6, 0.25], [0.6, 0.7], [0.2, 0.75]];
+        let start = TrackSample::from_quad(Time::ZERO, quad, 16.0 / 9.0, 1.0, true);
+        let track = MotionTrack { id: 1, media_path: "a.mp4".into(), aspect: 16.0 / 9.0, samples: vec![start] };
+        let request = RunRequest::for_track(&track, None, Direction::Forward, false).unwrap().with_mode(TrackMode::Robust, &[]).expect("no model needed");
+        assert_eq!(request.mode, TrackMode::Fast);
+        assert!(request.model.is_none());
+    }
 
     /// A plain bright square on gray, moving `speed` pixels a frame to the right from x = 40.
     struct Sliding {

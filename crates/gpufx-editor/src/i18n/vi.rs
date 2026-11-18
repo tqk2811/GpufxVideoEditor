@@ -622,6 +622,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FollowScale => "Bám scale".to_owned(),
         Message::FollowRotation => "Bám xoay".to_owned(),
         Message::FollowPerspective => "Phối cảnh".to_owned(),
+        Message::FollowBakePerspective => "Corner pin không chuyển thành keyframe được; tắt phối cảnh để bake".to_owned(),
         Message::FollowPerspectiveHint => "Ghim bốn góc vào bốn góc của vật (corner pin); scale và xoay đi theo".to_owned(),
         Message::TrackPlanar => "Phối cảnh 4 góc".to_owned(),
         Message::TrackPlanarHint => "Track vật phẳng (màn hình, biển, trang giấy) theo bốn góc; kéo các góc trên preview rồi track (chế độ Nhanh)".to_owned(),

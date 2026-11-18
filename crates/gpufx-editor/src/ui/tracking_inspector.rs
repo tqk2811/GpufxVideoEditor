@@ -249,7 +249,7 @@ pub(super) fn follow_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipK
                 state.set_follow_perspective(key, perspective);
             }
             ui.horizontal(|ui| {
-                if ui.button(language.t(Message::FollowBake)).clicked() {
+                if ui.add_enabled(!follow.perspective, egui::Button::new(language.t(Message::FollowBake))).on_disabled_hover_text(language.t(Message::FollowBakePerspective)).clicked() {
                     state.bake_follow(key);
                 }
                 if ui.button(language.t(Message::FollowClear)).clicked() {

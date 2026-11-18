@@ -131,3 +131,64 @@ fn set_follow_accepts_a_perspective_follow() {
     let p = set_follow(&p, key, Some(follow(true))).unwrap();
     assert!(p.tracks[1].clips[0].follow.unwrap().perspective);
 }
+
+#[test]
+fn a_quad_with_its_corners_the_wrong_way_round_does_not_validate() {
+    let mut p = rig(false);
+    let q = LATER;
+    p.motion_tracks[0].samples[1] = planar(2.0, [q[0], q[3], q[2], q[1]]);
+    assert!(p.motion_tracks[0].problem().is_some_and(|problem| problem.contains("convex")));
+}
+
+#[test]
+fn a_follow_in_perspective_is_not_baked() {
+    let p = rig(true);
+    let key = ClipKey { track: 1, clip: 0 };
+    assert!(matches!(engine::bake_follow(&p, key, 1.0), Err(engine::EditError::BakePerspective { .. })));
+    assert!(engine::bake_follow(&rig(false), key, 1.0).is_ok());
+}
+
+#[test]
+fn a_reference_clip_cannot_itself_follow_in_perspective() {
+    // The frame mapping of a follower reads the reference clip's place without any corner pin, so
+    // a pinned reference clip would put its followers in the wrong place.
+    let mut p = rig(true);
+    let mut other = clip("t.png", 0, 0, 2 * SECOND);
+    other.placement = Some(ClipPlacement { x: 0.1, y: 0.1, width: 0.2 });
+    let mut lane = track(vec![other], Vec::new());
+    lane.kind = TrackKind::Sticker;
+    p.tracks.push(lane);
+    let mut leaning = follow(true);
+    leaning.ref_track = 1;
+    assert!(set_follow(&p, ClipKey { track: 2, clip: 0 }, Some(leaning)).is_err());
+}
+
+#[test]
+fn a_clip_cannot_both_lock_and_follow_in_perspective() {
+    // So a corner pin and a lock never stack on one clip, and their order does not matter.
+    let mut p = rig(true);
+    let lock = engine::TrackLock { link: follow(true).link, zoom: 1.0 };
+    p.tracks[1].clips[0].lock = Some(lock);
+    assert!(engine::validate(&p, &engine::AcceptAll).iter().any(|error| matches!(error, engine::ValidationError::InvalidFollow { .. } | engine::ValidationError::InvalidLock { .. })));
+}
+
+#[test]
+fn between_two_samples_whose_mean_folds_the_corners_of_the_nearer_sample_hold() {
+    // The second sample is the first turned half way round: half way between, every corner meets
+    // in the middle, which is no quad at all.
+    let mut p = rig(true);
+    let a = AT_ANCHOR;
+    let turned = [a[2], a[3], a[0], a[1]];
+    p.motion_tracks[0].samples[1] = planar(2.0, turned);
+    let track = &p.motion_tracks[0];
+    assert!(track.problem().is_none());
+    for at in [SECOND - FRAME, SECOND, SECOND + FRAME] {
+        let quad = track.quad_at(t(at), 0.0).unwrap();
+        let square = quad.map(|[x, y]| [x * ASPECT, y]);
+        assert!(engine::tracker::homography::is_convex(&square), "{at}: {quad:?}");
+    }
+    assert_quad(track.quad_at(t(SECOND), 0.0).unwrap(), a);
+    // Smoothing over both samples folds the same way.
+    let smoothed = track.quad_at(t(SECOND), 1.0).unwrap();
+    assert!(engine::tracker::homography::is_convex(&smoothed.map(|[x, y]| [x * ASPECT, y])), "{smoothed:?}");
+}

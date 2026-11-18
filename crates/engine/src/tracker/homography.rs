@@ -119,11 +119,17 @@ fn normalizer(points: impl Iterator<Item = [f64; 2]> + Clone) -> Option<(f64, [f
     (spread > 1.0e-12 && spread.is_finite()).then(|| (std::f64::consts::SQRT_2 / spread, middle))
 }
 
-/// Gaussian elimination with partial pivoting.
+/// Gaussian elimination with partial pivoting. A pivot is taken as zero against the largest entry
+/// of the matrix, so the scale of the system does not decide whether it solves.
 fn solve8(mut a: [[f64; 8]; 8], mut b: [f64; 8]) -> Option<[f64; 8]> {
+    let largest = a.iter().flatten().fold(0.0f64, |most, v| most.max(v.abs()));
+    if !(largest > 0.0 && largest.is_finite()) {
+        return None;
+    }
+    let tiny = largest * 1.0e-12;
     for col in 0..8 {
         let pivot = (col..8).max_by(|&i, &j| a[i][col].abs().total_cmp(&a[j][col].abs()))?;
-        if !(a[pivot][col].abs() > 1.0e-12) {
+        if !(a[pivot][col].abs() > tiny) {
             return None;
         }
         a.swap(col, pivot);
@@ -144,18 +150,15 @@ fn solve8(mut a: [[f64; 8]; 8], mut b: [f64; 8]) -> Option<[f64; 8]> {
     Some(x)
 }
 
-/// Whether the four corners make a convex quadrilateral in order (either way round) with some area.
+/// Whether the four corners make a convex quadrilateral with some area, in the order of a quad:
+/// clockwise on screen (y down), as top-left, top-right, bottom-right, bottom-left go. The other
+/// way round is the picture mirrored, so it is refused too.
 pub fn is_convex(quad: &[[f64; 2]; 4]) -> bool {
-    let mut sign = 0.0f64;
-    for i in 0..4 {
+    (0..4).all(|i| {
         let (a, b, c) = (quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4]);
         let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
-        if !(cross.abs() > 1.0e-12) || (sign != 0.0 && cross.signum() != sign) {
-            return false;
-        }
-        sign = cross.signum();
-    }
-    true
+        cross > 1.0e-12
+    })
 }
 
 /// The area of the quadrilateral (shoelace), positive whichever way round.
@@ -251,7 +254,8 @@ pub fn ransac(pairs: &[([f64; 2], [f64; 2])], threshold: f64, iterations: usize)
     }
 }
 
-/// The four points sorted round their middle, so a sample can be checked for convexity whatever
+/// The four points sorted round their middle (clockwise on screen, the way [`is_convex`] wants),
+/// so a sample can be checked for convexity whatever
 /// order it was drawn in (the pairs keep their own order for the fit).
 fn order_round(points: [[f64; 2]; 4]) -> [[f64; 2]; 4] {
     let middle = [points.iter().map(|p| p[0]).sum::<f64>() / 4.0, points.iter().map(|p| p[1]).sum::<f64>() / 4.0];
@@ -345,5 +349,28 @@ mod tests {
         let reversed = [square[3], square[2], square[1], square[0]];
         assert!(quad_contains(&reversed, [5.0, 5.0], 2.0));
         assert!((quad_area(&square) - 100.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn a_quad_the_wrong_way_round_is_not_convex() {
+        // Clockwise on screen (y down) is the order of the corners; the reverse order mirrors.
+        let square = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        assert!(!is_convex(&[square[0], square[3], square[2], square[1]]));
+    }
+
+    #[test]
+    fn a_small_but_well_shaped_system_still_solves() {
+        let mut a = [[0.0; 8]; 8];
+        let mut b = [0.0; 8];
+        for i in 0..8 {
+            a[i][i] = 1.0e-14;
+            b[i] = 2.0e-14 * (i as f64 + 1.0);
+        }
+        let x = solve8(a, b).expect("only the scale is small");
+        for (i, v) in x.iter().enumerate() {
+            assert!((v - 2.0 * (i as f64 + 1.0)).abs() < 1e-9);
+        }
+        a[7][7] = 0.0;
+        assert!(solve8(a, b).is_none(), "a singular one does not");
     }
 }

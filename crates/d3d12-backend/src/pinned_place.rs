@@ -128,4 +128,10 @@ mod tests {
         }
         assert!(pin_params(&[corners[0], corners[2], corners[1], corners[3]], 1.0).is_none());
     }
+
+    #[test]
+    fn corners_the_wrong_way_round_are_refused_rather_than_mirrored() {
+        let corners = [[0.35, 0.2], [0.7, 0.3], [0.7, 0.6], [0.3, 0.75]];
+        assert!(pin_params(&[corners[0], corners[3], corners[2], corners[1]], 16.0 / 9.0).is_none());
+    }
 }

@@ -121,6 +121,8 @@ pub enum EditError {
     TrackRunStale { id: u32 },
     /// The clip follows no motion track.
     NotFollowing { key: ClipKey },
+    /// The clip follows with its corners pinned in perspective, which keyframes cannot hold.
+    BakePerspective { key: ClipKey },
     /// The clip is not locked to a motion track.
     NotLocked { key: ClipKey },
     /// The result would not pass validation.
@@ -188,6 +190,7 @@ impl fmt::Display for EditError {
             TrackRunStale { id } => write!(f, "motion track {id} changed while it was being tracked; the run was not written"),
             MarkerNotFound { marker } => write!(f, "marker {marker} does not exist"),
             NotFollowing { key } => write!(f, "track {}, clip {}: the clip follows no motion track", key.track, key.clip),
+            BakePerspective { key } => write!(f, "track {}, clip {}: a follow in perspective (corner pin) cannot be baked into keyframes", key.track, key.clip),
             NotLocked { key } => write!(f, "track {}, clip {}: the clip is not locked to a motion track", key.track, key.clip),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
@@ -1534,11 +1537,16 @@ pub const MAX_BAKED_KEYFRAMES: usize = crate::keyframe::MAX_KEYFRAMES;
 /// clamped to the range a keyframe takes ([`MAX_PLACEMENT_OFFSET`], [`MIN_PLACEMENT_WIDTH`] to
 /// [`MAX_PLACEMENT_WIDTH`], [`crate::keyframe::MAX_ROTATION`]), so an object followed far out of
 /// the frame bakes to the edge of that range and the clip stops short of where the follow put it.
+/// A follow in perspective is refused ([`EditError::BakePerspective`]): its corner pin has no
+/// keyframes.
 pub fn bake_follow(project: &Project, key: ClipKey, source_aspect: f64) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let follow = clip_of(project, key)?.follow.ok_or(EditError::NotFollowing { key })?;
+    if follow.perspective {
+        return Err(EditError::BakePerspective { key });
+    }
     let link = follow.link;
-    bake_motion(project, key, source_aspect, link.follow_scale || follow.perspective, link.follow_rotation || follow.perspective, |transform, t| crate::schedule::follow_transform(project, &follow, transform, t), |clip| clip.follow = None)
+    bake_motion(project, key, source_aspect, link.follow_scale, link.follow_rotation, |transform, t| crate::schedule::follow_transform(project, &follow, transform, t), |clip| clip.follow = None)
 }
 
 /// Turns the lock of clip `key` (a picture of `source_aspect`) into keyframes, as [`bake_follow`]

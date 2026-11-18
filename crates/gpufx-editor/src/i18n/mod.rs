@@ -687,6 +687,7 @@ pub enum Message {
     /// Pin the overlay's corners to the object's four corners in perspective (corner pin).
     FollowPerspective,
     FollowPerspectiveHint,
+    FollowBakePerspective,
     /// The track type: four corners in perspective rather than a box.
     TrackPlanar,
     TrackPlanarHint,
@@ -1168,6 +1169,7 @@ mod tests {
             Message::FollowRotation,
             Message::FollowPerspective,
             Message::FollowPerspectiveHint,
+            Message::FollowBakePerspective,
             Message::TrackPlanar,
             Message::TrackPlanarHint,
             Message::FollowClear,

@@ -201,6 +201,10 @@ pub fn follow_transform(project: &Project, follow: &crate::tracking::Follow, tra
 /// Moves `transform`, that of clip `clip` of track `track` which locks to a motion track, against
 /// the track at timeline time `t` (see [`Project::lock_pose`]). Leaves it as it is without a lock
 /// or when the track cannot be read.
+///
+/// A lock never stacks with a corner pin: a clip cannot both lock and follow
+/// ([`Project::follow_problem`], [`Project::lock_problem`]), so the order of the two does not
+/// matter.
 pub fn lock_transform(project: &Project, track: usize, clip: usize, transform: &mut ClipTransform, t: Time) {
     let Some(lock) = project.tracks.get(track).and_then(|lane| lane.clips.get(clip)).and_then(|c| c.lock) else { return };
     transform.rotates |= lock.link.follow_rotation;

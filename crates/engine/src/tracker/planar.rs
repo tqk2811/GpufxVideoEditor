@@ -94,15 +94,26 @@ impl PlanarTracker {
         self.quad
     }
 
+    /// Whether every corner of `quad` (pixels of the frame) lies within
+    /// [`crate::tracking::MAX_QUAD_COORDINATE`] parts of the picture, as a sample must.
+    fn within_reach(&self, quad: &Quad) -> bool {
+        let base = self.previous.base();
+        let (width, height) = (base.width.max(1) as f64, base.height.max(1) as f64);
+        // A hair inside the bound, so the corners still pass once turned into parts.
+        let limit = crate::tracking::MAX_QUAD_COORDINATE * (1.0 - 1.0e-9);
+        quad.iter().all(|[x, y]| ((x + 0.5) / width).abs() <= limit && ((y + 0.5) / height).abs() <= limit)
+    }
+
     fn step_of(&self, quad: Quad, confidence: f64, lost: bool, recovered: bool) -> TrackStep {
         TrackStep { area: quad_box(&quad), confidence, lost, recovered, quad: Some(quad) }
     }
 
-    /// Follows the quad into `frame`. A lost step leaves the tracker where it was.
+    /// Follows the quad into `frame`. A lost step leaves the tracker where it was. A quad with a
+    /// corner farther than a sample may hold ([`crate::tracking::MAX_QUAD_COORDINATE`]) is lost too.
     pub fn step(&mut self, frame: GrayImage) -> TrackStep {
         let next = Pyramid::new(frame, self.options.levels);
         let mut best_unsure = 0.0f64;
-        if let Some((quad, motion, agreeing)) = self.follow_flow(&next) {
+        if let Some((quad, motion, agreeing)) = self.follow_flow(&next).filter(|(quad, _, _)| self.within_reach(quad)) {
             if let Some(patch) = warped_patch(&next, &quad) {
                 let confidence = ncc(&self.template, &patch).max(0.0) * agreeing.sqrt();
                 if confidence >= self.options.lost_threshold {
@@ -119,7 +130,7 @@ impl PlanarTracker {
             _ => self.quad,
         };
         let (found, score) = self.search(&next, &predicted);
-        if score >= self.options.recover_threshold {
+        if score >= self.options.recover_threshold && self.within_reach(&found) {
             if let Some(patch) = warped_patch(&next, &found) {
                 self.accept(next, found, Homography::IDENTITY, &patch, score);
                 return self.step_of(found, score, false, true);

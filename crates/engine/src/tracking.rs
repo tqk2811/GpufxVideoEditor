@@ -311,7 +311,7 @@ impl MotionTrack {
                     total += weight;
                 }
                 if total > 0.0 {
-                    return Some(sum.map(|[x, y]| [x / total, y / total]));
+                    return Some(self.unfolded(sum.map(|[x, y]| [x / total, y / total]), at));
                 }
             }
         }
@@ -326,7 +326,22 @@ impl MotionTrack {
         let span = (b.source_time.ticks() - a.source_time.ticks()) as f64;
         let k = (at.ticks() - a.source_time.ticks()) as f64 / span;
         let (qa, qb) = (corners(a), corners(b));
-        Some(std::array::from_fn(|i| [qa[i][0] + (qb[i][0] - qa[i][0]) * k, qa[i][1] + (qb[i][1] - qa[i][1]) * k]))
+        let mixed: Quad = std::array::from_fn(|i| [qa[i][0] + (qb[i][0] - qa[i][0]) * k, qa[i][1] + (qb[i][1] - qa[i][1]) * k]);
+        Some(self.unfolded(mixed, at))
+    }
+
+    /// `quad`, or, when mixing samples folded it (no longer convex in the shape of the picture,
+    /// which a corner pin cannot draw), the corners of the sample nearest `at`, which validation
+    /// keeps convex. Holding them keeps a pin on screen instead of dropping back to the box.
+    fn unfolded(&self, quad: Quad, at: Time) -> Quad {
+        let square = quad.map(|[x, y]| [x * self.aspect, y]);
+        if crate::tracker::homography::is_convex(&square) {
+            return quad;
+        }
+        let next = self.samples.partition_point(|s| s.source_time <= at).min(self.samples.len() - 1);
+        let before = next.saturating_sub(1);
+        let nearest = if (at.ticks() - self.samples[before].source_time.ticks()).abs() <= (self.samples[next].source_time.ticks() - at.ticks()).abs() { before } else { next };
+        self.samples[nearest].corners(self.aspect)
     }
 
     /// Adds `sample`, or replaces the one at the same source time, keeping the order.
@@ -368,7 +383,7 @@ impl MotionTrack {
                 }
                 let pixels = quad.map(|[x, y]| [x * self.aspect, y]);
                 if !crate::tracker::homography::is_convex(&pixels) {
-                    return Some(format!("sample {i}: the quad must be convex with its corners in order"));
+                    return Some(format!("sample {i}: the quad must be convex with its corners in order, clockwise on screen (top-left, top-right, bottom-right, bottom-left)"));
                 }
             }
         }

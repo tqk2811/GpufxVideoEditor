@@ -141,3 +141,16 @@ fn a_planar_step_becomes_a_sample_with_its_quad_and_box() {
         assert!((back[0] - original[0]).abs() < 1e-9 && (back[1] - original[1]).abs() < 1e-9);
     }
 }
+
+#[test]
+fn stops_lost_rather_than_put_a_corner_past_the_reach_of_a_sample() {
+    let grid = texture_grid();
+    let frame = render(&grid, &corners_at(0));
+    // The bottom-left corner lies more than eight picture widths to the left, past
+    // `MAX_QUAD_COORDINATE`: a sample there would not pass validation.
+    let far: Quad = [[100.0, 70.0], [210.0, 70.0], [210.0, 170.0], [-2700.0, 170.0]];
+    let mut tracker = PlanarTracker::new(frame.clone(), far, TrackerOptions::default());
+    let (steps, end) = track_frames(&mut tracker, [Ok::<_, ()>(frame)], &AtomicBool::new(false), |_, _| {}).unwrap();
+    assert_eq!(end, RunEnd::Lost, "{:?}", steps[0]);
+    assert!(steps[0].lost);
+}

@@ -649,6 +649,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::FollowScale => "Scale with the object".to_owned(),
         Message::FollowRotation => "Turn with the object".to_owned(),
         Message::FollowPerspective => "Perspective".to_owned(),
+        Message::FollowBakePerspective => "A corner pin cannot become keyframes; turn off perspective to bake".to_owned(),
         Message::FollowPerspectiveHint => "Pin the four corners to the object's corners (corner pin); scale and turn come with it".to_owned(),
         Message::TrackPlanar => "Four corner perspective".to_owned(),
         Message::TrackPlanarHint => "Track a flat object (screen, sign, page) by its four corners; drag the corners on the preview, then track (Fast mode)".to_owned(),
