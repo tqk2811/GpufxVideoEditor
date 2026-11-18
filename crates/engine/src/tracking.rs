@@ -108,6 +108,42 @@ pub struct Follow {
     pub offset: [f64; 2],
 }
 
+/// The largest extra zoom of a lock.
+pub const MAX_LOCK_ZOOM: f64 = 8.0;
+/// The smallest extra zoom of a lock.
+pub const MIN_LOCK_ZOOM: f64 = 0.1;
+
+/// A video clip whose whole picture moves against a motion track of its own source ("lock to the
+/// object", stabilize on a track): at every moment the picture is moved, and with `follow_scale`
+/// and `follow_rotation` of [`TrackLink`] scaled and turned, so the object stands in the frame where
+/// it stood at the anchor. The rest of the frame moves the other way; the edges it reveals show what
+/// is under the clip (no automatic zoom: `zoom` is set by hand, provisional).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrackLock {
+    /// The track, of the clip's own source, and the anchor. `follow_scale` keeps the object's size,
+    /// `follow_rotation` its angle; the position is always kept.
+    #[serde(flatten)]
+    pub link: TrackLink,
+    /// Extra scale of the locked picture around the object, to hide the revealed edges; 1 is none.
+    #[serde(default = "unit_zoom", skip_serializing_if = "is_unit")]
+    pub zoom: f64,
+}
+
+fn unit_zoom() -> f64 {
+    1.0
+}
+
+fn is_unit(value: &f64) -> bool {
+    *value == 1.0
+}
+
+impl TrackLock {
+    /// A lock on track `track_id` at `anchor_source_time` that keeps only the position.
+    pub fn new(track_id: u32, anchor_source_time: Time) -> Self {
+        Self { link: TrackLink { track_id, anchor_source_time, follow_scale: false, follow_rotation: false, smooth: 0.0 }, zoom: 1.0 }
+    }
+}
+
 /// How a following picture moves at one moment, applied by [`ClipTransform::rect`]: its middle
 /// keeps its place relative to the object, which went from `from` to `to` (parts of the frame),
 /// grew `scale` times and turned `rotation` clockwise degrees.
@@ -242,6 +278,10 @@ fn wrap_degrees(degrees: f64) -> f64 {
     (degrees + 180.0).rem_euclid(360.0) - 180.0
 }
 
+/// Below this size (parts of the frame height) an object is taken as gone, and a lock does not
+/// scale by it.
+const MIN_POSE_SIZE: f64 = 1.0e-6;
+
 impl TrackLink {
     /// Why the link cannot be used, apart from the track it names.
     pub fn problem(&self) -> Option<String> {
@@ -280,6 +320,9 @@ impl Project {
         if (follow.ref_track, follow.ref_clip) == (track, clip) {
             return Some("a clip cannot follow itself".to_owned());
         }
+        if self.tracks.get(track).and_then(|t| t.clips.get(clip)).is_some_and(|own| own.lock.is_some()) {
+            return Some("a clip cannot both follow a track and lock to one".to_owned());
+        }
         let Some(reference) = self.tracks.get(follow.ref_track).and_then(|t| t.clips.get(follow.ref_clip)) else {
             return Some(format!("no reference clip {} on track {}", follow.ref_clip, follow.ref_track));
         };
@@ -293,6 +336,57 @@ impl Project {
             return Some("the reference clip does not show the anchor".to_owned());
         }
         None
+    }
+
+    /// Why `lock` on the clip at (`track`, `clip`) cannot be used, if it cannot.
+    pub fn lock_problem(&self, lock: &TrackLock, track: usize, clip: usize) -> Option<String> {
+        if let Some(problem) = lock.link.problem() {
+            return Some(problem);
+        }
+        if !(lock.zoom.is_finite() && (MIN_LOCK_ZOOM..=MAX_LOCK_ZOOM).contains(&lock.zoom)) {
+            return Some(format!("zoom {} not from {MIN_LOCK_ZOOM} to {MAX_LOCK_ZOOM}", lock.zoom));
+        }
+        let Some(motion) = self.motion_track(lock.link.track_id) else {
+            return Some(format!("no motion track {}", lock.link.track_id));
+        };
+        let Some(own) = self.tracks.get(track).and_then(|t| t.clips.get(clip)) else {
+            return Some(format!("no clip {clip} on track {track}"));
+        };
+        if own.source != motion.media_path {
+            return Some(format!("motion track {} is of {}, not of the clip's source {}", lock.link.track_id, motion.media_path, own.source));
+        }
+        if own.follow.is_some() {
+            return Some("a clip cannot both follow a track and lock to one".to_owned());
+        }
+        None
+    }
+
+    /// How the picture of the locked clip `clip` of track `track` moves at timeline time `t` so the
+    /// object stays where it stood at the anchor, applied by [`ClipTransform::rect`]: from where its
+    /// own place and keyframes put the object now to where they put it at the anchor, scaled and
+    /// turned back by how the object grew and turned when the lock keeps those, times the extra
+    /// zoom. `None` without a lock or when the track cannot be read. A split piece that does not
+    /// play the anchor still locks to it: the anchor is in source time.
+    pub fn lock_pose(&self, track: usize, clip: usize, t: Time) -> Option<FollowPose> {
+        let lane = self.tracks.get(track)?;
+        let own = lane.clips.get(clip)?;
+        let lock = own.lock?;
+        let motion = self.motion_track(lock.link.track_id)?;
+        let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
+        // The anchor side is the clip's own place and keyframes, without its preset animations
+        // (a zoom from nothing would lock the object to nothing, a slide to where it slid from),
+        // read at the anchor's time kept inside the clip, so a split piece that does not play the
+        // anchor reads its own first or last keyframe.
+        let last = own.duration.saturating_sub(Time::from_ticks(1)).max(Time::ZERO);
+        let anchor_offset = own.timeline_time_of(lock.link.anchor_source_time).saturating_sub(own.start).clamp(Time::ZERO, last);
+        let anchor_point = motion.point_at(lock.link.anchor_source_time, lock.link.smooth)?;
+        let (to, to_size, to_angle) = to_output(anchor_point, own.transform_at(anchor_offset), output_aspect, motion.aspect);
+        let source = own.source_time_at(t.saturating_sub(own.start)).max(Time::ZERO);
+        let point = motion.point_at(source, lock.link.smooth)?;
+        let (from, from_size, from_angle) = to_output(point, crate::schedule::clip_transform_at(lane, clip, t), output_aspect, motion.aspect);
+        let scale = if lock.link.follow_scale && from_size > MIN_POSE_SIZE && to_size > MIN_POSE_SIZE { to_size / from_size } else { 1.0 };
+        let rotation = if lock.link.follow_rotation { to_angle - from_angle } else { 0.0 };
+        Some(FollowPose { from, to, scale: scale * lock.zoom, rotation })
     }
 
     /// The clip that follows with the clip at (`track`, `clip`) as its reference, if one does.
@@ -339,6 +433,9 @@ impl Project {
                     self.tracks[t].clips[c].follow = repaired;
                 }
                 let source = self.tracks[t].clips[c].source.clone();
+                if self.tracks[t].clips[c].lock.is_some_and(|lock| self.motion_track(lock.link.track_id).is_none_or(|motion| motion.media_path != source)) {
+                    self.tracks[t].clips[c].lock = None;
+                }
                 let regions: Vec<bool> = self.tracks[t].clips[c].effects.iter().map(|effect| effect.region.and_then(|region| region.link).is_some_and(|link| self.motion_track(link.track_id).is_none_or(|motion| motion.media_path != source))).collect();
                 for (effect, drop) in self.tracks[t].clips[c].effects.iter_mut().zip(regions) {
                     if drop {
@@ -366,7 +463,7 @@ impl Project {
         let place = |time: Time| -> Option<(TrackPoint, ClipTransform)> {
             let source = reference.source_time_at(time.saturating_sub(reference.start)).max(Time::ZERO);
             let point = motion.point_at(source, follow.link.smooth)?;
-            Some((point, crate::schedule::clip_transform_at(track, follow.ref_clip, time)))
+            Some((point, crate::schedule::placed_transform_at(self, follow.ref_track, follow.ref_clip, time)))
         };
         let (anchor_point, anchor_transform) = place(anchor_time)?;
         let (point, transform) = place(t)?;
@@ -382,9 +479,9 @@ impl Project {
 /// output frame: its middle (parts of the frame), its size (geometric mean of width and height, in
 /// parts of the frame height) and its angle (clockwise degrees).
 fn to_output(point: TrackPoint, transform: ClipTransform, output_aspect: f64, source_aspect: f64) -> ([f64; 2], f64, f64) {
-    let mut plain = transform;
-    plain.follow = None;
-    let rect = plain.rect(output_aspect, source_aspect);
+    // A reference clip never follows ([`Project::follow_problem`] refuses one that does), so a pose
+    // in `transform` is that of its lock, which moves the picture and the object with it.
+    let rect = transform.rect(output_aspect, source_aspect);
     let (x, y) = (rect.x + point.cx * rect.width, rect.y + point.cy * rect.height);
     let (mx, my) = (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
     let (sine, cosine) = transform.rotation.to_radians().sin_cos();
@@ -462,13 +559,20 @@ impl FrameMapping {
 
 impl Project {
     /// How the picture of clip `clip` of track `track`, a source of `source_aspect`, lies in the
-    /// output frame at timeline time `t`, its keyframes and preset animations applied. A clip that
-    /// follows a motion track is taken at its own place, without the motion.
+    /// output frame at timeline time `t`, its keyframes, preset animations and lock applied. A clip
+    /// that follows a motion track is taken at its own place, without the motion.
     pub fn clip_frame_mapping(&self, track: usize, clip: usize, t: Time, source_aspect: f64) -> Option<FrameMapping> {
+        self.clip_frame_mapping_for(track, clip, t, source_aspect, None)
+    }
+
+    /// [`Self::clip_frame_mapping`] for drawing or editing the box of motion track `motion_track`:
+    /// when the clip locks to that very track its lock is left out, since the lock is worked out
+    /// from the box itself and would take it back to the anchor whatever an edit does.
+    pub fn clip_frame_mapping_for(&self, track: usize, clip: usize, t: Time, source_aspect: f64, motion_track: Option<u32>) -> Option<FrameMapping> {
         let lane = self.tracks.get(track)?;
-        lane.clips.get(clip)?;
-        let mut transform = crate::schedule::clip_transform_at(lane, clip, t);
-        transform.follow = None;
+        let own = lane.clips.get(clip)?;
+        let unlocked = motion_track.is_some_and(|id| own.lock.is_some_and(|lock| lock.link.track_id == id));
+        let transform = if unlocked { crate::schedule::clip_transform_at(lane, clip, t) } else { crate::schedule::placed_transform_at(self, track, clip, t) };
         let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
         Some(FrameMapping { rect: transform.rect(output_aspect, source_aspect), rotation: transform.rotation, output_aspect })
     }

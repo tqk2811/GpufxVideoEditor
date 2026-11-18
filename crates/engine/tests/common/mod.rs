@@ -28,6 +28,7 @@ pub fn clip(source: &str, start: i64, source_in: i64, duration: i64) -> Clip {
         reverse: false,
         matte: Default::default(),
         follow: None,
+        lock: None,
         censor: None,
     }
 }

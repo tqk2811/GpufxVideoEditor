@@ -94,7 +94,7 @@ fn installed_name() -> String {
 fn project(effects: Vec<Effect>) -> Project {
     let source = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-clips/clip-a.mp4"));
     let source = std::path::absolute(source).unwrap().to_string_lossy().into_owned();
-    let clip = Clip { source, start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_seconds(1).unwrap(), effects, gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, censor: None };
+    let clip = Clip { source, start: Time::ZERO, source_in: Time::ZERO, duration: Time::from_seconds(1).unwrap(), effects, gain_db: 0.0, muted: false, fade_in: Time::ZERO, fade_out: Time::ZERO, speed: 1.0, placement: None, motion: Default::default(), text: None, animation: Default::default(), denoise: Default::default(), voice: Default::default(), reverse: false, matte: Default::default(), follow: None, lock: None, censor: None };
     Project { version: SUPPORTED_VERSION, output: Output { width: 320, height: 180, frame_rate: engine::FrameRate::whole(30), audio: None }, tracks: vec![Track { kind: TrackKind::Video, clips: vec![clip], transitions: Vec::new(), locked: false, hidden: false, subtitle: None }], markers: Vec::new(), beats: Default::default(), motion_tracks: Vec::new() }
 }
 

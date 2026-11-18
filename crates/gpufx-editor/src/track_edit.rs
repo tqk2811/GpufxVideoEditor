@@ -6,7 +6,7 @@
 use crate::editor::EditorState;
 use crate::i18n::Message;
 use crate::tracking::Direction;
-use engine::{ClipKey, EditError, EffectRegion, Follow, FrameMapping, MotionTrack, Project, Time, TrackLink, TrackSample};
+use engine::{ClipKey, EditError, EffectRegion, Follow, FrameMapping, MotionTrack, Project, Time, TrackLink, TrackLock, TrackSample};
 
 /// A tracker run the inspector asked for; the window starts it with the file the preview decodes
 /// (the proxy when there is one), see [`EditorState::run_track_ask`].
@@ -136,12 +136,19 @@ impl EditorState {
     /// How clip `key`, a picture of the shape of its source, lies in the frame at the playhead,
     /// and the source time it shows there; `None` when the playhead is off the clip.
     pub fn clip_frame_now(&self, key: ClipKey) -> Option<(FrameMapping, Time)> {
+        self.clip_frame_now_for(key, None)
+    }
+
+    /// [`Self::clip_frame_now`] for drawing or editing the box and path of motion track
+    /// `motion_track`: without the clip's lock when it locks to that track (see
+    /// [`engine::Project::clip_frame_mapping_for`]).
+    pub fn clip_frame_now_for(&self, key: ClipKey, motion_track: Option<u32>) -> Option<(FrameMapping, Time)> {
         let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
         let at = self.playhead();
         if at < clip.start || at >= clip.start.saturating_add(clip.duration) {
             return None;
         }
-        let mapping = self.project().clip_frame_mapping(key.track, key.clip, at, self.clip_aspect(clip))?;
+        let mapping = self.project().clip_frame_mapping_for(key.track, key.clip, at, self.clip_aspect(clip), motion_track)?;
         Some((mapping, clip.source_time_at(at.saturating_sub(clip.start)).max(Time::ZERO)))
     }
 
@@ -305,7 +312,47 @@ impl EditorState {
         self.run(|project| engine::set_follow(project, key, None));
     }
 
+    /// Locks the frame of video clip `key` to motion track `track_id`, anchored at the playhead
+    /// (the clip's first frame when the playhead is off it): position only, with the smoothing the
+    /// track's followers have. One undo step.
+    pub fn lock_to_track(&mut self, key: ClipKey, track_id: u32) {
+        let Some(clip) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
+        let last = clip.start.saturating_add(clip.duration).saturating_sub(Time::from_ticks(1)).max(clip.start);
+        let time = self.playhead().clamp(clip.start, last);
+        let mut lock = TrackLock::new(track_id, clip.source_time_at(time.saturating_sub(clip.start)).max(Time::ZERO));
+        lock.link.smooth = track_smooth(self.project(), track_id);
+        self.run(|project| engine::set_lock(project, key, Some(lock)));
+    }
+
+    /// Changes the lock of video clip `key` with `change`, as one undo step.
+    pub fn set_lock_options(&mut self, key: ClipKey, change: impl FnOnce(&mut TrackLock)) {
+        let Some(mut lock) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.lock) else { return };
+        change(&mut lock);
+        self.run(|project| engine::set_lock(project, key, Some(lock)));
+    }
+
+    /// Moves the extra zoom of the lock of video clip `key` while a slider is dragged.
+    pub fn live_lock_zoom(&mut self, key: ClipKey, zoom: f64) {
+        let Some(mut lock) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.lock) else { return };
+        lock.zoom = zoom.clamp(engine::MIN_LOCK_ZOOM, engine::MAX_LOCK_ZOOM);
+        self.live_edit(|project| engine::set_lock(project, key, Some(lock)));
+    }
+
+    /// Ends the lock of video clip `key`.
+    pub fn clear_lock(&mut self, key: ClipKey) {
+        self.run(|project| engine::set_lock(project, key, None));
+    }
+
+    /// Turns the lock of video clip `key` into keyframes, see [`engine::bake_lock`].
+    pub fn bake_lock(&mut self, key: ClipKey) {
+        let Some(aspect) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map(|clip| self.clip_aspect(clip)) else { return };
+        if self.run(|project| engine::bake_lock(project, key, aspect)) {
+            self.status_info(Message::LockBaked);
+        }
+    }
+
     /// Turns the follow of overlay `key` into keyframes, see [`engine::bake_follow`].
+
     pub fn bake_follow(&mut self, key: ClipKey) {
         let Some(aspect) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).map(|clip| self.clip_aspect(clip)) else { return };
         if self.run(|project| engine::bake_follow(project, key, aspect)) {
@@ -430,7 +477,30 @@ mod tests {
     }
 
     #[test]
+    fn locking_a_clip_anchors_at_the_playhead_and_its_options_bake_and_clear() {
+        let mut state = rigged();
+        let key = ClipKey { track: 0, clip: 0 };
+        state.set_playhead(Time::from_ticks(SECOND));
+        state.lock_to_track(key, 1);
+        let lock = state.project().tracks[0].clips[0].lock.expect("locked");
+        assert_eq!((lock.link.track_id, lock.link.anchor_source_time, lock.link.follow_scale, lock.link.follow_rotation, lock.zoom), (1, Time::from_ticks(SECOND), false, false, 1.0));
+        state.set_lock_options(key, |lock| lock.link.follow_rotation = true);
+        assert!(state.project().tracks[0].clips[0].lock.unwrap().link.follow_rotation);
+        state.live_lock_zoom(key, 20.0);
+        state.commit_live();
+        assert_eq!(state.project().tracks[0].clips[0].lock.unwrap().zoom, engine::MAX_LOCK_ZOOM, "clamped");
+        state.bake_lock(key);
+        let clip = &state.project().tracks[0].clips[0];
+        assert!(clip.lock.is_none() && clip.motion.has_keyframes(engine::ClipProperty::X));
+        state.undo();
+        assert!(state.project().tracks[0].clips[0].lock.is_some(), "baking is one undo step");
+        state.clear_lock(key);
+        assert!(state.project().tracks[0].clips[0].lock.is_none());
+    }
+
+    #[test]
     fn attaching_at_the_playhead_keeps_the_overlay_there_then_moves_it_with_the_object() {
+
         let mut state = rigged();
         let key = ClipKey { track: 1, clip: 0 };
         let at = Time::from_ticks(SECOND);
@@ -544,6 +614,25 @@ mod tests {
         let (shown, on_frame) = state.box_at_playhead(key, &track).unwrap();
         assert_eq!((shown.source_time, on_frame), (Time::from_ticks(SECOND), None));
         assert_eq!(snap_to_frame(Time::from_ticks(SECOND / 24 * 3 + 7), (24, 1)), Time::from_ticks(SECOND / 8));
+    }
+
+    #[test]
+    fn the_box_of_the_track_a_clip_locks_to_is_drawn_without_the_lock() {
+        let mut state = rigged();
+        let key = ClipKey { track: 0, clip: 0 };
+        state.set_playhead(Time::from_ticks(2 * SECOND));
+        let (plain, _) = state.clip_frame_now(key).unwrap();
+        let mut project = state.project().clone();
+        let link = engine::TrackLink { track_id: 1, anchor_source_time: Time::ZERO, follow_scale: true, follow_rotation: true, smooth: 0.0 };
+        project.tracks[0].clips[0].lock = Some(engine::TrackLock { link, zoom: 1.5 });
+        state.replace_project(project, None);
+        let (locked, _) = state.clip_frame_now(key).unwrap();
+        assert_ne!(locked, plain, "the picture itself is drawn locked");
+        // The box of track 1 drives the lock, so it is drawn and dragged in the clip's own place:
+        // a drag then moves the sample by just as much, not through the lock it changes.
+        let (for_box, _) = state.clip_frame_now_for(key, Some(1)).unwrap();
+        assert_eq!(for_box, plain);
+        assert_eq!(state.clip_frame_now_for(key, Some(2)).unwrap().0, locked, "another track keeps the lock");
     }
 
     #[test]

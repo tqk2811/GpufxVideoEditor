@@ -1,5 +1,5 @@
 //! The censor and tracking tools on a [`FileSession`]: censor_add, track_set_sample,
-//! clip_follow_set, clip_follow_clear and track_run.
+//! clip_follow_set, clip_follow_clear, clip_lock_set, clip_lock_clear and track_run.
 
 mod common;
 
@@ -42,9 +42,23 @@ fn a_censor_region_follows_a_track_of_the_video_under_it() {
     let follow = project.tracks[1].clips[0].follow.expect("follows");
     assert_eq!((follow.link.track_id, follow.ref_track, follow.ref_clip), (id as u32, 0, 0));
     assert!(project.motion_tracks[0].samples.iter().all(|sample| sample.manual), "entered by hand");
-    call_ok(&mut session, "clip_follow_clear", json!({"expected_revision": revision(&followed), "clip": {"track": 1, "clip": 0}}));
+    let cleared = call_ok(&mut session, "clip_follow_clear", json!({"expected_revision": revision(&followed), "clip": {"track": 1, "clip": 0}}));
     assert!(project_of(&mut session).tracks[1].clips[0].follow.is_none());
+
+    // Lock the video itself to the track, then bake and undo, then clear.
+    let video = json!({"track": 0, "clip": 0});
+    assert_eq!(call_err(&mut session, "clip_lock_set", json!({"expected_revision": revision(&cleared), "clip": video, "track_id": id, "zoom": 50.0})).code, "invalid_project");
+    let locked = call_ok(&mut session, "clip_lock_set", json!({"expected_revision": revision(&cleared), "clip": video, "track_id": id, "at": 45_000, "lock_rotation": true, "zoom": 1.25}));
+    let lock = project_of(&mut session).tracks[0].clips[0].lock.expect("locked");
+    assert_eq!((lock.link.track_id, lock.link.anchor_source_time.ticks(), lock.link.follow_scale, lock.link.follow_rotation, lock.zoom), (id as u32, 45_000, false, true, 1.25));
+    let baked = call_ok(&mut session, "track_bake_keyframes", json!({"expected_revision": revision(&locked), "clip": video}));
+    let project = project_of(&mut session);
+    assert!(project.tracks[0].clips[0].lock.is_none() && project.tracks[0].clips[0].motion.has_keyframes(engine::ClipProperty::Width), "the zoom bakes to width");
+    let undone = call_ok(&mut session, "undo", json!({"expected_revision": revision(&baked)}));
+    call_ok(&mut session, "clip_lock_clear", json!({"expected_revision": revision(&undone), "clip": video}));
+    assert!(project_of(&mut session).tracks[0].clips[0].lock.is_none());
 }
+
 
 /// A 2 s, 30 fps, 320x180 clip of a 64x64 textured square on gray whose left edge is at
 /// x = 40 + 2n in frame n and top at y = 60.
