@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use engine::{
-    add_clip, delete_clip, layers_at_frame, move_clip, remove_track, set_follow, set_track_sample, split_clip, validate, AcceptAll, CensorContent, CensorMode, ClipKey, ClipPlacement, ClipProperty, EditError, EffectRegion, Follow, Keyframe, LayerContent, MotionTrack, Project, RegionShape, Time, TrackKind, TrackLink,
+    add_clip, delete_clip, layers_at_frame, move_clip, remove_track, set_follow, set_track_sample, apply_track_run, split_clip, validate, AcceptAll, CensorContent, CensorMode, ClipKey, ClipPlacement, ClipProperty, EditError, EffectRegion, Follow, Keyframe, LayerContent, MotionTrack, Project, RegionShape, Time, TrackKind, TrackLink,
     TrackSample, ValidationError,
 };
 
@@ -192,6 +192,25 @@ fn samples_are_kept_in_order_and_replaced_at_the_same_time() {
     assert_eq!(times, [0, SECOND, 2 * SECOND]);
     assert!(p.motion_tracks[0].samples[1].manual && p.motion_tracks[0].samples[1].cx == 0.2);
     assert!(matches!(set_track_sample(&p, 1, sample(0.0, 0.0, 0.0)), Err(EditError::MotionTrackNotFound { id: 1 })));
+}
+
+#[test]
+fn a_tracker_run_replaces_the_tracker_samples_of_its_span_but_not_the_users() {
+    let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
+    let p = set_track_sample(&p, 7, TrackSample { manual: true, ..sample(1.0, 0.2, 0.2) }).unwrap();
+    let run = [sample(0.5, 0.3, 0.5), TrackSample { manual: true, ..sample(1.0, 0.9, 0.9) }, sample(1.5, 0.4, 0.5)];
+    let next = apply_track_run(&p, 7, &run).unwrap();
+    let samples = &next.motion_tracks[0].samples;
+    let times: Vec<i64> = samples.iter().map(|s| s.source_time.ticks()).collect();
+    assert_eq!(times, [0, SECOND / 2, SECOND, SECOND * 3 / 2, 2 * SECOND]);
+    assert!(samples[2].manual && samples[2].cx == 0.2, "the user's sample stays");
+    assert!(!samples[1].manual && samples[1].cx == 0.3 && !samples[3].manual);
+    // A run over the whole track replaces the tracker's samples at its ends.
+    let next = apply_track_run(&p, 7, &[sample(0.0, 0.6, 0.6), sample(2.0, 0.7, 0.7)]).unwrap();
+    let cx: Vec<f64> = next.motion_tracks[0].samples.iter().map(|s| s.cx).collect();
+    assert_eq!(cx, [0.6, 0.2, 0.7]);
+    assert_eq!(apply_track_run(&p, 7, &[]).unwrap(), p);
+    assert!(matches!(apply_track_run(&p, 1, &run), Err(EditError::MotionTrackNotFound { id: 1 })));
 }
 
 #[test]

@@ -1471,6 +1471,25 @@ pub fn set_track_sample(project: &Project, id: u32, sample: TrackSample) -> Resu
     finish(project, next)
 }
 
+/// Writes the samples of one tracker run to motion track `id`: the samples the tracker made
+/// before between the run's first and last source time go (the user's own stay, and a run never
+/// replaces one), then `samples` are put in. Nothing changes without samples.
+pub fn apply_track_run(project: &Project, id: u32, samples: &[TrackSample]) -> Result<Project, EditError> {
+    let mut next = project.clone();
+    let track = next.motion_tracks.iter_mut().find(|track| track.id == id).ok_or(EditError::MotionTrackNotFound { id })?;
+    let (Some(low), Some(high)) = (samples.iter().map(|s| s.source_time).min(), samples.iter().map(|s| s.source_time).max()) else {
+        return Ok(project.clone());
+    };
+    track.samples.retain(|s| s.manual || s.source_time < low || s.source_time > high);
+    for sample in samples {
+        let manual_there = track.samples.binary_search_by_key(&sample.source_time, |s| s.source_time).is_ok_and(|i| track.samples[i].manual);
+        if !manual_there {
+            track.upsert(TrackSample { manual: false, ..*sample });
+        }
+    }
+    finish(project, next)
+}
+
 /// Snapshot undo and redo over a project, keeping at most `depth` undo steps.
 #[derive(Debug, Clone)]
 pub struct EditHistory {
