@@ -176,9 +176,13 @@ Lựa chọn (user đã duyệt):
 - Bật "Phối cảnh" trên overlay thì bỏ qua hai ô bám scale và bám xoay (phối cảnh đã gồm cả hai). Bake keyframe của overlay phối cảnh chỉ ghi phần similarity (X/Y, Width, Rotation); keyframe không biểu diễn được phối cảnh.
 - Kéo góc của tứ giác dùng ánh xạ của clip tại đầu phát, như kéo khung.
 
+Lựa chọn tạm mới (chờ user duyệt):
+
 - Mép mịn của vùng che tứ giác tính theo khung có cỡ bằng trung bình các cạnh, không theo độ co giãn phối cảnh tại từng pixel, nên phía xa của mặt phẳng có mép mịn hơi rộng hơn mắt thấy.
 - Khoá phối cảnh bỏ qua hai ô giữ cỡ và giữ góc (phối cảnh đã gồm cả hai). Pose dùng cho gizmo của clip đã khoá phối cảnh vẫn là pose khung; overlay bám clip này qua `follow_pose` (khi không bật phối cảnh) chỉ gần đúng, còn `follow_pin` thì đúng.
 - Vùng effect bật phối cảnh mà track không phẳng thì cờ vẫn được lưu nhưng vùng bám theo khung.
+- Clip che vùng chỉ dùng tứ giác khi clip tham chiếu bám theo phối cảnh (`Follow.perspective` bật); không thì che theo khung như cũ.
+- Ô bật bám phối cảnh trong inspector gọi là "Phối cảnh" (`Message::FollowPerspective`), kèm gợi ý một dòng về corner pin.
 
 Việc còn lại:
 
