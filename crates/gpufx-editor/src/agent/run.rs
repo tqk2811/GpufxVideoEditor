@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 
-use d3d12_backend::{is_asset_source, overwritten_input, probe_media, read_package_info, same_file, EncoderChoice, ExportJob, MediaProbe, ParamKind, ProjectPaths};
+use d3d12_backend::{animation_timing, is_asset_source, overwritten_input, probe_media, read_package_info, same_file, EncoderChoice, AnimationTiming, ExportJob, MediaProbe, ParamKind, ProjectPaths};
 use engine::{clip_at, frame_count, frame_time, nearest_free_start, Clip, ClipKey, Effect, KeyframeTarget, Project, Time, TrackKind, Transition};
 use serde_json::{json, Map, Value};
 
@@ -27,6 +27,7 @@ use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
 use crate::text_clip::{default_text, natural_placement};
 use crate::text_shapes::available_families;
 use crate::text_style_library::subtitle_placement;
+use crate::sticker_library::animated_duration;
 use crate::project_file::{load_project_file_for_agent, save_project_file};
 use crate::preview::plan::frame_index;
 use crate::project_lock;
@@ -37,6 +38,8 @@ pub struct Prepared {
     pub request: AgentRequest,
     loaded: Option<Result<Project, AgentError>>,
     probe: Option<Result<MediaProbe, AgentError>>,
+    /// The loop of the picture a `clip_add` adds, when it is an animated WebP or GIF.
+    animation: Option<AnimationTiming>,
     packages_problem: Option<AgentError>,
     package_list: Option<Value>,
 }
@@ -96,12 +99,15 @@ pub trait AgentHost {
 
 /// Reads what `request` needs from disk.
 pub fn prepare(request: AgentRequest, package_roots: &[PathBuf]) -> Prepared {
-    let mut prepared = Prepared { request, loaded: None, probe: None, packages_problem: None, package_list: None };
+    let mut prepared = Prepared { request, loaded: None, probe: None, animation: None, packages_problem: None, package_list: None };
     match &prepared.request {
         AgentRequest::ProjectOpen { path, .. } => prepared.loaded = Some(load(path, package_roots)),
         AgentRequest::PackagesList { filter } => prepared.package_list = Some(package_list(package_roots, filter.as_deref())),
         AgentRequest::InstalledPacks { kind } => prepared.package_list = Some(installed_packs(package_roots, kind.as_deref())),
-        AgentRequest::Edit { edit: AgentEdit::ClipAdd { source, .. }, .. } => prepared.probe = Some(probe(source, package_roots)),
+        AgentRequest::Edit { edit: AgentEdit::ClipAdd { source, .. }, .. } => {
+            prepared.probe = Some(probe(source, package_roots));
+            prepared.animation = animation(source, package_roots);
+        }
         AgentRequest::Edit { edit: AgentEdit::EffectAdd { package, .. } | AgentEdit::TransitionAdd { package, .. }, .. } => prepared.packages_problem = package_problem(package, package_roots),
         _ => {}
     }
@@ -111,6 +117,17 @@ pub fn prepare(request: AgentRequest, package_roots: &[PathBuf]) -> Prepared {
 fn load(path: &Path, package_roots: &[PathBuf]) -> Result<Project, AgentError> {
     let file = std::path::absolute(path).map_err(|e| AgentError::new("invalid_path", e.to_string()))?;
     load_project_file_for_agent(&file, package_roots).map_err(|message| AgentError::new("invalid_project", message))
+}
+
+/// The loop of the picture at `source` when it is an animated WebP or GIF; `None` for anything
+/// else or a file that cannot be read, which [`probe`] reports.
+fn animation(source: &Path, package_roots: &[PathBuf]) -> Option<AnimationTiming> {
+    let text = source.to_string_lossy();
+    if !engine::is_image_source(&text) {
+        return None;
+    }
+    let file = if is_asset_source(&text) { ProjectPaths::roots_only(Path::new("agent.json"), package_roots.to_vec()).asset_path(&text).ok()? } else { source.to_path_buf() };
+    animation_timing(&file).ok().flatten()
 }
 
 fn probe(source: &Path, package_roots: &[PathBuf]) -> Result<MediaProbe, AgentError> {
@@ -213,7 +230,7 @@ fn landing_start(project: &Project, clip: ClipRef, track: usize, start: Time) ->
 }
 
 /// The clip of a `clip_add`, checked against what the track plays.
-fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, source_in: Option<Time>, duration: Option<Time>, speed: Option<f64>, probe: Option<Result<MediaProbe, AgentError>>) -> Result<Clip, AgentError> {
+fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, source_in: Option<Time>, duration: Option<Time>, speed: Option<f64>, probe: Option<Result<MediaProbe, AgentError>>, animation: Option<AnimationTiming>) -> Result<Clip, AgentError> {
     let probe = probe.unwrap_or_else(|| Err(AgentError::new("internal", "the source was not probed")))?;
     let Some(target) = state.project().tracks.get(track) else {
         return Err(AgentError::from_edit(&engine::EditError::TrackNotFound { track }));
@@ -240,9 +257,10 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
     let mut clip = new_clip(&stored, start, Time::ZERO);
     clip.source_in = source_in;
     if clip.is_image() {
-        // A still has no source position or speed: it runs as long as asked, 5 seconds by default.
+        // A still has no source position or speed: it runs as long as asked, 5 seconds by default;
+        // an animated one by default runs whole loops, as when it is dropped on the timeline.
         clip.source_in = Time::ZERO;
-        clip.duration = duration.unwrap_or(DEFAULT_IMAGE_DURATION);
+        clip.duration = duration.unwrap_or_else(|| animation.map_or(DEFAULT_IMAGE_DURATION, |timing| animated_duration(DEFAULT_IMAGE_DURATION, timing)));
         return Ok(clip);
     }
     clip.speed = engine::speed_milli(speed) as f64 / engine::SPEED_SCALE as f64;
@@ -290,7 +308,7 @@ fn check_keyframe_target(state: &EditorState, clip: ClipRef, target: &KeyframeTa
     }
 }
 
-fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<MediaProbe, AgentError>>) -> Result<Value, AgentError> {
+fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<MediaProbe, AgentError>>, animation: Option<AnimationTiming>) -> Result<Value, AgentError> {
     let refused = |error: engine::EditError| AgentError::from_edit(&error);
     let mut result = Map::new();
     match edit {
@@ -325,7 +343,7 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             result.insert("output".to_owned(), json!({"width": output.width, "height": output.height, "frame_rate": output.frame_rate}));
         }
         AgentEdit::ClipAdd { track, source, start, source_in, duration, speed } => {
-            let clip = added_clip(state, track, &source, start, source_in, duration, speed, probe)?;
+            let clip = added_clip(state, track, &source, start, source_in, duration, speed, probe, animation)?;
             state.apply_agent_command(|project| engine::add_clip(project, track, clip)).map_err(refused)?;
             result.insert("clip".to_owned(), clip_json(clip_at(state.project(), track, start)));
         }
@@ -913,7 +931,7 @@ fn frame_capture<H: AgentHost>(host: &mut H, target: CaptureTarget, max_width: u
 
 /// Runs a prepared request against the host's state. `revision` is added to every object it answers.
 pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
-    let Prepared { request, loaded, probe, packages_problem, package_list } = prepared;
+    let Prepared { request, loaded, probe, animation, packages_problem, package_list } = prepared;
     let result = match request {
         AgentRequest::SessionStatus => Ok(session_status(host)),
         AgentRequest::ProjectNew { discard_changes } => replaceable(host, discard_changes).map(|()| {
@@ -940,7 +958,7 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::BeatsDetect { expected_revision, clip, retry } => beats_detect(host, expected_revision, clip, retry),
         AgentRequest::Edit { expected_revision, edit } => match packages_problem {
             Some(error) => Err(error),
-            None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe)),
+            None => writable(host, expected_revision).and_then(|()| run_edit(host.state(), edit, probe, animation)),
         },
         AgentRequest::Undo { expected_revision } => undo_or_redo(host, expected_revision, true),
         AgentRequest::Redo { expected_revision } => undo_or_redo(host, expected_revision, false),
@@ -1211,7 +1229,7 @@ mod tests {
     fn added(source_in: Option<Time>, duration: Option<Time>, speed: Option<f64>) -> Result<Clip, AgentError> {
         let mut state = EditorState::default();
         state.add_track(TrackKind::Video);
-        added_clip(&state, 0, Path::new("a.mp4"), Time::ZERO, source_in, duration, speed, Some(Ok(probed(Time::from_ticks(9000)))))
+        added_clip(&state, 0, Path::new("a.mp4"), Time::ZERO, source_in, duration, speed, Some(Ok(probed(Time::from_ticks(9000)))), None)
     }
 
     #[test]
@@ -1221,12 +1239,28 @@ mod tests {
         let asset = Path::new("asset:sfx/p/audio/a.flac");
         let audio = MediaProbe { has_video: false, has_audio: true, video_duration: None, audio_duration: Some(Time::from_ticks(9000)), video_problem: None, audio_problem: None };
         let track = state.project().tracks.iter().rposition(|track| track.is_audio()).expect("an audio track was added");
-        let clip = added_clip(&state, track, asset, Time::ZERO, None, None, None, Some(Ok(audio))).unwrap();
+        let clip = added_clip(&state, track, asset, Time::ZERO, None, None, None, Some(Ok(audio)), None).unwrap();
         assert_eq!(clip.source, "asset:sfx/p/audio/a.flac", "no absolute path in the project");
         let escaping = probe(Path::new("asset:sfx/../../secret.flac"), &[]).unwrap_err();
         assert_eq!(escaping.code, "source_not_found");
         let missing = probe(Path::new("asset:sfx/nothing/audio/a.flac"), &[]).unwrap_err();
         assert!(missing.message.contains("nothing") && missing.message.contains("not installed"), "{}", missing.message);
+    }
+
+    #[test]
+    fn an_animated_sticker_added_without_a_duration_runs_whole_loops_as_a_drop_does() {
+        let gif = Path::new(env!("CARGO_MANIFEST_DIR")).join("../d3d12-backend/tests/fixtures/animated_subframes.gif");
+        let timing = animation(&gif, &[]).expect("an animated gif");
+        assert_eq!(timing, AnimationTiming { loop_ms: 500, loops: 3 });
+        assert_eq!(animation(Path::new("a.mp4"), &[]), None, "only a picture is read");
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Sticker);
+        let track = state.project().tracks.iter().rposition(|track| track.kind == TrackKind::Sticker).expect("a sticker track");
+        let add = |duration: Option<Time>, animation: Option<AnimationTiming>| added_clip(&state, track, &gif, Time::ZERO, None, duration, None, Some(Ok(probed(Time::ZERO))), animation).unwrap().duration;
+        assert_eq!(add(None, Some(timing)), Time::from_ticks(1500 * 90), "three plays of 500 ms");
+        assert_eq!(add(None, Some(AnimationTiming { loop_ms: 600, loops: 0 })), animated_duration(DEFAULT_IMAGE_DURATION, AnimationTiming { loop_ms: 600, loops: 0 }));
+        assert_eq!(add(None, None), DEFAULT_IMAGE_DURATION, "a still keeps the default");
+        assert_eq!(add(Some(Time::from_ticks(9000)), Some(timing)), Time::from_ticks(9000), "an asked duration wins");
     }
 
     #[test]
