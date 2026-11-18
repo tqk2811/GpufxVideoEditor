@@ -1,5 +1,5 @@
 //! The tracking parts of the inspector: the Tracking section of a video clip (pick an object, run
-//! the tracker, choose, smooth or delete tracks, add a censor that follows), the follow section
+//! the tracker, choose, smooth or delete tracks, add a censor that follows, lock the frame to the object), the follow section
 //! of an overlay, and the region of a blur or pixelate effect.
 
 use super::numeric::{add_slider, drag_field};
@@ -7,7 +7,7 @@ use super::theme;
 use crate::editor::EditorState;
 use crate::i18n::{Language, Message};
 use crate::tracking::Direction;
-use engine::{ClipKey, EffectRegion, MotionTrack, RegionShape, MAX_FOLLOW_SMOOTH};
+use engine::{ClipKey, EffectRegion, MotionTrack, RegionShape, MAX_FOLLOW_SMOOTH, MAX_LOCK_ZOOM, MIN_LOCK_ZOOM};
 
 /// The region a blur or pixelate effect takes when it is first limited: a third of the picture
 /// in the middle, soft edged.
@@ -87,10 +87,47 @@ pub(super) fn tracking_rows(ui: &mut egui::Ui, state: &mut EditorState, key: Cli
     if ui.button(language.t(Message::AddCensorFollowing)).clicked() {
         state.add_censor_following(current.id);
     }
+    lock_rows(ui, state, key, current.id);
+
     ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackHintFix)).color(theme::text_dim()).small()).wrap());
 }
 
+/// Locking the frame of video clip `key` to the object: a button that locks it to motion track
+/// `track_id` at the playhead, or the options of the lock it has.
+fn lock_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, track_id: u32) {
+    let language = state.language();
+    let Some(clip) = state.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
+    let Some(lock) = clip.lock else {
+        if ui.button(language.t(Message::LockToObject)).clicked() {
+            state.lock_to_track(key, track_id);
+        }
+        return;
+    };
+    ui.colored_label(theme::text_dim(), language.t(Message::LockedToTrack(lock.link.track_id)));
+    let (mut scale, mut rotation) = (lock.link.follow_scale, lock.link.follow_rotation);
+    let changed = ui.checkbox(&mut scale, language.t(Message::LockScale)).changed() | ui.checkbox(&mut rotation, language.t(Message::LockRotation)).changed();
+    if changed {
+        state.set_lock_options(key, |lock| {
+            lock.link.follow_scale = scale;
+            lock.link.follow_rotation = rotation;
+        });
+    }
+    let mut zoom = lock.zoom;
+    if number_row(ui, &language.t(Message::LockZoom), &mut zoom, MIN_LOCK_ZOOM..=MAX_LOCK_ZOOM, 2, "\u{d7}") {
+        state.live_lock_zoom(key, zoom);
+    }
+    ui.horizontal(|ui| {
+        if ui.button(language.t(Message::FollowBake)).clicked() {
+            state.bake_lock(key);
+        }
+        if ui.button(language.t(Message::LockClear)).clicked() {
+            state.clear_lock(key);
+        }
+    });
+}
+
 /// The follow section of overlay `key`: which track it follows and how, or a picker to start.
+
 pub(super) fn follow_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: &engine::Clip) {
     let language = state.language();
     let tracks: Vec<MotionTrack> = state.project().motion_tracks.clone();
