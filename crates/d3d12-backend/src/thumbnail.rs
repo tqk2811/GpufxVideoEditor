@@ -179,6 +179,18 @@ impl FrameSampler {
         Ok(())
     }
 
+    /// Decodes every frame in full from now on, the loop filter kept and no frame skipped, and
+    /// lets one search for a frame take up to `budget`: for analysis that needs exactly the frame
+    /// asked for, such as the object tracker, rather than a quick thumbnail.
+    pub fn set_exact(&mut self, budget: Duration) {
+        // SAFETY: the codec context is valid after open; these fields are read per frame.
+        unsafe {
+            (*self.codec_context).skip_loop_filter = ffi::AVDISCARD_DEFAULT;
+            (*self.codec_context).skip_frame = ffi::AVDISCARD_DEFAULT;
+        }
+        self.decode_budget = budget;
+    }
+
     /// Width and height of the pictures this sampler makes.
     pub fn picture_size(&self) -> (u32, u32) {
         (self.shown_width, self.target_height)

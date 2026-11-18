@@ -38,6 +38,7 @@ pub mod sticker_motion;
 pub mod subtitle_style_install;
 pub mod subtitle_track;
 pub mod tasks;
+pub mod tracking;
 pub mod timecode;
 pub mod timeline;
 pub mod ui;
