@@ -227,3 +227,34 @@ fn baking_a_lock_writes_keyframes_where_the_picture_was_and_drops_the_lock() {
     }
     assert!(matches!(bake_lock(&baked, KEY, ASPECT), Err(EditError::NotLocked { .. })));
 }
+
+/// A zoom from nothing over the first second.
+fn zoom_in() -> engine::ClipAnimation {
+    engine::ClipAnimation { enter: Some(engine::AnimationRef { preset: "zoom".to_owned(), duration: t(SECOND) }), ..engine::ClipAnimation::default() }
+}
+
+#[test]
+fn an_anchor_under_an_enter_animation_reads_the_clip_without_it() {
+    let mut video = clip("a.mp4", 0, 0, 2 * SECOND);
+    video.animation = zoom_in();
+    let p = rig(video, lock(0, true, false));
+    // Once the zoom is over, the object sits where the clip's own place put it at the anchor, at
+    // the size it had there, not at the nothing the zoom started from.
+    for frame in [30, 45, 59] {
+        let (at, _, width) = object(&p, frame);
+        close(at, [0.25, 0.4]);
+        assert!((width - 0.1).abs() < 1e-6, "width {width} at frame {frame}");
+    }
+}
+
+#[test]
+fn a_split_piece_without_the_anchor_reads_its_place_inside_itself() {
+    let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), lock(SECOND / 2, true, true));
+    let mut split = split_clip(&p, KEY, t(SECOND)).unwrap();
+    // The second piece zooms in: the anchor, before it, must not read that zoom at its start.
+    split.tracks[0].clips[1].animation = zoom_in();
+    for frame in [59] {
+        close(object(&split, frame).0, object(&p, frame).0);
+        assert!(drawn(&split, 0, frame).rect.width.is_finite() && drawn(&split, 0, frame).rect.width > 0.1);
+    }
+}

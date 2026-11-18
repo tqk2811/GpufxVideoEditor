@@ -278,6 +278,10 @@ fn wrap_degrees(degrees: f64) -> f64 {
     (degrees + 180.0).rem_euclid(360.0) - 180.0
 }
 
+/// Below this size (parts of the frame height) an object is taken as gone, and a lock does not
+/// scale by it.
+const MIN_POSE_SIZE: f64 = 1.0e-6;
+
 impl TrackLink {
     /// Why the link cannot be used, apart from the track it names.
     pub fn problem(&self) -> Option<String> {
@@ -369,14 +373,18 @@ impl Project {
         let lock = own.lock?;
         let motion = self.motion_track(lock.link.track_id)?;
         let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
-        let place = |time: Time| -> Option<([f64; 2], f64, f64)> {
-            let source = own.source_time_at(time.saturating_sub(own.start)).max(Time::ZERO);
-            let point = motion.point_at(source, lock.link.smooth)?;
-            Some(to_output(point, crate::schedule::clip_transform_at(lane, clip, time), output_aspect, motion.aspect))
-        };
-        let (to, to_size, to_angle) = place(own.timeline_time_of(lock.link.anchor_source_time))?;
-        let (from, from_size, from_angle) = place(t)?;
-        let scale = if lock.link.follow_scale && from_size > 0.0 { to_size / from_size } else { 1.0 };
+        // The anchor side is the clip's own place and keyframes, without its preset animations
+        // (a zoom from nothing would lock the object to nothing, a slide to where it slid from),
+        // read at the anchor's time kept inside the clip, so a split piece that does not play the
+        // anchor reads its own first or last keyframe.
+        let last = own.duration.saturating_sub(Time::from_ticks(1)).max(Time::ZERO);
+        let anchor_offset = own.timeline_time_of(lock.link.anchor_source_time).saturating_sub(own.start).clamp(Time::ZERO, last);
+        let anchor_point = motion.point_at(lock.link.anchor_source_time, lock.link.smooth)?;
+        let (to, to_size, to_angle) = to_output(anchor_point, own.transform_at(anchor_offset), output_aspect, motion.aspect);
+        let source = own.source_time_at(t.saturating_sub(own.start)).max(Time::ZERO);
+        let point = motion.point_at(source, lock.link.smooth)?;
+        let (from, from_size, from_angle) = to_output(point, crate::schedule::clip_transform_at(lane, clip, t), output_aspect, motion.aspect);
+        let scale = if lock.link.follow_scale && from_size > MIN_POSE_SIZE && to_size > MIN_POSE_SIZE { to_size / from_size } else { 1.0 };
         let rotation = if lock.link.follow_rotation { to_angle - from_angle } else { 0.0 };
         Some(FollowPose { from, to, scale: scale * lock.zoom, rotation })
     }
