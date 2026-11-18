@@ -103,8 +103,8 @@ impl MediaLibrary {
     pub fn adopt_project_media(&mut self, project: &Project) {
         for track in &project.tracks {
             let kind = if track.is_audio() { MediaKind::Audio } else { MediaKind::Video };
-            // A text clip names no file, so it is no media item.
-            for clip in track.clips.iter().filter(|clip| !clip.is_text()) {
+            // A text or censor clip names no file, so it is no media item.
+            for clip in track.clips.iter().filter(|clip| !clip.is_text() && !clip.is_censor()) {
                 // An image has no source length: however long a clip made it, its item stays at the default.
                 let used_to = if clip.is_image() { DEFAULT_IMAGE_DURATION } else { clip.source_end() };
                 let known = self.items.iter_mut().find(|item| same_source(&item.source, &clip.source));

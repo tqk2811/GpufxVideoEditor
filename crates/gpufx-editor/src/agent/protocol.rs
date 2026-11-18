@@ -192,6 +192,19 @@ pub enum AgentEdit {
     MarkerMove { marker: usize, at: Time },
     /// Takes the beats off a clip.
     ClipBeatsClear { clip: ClipRef },
+    /// A censor region from `start` for `duration` on sticker track `track`, or on the first
+    /// sticker track with room or a new one. `placement` absent: a third of the frame wide in the
+    /// middle.
+    CensorAdd { track: Option<usize>, start: Time, duration: Time, placement: Option<ClipPlacement>, censor: engine::CensorContent },
+    /// Makes `clip` follow motion track `track_id` through `reference`, the clip that shows the
+    /// tracked file, anchored at the source time `reference` shows at timeline time `at` (its start
+    /// when absent): there the clip stands where it is placed.
+    ClipFollowSet { clip: ClipRef, track_id: u32, reference: ClipRef, at: Option<Time>, follow_scale: bool, follow_rotation: bool, smooth: f64 },
+    /// Stops `clip` following a motion track.
+    ClipFollowClear { clip: ClipRef },
+    /// Adds or replaces a sample of motion track `track_id`, or starts a new track of the source
+    /// of `clip` with it when `track_id` is absent. Answers the track id.
+    TrackSetSample { track_id: Option<u32>, clip: Option<ClipRef>, sample: engine::TrackSample },
 }
 
 /// Which output frame to capture.

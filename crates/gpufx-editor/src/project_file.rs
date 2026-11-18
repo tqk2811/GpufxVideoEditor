@@ -114,7 +114,7 @@ pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
                 *path = relative;
             }
         }
-        if is_asset_source(&clip.source) || clip.is_text() {
+        if is_asset_source(&clip.source) || clip.is_text() || clip.is_censor() {
             continue;
         }
         if let Some(relative) = relative_under(folder, Path::new(&clip.source)) {
@@ -140,7 +140,7 @@ pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
                 *path = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
             }
         }
-        if !is_asset_source(&clip.source) && !clip.is_text() && is_relative_source(&clip.source) {
+        if !is_asset_source(&clip.source) && !clip.is_text() && !clip.is_censor() && is_relative_source(&clip.source) {
             let joined = folder.join(&clip.source);
             clip.source = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
         }

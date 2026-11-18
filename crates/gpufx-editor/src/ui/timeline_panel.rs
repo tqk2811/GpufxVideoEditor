@@ -650,8 +650,8 @@ pub fn draw_clip(painter: &egui::Painter, paint: &ClipPaint<'_>) {
         text.rect_filled(badge.expand2(Vec2::new(3.0, 1.0)), CornerRadius::same(3), dim(header));
         text.galley(badge.min, galley, theme::on_clip_accent());
     }
-    // A text clip names no file, so there is no picture or sound to probe.
-    if let Some(visuals) = paint.visuals.filter(|_| !paint.clip.is_text()) {
+    // A text or censor clip names no file, so there is no picture or sound to probe.
+    if let Some(visuals) = paint.visuals.filter(|_| !paint.clip.is_text() && !paint.clip.is_censor()) {
         draw_clip_media(painter, paint, &mut visuals.borrow_mut(), paint.rect.with_min_y(strip.bottom()));
     }
     if paint.kind.shows_picture() {

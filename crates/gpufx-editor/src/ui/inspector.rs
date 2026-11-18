@@ -66,7 +66,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
 /// The inspector title for a clip on a track of `kind`: what the clip is, not just "Clip".
 fn clip_title(kind: engine::TrackKind, clip: Option<&engine::Clip>) -> Message {
     let source = clip.map_or("", |clip| clip.source.as_str());
-    if clip.is_some_and(engine::Clip::is_text) || kind == engine::TrackKind::Text {
+    if clip.is_some_and(engine::Clip::is_censor) {
+        Message::ClipTitleCensor
+    } else if clip.is_some_and(engine::Clip::is_text) || kind == engine::TrackKind::Text {
         Message::ClipTitleText
     } else if kind == engine::TrackKind::Audio {
         Message::ClipTitleAudio
@@ -286,14 +288,92 @@ fn picture_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: 
         ui.add_enabled_ui(editable, |ui| super::text_inspector::show(ui, state, key, id, text));
         ui.separator();
     }
+    if let Some(censor) = &clip.censor {
+        ui.add_enabled_ui(editable, |ui| censor_rows(ui, state, censor));
+        ui.separator();
+    }
     ui.add_enabled_ui(editable, |ui| {
         placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some() || ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)));
         motion_rows(ui, state, key, clip);
     });
-    if clip.text.is_none() {
+    if clip.text.is_none() && clip.censor.is_none() {
         ui.separator();
         ui.add_enabled_ui(editable, |ui| matte_rows(ui, state, &clip.matte));
     }
+}
+
+/// How a censor region hides: its shape, the softness of its edge, and blur, blocks or a colour
+/// with its strength.
+fn censor_rows(ui: &mut egui::Ui, state: &mut EditorState, censor: &engine::CensorContent) {
+    let language = state.language();
+    ui.colored_label(theme::text_dim(), language.t(Message::CensorShape));
+    ui.horizontal(|ui| {
+        for (shape, label) in [(engine::RegionShape::Rect, Message::CensorShapeRect), (engine::RegionShape::Ellipse, Message::CensorShapeEllipse)] {
+            if ui.selectable_label(censor.shape == shape, language.t(label)).clicked() && censor.shape != shape {
+                state.set_censor(engine::CensorContent { shape, ..*censor });
+            }
+        }
+    });
+    let mut feather = censor.feather * 100.0;
+    let changed = ui.horizontal(|ui| {
+        ui.colored_label(theme::text_dim(), language.t(Message::CensorFeather));
+        ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+        let mut changed = numeric::add_slider(ui, slider(&mut feather, 0.0..=100.0)).changed();
+        changed |= drag_field(ui, &mut feather, 0.0..=100.0, 1.0, 0, " %", None).1;
+        changed
+    });
+    if changed.inner {
+        state.live_censor(engine::CensorContent { feather: (feather / 100.0).clamp(0.0, 1.0), ..*censor });
+    }
+    ui.colored_label(theme::text_dim(), language.t(Message::CensorMode));
+    ui.horizontal(|ui| {
+        let modes = [
+            (engine::CensorMode::Blur { radius: 30.0 }, Message::CensorBlur),
+            (engine::CensorMode::Pixelate { block: 24.0 }, Message::CensorPixelate),
+            (engine::CensorMode::Solid { color: [0, 0, 0, 255] }, Message::CensorSolid),
+        ];
+        for (mode, label) in modes {
+            let same = std::mem::discriminant(&mode) == std::mem::discriminant(&censor.mode);
+            if ui.selectable_label(same, language.t(label)).clicked() && !same {
+                state.set_censor(engine::CensorContent { mode, ..*censor });
+            }
+        }
+    });
+    match censor.mode {
+        engine::CensorMode::Blur { radius } => {
+            let mut value = radius;
+            if strength_row(ui, &language.t(Message::CensorStrength), &mut value, 0.0..=engine::MAX_CENSOR_BLUR) {
+                state.live_censor(engine::CensorContent { mode: engine::CensorMode::Blur { radius: value }, ..*censor });
+            }
+        }
+        engine::CensorMode::Pixelate { block } => {
+            let mut value = block;
+            if strength_row(ui, &language.t(Message::CensorBlock), &mut value, 1.0..=engine::MAX_CENSOR_BLOCK) {
+                state.live_censor(engine::CensorContent { mode: engine::CensorMode::Pixelate { block: value }, ..*censor });
+            }
+        }
+        engine::CensorMode::Solid { color } => {
+            let mut picked = egui::Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]);
+            ui.horizontal(|ui| {
+                ui.colored_label(theme::text_dim(), language.t(Message::CensorColor));
+                if egui::color_picker::color_edit_button_srgba(ui, &mut picked, egui::color_picker::Alpha::OnlyBlend).changed() {
+                    state.live_censor(engine::CensorContent { mode: engine::CensorMode::Solid { color: picked.to_srgba_unmultiplied() }, ..*censor });
+                }
+            });
+        }
+    }
+}
+
+/// A labelled slider with a number field, in pixels of a 1080-line frame. Whether it changed.
+fn strength_row(ui: &mut egui::Ui, label: &str, value: &mut f64, range: std::ops::RangeInclusive<f64>) -> bool {
+    ui.horizontal(|ui| {
+        ui.colored_label(theme::text_dim(), label);
+        ui.spacing_mut().slider_width = (ui.available_width() - 66.0).max(40.0);
+        let mut changed = numeric::add_slider(ui, slider(value, range.clone())).changed();
+        changed |= drag_field(ui, value, range, 1.0, 0, " px", None).1;
+        changed
+    })
+    .inner
 }
 
 /// The AI background removal of the clip: the model, whether it is installed, and the shaping.

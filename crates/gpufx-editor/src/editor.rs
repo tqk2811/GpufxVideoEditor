@@ -1471,6 +1471,10 @@ impl EditorState {
     /// Width over height of the picture of `clip`: that of its rasterized text for a text clip,
     /// else that of its source.
     pub fn clip_aspect(&self, clip: &Clip) -> f64 {
+        if let Some(censor) = &clip.censor {
+            // The box's own shape, in output pixels, stands for the shape of a source.
+            return censor.aspect;
+        }
         match &clip.text {
             Some(text) => self.text_shapes.borrow_mut().shape(&self.resolved_font(text), self.project().output.height).aspect,
             None => self.source_aspect(&clip.source),
@@ -1508,7 +1512,7 @@ impl EditorState {
     /// Whether the shape of the picture of `clip` is known: always for text, which is measured on
     /// the spot, and for media once the probe has said.
     fn clip_shape_known(&self, clip: &Clip) -> bool {
-        clip.is_text() || self.source_shape_known(&clip.source)
+        clip.is_text() || clip.is_censor() || self.source_shape_known(&clip.source)
     }
 
     /// The value of a property of clip `key` shown in the panels, at the playhead when it is on the
@@ -1691,8 +1695,8 @@ impl EditorState {
     pub fn source_remaining(&self, key: ClipKey) -> Option<Time> {
         let track = self.project().tracks.get(key.track)?;
         let clip = track.clips.get(key.clip)?;
-        // A text clip names no file, so there is nothing to ask the library about.
-        if clip.is_text() {
+        // A text or censor clip names no file, so there is nothing to ask the library about.
+        if clip.is_text() || clip.is_censor() {
             return None;
         }
         let length = self.library.probed_duration(&clip.source, track.kind)?;
@@ -2029,6 +2033,42 @@ impl EditorState {
         let text = style.new_text(style.preview_text.clone(), &available_families(), &self.font_library.fonts);
         let animation = Some(style.animation_for(&engine::ClipAnimation::default())).filter(|animation| !animation.is_empty());
         self.add_text_clip_at_playhead(text, animation, style.layout);
+    }
+
+    /// Adds a censor region at the playhead, on a sticker track with room or a new one: a blurred
+    /// box in the middle of the frame, a third of its width, selected, as one undo step.
+    pub fn add_censor_at_playhead(&mut self) {
+        if self.edits_blocked() {
+            return;
+        }
+        let censor = engine::CensorContent::default();
+        let placement = censor_placement(self.output_pixels(), &censor);
+        let (start, duration) = (self.playhead, DEFAULT_IMAGE_DURATION);
+        let choice = choose_track(self.project(), TrackKind::Sticker, duration, start);
+        let track = match choice {
+            TrackChoice::Existing(index) => index,
+            TrackChoice::New => self.project().tracks.len(),
+        };
+        let added = self.run(|project| {
+            let with_track = if choice == TrackChoice::New { add_track(project, TrackKind::Sticker)? } else { project.clone() };
+            engine::add_censor_clip(&with_track, track, start, duration, censor, Some(placement))
+        });
+        if added {
+            self.selection = clip_at(self.project(), track, start);
+            self.status = Status::Info(Message::CensorAdded);
+        }
+    }
+
+    /// Changes how the selected censor clip hides, as one undo step.
+    pub fn set_censor(&mut self, censor: engine::CensorContent) {
+        let Some(key) = self.selection else { return };
+        self.run(|project| engine::set_censor(project, key, censor));
+    }
+
+    /// Moves a slider of the selected censor clip, merged like the other sliders.
+    pub fn live_censor(&mut self, censor: engine::CensorContent) {
+        let Some(key) = self.selection else { return };
+        self.live_edit(|project| engine::set_censor(project, key, censor));
     }
 
     fn add_text_clip_at_playhead(&mut self, text: TextContent, animation: Option<engine::ClipAnimation>, layout: Option<SubtitleLayout>) {
@@ -2695,7 +2735,18 @@ const TEXT_NAME_CHARS: usize = 40;
 
 /// The name shown for `clip`: the file name of its source, or for a text clip the first line of
 /// its text, cut short with an ellipsis.
+/// Where a new censor region of `censor` goes in a frame of `output` pixels: a third of the frame
+/// wide, in the middle.
+pub fn censor_placement(output: (u32, u32), censor: &engine::CensorContent) -> engine::ClipPlacement {
+    let width = 1.0 / 3.0;
+    let height = width * f64::from(output.0) / f64::from(output.1.max(1)) / censor.aspect;
+    engine::ClipPlacement { x: (1.0 - width) / 2.0, y: (1.0 - height) / 2.0, width }
+}
+
 pub fn clip_name(clip: &Clip) -> std::borrow::Cow<'_, str> {
+    if clip.is_censor() {
+        return "censor".into();
+    }
     let Some(text) = &clip.text else { return clip_label(&clip.source).into() };
     let line = text.content.lines().next().unwrap_or("").trim();
     let more = line.chars().count() > TEXT_NAME_CHARS || text.content.trim_end().lines().nth(1).is_some();
@@ -5085,6 +5136,22 @@ lines"));
         let output = &state.project().output;
         let rect = PlacedRect::of(clip.placement, f64::from(output.width) / f64::from(output.height), state.clip_aspect(clip));
         (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0)
+    }
+
+    #[test]
+    fn a_new_censor_region_is_a_selected_box_in_the_middle_that_the_inspector_changes() {
+        let mut state = EditorState::default();
+        state.add_censor_at_playhead();
+        let key = state.selection().expect("the new region is selected");
+        assert_eq!(state.project().tracks[key.track].kind, TrackKind::Sticker);
+        let clip = state.project().tracks[key.track].clips[key.clip].clone();
+        let (x, y) = centre_of(&state, &clip);
+        assert!((x - 0.5).abs() < 1e-9 && (y - 0.5).abs() < 1e-9, "in the middle: {x} {y}");
+        assert_eq!(clip_name(&clip), "censor");
+        let censor = engine::CensorContent { mode: engine::CensorMode::Pixelate { block: 40.0 }, ..clip.censor.expect("a censor region") };
+        state.set_censor(censor);
+        assert_eq!(state.project().tracks[key.track].clips[key.clip].censor, Some(censor));
+        assert!(state.can_undo(), "undo steps");
     }
 
     #[test]

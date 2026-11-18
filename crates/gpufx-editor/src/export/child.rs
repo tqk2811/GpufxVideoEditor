@@ -53,7 +53,7 @@ fn absolute_project(project: &Project, paths: &ProjectPaths) -> Project {
                     }
                 }
             }
-            if !clip.is_text() && paths.asset_problem(&clip.source).is_none() {
+            if !clip.is_text() && !clip.is_censor() && paths.asset_problem(&clip.source).is_none() {
                 let source = paths.source_path(&clip.source);
                 clip.source = std::path::absolute(&source).unwrap_or(source).to_string_lossy().into_owned();
             }

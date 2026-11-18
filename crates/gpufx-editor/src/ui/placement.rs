@@ -123,7 +123,7 @@ fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
     // The resting place, without the text animation's pose: dragging edits the clip's own placement,
     // so the frame stays put while the text moves through its preset.
     let transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
-    if clip.is_text() {
+    if clip.is_text() || clip.is_censor() {
         return Some((key, transform, state.clip_aspect(clip)));
     }
     let mut visuals = state.visuals.borrow_mut();

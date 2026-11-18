@@ -164,6 +164,10 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
 /// The Sticker tab: the import button, a search, a category filter and the grid.
 fn sticker_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let language = state.language();
+    if icons::label_button(ui, Icon::Plus, &language.t(Message::AddCensor), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).on_hover_text(language.t(Message::AddCensorHint)).clicked() {
+        state.add_censor_at_playhead();
+    }
+    ui.add_space(4.0);
     if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportPackage), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
         requests.push(UiRequest::ImportPackage);
     }

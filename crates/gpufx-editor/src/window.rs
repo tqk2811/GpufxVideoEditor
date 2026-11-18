@@ -1774,7 +1774,7 @@ fn proxy_sources(project: &Project, paths: &ProjectPaths) -> Vec<(String, PathBu
     let mut seen = std::collections::HashSet::new();
     for track in project.tracks.iter().filter(|track| !track.is_audio()) {
         for clip in &track.clips {
-            if clip.is_text() || clip.is_image() || d3d12_backend::is_asset_source(&clip.source) || !seen.insert(clip.source.as_str()) {
+            if clip.is_text() || clip.is_censor() || clip.is_image() || d3d12_backend::is_asset_source(&clip.source) || !seen.insert(clip.source.as_str()) {
                 continue;
             }
             let path = paths.source_path(&clip.source);

@@ -500,6 +500,50 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             state.apply_agent_command(|project| engine::add_effect(project, clip.into(), Effect { package, params, keyframes: Default::default(), region: None })).map_err(refused)?
         }
         AgentEdit::EffectRemove { clip, effect } => state.apply_agent_command(|project| engine::remove_effect(project, clip.into(), effect)).map_err(refused)?,
+        AgentEdit::CensorAdd { track, start, duration, placement, censor } => {
+            let placement = placement.unwrap_or_else(|| crate::editor::censor_placement(state.output_pixels(), &censor));
+            let (track, new_track) = match track {
+                Some(track) => (track, false),
+                None => match choose_track(state.project(), TrackKind::Sticker, duration, start) {
+                    TrackChoice::Existing(track) => (track, false),
+                    TrackChoice::New => (state.project().tracks.len(), true),
+                },
+            };
+            state
+                .apply_agent_command(|project| {
+                    let with_track = if new_track { engine::add_track(project, TrackKind::Sticker)? } else { project.clone() };
+                    engine::add_censor_clip(&with_track, track, start, duration, censor, Some(placement))
+                })
+                .map_err(refused)?;
+            result.insert("clip".to_owned(), clip_json(clip_at(state.project(), track, start)));
+        }
+        AgentEdit::ClipFollowSet { clip, track_id, reference, at, follow_scale, follow_rotation, smooth } => state
+            .apply_agent_command(|project| {
+                let shown = current_clip(project, reference)?;
+                let at = at.unwrap_or(shown.start);
+                let anchor_source_time = shown.source_time_at(at.saturating_sub(shown.start)).max(Time::ZERO);
+                let link = engine::TrackLink { track_id, anchor_source_time, follow_scale, follow_rotation, smooth };
+                engine::set_follow(project, clip.into(), Some(engine::Follow { link, ref_track: reference.track, ref_clip: reference.clip, offset: [0.0, 0.0] }))
+            })
+            .map_err(refused)?,
+        AgentEdit::ClipFollowClear { clip } => state.apply_agent_command(|project| engine::set_follow(project, clip.into(), None)).map_err(refused)?,
+        AgentEdit::TrackSetSample { track_id, clip, sample } => {
+            let id = match (track_id, clip) {
+                (Some(id), _) => {
+                    state.apply_agent_command(|project| engine::set_track_sample(project, id, sample)).map_err(refused)?;
+                    id
+                }
+                (None, Some(clip)) => {
+                    let shown = current_clip(state.project(), clip).map_err(|error| AgentError::from_edit(&error))?.clone();
+                    let id = state.project().next_motion_track_id();
+                    let track = engine::MotionTrack { id, media_path: shown.source.clone(), aspect: state.clip_aspect(&shown), samples: vec![sample] };
+                    state.apply_agent_command(|project| engine::set_motion_track(project, track)).map_err(refused)?;
+                    id
+                }
+                (None, None) => return Err(AgentError::new("invalid_params", "give track_id, or clip to start a new track")),
+            };
+            result.insert("track_id".to_owned(), Value::from(id));
+        }
         AgentEdit::TransitionAdd { track, after_clip, package, duration, params } => {
             let transition = Transition { after_clip, package, duration: duration.unwrap_or(DEFAULT_TRANSITION_DURATION), params };
             let mut released = Vec::new();
@@ -1365,6 +1409,39 @@ mod tests {
         set(None, Some(720), None).expect("height alone");
         let output = &host.state.project().output;
         assert_eq!((output.width, output.height, output.frame_rate), (before.width, 720, before.frame_rate));
+    }
+
+    #[test]
+    fn an_agent_adds_a_censor_region_that_follows_a_track_entered_by_hand() {
+        let mut host = FakeHost::new("live");
+        host.state.add_track(TrackKind::Video);
+        host.state.add_clip_from_file(0, Path::new("a.mp4"));
+        let edit = |host: &mut FakeHost, edit: AgentEdit| {
+            let revision = host.state.revision();
+            host.run(AgentRequest::Edit { expected_revision: revision, edit })
+        };
+        let censor = engine::CensorContent { mode: engine::CensorMode::Pixelate { block: 20.0 }, ..Default::default() };
+        let added = edit(&mut host, AgentEdit::CensorAdd { track: None, start: Time::ZERO, duration: Time::from_ticks(90_000), placement: None, censor }).expect("censor");
+        let censor_clip = ClipRef { track: added["clip"]["track"].as_u64().unwrap() as usize, clip: added["clip"]["clip"].as_u64().unwrap() as usize };
+        assert_eq!(host.state.project().tracks[censor_clip.track].kind, TrackKind::Sticker);
+        assert!(host.state.project().tracks[censor_clip.track].clips[0].placement.is_some(), "placed in the middle");
+
+        let video = ClipRef { track: 0, clip: 0 };
+        let sample = |at: i64, cx: f64| engine::TrackSample { source_time: Time::from_ticks(at), cx, cy: 0.5, w: 0.1, h: 0.1, angle: 0.0, confidence: 1.0, manual: true };
+        assert_eq!(code(edit(&mut host, AgentEdit::TrackSetSample { track_id: None, clip: None, sample: sample(0, 0.2) })), "invalid_params");
+        let started = edit(&mut host, AgentEdit::TrackSetSample { track_id: None, clip: Some(video), sample: sample(0, 0.2) }).expect("new track");
+        let id = started["track_id"].as_u64().unwrap() as u32;
+        edit(&mut host, AgentEdit::TrackSetSample { track_id: Some(id), clip: None, sample: sample(90_000, 0.6) }).expect("second sample");
+        assert_eq!(host.state.project().motion_tracks[0].samples.len(), 2);
+        assert_eq!(code(edit(&mut host, AgentEdit::TrackSetSample { track_id: Some(id + 5), clip: None, sample: sample(0, 0.2) })), "motion_track_not_found");
+
+        let follow = |track_id| AgentEdit::ClipFollowSet { clip: censor_clip, track_id, reference: video, at: None, follow_scale: false, follow_rotation: false, smooth: 0.0 };
+        assert_eq!(code(edit(&mut host, follow(id + 5))), "invalid_project");
+        edit(&mut host, follow(id)).expect("follow");
+        let followed = host.state.project().tracks[censor_clip.track].clips[0].follow.expect("set");
+        assert_eq!((followed.ref_track, followed.ref_clip, followed.link.anchor_source_time), (0, 0, Time::ZERO));
+        edit(&mut host, AgentEdit::ClipFollowClear { clip: censor_clip }).expect("clear");
+        assert!(host.state.project().tracks[censor_clip.track].clips[0].follow.is_none());
     }
 
     #[test]

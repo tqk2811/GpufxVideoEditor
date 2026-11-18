@@ -963,6 +963,9 @@ params!(TransformParams { expected_revision: u64, clip: ClipParam, placement: Op
 params!(KeyframeSetParams { expected_revision: u64, clip: ClipParam, property: Option<ClipPropertyParam>, effect: Option<usize>, param: Option<String>, at: i64, value: f64, easing: Option<EasingParam> });
 params!(KeyframeRemoveParams { expected_revision: u64, clip: ClipParam, property: Option<ClipPropertyParam>, effect: Option<usize>, param: Option<String>, at: i64 });
 params!(RevisionParams { expected_revision: u64 });
+params!(CensorAddParams { expected_revision: u64, track: Option<usize>, start: i64, duration: i64, placement: Option<PlacementParam>, aspect: Option<f64>, shape: Option<String>, feather: Option<f64>, mode: Option<String>, strength: Option<f64>, color: Option<[u8; 4]> });
+params!(FollowSetParams { expected_revision: u64, clip: ClipParam, track_id: u32, reference: ClipParam, at: Option<i64>, #[serde(default)] follow_scale: bool, #[serde(default)] follow_rotation: bool, smooth: Option<f64> });
+params!(TrackSampleParams { expected_revision: u64, track_id: Option<u32>, clip: Option<ClipParam>, source_time: i64, cx: f64, cy: f64, w: f64, h: f64, angle: Option<f64>, confidence: Option<f64> });
 params!(ExportStartParams { out: PathBuf, #[serde(default)] overwrite: bool, codec: Option<String>, encoder: Option<String> });
 params!(ExportJobParams { job: Option<u64> });
 params!(FrameCaptureParams { time: Option<i64>, frame: Option<i64>, max_width: Option<u32> });
@@ -1014,6 +1017,28 @@ macro_rules! tool {
 
 fn edit(expected_revision: u64, edit: AgentEdit) -> Result<AgentRequest, AgentError> {
     Ok(AgentRequest::Edit { expected_revision, edit })
+}
+
+fn censor_add(p: CensorAddParams) -> Result<AgentRequest, AgentError> {
+    let shape = match p.shape.as_deref() {
+        None | Some("rect") => engine::RegionShape::Rect,
+        Some("ellipse") => engine::RegionShape::Ellipse,
+        Some(other) => return Err(AgentError::new("invalid_params", format!("shape {other:?}: rect or ellipse"))),
+    };
+    let mode = match p.mode.as_deref() {
+        None | Some("blur") => engine::CensorMode::Blur { radius: p.strength.unwrap_or(30.0) },
+        Some("pixelate") => engine::CensorMode::Pixelate { block: p.strength.unwrap_or(24.0) },
+        Some("solid") => engine::CensorMode::Solid { color: p.color.unwrap_or([0, 0, 0, 255]) },
+        Some(other) => return Err(AgentError::new("invalid_params", format!("mode {other:?}: blur, pixelate or solid"))),
+    };
+    let defaults = engine::CensorContent::default();
+    let censor = engine::CensorContent { shape, aspect: p.aspect.unwrap_or(defaults.aspect), feather: p.feather.unwrap_or(defaults.feather), mode };
+    edit(p.expected_revision, AgentEdit::CensorAdd { track: p.track, start: ticks(p.start), duration: ticks(p.duration), placement: p.placement.map(Into::into), censor })
+}
+
+fn track_set_sample(p: TrackSampleParams) -> Result<AgentRequest, AgentError> {
+    let sample = engine::TrackSample { source_time: ticks(p.source_time), cx: p.cx, cy: p.cy, w: p.w, h: p.h, angle: p.angle.unwrap_or(0.0), confidence: p.confidence.unwrap_or(1.0), manual: true };
+    edit(p.expected_revision, AgentEdit::TrackSetSample { track_id: p.track_id, clip: p.clip.map(Into::into), sample })
 }
 
 fn text_add(p: TextAddParams) -> Result<AgentRequest, AgentError> {
@@ -1093,6 +1118,10 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("marker_remove", "Removes a marker by index (markers_list). Refused with marker_not_found.", MarkerParams, |p| edit(p.expected_revision, AgentEdit::MarkerRemove { marker: p.marker })),
         tool!("marker_move", "Moves a marker to time (timeline ticks); returns marker, the index it now has. Refused with marker_not_found.", MarkerMoveParams, |p| edit(p.expected_revision, AgentEdit::MarkerMove { marker: p.marker, at: ticks(p.time) })),
         tool!("markers_list", "The markers of the ruler, each {marker: index, at: timeline ticks, label, color}, and the beats of every clip whose source has some: {clip, source, tempo, beats: [{at: timeline ticks, downbeat}]}, only those the clip plays.", NoParams, |_| Ok(AgentRequest::MarkersList)),
+        tool!("censor_add", "Adds a censor region: a box on a sticker track that hides what the tracks below show inside it, from start for duration (ticks), on track (a sticker track) or, when absent, on the first sticker track with room or a new one. placement (x, y, width in parts of the frame; the height follows from aspect, width over height in output pixels, 16/9 by default) defaults to a third of the frame wide in the middle; clip_set_transform and keyframe_set move it later. shape: rect (default) or ellipse. feather: soft edge, 0 to 1 of half the smaller side (0.2 by default). mode: blur (default; strength is the radius, 0 to 120, in pixels of a 1080-line frame, 30 by default), pixelate (strength is the block, 1 to 200, 24 by default) or solid (color [r, g, b, a], black by default). Returns the new clip.", CensorAddParams, censor_add),
+        tool!("track_set_sample", "Adds or replaces (same source_time) a sample of a motion track: where an object is in the source file at source_time (ticks of the source, not of the timeline): middle cx, cy and size w, h in parts of the source picture, angle in clockwise degrees (0), confidence 0 to 1 (1). Give track_id, or clip (a clip showing the file) to start a new track of that file with this sample. Tracks belong to the file, so every clip of it shares them. Returns track_id.", TrackSampleParams, track_set_sample),
+        tool!("clip_follow_set", "Makes clip follow motion track track_id as it is seen through reference, a clip showing the tracked file: at timeline time at (reference's start when absent) the clip stands where it is placed, and from there it moves by how far the object moved, through the trim, speed, direction, place and transform of reference. follow_scale and follow_rotation (false) also scale and turn it with the object; smooth (0 to 2 seconds of source, 0) evens out the track. The clip's own keyframes add to the motion. A split, trim or delete of reference keeps the follow on the clip that shows the anchor, or drops it. Refused with invalid_project when the track, the reference or the anchor does not fit.", FollowSetParams, |p| edit(p.expected_revision, AgentEdit::ClipFollowSet { clip: p.clip.into(), track_id: p.track_id, reference: p.reference.into(), at: p.at.map(ticks), follow_scale: p.follow_scale, follow_rotation: p.follow_rotation, smooth: p.smooth.unwrap_or(0.0) })),
+        tool!("clip_follow_clear", "Stops a clip following a motion track; it stays where it is placed.", ClipOnlyParams, |p| edit(p.expected_revision, AgentEdit::ClipFollowClear { clip: p.clip.into() })),
         tool!("undo", "Undoes the last edit.", RevisionParams, |p| Ok(AgentRequest::Undo { expected_revision: p.expected_revision })),
         tool!("redo", "Redoes an undone edit.", RevisionParams, |p| Ok(AgentRequest::Redo { expected_revision: p.expected_revision })),
         tool!("frame_capture", "The composited frame at a time (ticks) or frame index, exactly one of them, as a PNG no wider than max_width (default 1280). A position outside the timeline is an error.", FrameCaptureParams, frame_capture),
