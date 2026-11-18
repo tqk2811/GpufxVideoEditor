@@ -123,6 +123,11 @@ impl<'a> AnimatedWebp<'a> {
         Ok(Some(Self { width, height, loops, frames }))
     }
 
+    /// How long each frame says it lasts, in milliseconds, without decoding any picture.
+    pub fn durations_ms(&self) -> impl Iterator<Item = u32> + '_ {
+        self.frames.iter().map(|frame| frame.duration_ms)
+    }
+
     /// The frames, each the whole canvas, one at a time; `limits` bound each frame's decode.
     pub fn frames(&self, limits: Limits) -> impl Iterator<Item = Result<CanvasFrame, String>> + '_ {
         let width = self.width as usize;

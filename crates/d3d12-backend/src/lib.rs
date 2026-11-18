@@ -50,5 +50,5 @@ pub use packages::{expression_error, read_package_info, read_zip_package_info, P
 pub use paths::{asset_source, check_path_part, pack_key, pack_key_of, read_disabled_packs, DISABLED_PACKS_FILE, is_asset_source, is_safe_id, is_safe_pack_file, parse_asset_source, AssetProblem, AssetRef, PathPartProblem, ProjectPaths, ProxyFile, ProxyTiming, ASSET_AUDIO_EXTENSIONS, ASSET_FONT_EXTENSIONS, ASSET_IMAGE_EXTENSIONS, ASSET_PREFIX, ASSET_TEXTURE_EXTENSIONS, ASSET_TYPES, FONT_ASSET_TYPE, MAX_ASSET_ID_LENGTH, SUBTITLE_STYLE_ASSET_TYPE, TEXT_STYLE_ASSET_TYPE};
 pub use probe::{frame_ticks_floor, probe_media, probe_video_format, MediaProbe, VideoFormat};
 pub use progress::{ProgressEvent, CANCEL_LINE, MAX_EVENT_LINE, PROGRESS_PROTOCOL};
-pub use still::{read_still, still_dimensions, still_thumbnail, StillPicture, MAX_STILL_SIDE};
+pub use still::{animation_timing, read_still, still_dimensions, still_thumbnail, AnimationTiming, StillPicture, MAX_STILL_SIDE};
 pub use thumbnail::{FrameSampler, ThumbnailError, ThumbnailImage};

@@ -218,6 +218,35 @@ impl AnimatedPicture {
     }
 }
 
+/// What a frame that says it lasts `delay_ms` is shown for: a frame of [`SHORTEST_FRAME_MS`] or less
+/// lasts [`DEFAULT_FRAME_MS`], as browsers show it.
+fn frame_ms(delay_ms: u32) -> u64 {
+    let delay = u64::from(delay_ms);
+    if delay <= SHORTEST_FRAME_MS { DEFAULT_FRAME_MS } else { delay }
+}
+
+/// How long one loop of an animated picture lasts and how many times it plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimationTiming {
+    /// The length of one loop in milliseconds, as [`AnimatedPicture::ends_ms`] ends.
+    pub loop_ms: u64,
+    /// How many times the loop plays; 0 is forever.
+    pub loops: u32,
+}
+
+/// The timing of `path` when it is an animated WebP, or `None` for any other picture. Reads the
+/// file's chunks but decodes no frame, so it is cheap next to [`read_animation`].
+pub fn animation_timing(path: &Path) -> Result<Option<AnimationTiming>, String> {
+    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("webp")) {
+        return Ok(None);
+    }
+    let shown = path.display();
+    let data = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
+    let Some(animation) = AnimatedWebp::parse(&data).map_err(|e| format!("{shown}: {e}"))? else { return Ok(None) };
+    let loop_ms = animation.durations_ms().map(frame_ms).sum();
+    Ok(Some(AnimationTiming { loop_ms, loops: animation.loops }))
+}
+
 /// The frames of `path` when it is an animated WebP, or `None` for any other picture, which is a
 /// still. Each frame is the whole canvas with the frames before it laid under it, as libwebp lays
 /// them (see [`crate::animated_webp`]).
@@ -240,8 +269,7 @@ pub fn read_animation(path: &Path) -> Result<Option<AnimatedPicture>, String> {
     let (mut bytes, mut end) = (0u64, 0u64);
     for frame in animation.frames(limits) {
         let frame = frame.map_err(|e| format!("{shown}: {e}"))?;
-        let delay = u64::from(frame.duration_ms);
-        end += if delay <= SHORTEST_FRAME_MS { DEFAULT_FRAME_MS } else { delay };
+        end += frame_ms(frame.duration_ms);
         let canvas = RgbaImage::from_raw(animation.width, animation.height, frame.rgba).ok_or_else(|| format!("{shown}: a frame of the wrong size"))?;
         let still = finished_picture(canvas);
         bytes += still.rgba.len() as u64;
@@ -401,6 +429,19 @@ mod tests {
         }
         assert_eq!(picture.frames[0].rgba[3], 0, "the hole of the first frame stays transparent");
         assert_eq!(picture.frames[0].rgba[..3], [255, 0, 0], "and takes the colour next to it");
+    }
+
+    #[test]
+    fn the_timing_of_an_animated_webp_matches_its_decoded_frames_without_decoding_them() {
+        let timing = animation_timing(&animated_fixture()).unwrap().expect("animated");
+        let picture = read_animation(&animated_fixture()).unwrap().expect("animated");
+        assert_eq!(timing, AnimationTiming { loop_ms: *picture.ends_ms.last().unwrap(), loops: picture.loops });
+        assert_eq!(timing.loop_ms, 600);
+        let dir = scratch("timing");
+        let still = dir.join("a.png");
+        checker().save(&still).unwrap();
+        assert_eq!(animation_timing(&still), Ok(None), "a png is not animated");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
