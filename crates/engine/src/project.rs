@@ -1407,7 +1407,7 @@ impl Project {
 }
 
 /// The extensions of the still images a clip may show, lower-cased.
-pub const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+pub const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "gif"];
 
 /// The start of the source of every sticker: `asset:sticker/<pack id>/<file>`.
 pub const STICKER_SOURCE_PREFIX: &str = "asset:sticker/";
@@ -1429,12 +1429,12 @@ impl Clip {
         is_image_source(&self.source)
     }
 
-    /// Whether the clip shows a picture that may be animated, a WebP, so it keeps a source offset
+    /// Whether the clip shows a picture that may be animated, a WebP or a GIF, so it keeps a source offset
     /// through a cut or a trim of its left edge as a video does (see [`crate::trim_start`]). Told
-    /// by the extension, without reading the file on the edit thread: a still WebP shows the same
+    /// by the extension, without reading the file on the edit thread: a still WebP or GIF shows the same
     /// picture at any offset, so it loses nothing. Provisional until the user settles it.
     pub fn may_be_animated(&self) -> bool {
-        self.is_image() && !self.is_text() && self.source.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("webp"))
+        self.is_image() && !self.is_text() && self.source.rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("webp") || extension.eq_ignore_ascii_case("gif"))
     }
 
     /// Whether the clip shows text, rasterized into a still picture.

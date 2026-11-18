@@ -234,26 +234,48 @@ pub struct AnimationTiming {
     pub loops: u32,
 }
 
-/// The timing of `path` when it is an animated WebP, or `None` for any other picture. Reads the
-/// file's chunks but decodes no frame, so it is cheap next to [`read_animation`].
-pub fn animation_timing(path: &Path) -> Result<Option<AnimationTiming>, String> {
-    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("webp")) {
-        return Ok(None);
+/// Which animated format the extension of `path` names, if any.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AnimatedFormat {
+    Webp,
+    Gif,
+}
+
+fn animated_format(path: &Path) -> Option<AnimatedFormat> {
+    let extension = path.extension()?;
+    if extension.eq_ignore_ascii_case("webp") {
+        Some(AnimatedFormat::Webp)
+    } else if extension.eq_ignore_ascii_case("gif") {
+        Some(AnimatedFormat::Gif)
+    } else {
+        None
     }
+}
+
+/// The timing of `path` when it is an animated WebP or GIF, or `None` for any other picture. Reads
+/// the file's chunks or blocks but decodes no frame, so it is cheap next to [`read_animation`].
+pub fn animation_timing(path: &Path) -> Result<Option<AnimationTiming>, String> {
+    let Some(format) = animated_format(path) else { return Ok(None) };
     let shown = path.display();
+    if format == AnimatedFormat::Gif {
+        let file = File::open(path).map_err(|e| format!("{shown}: {e}"))?;
+        let Some((_, _, delays, loops)) = crate::animated_gif::timing(BufReader::new(file)).map_err(|e| format!("{shown}: {e}"))? else { return Ok(None) };
+        return Ok(Some(AnimationTiming { loop_ms: delays.into_iter().map(frame_ms).sum(), loops }));
+    }
     let data = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
     let Some(animation) = AnimatedWebp::parse(&data).map_err(|e| format!("{shown}: {e}"))? else { return Ok(None) };
     let loop_ms = animation.durations_ms().map(frame_ms).sum();
     Ok(Some(AnimationTiming { loop_ms, loops: animation.loops }))
 }
 
-/// The frames of `path` when it is an animated WebP, or `None` for any other picture, which is a
-/// still. Each frame is the whole canvas with the frames before it laid under it, as libwebp lays
-/// them (see [`crate::animated_webp`]).
+/// The frames of `path` when it is an animated WebP or GIF, or `None` for any other picture, which
+/// is a still. Each frame is the whole canvas with the frames before it laid under it, as libwebp
+/// and browsers lay them (see [`crate::animated_webp`] and [`crate::animated_gif`]).
 pub fn read_animation(path: &Path) -> Result<Option<AnimatedPicture>, String> {
     let shown = path.display();
-    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("webp")) {
-        return Ok(None);
+    let Some(format) = animated_format(path) else { return Ok(None) };
+    if format == AnimatedFormat::Gif {
+        return read_gif_animation(path);
     }
     let data = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
     let Some(animation) = AnimatedWebp::parse(&data).map_err(|e| format!("{shown}: {e}"))? else { return Ok(None) };
@@ -279,6 +301,39 @@ pub fn read_animation(path: &Path) -> Result<Option<AnimatedPicture>, String> {
         picture.frames.push(still);
         picture.ends_ms.push(end);
     }
+    // Whether a picture has alpha picks how it is drawn, so every frame says the same.
+    let has_alpha = picture.frames.iter().any(|frame| frame.has_alpha);
+    for frame in &mut picture.frames {
+        frame.has_alpha = has_alpha;
+    }
+    Ok(Some(picture))
+}
+
+/// [`read_animation`] for a GIF: its blocks are read once for the size and the frame count, so a
+/// GIF of one frame is a still and a canvas too large is refused before any pixel is decoded.
+fn read_gif_animation(path: &Path) -> Result<Option<AnimatedPicture>, String> {
+    let shown = path.display();
+    let data = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
+    let Some((width, height, _, loops)) = crate::animated_gif::timing(data.as_slice()).map_err(|e| format!("{shown}: {e}"))? else { return Ok(None) };
+    check_pixels(path, (width, height))?;
+    if width.max(height) > MAX_ANIMATION_SIDE {
+        return Err(format!("{shown}: {width}x{height} is larger than the {MAX_ANIMATION_SIDE} pixels a side an animated picture may have"));
+    }
+    let mut picture = AnimatedPicture { frames: Vec::new(), ends_ms: Vec::new(), loops };
+    let (mut bytes, mut end) = (0u64, 0u64);
+    crate::animated_gif::frames(data.as_slice(), DECODER_ALLOCATION, |frame| {
+        end += frame_ms(frame.duration_ms);
+        let canvas = RgbaImage::from_raw(width, height, frame.rgba).ok_or_else(|| "a frame of the wrong size".to_owned())?;
+        let still = finished_picture(canvas);
+        bytes += still.rgba.len() as u64;
+        if bytes > MAX_ANIMATION_BYTES {
+            return Err(format!("its frames take more than the {MAX_ANIMATION_BYTES} bytes an animated picture may have"));
+        }
+        picture.frames.push(still);
+        picture.ends_ms.push(end);
+        Ok(())
+    })
+    .map_err(|e| format!("{shown}: {e}"))?;
     // Whether a picture has alpha picks how it is drawn, so every frame says the same.
     let has_alpha = picture.frames.iter().any(|frame| frame.has_alpha);
     for frame in &mut picture.frames {
@@ -469,6 +524,62 @@ mod tests {
                 assert!(close, "frame {index} at ({x}, {y}): {got:?} is not {want:?}");
             }
         }
+    }
+
+    fn gif_fixture() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/animated_subframes.gif")
+    }
+
+    #[test]
+    fn gif_frames_over_part_of_the_canvas_dispose_as_browsers_do() {
+        // See make_animated_gif.py: frame 1 is restored to what was before it, frame 2 is cleared to
+        // transparent (not the background colour of the file) and its transparent pixel shows red.
+        let points = [(0, 0), (2, 2), (4, 4), (5, 5), (7, 7), (6, 1)];
+        let (red, green, blue, yellow, clear) = ([255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 0, 255], [0, 0, 0, 0]);
+        let expected = [
+            [red; 6],
+            [red, green, green, green, red, red],
+            [red, red, red, blue, blue, red],
+            [yellow, red, clear, clear, clear, red],
+        ];
+        let picture = read_animation(&gif_fixture()).unwrap().expect("animated");
+        assert_eq!(picture.frames.len(), 4);
+        assert_eq!(picture.ends_ms, [100, 200, 400, 500], "delays of 0 and 1/100 s last 100 ms");
+        assert_eq!(picture.loops, 3, "a NETSCAPE loop count of 2 repeats twice after the first play");
+        for (index, (frame, expected)) in picture.frames.iter().zip(expected).enumerate() {
+            assert_eq!((frame.width, frame.height), (8, 8));
+            assert!(frame.has_alpha, "frame 3 has a hole, so every frame says it has alpha");
+            for ((x, y), want) in points.into_iter().zip(expected) {
+                let at = (y * frame.width as usize + x) * 4;
+                let got = &frame.rgba[at..at + 4];
+                let channels = if want[3] == 0 { 3..4 } else { 0..4 };
+                assert!(channels.clone().all(|c| got[c] == want[c]), "frame {index} at ({x}, {y}): {got:?} is not {want:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_timing_of_an_animated_gif_matches_its_decoded_frames() {
+        let timing = animation_timing(&gif_fixture()).unwrap().expect("animated");
+        assert_eq!(timing, AnimationTiming { loop_ms: 500, loops: 3 });
+    }
+
+    #[test]
+    fn a_gif_of_one_frame_is_a_still_and_its_first_frame_is_its_still() {
+        let dir = scratch("gif-still");
+        let path = dir.join("one.gif");
+        let bytes = std::fs::read(gif_fixture()).unwrap();
+        // Everything before the second frame's control block, then the trailer.
+        let first_end = bytes.windows(3).enumerate().filter(|(_, w)| *w == [0x21, 0xF9, 0x04]).nth(1).unwrap().0;
+        let mut one = bytes[..first_end].to_vec();
+        one.push(0x3B);
+        std::fs::write(&path, one).unwrap();
+        assert_eq!(read_animation(&path).unwrap(), None);
+        assert_eq!(animation_timing(&path), Ok(None));
+        let still = read_still(&gif_fixture()).unwrap();
+        assert_eq!((still.width, still.height), (8, 8));
+        assert_eq!(&still.rgba[..4], &[255, 0, 0, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The fixture with the loop count of its ANIM chunk set to `loops`, in a new file.

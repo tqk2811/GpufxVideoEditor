@@ -88,7 +88,7 @@ pub const STICKER_ASSET_TYPE: &str = "sticker";
 /// The extensions of the files of a sound pack a clip may play.
 pub const ASSET_AUDIO_EXTENSIONS: [&str; 2] = ["flac", "mp3"];
 /// The extensions of the files of a sticker pack a clip may show.
-pub const ASSET_IMAGE_EXTENSIONS: [&str; 4] = engine::IMAGE_EXTENSIONS;
+pub const ASSET_IMAGE_EXTENSIONS: [&str; 5] = engine::IMAGE_EXTENSIONS;
 /// The pack type whose files are fonts a text clip may draw with (see [`ProjectPaths::font_pack_path`]).
 /// It is not one of [`ASSET_TYPES`]: no clip source names a font.
 pub const FONT_ASSET_TYPE: &str = "font";

@@ -11,6 +11,7 @@
 #![cfg(windows)]
 
 mod alpha_merge;
+mod animated_gif;
 mod animated_webp;
 mod audio;
 mod clip_animation_pack;

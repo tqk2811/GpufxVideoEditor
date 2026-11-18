@@ -49,7 +49,7 @@ const PLAYING_REPAINT: Duration = Duration::from_millis(16);
 /// How often the export bar moves.
 const EXPORT_REPAINT: Duration = Duration::from_millis(100);
 
-const MEDIA_EXTENSIONS: [&str; 14] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac", "png", "jpg", "jpeg", "webp"];
+const MEDIA_EXTENSIONS: [&str; 15] = ["mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "flac", "png", "jpg", "jpeg", "webp", "gif"];
 const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "wav", "m4a", "flac", "aac", "ogg"];
 
 /// Hidden check of the frame path: names a media file to open at one second, and the app reports

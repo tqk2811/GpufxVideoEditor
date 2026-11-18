@@ -19,7 +19,9 @@ serde_json = "1"
 sha2 = "0.10"
 pollster = "0.4"
 png = "0.18"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# Lays animated GIF frames itself (disposal, loop count); the version image 0.25 uses.
+gif = "0.14"
 gpufx-core = { path = "../../external/FFmpegGpuFilter/crates/gpufx-core" }
 # Writes the built-in alpha packages, which gpufx loads from zip bytes.
 zip = { version = "9", default-features = false, features = ["deflate"] }

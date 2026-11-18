@@ -101,6 +101,15 @@ fn a_cut_webp_sticker_goes_on_from_the_same_frame() {
 }
 
 #[test]
+fn a_cut_gif_sticker_goes_on_from_the_same_frame() {
+    let timeline = project(TrackKind::Video, vec![clip("dance.GIF", 10, 6)]);
+    let cut = engine::split_clip(&timeline, KEY, seconds(12)).expect("a cut");
+    let clips = &cut.tracks[0].clips;
+    assert_eq!((clips[0].source_in, clips[1].source_in), (Time::ZERO, seconds(2)));
+    assert!(validate(&cut, &AcceptAll).is_empty());
+}
+
+#[test]
 fn the_left_edge_of_a_webp_sticker_keeps_its_offset_and_stops_it_at_zero() {
     let timeline = project(TrackKind::Video, vec![clip("fire.webp", 10, 6)]);
     let later = trim_start(&timeline, KEY, seconds(13)).expect("a trim");
