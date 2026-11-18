@@ -564,8 +564,12 @@ impl Decoder for SourceDecoder {
             Self::Still(still) => Ok(SourceFrame::Still(still.clone())),
             Self::Steps(steps) => {
                 let step = engine::karaoke::step_at(&steps.times, time);
-                if steps.clip.text.as_ref().and_then(|text| text.karaoke.as_ref()).is_some_and(engine::TextKaraoke::scales) {
-                    return Ok(SourceFrame::Step { steps: steps.clone(), step, time });
+                // In `scale` mode a word off its own size is drawn per frame; with every word at
+                // its size the step is the same picture as in any other mode.
+                if let Some(text) = steps.clip.text.as_ref().filter(|text| text.karaoke.as_ref().is_some_and(engine::TextKaraoke::scales)) {
+                    if engine::karaoke::word_scales(text, &steps.words, time).iter().any(|scale| *scale != 1.0) {
+                        return Ok(SourceFrame::Step { steps: steps.clone(), step, time });
+                    }
                 }
                 let shown = steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().filter(|(shown, _)| *shown == step).and_then(|(_, still)| still.upgrade());
                 Ok(shown.map_or_else(|| SourceFrame::Step { steps: steps.clone(), step, time }, SourceFrame::Still))
@@ -1385,6 +1389,8 @@ impl D3d12Compositor {
             *frame = SourceFrame::Still(self.draw_scaled(&steps, step, &styles, &scales)?);
             return Ok(());
         }
+        // Every word is at its size: the scaled picture is not needed any more.
+        *steps.scaled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let still = self.load_text(&steps.clip, text, &styles, &[])?;
         *steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((step, Arc::downgrade(&still)));
         *frame = SourceFrame::Still(still);
@@ -2269,6 +2275,11 @@ mod tests {
         assert!(easing_ink > start_ink && easing_ink < middle_ink, "it grows smoothly: {start_ink} {easing_ink} {middle_ink}");
         let between = at(&mut compositor, 30_000);
         assert!(read(&compositor, &between).abs_diff(plain_ink) * 20 < plain_ink, "it is back to its size when the next word starts");
+        let SourceDecoder::Steps(steps) = &decoder else { panic!("a karaoke decoder") };
+        assert!(steps.scaled.lock().unwrap().is_none(), "with every word at its size the scaled picture is let go");
+        let drawn = compositor.text_rasterizations();
+        assert!(matches!(decoder.frame_at(Time::from_ticks(30_000)).expect("a frame"), SourceFrame::Still(_)), "a step at rest is taken without drawing or the cache");
+        assert_eq!(compositor.text_rasterizations(), drawn);
     }
 
     #[test]
