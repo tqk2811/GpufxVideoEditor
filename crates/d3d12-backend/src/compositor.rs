@@ -1554,8 +1554,11 @@ impl D3d12Compositor {
 
     /// Hides `region` of `base` (or of a black frame when it is [`BLANK_IMAGE`]) into a new image;
     /// `base` stays the caller's. A blur or blocks of a black frame change nothing, so those give
-    /// [`BLANK_IMAGE`] back.
-    fn hide(&mut self, base: ImageId, region: &CensorRegion, info: &FrameInfo) -> Result<ImageId, String> {
+    /// [`BLANK_IMAGE`] back. `stretch` is how many pixels of the picture the frame holds one frame
+    /// pixel is across, the picture's pixels counted at the frame's height (see
+    /// [`picture_stretch`]); 1 for a region of the frame itself.
+    fn hide(&mut self, base: ImageId, region: &CensorRegion, stretch: f64, info: &FrameInfo) -> Result<ImageId, String> {
+        let stretch = if stretch.is_finite() && stretch > 0.0 { stretch } else { 1.0 };
         let (width, height) = (self.width, self.height);
         // Strengths are in pixels of a 1080-line frame.
         let scale = f64::from(height) / 1080.0;
@@ -1596,11 +1599,12 @@ impl D3d12Compositor {
             },
         };
         let rect = region.rect;
-        let feather = region.feather.clamp(0.0, 1.0) * (rect.width * f64::from(width)).min(rect.height * f64::from(height)) / 2.0;
+        let feather = region.feather.clamp(0.0, 1.0) * (rect.width * f64::from(width) * stretch).min(rect.height * f64::from(height)) / 2.0;
         let numbers = [
             ("x", rect.x), ("y", rect.y), ("width", rect.width.max(0.0)), ("height", rect.height.max(0.0)), ("rotation", region.rotation), ("feather", feather),
             ("ellipse", if region.shape == RegionShape::Ellipse { 1.0 } else { 0.0 }), ("opacity", region.opacity.clamp(0.0, 1.0)), ("mode", mode), ("block", block),
             ("red", color[0]), ("green", color[1]), ("blue", color[2]), ("alpha", color[3]), ("blank", if blank { 1.0 } else { 0.0 }),
+            ("stretch", stretch),
         ];
         for (name, value) in numbers {
             if let Err(e) = mixer.set_param(name, &[value]) {
@@ -1869,6 +1873,33 @@ fn region_of(effect: &ProjectEffect, region: EffectRegion, height: u32) -> Censo
     CensorRegion { rect, rotation: region.angle, shape: region.shape, feather: region.feather, mode, opacity: 1.0 }
 }
 
+/// How many pixels of a picture of `aspect` (width over height) one pixel of a frame of `width` by
+/// `height` is across when the picture is stretched over the frame, its pixels counted at the
+/// frame's height.
+fn picture_stretch(aspect: f64, width: u32, height: u32) -> f64 {
+    let stretch = aspect * f64::from(height.max(1)) / f64::from(width.max(1));
+    if stretch.is_finite() && stretch > 0.0 { stretch } else { 1.0 }
+}
+
+/// `regions`, in parts of a picture of `aspect` without its `margin` (parts of its width and
+/// height past each side, see [`StillImage::margin`]), in parts of the whole picture with its
+/// margin, with its [`picture_stretch`] over a frame of `width` by `height`.
+fn picture_regions(regions: Vec<CensorRegion>, aspect: f64, margin: (f64, f64), width: u32, height: u32) -> (Vec<CensorRegion>, f64) {
+    let (across, down) = (1.0 + 2.0 * margin.0, 1.0 + 2.0 * margin.1);
+    let whole_aspect = aspect * across / down;
+    let regions = regions
+        .into_iter()
+        .map(|region| {
+            if margin == (0.0, 0.0) {
+                return region;
+            }
+            let rect = region.rect;
+            CensorRegion { rect: PlacedRect { x: (rect.x + margin.0) / across, y: (rect.y + margin.1) / down, width: rect.width / across, height: rect.height / down }, ..region }
+        })
+        .collect();
+    (regions, picture_stretch(whole_aspect, width, height))
+}
+
 fn load_overlay(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<EffectGraph, String> {
     let path = package_path(paths, "packages/gpufx/ffmpeg/overlay")?;
     let mut effect = open_effect(context, &path, "overlay")?;
@@ -1898,7 +1929,8 @@ fn load_blur(context: &Arc<GpuContext>, paths: &ProjectPaths) -> Result<EffectGr
 
 /// The largest radius one run of the gaussian blur package takes.
 const MAX_BLUR_PASS: f64 = 48.0;
-/// The most runs of the blur for one censor blur.
+/// The most runs of the blur for one censor blur. A larger radius is cut to what this many runs
+/// give (`MAX_BLUR_PASS` times the square root of this), a little under 136 pixels.
 const MAX_BLUR_PASSES: f64 = 8.0;
 
 fn load_censor_mixer(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
@@ -1972,7 +2004,7 @@ impl Compositor for D3d12Compositor {
 
     fn censor(&mut self, base: ImageId, region: &CensorRegion, at: FrameContext) -> Result<ImageId, RenderError> {
         let info = Self::info(at);
-        let output = self.hide(base, region, &info).map_err(RenderError)?;
+        let output = self.hide(base, region, 1.0, &info).map_err(RenderError)?;
         if output == BLANK_IMAGE {
             return Ok(output);
         }
@@ -2010,6 +2042,8 @@ impl D3d12Compositor {
         // picture and stays on the clip. Mixing through a shape after the graph is the one step
         // every hiding effect shares, and it is the step censor clips already take.
         let regional: Vec<CensorRegion> = all_effects.iter().filter_map(|effect| Some(region_of(effect, effect.region?, self.height))).collect();
+        // The graph's picture is the source (with its margin) stretched over the project frame.
+        let (regional, stretch) = picture_regions(regional, frame.display_aspect(), frame.margin(), self.width, self.height);
         let plain: Vec<ProjectEffect> = if regional.is_empty() { Vec::new() } else { all_effects.iter().filter(|effect| effect.region.is_none()).cloned().collect() };
         let effects: &[ProjectEffect] = if regional.is_empty() { all_effects } else { &plain };
         let matted_input = matted.map(|image| self.images[image.0].frame(self.width, self.height));
@@ -2089,7 +2123,7 @@ impl D3d12Compositor {
         }
         let mut output = output;
         for region in &regional {
-            match self.hide(output, region, &info) {
+            match self.hide(output, region, stretch, &info) {
                 Ok(hidden) => {
                     self.release_image(output);
                     output = hidden;
@@ -2328,11 +2362,16 @@ mod tests {
 
     /// Hides `region` of a picture whose pixel (x, y) is `paint(x, y)`, and reads the result.
     fn hidden(compositor: &mut D3d12Compositor, paint: impl Fn(u32, u32) -> [u8; 4], region: CensorRegion) -> Vec<u8> {
+        hidden_stretched(compositor, paint, region, 1.0)
+    }
+
+    /// [`hidden`] for a picture stretched over the frame by `stretch` (see [`picture_stretch`]).
+    fn hidden_stretched(compositor: &mut D3d12Compositor, paint: impl Fn(u32, u32) -> [u8; 4], region: CensorRegion, stretch: f64) -> Vec<u8> {
         let (width, height) = (compositor.width, compositor.height);
         let rgba = (0..width * height).flat_map(|i| paint(i % width, i / width)).collect();
         let picture = StillPicture { width, height, rgba, has_alpha: false };
         let image = ImageId(compositor.images.push(Image::upload(&compositor.gpu, &picture).expect("an upload")));
-        let output = compositor.hide(image, &region, &FrameInfo::new(0.0, 0)).expect("hidden");
+        let output = compositor.hide(image, &region, stretch, &FrameInfo::new(0.0, 0)).expect("hidden");
         let mut rgba = Vec::new();
         compositor.read(output, &mut rgba).expect("read");
         compositor.release(output);
@@ -2408,13 +2447,53 @@ mod tests {
         assert_eq!(red(&rgba, left, top), 255, "the upright corner is outside the turned square");
         assert_eq!(red(&rgba, left + 69, top + 69), 0);
 
-        let output = compositor.hide(BLANK_IMAGE, &middle_region(CensorMode::Solid { color: [255, 0, 0, 255] }), &FrameInfo::new(0.0, 0)).expect("hidden");
+        let output = compositor.hide(BLANK_IMAGE, &middle_region(CensorMode::Solid { color: [255, 0, 0, 255] }), 1.0, &FrameInfo::new(0.0, 0)).expect("hidden");
         let mut rgba = Vec::new();
         compositor.read(output, &mut rgba).expect("read");
         compositor.release(output);
         assert_eq!(&rgba[((180 * 640 + 320) * 4) as usize..][..3], [255, 0, 0], "a box of colour over nothing");
         assert_eq!(&rgba[..3], [0, 0, 0], "black around it");
-        assert!(matches!(compositor.hide(BLANK_IMAGE, &middle_region(CensorMode::Blur { radius: 10.0 }), &FrameInfo::new(0.0, 0)), Ok(BLANK_IMAGE)));
+        assert!(matches!(compositor.hide(BLANK_IMAGE, &middle_region(CensorMode::Blur { radius: 10.0 }), 1.0, &FrameInfo::new(0.0, 0)), Ok(BLANK_IMAGE)));
+    }
+
+    #[test]
+    fn a_turned_ellipse_on_a_tall_picture_keeps_its_shape_on_the_picture() {
+        let Some(mut compositor) = censor_rig() else { return };
+        // A 9:16 picture stretched over the 16:9 frame; a circle on it (0.4 of its width, as tall),
+        // turned 45 degrees, stays a circle on the picture: on the frame, an upright ellipse 256
+        // pixels wide and 81 tall around the middle.
+        let aspect = 9.0 / 16.0;
+        let (regions, stretch) = picture_regions(vec![CensorRegion { rect: PlacedRect { x: 0.3, y: 0.5 - 0.4 * aspect / 2.0, width: 0.4, height: 0.4 * aspect }, rotation: 45.0, shape: RegionShape::Ellipse, ..middle_region(CensorMode::Solid { color: [0, 0, 0, 255] }) }], aspect, (0.0, 0.0), 640, 360);
+        let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        let rgba = hidden_stretched(&mut compositor, white, regions[0], stretch);
+        assert_eq!(red(&rgba, 320 + 115, 180), 0, "far along the width is inside");
+        assert_eq!(red(&rgba, 320 - 115, 180), 0);
+        assert_eq!(red(&rgba, 320, 180 + 35), 0, "near the top and bottom too");
+        assert_eq!(red(&rgba, 320, 180 + 46), 255, "past the height is outside");
+        assert_eq!((red(&rgba, 320 + 70, 180 + 70), red(&rgba, 320 + 70, 180 - 70)), (255, 255), "and the diagonals, one of which an ellipse turned on the frame would cover");
+    }
+
+    #[test]
+    fn a_margin_and_the_picture_shape_map_a_region_onto_the_whole_picture() {
+        let region = middle_region(CensorMode::Pixelate { block: 8.0 });
+        let (regions, stretch) = picture_regions(vec![region], 2.0, (0.25, 0.0), 640, 360);
+        let rect = regions[0].rect;
+        assert!((rect.x - 0.5 / 1.5).abs() < 1e-9 && (rect.width - 0.5 / 1.5).abs() < 1e-9 && rect.y == 0.25, "{rect:?}");
+        assert!((stretch - 3.0 * 360.0 / 640.0).abs() < 1e-9, "the whole picture is 3:1: {stretch}");
+        assert_eq!(picture_regions(vec![region], 16.0 / 9.0, (0.0, 0.0), 640, 360).0[0], region);
+    }
+
+    #[test]
+    fn the_blocks_of_a_pixelated_region_start_at_its_middle() {
+        let Some(mut compositor) = censor_rig() else { return };
+        // Blocks of 16 pixels; the middle of the region is at x 325, off the grid of the frame.
+        let ramp = |x: u32, _y: u32| [((x / 2) % 256) as u8, 0, 0, 255];
+        let region = CensorRegion { rect: PlacedRect { x: 0.25 + 5.0 / 640.0, ..middle_region(CensorMode::Pixelate { block: 48.0 }).rect }, ..middle_region(CensorMode::Pixelate { block: 48.0 }) };
+        let rgba = hidden(&mut compositor, ramp, region);
+        for x in 325..341 {
+            assert_eq!(red(&rgba, x, 180), red(&rgba, 325, 180), "one block from the middle, at x {x}");
+        }
+        assert_ne!(red(&rgba, 324, 180), red(&rgba, 325, 180), "a new block starts at the middle");
     }
 
     /// Acquires `count` images at once, gives them back and ends the frame.

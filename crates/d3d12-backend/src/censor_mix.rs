@@ -35,7 +35,8 @@ const MANIFEST: &str = r#"{
     { "name": "green", "type": "float", "default": 0, "min": 0, "max": 1 },
     { "name": "blue", "type": "float", "default": 0, "min": 0, "max": 1 },
     { "name": "alpha", "type": "float", "default": 1, "min": 0, "max": 1 },
-    { "name": "blank", "type": "float", "default": 0, "min": 0, "max": 1 }
+    { "name": "blank", "type": "float", "default": 0, "min": 0, "max": 1 },
+    { "name": "stretch", "type": "float", "default": 1, "min": 0.0001, "max": 10000 }
   ],
   "groups": [{ "passes": [{ "shader": "shaders/main.wgsl" }] }]
 }"#;
@@ -51,13 +52,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (!gpufx_in_bounds(id)) { return; }
     let p = vec2i(id.xy);
     let original = picture_at(p);
-    // In output pixels, so a turn keeps the shape of the box whatever the frame's is.
-    let size = vec2f(params.width, params.height) * globals.size;
+    // In pixels of the picture as it is meant to be seen: the frame may hold a picture of another
+    // shape stretched over it, and `stretch` is how many of those pixels one frame pixel is across
+    // (1 for a region of the frame itself). So a turn, an ellipse, the soft edge and the blocks keep
+    // the shape they have on the picture.
+    let unit = vec2f(max(params.stretch, 0.0001), 1.0);
+    let size = vec2f(params.width, params.height) * globals.size * unit;
     let centre = (vec2f(params.x, params.y) + vec2f(params.width, params.height) * 0.5) * globals.size;
     let turn = radians(params.rotation);
     let cosine = cos(turn);
     let sine = sin(turn);
-    let d = vec2f(id.xy) + 0.5 - centre;
+    let d = (vec2f(id.xy) + 0.5 - centre) * unit;
     let local = vec2f(cosine * d.x + sine * d.y, cosine * d.y - sine * d.x);
     let half = max(size * 0.5, vec2f(0.0001));
     // How far inside the edge the pixel is, in pixels.
@@ -81,15 +86,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (params.mode < 0.5) {
         changed = textureLoad(hidden, p, 0);
     } else if (params.mode < 1.5) {
-        // The mean of a few points spread over the block, on a grid of the frame.
+        // The mean of a few points spread over the block, on an upright grid that starts at the
+        // middle of the region, so the blocks move with the region.
         let block = max(params.block, 1.0);
-        let cell = floor(vec2f(id.xy) / block) * block;
+        let cell = floor(d / block) * block;
         let steps = i32(min(ceil(block), 16.0));
         var sum = vec4f(0.0);
         for (var j = 0; j < steps; j = j + 1) {
             for (var i = 0; i < steps; i = i + 1) {
-                let q = cell + (vec2f(f32(i), f32(j)) + 0.5) * block / f32(steps);
-                sum = sum + picture_at(vec2i(q));
+                let q = centre + (cell + (vec2f(f32(i), f32(j)) + 0.5) * block / f32(steps)) / unit;
+                sum = sum + picture_at(vec2i(floor(q)));
             }
         }
         changed = sum / f32(steps * steps);
