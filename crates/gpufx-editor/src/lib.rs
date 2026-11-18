@@ -34,6 +34,7 @@ pub mod clip_animation_install;
 pub mod clip_animation_library;
 pub mod sticker_install;
 pub mod sticker_library;
+pub mod sticker_motion;
 pub mod subtitle_style_install;
 pub mod subtitle_track;
 pub mod tasks;

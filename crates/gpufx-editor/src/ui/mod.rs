@@ -70,6 +70,7 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     theme::apply(root.ctx(), state.ui.theme);
     state.visuals.borrow_mut().begin_frame(root.ctx());
     state.previews.borrow_mut().begin_frame(root.ctx());
+    state.sticker_motion.borrow_mut().begin_frame(root.ctx());
     state.visuals.borrow_mut().sync_project(state.revision(), state.project());
     // Finished detections write their beats; running ones need the progress drawn.
     if state.poll_beats() {
@@ -105,6 +106,8 @@ pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiR
     let mut previews = state.previews.borrow_mut();
     previews.set_paused(state.is_playing() || state.is_exporting());
     previews.end_frame();
+    // A decode no tile asked for this frame is cancelled: the pointer left its sticker.
+    state.sticker_motion.borrow_mut().end_frame();
 }
 
 /// Starts or restarts the time the fullscreen controls stay up. Before the shortcuts, which consume
