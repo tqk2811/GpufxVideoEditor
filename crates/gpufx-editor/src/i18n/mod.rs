@@ -315,6 +315,8 @@ pub enum Message {
     AllCategories,
     StickerLibraryEmpty,
     StickerAddHint,
+    /// The hover line of an animated sticker: one loop in milliseconds, and how many times it plays (0 is forever).
+    AnimatedSticker { loop_ms: u64, loops: u32 },
     StickerPackInstalled { name: String, replaced: bool },
     FontPackInstalled { name: String, replaced: bool },
     ClipAnimationPackInstalled { name: String, replaced: bool },
@@ -726,6 +728,8 @@ mod tests {
             Message::AllCategories,
             Message::StickerLibraryEmpty,
             Message::StickerAddHint,
+            Message::AnimatedSticker { loop_ms: 600, loops: 0 },
+            Message::AnimatedSticker { loop_ms: 1250, loops: 3 },
             Message::StickerPackInstalled { name: name(), replaced: true },
             Message::FontPackInstalled { name: name(), replaced: false },
             Message::ClipAnimationPackInstalled { name: name(), replaced: false },

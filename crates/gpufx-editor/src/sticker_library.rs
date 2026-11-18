@@ -3,7 +3,8 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use d3d12_backend::{asset_source, still_dimensions, ProjectPaths};
+use d3d12_backend::{animation_timing, asset_source, still_dimensions, AnimationTiming, ProjectPaths};
+use engine::Time;
 
 use crate::audio_library::LibraryProblem;
 use crate::editor::DEFAULT_IMAGE_DURATION;
@@ -20,17 +21,43 @@ pub struct LibrarySticker {
     pub category: String,
     /// Width and height from the file's header, or `None` when it could not be read.
     pub size: Option<(u32, u32)>,
+    /// How long a loop lasts and how many times it plays, for an animated sticker; `None` for a
+    /// still one or when the file could not be read.
+    pub animation: Option<AnimationTiming>,
 }
 
 impl LibrarySticker {
     /// The item that goes through the drag and the add paths of the media list.
     pub fn media_item(&self) -> MediaItem {
-        MediaItem { source: self.source.clone(), name: self.name.clone(), kind: MediaKind::Video, duration: Some(DEFAULT_IMAGE_DURATION), estimated: true }
+        MediaItem { source: self.source.clone(), name: self.name.clone(), kind: MediaKind::Video, duration: Some(self.default_duration()), estimated: true }
+    }
+
+    /// Whether the sticker moves.
+    pub fn is_animated(&self) -> bool {
+        self.animation.is_some()
+    }
+
+    /// How long a clip of it is when it is added.
+    pub fn default_duration(&self) -> Time {
+        self.animation.map_or(DEFAULT_IMAGE_DURATION, |timing| animated_duration(DEFAULT_IMAGE_DURATION, timing))
     }
 
     fn matches(&self, word: &str) -> bool {
         self.name.to_lowercase().contains(word) || self.category.to_lowercase().contains(word) || self.tags.iter().any(|tag| tag.to_lowercase().contains(word))
     }
+}
+
+/// The length of a new clip of an animation of `timing`: as many whole loops as come closest to
+/// `wanted`, at least one, so the clip does not stop in the middle of a loop; or every loop when the
+/// animation plays a fixed number of times.
+pub fn animated_duration(wanted: Time, timing: AnimationTiming) -> Time {
+    const TICKS_PER_MS: i64 = engine::TICKS_PER_SECOND / 1000;
+    let length = i64::try_from(timing.loop_ms).unwrap_or(i64::MAX / TICKS_PER_MS).saturating_mul(TICKS_PER_MS);
+    if length <= 0 {
+        return wanted;
+    }
+    let count = if timing.loops != 0 { i64::from(timing.loops) } else { ((wanted.ticks() + length / 2) / length).max(1) };
+    Time::from_ticks(length.saturating_mul(count))
 }
 
 /// One installed pack.
@@ -105,7 +132,9 @@ fn read_pack(root: &Path, folder: &Path, library: &mut StickerLibrary) -> Option
         };
         // This scan runs off the UI thread, and only reads each file's header.
         let size = still_dimensions(&path).ok();
-        stickers.push(LibrarySticker { source, name: item.name, tags: item.tags, category: item.category, size });
+        // Only an animated WebP's chunks are read for its timing; no frame is decoded.
+        let animation = animation_timing(&path).ok().flatten();
+        stickers.push(LibrarySticker { source, name: item.name, tags: item.tags, category: item.category, size, animation });
     }
     Some(StickerPack { id: manifest.id.to_ascii_lowercase(), name: manifest.name, stickers })
 }
@@ -140,7 +169,7 @@ mod tests {
     use super::*;
 
     fn sticker(name: &str, tags: &[&str], category: &str) -> LibrarySticker {
-        LibrarySticker { source: format!("asset:sticker/p/{name}.png"), name: name.to_owned(), tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), size: None }
+        LibrarySticker { source: format!("asset:sticker/p/{name}.png"), name: name.to_owned(), tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), size: None, animation: None }
     }
 
     fn library() -> StickerLibrary {
@@ -204,5 +233,53 @@ mod tests {
     fn a_library_sticker_is_a_video_item_marked_as_an_estimate() {
         let media = sticker("Smile", &[], "c").media_item();
         assert_eq!((media.kind, media.duration, media.estimated), (MediaKind::Video, Some(DEFAULT_IMAGE_DURATION), true));
+        assert!(!sticker("Smile", &[], "c").is_animated());
+    }
+
+    fn ms(ms: i64) -> Time {
+        Time::from_ticks(ms * (engine::TICKS_PER_SECOND / 1000))
+    }
+
+    #[test]
+    fn an_endless_animation_lasts_the_whole_loops_closest_to_the_wanted_length() {
+        let endless = |loop_ms| AnimationTiming { loop_ms, loops: 0 };
+        assert_eq!(animated_duration(ms(5000), endless(600)), ms(4800), "8 loops are closer than 9");
+        assert_eq!(animated_duration(ms(5000), endless(700)), ms(4900));
+        assert_eq!(animated_duration(ms(5000), endless(1400)), ms(5600), "4 loops are closer than 3");
+        assert_eq!(animated_duration(ms(5000), endless(2000)), ms(6000), "half way rounds up");
+        assert_eq!(animated_duration(ms(5000), endless(12_000)), ms(12_000), "at least one loop");
+        assert_eq!(animated_duration(ms(5000), endless(0)), ms(5000), "a loop of no length keeps the wanted length");
+    }
+
+    #[test]
+    fn an_animation_that_plays_a_fixed_number_of_times_lasts_every_loop() {
+        assert_eq!(animated_duration(ms(5000), AnimationTiming { loop_ms: 600, loops: 3 }), ms(1800));
+        assert_eq!(animated_duration(ms(5000), AnimationTiming { loop_ms: 4000, loops: 2 }), ms(8000));
+    }
+
+    #[test]
+    fn an_animated_sticker_is_added_as_long_as_its_loops() {
+        let mut animated = sticker("Spin", &[], "c");
+        animated.animation = Some(AnimationTiming { loop_ms: 600, loops: 0 });
+        assert!(animated.is_animated());
+        assert_eq!(animated.media_item().duration, Some(ms(4800)));
+    }
+
+    #[test]
+    fn a_scan_finds_which_stickers_move() {
+        let dir = scratch("animated");
+        write_pack(&dir, "moving", "Moving", &["images/a.png", "images/b.png"]);
+        let pack = dir.join("packages/sticker/moving");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../d3d12-backend/tests/fixtures/animated.webp");
+        std::fs::copy(&fixture, pack.join("images/b.webp")).unwrap();
+        let manifest = std::fs::read_to_string(pack.join("manifest.json")).unwrap().replace("images/b.png", "images/b.webp");
+        std::fs::write(pack.join("manifest.json"), manifest).unwrap();
+
+        let library = scan_sticker_packs(std::slice::from_ref(&dir));
+
+        let stickers = &library.packs[0].stickers;
+        assert_eq!(stickers.iter().map(LibrarySticker::is_animated).collect::<Vec<_>>(), vec![false, true]);
+        assert_eq!(stickers[1].animation, Some(AnimationTiming { loop_ms: 600, loops: 0 }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

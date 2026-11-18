@@ -297,6 +297,10 @@ pub(super) fn text(message: &Message) -> String {
         Message::SearchStickers => "Tìm sticker".to_owned(),
         Message::AllCategories => "Tất cả nhóm".to_owned(),
         Message::StickerLibraryEmpty => "Chưa có sticker nào. Hãy nhập một gói (.zip).".to_owned(),
+        Message::AnimatedSticker { loop_ms, loops } => {
+            let seconds = *loop_ms as f64 / 1000.0;
+            if *loops == 0 { format!("Sticker động: mỗi vòng {seconds:.2} giây, lặp mãi") } else { format!("Sticker động: mỗi vòng {seconds:.2} giây, chạy {loops} lần") }
+        }
         Message::StickerAddHint => "Bấm đúp để thêm sticker vào vị trí đầu phát, hoặc kéo vào một track video hay trình phát.".to_owned(),
         Message::StickerPackInstalled { name, replaced } => format!("Đã {} \"{name}\" vào Sticker.", if *replaced { "thay thế" } else { "cài" }),
         Message::FontPackInstalled { name, replaced } => format!("Đã {} gói font \"{name}\"; font của gói có trong danh sách font.", if *replaced { "thay thế" } else { "cài" }),

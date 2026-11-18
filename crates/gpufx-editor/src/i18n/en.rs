@@ -324,6 +324,10 @@ pub(super) fn text(message: &Message) -> String {
         Message::SearchStickers => "Search stickers".to_owned(),
         Message::AllCategories => "All categories".to_owned(),
         Message::StickerLibraryEmpty => "No stickers yet. Import a pack (.zip).".to_owned(),
+        Message::AnimatedSticker { loop_ms, loops } => {
+            let seconds = *loop_ms as f64 / 1000.0;
+            if *loops == 0 { format!("Animated: a {seconds:.2} s loop, repeated") } else { format!("Animated: a {seconds:.2} s loop, played {loops} times") }
+        }
         Message::StickerAddHint => "Double-click to add a sticker at the playhead, or drag it onto a video track or the player.".to_owned(),
         Message::StickerPackInstalled { name, replaced } => format!("{} \"{name}\" in Stickers.", if *replaced { "Replaced" } else { "Installed" }),
         Message::FontPackInstalled { name, replaced } => format!("{} the font pack \"{name}\"; its fonts are in the font list.", if *replaced { "Replaced" } else { "Installed" }),

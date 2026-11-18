@@ -1288,7 +1288,7 @@ mod tests {
         let sound = |name: &str| LibrarySound { source: format!("asset:music/m/{name}.mp3"), name: name.to_owned(), duration: None, tags: vec!["happy".to_owned()], category: String::new(), looped: false };
         host.state.audio_library.packs.push(LibraryPack { kind: AudioPackKind::Music, id: "m".to_owned(), name: "M".to_owned(), version: "1".to_owned(), sounds: vec![sound("Kids Fun"), sound("Calm")] });
         host.state.audio_library.loaded = true;
-        host.state.sticker_library.packs.push(StickerPack { id: "s".to_owned(), name: "S".to_owned(), stickers: vec![LibrarySticker { source: "asset:sticker/s/star.png".to_owned(), name: "Star".to_owned(), tags: vec!["happy".to_owned()], category: String::new(), size: Some((64, 64)) }] });
+        host.state.sticker_library.packs.push(StickerPack { id: "s".to_owned(), name: "S".to_owned(), stickers: vec![LibrarySticker { source: "asset:sticker/s/star.png".to_owned(), name: "Star".to_owned(), tags: vec!["happy".to_owned()], category: String::new(), size: Some((64, 64)), animation: None }] });
         host.state.sticker_library.loaded = true;
         let sources = |result: AgentResult| result.expect("list")["items"].as_array().unwrap().iter().map(|item| item["source"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(sources(host.run(AgentRequest::AssetList { kind: None, filter: Some("happy".to_owned()) })).len(), 3);

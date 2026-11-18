@@ -4485,7 +4485,7 @@ mod tests {
     #[test]
     fn a_sticker_goes_on_a_sticker_track_and_an_image_may_join_it() {
         let mut state = EditorState::default();
-        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None };
+        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None, animation: None };
         state.add_media_at_playhead(&sticker.media_item());
         assert_eq!(state.project().tracks.iter().map(|track| track.kind).collect::<Vec<_>>(), vec![TrackKind::Sticker]);
         let dropped = state.drop_media(&sticker.media_item(), None, seconds(30)).unwrap();
@@ -4749,7 +4749,7 @@ mod tests {
     fn a_sticker_dropped_on_the_player_gets_a_new_track_from_the_playhead_centred_where_it_fell() {
         let mut state = state_with_clip();
         state.set_playhead(seconds(1));
-        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None };
+        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None, animation: None };
         let before = state.project().clone();
         let key = state.drop_picture_on_player(&sticker.media_item(), (0.25, 0.75)).unwrap();
         assert_eq!(state.project().tracks.len(), 3, "a new track");
@@ -4765,7 +4765,7 @@ mod tests {
     #[test]
     fn an_image_dropped_on_the_player_gets_its_own_new_track_even_next_to_a_sticker() {
         let mut state = state_with_clip();
-        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None };
+        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None, animation: None };
         let first = state.drop_picture_on_player(&sticker.media_item(), (0.5, 0.5)).unwrap();
         state.set_playhead(seconds(60));
         let image = media("C:/media/logo.png", crate::media::MediaKind::Video, Some(5));
@@ -4808,7 +4808,7 @@ mod tests {
     #[test]
     fn a_sticker_of_the_library_comes_small_and_centred() {
         let mut state = EditorState::default();
-        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None };
+        let sticker = crate::sticker_library::LibrarySticker { source: "asset:sticker/p/images/a.png".to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: None, animation: None };
         state.add_media_at_playhead(&sticker.media_item());
         let clip = state.project().tracks.iter().find(|track| track.kind == TrackKind::Sticker).unwrap().clips[0].clone();
         assert_eq!(clip.duration, DEFAULT_IMAGE_DURATION);
@@ -4820,7 +4820,7 @@ mod tests {
     fn placed_sticker(size: (u32, u32)) -> (ClipPlacement, f64) {
         let mut state = EditorState::default();
         let source = "asset:sticker/p/images/a.png";
-        let sticker = crate::sticker_library::LibrarySticker { source: source.to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: Some(size) };
+        let sticker = crate::sticker_library::LibrarySticker { source: source.to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: Some(size), animation: None };
         state.sticker_library = crate::sticker_library::StickerLibrary { packs: vec![crate::sticker_library::StickerPack { id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker.clone()] }], problems: Vec::new(), loaded: true };
         state.add_media_at_playhead(&sticker.media_item());
         let output = state.project().output.clone();

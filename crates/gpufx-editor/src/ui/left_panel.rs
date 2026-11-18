@@ -340,20 +340,34 @@ fn sticker_tile(ui: &mut egui::Ui, state: &EditorState, sticker: &LibrarySticker
         }
         None => icons::paint(&painter, Rect::from_center_size(picture.center(), Vec2::splat(24.0)), Icon::Sticker, theme::text_dim()),
     }
+    if sticker.is_animated() {
+        animated_badge(&painter, picture);
+    }
     let stroke = if response.hovered() { Stroke::new(1.0, theme::accent()) } else { Stroke::new(1.0, theme::border()) };
     painter.rect_stroke(picture, radius, stroke, StrokeKind::Inside);
     let mut job = egui::text::LayoutJob::simple_singleline(sticker.name.clone(), FontId::proportional(12.0), theme::text());
     job.wrap = egui::text::TextWrapping::truncate_at_width((side - 4.0).max(1.0));
     let galley = painter.layout_job(job);
     painter.galley(egui::pos2(rect.left() + 2.0, picture.bottom() + (TILE_CAPTION - galley.size().y) / 2.0), galley, theme::text());
-    let response = response.on_hover_text(sticker_tooltip(sticker));
+    let response = response.on_hover_text(sticker_tooltip(sticker, state.language()));
     // A single click is too easy to make by accident, so adding needs a double click.
     response.double_clicked()
 }
 
-fn sticker_tooltip(sticker: &LibrarySticker) -> String {
+fn sticker_tooltip(sticker: &LibrarySticker, language: Language) -> String {
     let tags = if sticker.tags.is_empty() { sticker.category.clone() } else { format!("{} [{}]", sticker.category, sticker.tags.join(", ")) };
-    format!("{}\n{tags}", sticker.name)
+    match sticker.animation {
+        Some(timing) => format!("{}\n{tags}\n{}", sticker.name, language.t(Message::AnimatedSticker { loop_ms: timing.loop_ms, loops: timing.loops })),
+        None => format!("{}\n{tags}", sticker.name),
+    }
+}
+
+/// The mark of an animated sticker: a small play sign on a dark pill at the top right of `picture`,
+/// as the proxy label sits on a video thumbnail.
+fn animated_badge(painter: &egui::Painter, picture: Rect) {
+    let badge = Rect::from_min_size(egui::pos2(picture.right() - 21.0, picture.top() + 4.0), Vec2::new(17.0, 13.0));
+    painter.rect_filled(badge, CornerRadius::same(3), Color32::from_black_alpha(180));
+    icons::paint(painter, Rect::from_center_size(badge.center(), Vec2::splat(9.0)), Icon::Play, theme::on_clip());
 }
 
 /// The grid of `items`, and the one chosen this frame.
