@@ -34,8 +34,10 @@ pub enum KaraokeMode {
     Color,
     /// As `color`, with a box behind the active word.
     Box,
-    /// Meant to scale the active word. Each word would need a picture of its own, which is not
-    /// made yet, so it draws as `color`.
+    /// As `color`, and each word takes the scale of its state's look around its own middle,
+    /// without moving the other words. A word eases from the scale it had into the active scale
+    /// when it starts and back into the spoken scale before it ends (see [`word_scales`]), so the
+    /// picture changes on every frame of those turns rather than once a step.
     Scale,
 }
 
@@ -48,7 +50,7 @@ pub struct KaraokeLook {
     /// The box behind the word in `box` mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<Rgba>,
-    /// Above 0 and at most [`MAX_KARAOKE_SCALE`]. Kept; nothing scales a word yet.
+    /// Above 0 and at most [`MAX_KARAOKE_SCALE`]. Only `scale` mode draws it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<f32>,
     /// 0 to 1.
@@ -101,7 +103,16 @@ impl TextKaraoke {
     pub fn draws_box(&self) -> bool {
         self.mode == KaraokeMode::Box
     }
+
+    /// Whether it scales words, so its picture changes between steps.
+    pub fn scales(&self) -> bool {
+        self.mode == KaraokeMode::Scale
+    }
 }
+
+/// The longest a word takes to ease into its active scale, and out of it, in ticks (0.12 s). A
+/// shorter word takes half its length for each.
+pub const KARAOKE_SCALE_EASE_TICKS: i64 = 10_800;
 
 /// The state of a word at a moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,6 +247,50 @@ pub fn word_styles(text: &TextContent, words: &[KaraokeWord], states: &[WordStat
         .collect()
 }
 
+/// The scale of each word of `text` at `time`, in `scale` mode; all 1 in any other mode. A word
+/// holds the scale of its state's look (with the emphasis look on top), 1 when it names none. An
+/// active word eases out of the upcoming scale over its first [`KARAOKE_SCALE_EASE_TICKS`] and into
+/// the spoken scale over its last, so at its start and end it matches its neighbours in time.
+pub fn word_scales(text: &TextContent, words: &[KaraokeWord], time: Time) -> Vec<f32> {
+    let karaoke = text.karaoke.clone().unwrap_or_default();
+    if !karaoke.scales() {
+        return vec![1.0; words.len()];
+    }
+    let scale_of = |look: Option<KaraokeLook>, emphasis: bool| {
+        let extra = if emphasis { karaoke.emphasis.unwrap_or_default() } else { KaraokeLook::default() };
+        let scale = extra.scale.or(look.unwrap_or_default().scale).unwrap_or(1.0);
+        if scale.is_finite() && scale > 0.0 { scale.min(MAX_KARAOKE_SCALE) } else { 1.0 }
+    };
+    words
+        .iter()
+        .map(|word| {
+            let (upcoming, active, spoken) = (scale_of(karaoke.upcoming, word.emphasis), scale_of(karaoke.active, word.emphasis), scale_of(karaoke.spoken, word.emphasis));
+            if word.end <= time {
+                return spoken;
+            }
+            if time < word.start {
+                return upcoming;
+            }
+            let length = word.end.ticks() - word.start.ticks();
+            let ease = KARAOKE_SCALE_EASE_TICKS.min(length / 2).max(1) as f32;
+            let into = (time.ticks() - word.start.ticks()) as f32 / ease;
+            let out_of = (word.end.ticks() - time.ticks()) as f32 / ease;
+            if into < 1.0 {
+                upcoming + (active - upcoming) * ease_out(into)
+            } else if out_of < 1.0 {
+                spoken + (active - spoken) * ease_out(out_of)
+            } else {
+                active
+            }
+        })
+        .collect()
+}
+
+/// A cubic ease out from 0 to 1.
+fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
 /// What is wrong with the karaoke of `text`, if anything: a look out of range, or word times that
 /// are not one per word, in order and not overlapping.
 pub fn karaoke_problem(text: &TextContent) -> Option<String> {
@@ -273,6 +328,24 @@ pub fn karaoke_problem(text: &TextContent) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_mode_eases_the_active_word_in_and_out_and_holds_between() {
+        let mut text = TextContent::new("one two", 0.1);
+        let active = KaraokeLook { scale: Some(1.5), ..KaraokeLook::default() };
+        text.karaoke = Some(TextKaraoke { mode: KaraokeMode::Scale, active: Some(active), ..TextKaraoke::default() });
+        let words = [KaraokeWord { start: Time::ZERO, end: Time::from_ticks(90_000), emphasis: false }, KaraokeWord { start: Time::from_ticks(90_000), end: Time::from_ticks(180_000), emphasis: false }];
+        let at = |ticks: i64| word_scales(&text, &words, Time::from_ticks(ticks));
+        assert_eq!(at(0), vec![1.0, 1.0], "a word starts at its own size");
+        let early = at(KARAOKE_SCALE_EASE_TICKS / 4)[0];
+        assert!(early > 1.0 && early < 1.5, "then grows: {early}");
+        assert_eq!(at(45_000), vec![1.5, 1.0], "and holds the active scale");
+        let late = at(90_000 - KARAOKE_SCALE_EASE_TICKS / 4)[0];
+        assert!(late > 1.0 && late < 1.5, "then eases back: {late}");
+        assert_eq!(at(90_000), vec![1.0, 1.0], "back to its size as the next word starts");
+        text.karaoke.as_mut().expect("karaoke").mode = KaraokeMode::Color;
+        assert_eq!(word_scales(&text, &words, Time::from_ticks(45_000)), vec![1.0, 1.0], "only scale mode scales");
+    }
 
     fn karaoke_text(content: &str) -> TextContent {
         let mut text = TextContent::new(content, 0.1);

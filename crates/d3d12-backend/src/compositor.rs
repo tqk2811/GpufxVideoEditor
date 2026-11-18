@@ -445,8 +445,9 @@ pub enum SourceFrame {
     Video(DecodedFrame),
     Still(Arc<StillImage>),
     /// A step of a karaoke text not drawn yet. The compositor draws it, through its still cache,
-    /// before it reads the frame (see [`D3d12Compositor::resolve_frame`]).
-    Step { steps: Arc<KaraokeSteps>, step: usize },
+    /// before it reads the frame (see [`D3d12Compositor::resolve_frame`]). `time` is the source
+    /// time of the frame, which `scale` mode draws its words at.
+    Step { steps: Arc<KaraokeSteps>, step: usize, time: Time },
     /// A frame of a text whose characters move one by one, not drawn yet; drawn with the poses of
     /// its units at the clip's clock (see [`D3d12Compositor::resolve_frame`]).
     Units(Arc<MovingText>),
@@ -466,11 +467,17 @@ pub struct MovingText {
 /// first is step 0 (see [`engine::karaoke::step_at`]). Their pictures are drawn when shown and
 /// kept by the still cache only, so the cache can let them go; `shown` remembers the last one
 /// without keeping it.
+///
+/// In `scale` mode a word grows and shrinks between steps, so while any word is not at its own
+/// size the picture is drawn per frame, outside the still cache as a [`MovingText`] is, and the
+/// last one is kept in `scaled` for a scale held over several frames.
 pub struct KaraokeSteps {
     clip: Clip,
     words: Vec<engine::KaraokeWord>,
     times: Vec<Time>,
     shown: Mutex<Option<(usize, Weak<StillImage>)>>,
+    /// The key of the step and word scales of the last scaled picture, and that picture.
+    scaled: Mutex<Option<(String, Arc<StillImage>)>>,
 }
 
 impl SourceFrame {
@@ -557,8 +564,11 @@ impl Decoder for SourceDecoder {
             Self::Still(still) => Ok(SourceFrame::Still(still.clone())),
             Self::Steps(steps) => {
                 let step = engine::karaoke::step_at(&steps.times, time);
+                if steps.clip.text.as_ref().and_then(|text| text.karaoke.as_ref()).is_some_and(engine::TextKaraoke::scales) {
+                    return Ok(SourceFrame::Step { steps: steps.clone(), step, time });
+                }
                 let shown = steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref().filter(|(shown, _)| *shown == step).and_then(|(_, still)| still.upgrade());
-                Ok(shown.map_or_else(|| SourceFrame::Step { steps: steps.clone(), step }, SourceFrame::Still))
+                Ok(shown.map_or_else(|| SourceFrame::Step { steps: steps.clone(), step, time }, SourceFrame::Still))
             }
             Self::Units(moving) => Ok(SourceFrame::Units(moving.clone())),
         }
@@ -1312,6 +1322,35 @@ impl D3d12Compositor {
         let rasterizer = self.text_rasterizer.get_or_insert_with(gpufx_text::shared).clone();
         let plan = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).prepare_units(&text, self.height, scale);
         let image = plan.draw(poses);
+        let still = self.moving_still(image)?;
+        *moving.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((key, still.clone()));
+        Ok(still)
+    }
+
+    /// Draws a karaoke step in `scale` mode with its words at `scales`, or gives the picture last
+    /// drawn for the same step and scales (see [`KaraokeSteps`]).
+    fn draw_scaled(&mut self, steps: &KaraokeSteps, step: usize, styles: &[engine::WordStyle], scales: &[f32]) -> Result<Arc<StillImage>, String> {
+        let text = steps.clip.text.as_ref().ok_or("a karaoke step of a clip without text")?;
+        let text = self.resolved_text(text);
+        let (_, scale) = self.text_digest_and_scale(&steps.clip, &text)?;
+        let poses: Vec<engine::AnimationPose> = scales.iter().map(|scale| engine::AnimationPose { scale: f64::from(*scale), ..engine::AnimationPose::IDENTITY }).collect();
+        let poses = [(engine::TextUnit::Word, poses)];
+        let key = format!("{} {step} {}", scale.to_bits(), poses_key(&poses));
+        if let Some((known, still)) = steps.scaled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+            if *known == key {
+                return Ok(still.clone());
+            }
+        }
+        let rasterizer = self.text_rasterizer.get_or_insert_with(gpufx_text::shared).clone();
+        let plan = rasterizer.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).prepare_units(&text, self.height, scale);
+        let image = plan.draw_styled(&poses, styles);
+        let still = self.moving_still(image)?;
+        *steps.scaled.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((key, still.clone()));
+        Ok(still)
+    }
+
+    /// Uploads a frame of a text whose units move, with the room of its margin.
+    fn moving_still(&mut self, image: gpufx_text::TextImage) -> Result<Arc<StillImage>, String> {
         self.text_rasterized(&image);
         let (margin_x, margin_y) = image.margin;
         let inner = (image.width.saturating_sub(2 * margin_x), image.height.saturating_sub(2 * margin_y));
@@ -1319,9 +1358,7 @@ impl D3d12Compositor {
         let picture = premultiplied_still(image.width, image.height, image.pixels);
         let aspect = if margin == (0.0, 0.0) { picture.aspect() } else { f64::from(inner.0) / f64::from(inner.1) };
         let uploaded = Image::upload(&self.gpu, &picture)?;
-        let still = Arc::new(StillImage { origin: None, aspect, has_alpha: picture.has_alpha, fence_value: AtomicU64::new(uploaded.fence_value), image: uploaded, margin });
-        *moving.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((key, still.clone()));
-        Ok(still)
+        Ok(Arc::new(StillImage { origin: None, aspect, has_alpha: picture.has_alpha, fence_value: AtomicU64::new(uploaded.fence_value), image: uploaded, margin }))
     }
 
     /// Draws a karaoke step that `frame` holds, or takes it from the still cache, and makes the
@@ -1339,10 +1376,15 @@ impl D3d12Compositor {
             *frame = SourceFrame::Still(still);
             return Ok(());
         }
-        let SourceFrame::Step { steps, step } = frame else { return Ok(()) };
-        let (steps, step) = (steps.clone(), *step);
+        let SourceFrame::Step { steps, step, time } = frame else { return Ok(()) };
+        let (steps, step, time) = (steps.clone(), *step, *time);
         let text = steps.clip.text.as_ref().ok_or("a karaoke step of a clip without text")?;
         let styles = engine::karaoke::word_styles(text, &steps.words, &engine::karaoke::step_states(&steps.words, &steps.times, step));
+        let scales = engine::karaoke::word_scales(text, &steps.words, time);
+        if scales.iter().any(|scale| *scale != 1.0) {
+            *frame = SourceFrame::Still(self.draw_scaled(&steps, step, &styles, &scales)?);
+            return Ok(());
+        }
         let still = self.load_text(&steps.clip, text, &styles, &[])?;
         *steps.shown.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((step, Arc::downgrade(&still)));
         *frame = SourceFrame::Still(still);
@@ -1665,7 +1707,7 @@ impl Compositor for D3d12Compositor {
             if let Some(words) = engine::clip_words(clip).filter(|words| !words.is_empty()) {
                 // One picture per karaoke step, drawn when the step is shown.
                 let times = engine::karaoke::step_times(&words);
-                return Ok(SourceDecoder::Steps(Arc::new(KaraokeSteps { clip: clip.clone(), words, times, shown: Mutex::new(None) })));
+                return Ok(SourceDecoder::Steps(Arc::new(KaraokeSteps { clip: clip.clone(), words, times, shown: Mutex::new(None), scaled: Mutex::new(None) })));
             }
             // A text whose characters move gets a picture per frame while they move. (With
             // karaoke on, karaoke wins and the characters stay still.)
@@ -2189,6 +2231,44 @@ mod tests {
         let (middle_pixels, still_pixels) = (read(&compositor, &middle), read(&compositor, &still));
         let ink = |pixels: &[u8]| pixels.chunks(4).filter(|p| p[3] > 64).count();
         assert!(ink(&middle_pixels) > 0 && ink(&middle_pixels) < ink(&still_pixels), "half typed: {} of {}", ink(&middle_pixels), ink(&still_pixels));
+    }
+
+    #[test]
+    fn karaoke_scale_grows_the_active_word_and_eases_back() {
+        let Some((gpu, _)) = overlay_on_hardware() else { return };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter");
+        let mut compositor = D3d12Compositor::new(Arc::new(gpu), Arc::new(ProjectPaths::new(Path::new("project.json"), vec![root])), 320, 180).expect("a compositor");
+        let mut text = TextContent::new("HH HH HH", 0.15);
+        let active = engine::KaraokeLook { scale: Some(2.0), ..engine::KaraokeLook::default() };
+        text.karaoke = Some(engine::TextKaraoke { mode: engine::KaraokeMode::Scale, active: Some(active), ..engine::TextKaraoke::default() });
+        let clip = engine::edit::text_clip(Time::ZERO, Time::from_ticks(90_000), text.clone());
+        let mut decoder = compositor.open_decoder(&clip).expect("a decoder");
+        let mut at = |compositor: &mut D3d12Compositor, time: i64| {
+            let mut frame = decoder.frame_at(Time::from_ticks(time)).expect("a frame");
+            compositor.resolve_frame(&mut frame, ClipClock { elapsed: Time::from_ticks(time), duration: Time::from_ticks(90_000) }).expect("a drawn frame");
+            let SourceFrame::Still(still) = frame else { panic!("a still once drawn") };
+            still
+        };
+        let read = |compositor: &D3d12Compositor, still: &StillImage| {
+            let buffer = readback_buffer(&compositor.gpu, still.image.width, still.image.height);
+            let mut rgba = Vec::new();
+            still.image.read_rgba(&compositor.gpu, &buffer, &mut rgba).expect("read back");
+            rgba.chunks(4).filter(|p| p[3] > 64).count()
+        };
+        let plain = compositor.load_text(&clip, &TextContent { karaoke: None, ..text.clone() }, &[], &[]).expect("the plain text");
+        let plain_ink = read(&compositor, &plain);
+        // Words by characters: the first is spoken from 0 to 30000 ticks.
+        let start = at(&mut compositor, 0);
+        let middle = at(&mut compositor, 15_000);
+        let held = at(&mut compositor, 15_001);
+        assert!(Arc::ptr_eq(&middle, &held), "a held scale is drawn once");
+        let easing = at(&mut compositor, 1_500);
+        let (start_ink, easing_ink, middle_ink) = (read(&compositor, &start), read(&compositor, &easing), read(&compositor, &middle));
+        assert!(start_ink.abs_diff(plain_ink) * 20 < plain_ink, "at its start the word is its own size: {start_ink} of {plain_ink}");
+        assert!(middle_ink > plain_ink * 3 / 2, "twice as large, the word has four times its ink: {middle_ink} of {plain_ink}");
+        assert!(easing_ink > start_ink && easing_ink < middle_ink, "it grows smoothly: {start_ink} {easing_ink} {middle_ink}");
+        let between = at(&mut compositor, 30_000);
+        assert!(read(&compositor, &between).abs_diff(plain_ink) * 20 < plain_ink, "it is back to its size when the next word starts");
     }
 
     #[test]

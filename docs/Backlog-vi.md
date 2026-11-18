@@ -614,10 +614,6 @@ Clip chữ chỉ thêm bằng nút "Thêm chữ" ở tab Chữ (`EditorState::ad
 
 `crates/engine/src/keyframe.rs:301-306` nhân thẳng `rect.width *= zoom * stretch[0]`, nên `scaleX`/`scaleY` âm của animation cho bề ngang âm và compositor bỏ không vẽ (`crates/d3d12-backend/src/compositor.rs:978-980`): clip biến mất thay vì lật. Gói CapCut "Flip II" vì vậy dùng `|cos|` (không lật). Cần cho `rect` mang dấu và đảo trục trong shader xoay (`crates/d3d12-backend/src/rotated_place.rs`) để lật gương thật, mở khoá các kiểu lật 3D. Ghi ngày 2026-11-13.
 
-### [Vừa] Karaoke mode `scale`/pop theo từ chưa vẽ (12c)
-
-`KaraokeMode::Scale` và `KaraokeLook::scale` (`crates/engine/src/karaoke.rs`) được đọc, lưu và kiểm tra nhưng chưa vẽ: mode `scale` hiện vẽ như `color`. Lý do để lại: phóng to một từ trong ảnh chữ đã raster cần hoặc raster lại cả câu với cỡ chữ riêng cho span (cosmic-text `Attrs::metrics`), làm dòng bị dàn lại và kích thước ảnh đổi theo từng bước, nên vị trí và tỉ lệ clip nhảy; hoặc raster từng từ thành ảnh riêng rồi compositor ghép từng từ với pose riêng (pop theo thời gian, không chỉ theo bước rời rạc). Cả hai đều cần đổi `TextRasterizer` trả thêm hộp từng từ và compositor vẽ nhiều ảnh cho một clip, là việc lớn. Cách gợi ý: raster cả câu một lần ở trạng thái thường, thêm ảnh riêng cho từ đang nói (giữ chỗ của nó trong ảnh câu), compositor vẽ ảnh từ đè lên với scale/pop theo thời gian của từ. Ghi ngày 2026-11-14.
-
 ### [Thấp] Karaoke: thời gian từ tự chia theo cue đổi khi cắt clip; mọi bước raster ngay lúc mở
 
 `engine::karaoke::clip_words` chia thời lượng từ 0 tới `cue_end(clip)` (= `source_in` + thời lượng nguồn) khi không có `words`. Cắt đôi một cue thì nửa đầu có `cue_end` mới nên các từ bị dồn lại vào nửa đầu (nửa sau giữ đúng). Nên khi cắt clip có karaoke chưa đặt `words` thì ghi cứng `words` tính từ cue gốc vào cả hai nửa. Thêm: compositor (`crates/d3d12-backend/src/compositor.rs` `open_decoder`) raster mọi bước của cue lúc mở decoder (số từ + 1 ảnh, ảnh trùng kiểu dùng chung cache); cue rất dài nhiều từ thì mở chậm, có thể chuyển sang raster lười theo bước. Ghi ngày 2026-11-14.
@@ -648,7 +644,7 @@ Editor chỉ đọc lại các gói clip-animation (và tìm lại gói effect g
 
 ### [Thấp] Karaoke và animation theo ký tự không chạy cùng nhau
 
-`open_decoder` (`crates/d3d12-backend/src/compositor.rs:1280`): clip chữ có karaoke đi đường bước karaoke và bỏ qua preset per_unit; `draw_units` (`crates/gpufx-text/src/units.rs`) cũng không nhận màu từng từ. Muốn dùng chung thì mỗi khung cần cả kiểu từ (`WordStyle`) lẫn pose đơn vị, và ảnh từng ký tự phải tô theo màu từ. Cùng hạ tầng này mở được mục "Karaoke mode `scale`/pop theo từ chưa vẽ (12c)". Ghi ngày 2026-11-14.
+`open_decoder` (`crates/d3d12-backend/src/compositor.rs:1280`): clip chữ có karaoke đi đường bước karaoke và bỏ qua preset per_unit; `UnitsPlan::draw_styled` (`crates/gpufx-text/src/units.rs`) đã tô màu theo từ (mode `scale` dùng nó), nên phần còn thiếu là ghép pose của preset per_unit với pose phóng to của karaoke trong `resolve_frame` và vẽ hộp từ (mode `box`) trên đường này. Ghi ngày 2026-11-14.
 
 ### [Thấp] Preset `type` của AVS chưa có con trỏ nhấp nháy
 
