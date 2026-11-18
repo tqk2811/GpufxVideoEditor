@@ -2,7 +2,7 @@
 
 Mục tiêu: người dùng chọn một vật trong clip video. Sticker, text hoặc vùng che (blur, pixelate, hộp màu) gắn vào vật đó và tự di chuyển theo, có thể bám cả scale và góc xoay. Tham khảo: Tracking của CapCut, Motion tracking của DaVinci Resolve, Motion Tracker của Shotcut, tracker OpenCV trong Kdenlive.
 
-Trạng thái: chờ duyệt. Các mục "chờ chốt" ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt) dùng phương án đề xuất làm lựa chọn tạm.
+Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). Đang làm P0.
 
 ## Hiện trạng
 
@@ -56,7 +56,11 @@ Vẫn có lệnh "Bake thành keyframe" cho ai muốn sửa tay từng keyframe.
 `ClipKind::Censor { shape: Rect | Ellipse, feather, mode: Blur(r) | Pixelate(block) | Solid(color), follow }`
 
 - Vùng che hoạt động như một adjustment layer, chỉ áp trong vùng của nó. Compositor lấy ảnh đã chồng của các track bên dưới, áp blur hoặc pixelate, rồi trộn lại qua mask hình chữ nhật hoặc elip có feather.
-- Lý do không làm thành effect có tham số vùng trên clip video: cách đó chỉ che được một clip, và vướng khi có transition.
+- Khung vùng che kéo vị trí và kích thước bằng gizmo như một sticker.
+
+### Effect có tham số vùng
+
+Ngoài clip che vùng, effect blur/pixelate trên clip video có thêm tham số vùng (hình, vị trí, kích thước, feather, `follow`). Cách này chỉ che chính clip đó, hợp khi muốn vùng che đi theo clip qua split hay di chuyển clip.
 
 ## Thuật toán
 
@@ -114,15 +118,17 @@ Chỉ dùng mã và model có giấy phép MIT, Apache hoặc BSD. Tự viết t
 
 ## Câu hỏi cần chốt
 
-| # | Câu hỏi | Đề xuất (tạm dùng tới khi chốt) |
+User đã chốt cả 10 câu ngày 2026-11-18.
+
+| # | Câu hỏi | Đã chốt |
 |---|---|---|
-| Q1 | Lưu track riêng hay bake thành keyframe? | Track riêng, có thêm nút Bake |
-| Q2 | Vùng che là clip overlay hay effect trên clip video? | Clip overlay riêng (adjustment layer chỉ áp trong vùng) |
-| Q3 | Hình dạng vùng che | Chữ nhật và elip có feather ở P0; đa giác vẽ tay để sau |
-| Q4 | P1 bám những gì? | Vị trí, scale và xoay; phối cảnh 4 góc để P4 |
+| Q1 | Lưu track riêng hay bake thành keyframe? | Track riêng, có thêm nút Bake (đổ track thành keyframe animation trên overlay) |
+| Q2 | Vùng che là clip overlay hay effect trên clip video? | Làm cả hai: clip che vùng riêng (adjustment layer chỉ áp trong vùng) và effect có tham số vùng trên clip video |
+| Q3 | Hình dạng vùng che | Khung kéo vị trí và kích thước bằng gizmo như sticker; hình chữ nhật hoặc elip, có feather, chỉnh trong inspector |
+| Q4 | P1 bám những gì? | Vị trí, scale và xoay; xoay bật/tắt được. Phối cảnh 4 góc để P4 |
 | Q5 | Có chạy tracker trên proxy khi có proxy không? | Có |
 | Q6 | Model NN ở P3 | NanoTrack, host trên release FFmpegGpuFilter |
 | Q7 | Khi lạc thì làm gì? | Dừng, đánh dấu đỏ để sửa tay |
-| Q8 | Overlay mặc định bám scale và xoay không? | Không, chỉ vị trí; scale và xoay là checkbox |
+| Q8 | Overlay mặc định bám scale và xoay không? | Mặc định chỉ bám vị trí; scale và xoay là hai checkbox riêng |
 | Q9 | Tự động che mặt | Để P4, dùng YuNet |
 | Q10 | Track lưu ở cấp project theo file nguồn hay theo từng clip? | Cấp project theo file nguồn |
