@@ -160,24 +160,28 @@ Lựa chọn tạm (chờ user duyệt):
 Dùng cho vật phẳng như màn hình, biển hiệu, trang giấy: track theo bốn góc thay vì một khung, rồi ghim bốn góc của overlay vào bốn góc của vật (corner pin).
 
 - **Dữ liệu:** `TrackSample.quad` (tuỳ chọn, mặc định không có) là bốn góc theo thứ tự trên trái, trên phải, dưới phải, dưới trái của vật, tính theo phần của ảnh nguồn. Khung (`cx`, `cy`, `w`, `h`, `angle`) vẫn được ghi, lấy từ bốn góc (tâm là trung bình bốn góc, cạnh là trung bình hai cạnh đối, góc là góc cạnh trên), nên mọi chỗ chỉ đọc khung vẫn chạy. Validate: toạ độ hữu hạn, trong khoảng ±8, tứ giác lồi và đúng thứ tự. Một track là "phẳng" khi có sample mang `quad`. `MotionTrack::quad_at` nội suy và làm mượt bốn góc như `point_at`; sample không có `quad` cho bốn góc của khung xoay.
-- **Tracker:** `PlanarTracker` (chỉ chế độ Nhanh). Mỗi bước lấy điểm góc trong tứ giác, theo dõi bằng KLT nhiều tầng kèm kiểm tra đi về, khớp homography bằng RANSAC (DLT chuẩn hoá Hartley, mẫu 4 điểm, khớp lại bằng bình phương nhỏ nhất trên điểm đồng thuận), rồi dời bốn góc. Độ tin cậy là NCC giữa mẫu (tứ giác nắn về hình vuông 24×24) với mẫu nhớ, nhân căn tỉ lệ điểm đồng thuận. Dưới ngưỡng thì tìm lại bằng NCC trên tứ giác nắn, dời và co giãn quanh chỗ dự đoán (giữ hình dạng); không thấy thì dừng và đánh dấu lạc (Q7). Run bắt đầu từ sample có `quad` ở chế độ Nhanh thì dùng tracker này; chế độ Bền vẫn chỉ theo khung.
+- **Tracker:** `PlanarTracker` (chỉ chế độ Nhanh). Mỗi bước lấy điểm góc trong tứ giác, theo dõi bằng KLT nhiều tầng kèm kiểm tra đi về, khớp homography bằng RANSAC (DLT chuẩn hoá Hartley, mẫu 4 điểm, khớp lại bằng bình phương nhỏ nhất trên điểm đồng thuận), rồi dời bốn góc. Độ tin cậy là NCC giữa mẫu (tứ giác nắn về hình vuông 24×24) với mẫu nhớ, nhân căn tỉ lệ điểm đồng thuận. Dưới ngưỡng thì tìm lại bằng NCC trên tứ giác nắn, dời và co giãn quanh chỗ dự đoán (giữ hình dạng); không thấy thì dừng và đánh dấu lạc (Q7). Run bắt đầu từ sample có `quad` luôn dùng tracker này, kể cả khi đang chọn Bền.
 - **Bám:** `Follow.perspective` (mặc định tắt). `Project::follow_pin` tính homography, theo phần của khung output, đưa bốn góc của vật nhìn qua clip tham chiếu lúc neo tới bốn góc lúc `t` (qua placement, keyframe, animation và khoá của clip tham chiếu ở từng thời điểm), rồi cộng offset. `schedule::follow_transform` đặt nó vào `ClipTransform.pin`. Bốn góc của overlay là bốn góc của hình chữ nhật đặt của nó (chưa có bám, đã xoay theo góc riêng) đi qua homography (`ClipTransform::pinned_corners`). Khi bật phối cảnh thì pose bám cũng tính cả scale và xoay, để gizmo và khung trên preview gần đúng.
 - **Compositor:** gói dựng sẵn `pinned_place` lấy mỗi pixel output ngược qua homography nghịch về ảnh nguồn, nên lấy mẫu đúng phối cảnh (không chia hai tam giác). Màu lọc theo premultiplied, mép mịn theo khoảng cách tới cạnh tính bằng pixel output. Ma trận được nhân dấu để toạ độ thứ ba dương trong ảnh; pixel bên kia đường chân trời của mặt phẳng không hiện gì. Bốn góc không lồi thì quay về cách đặt hình chữ nhật cũ.
 - **Giao diện:** mục Tracking có ô "Phối cảnh 4 góc". Bật thì khung tại đầu phát thành sample đặt tay có bốn góc; tắt thì mọi sample bỏ bốn góc (một bước undo). Preview vẽ tứ giác và hai đường chéo; kéo thân là dời cả bốn góc, kéo một góc là dời riêng góc đó, không cho kéo thành tứ giác gập. Overlay đang bám có ô "Phối cảnh".
 - **Agent và MCP:** `track_create` và `track_set_sample` nhận `quad` (khi đó khung lấy từ bốn góc, `cx`, `cy`, `w`, `h` thành tuỳ chọn); `clip_follow_set` nhận `perspective`.
+- **Vùng che theo tứ giác:** clip che vùng bám track với "Phối cảnh" che đúng tứ giác đã ghim (`CensorRegion.quad` lấy từ `ClipTransform::pinned_corners`). Vùng của effect có `EffectRegion.perspective`; khi track liên kết là track phẳng thì `tracking::follow_region_quad` đưa bốn góc của khung (đã xoay) qua homography từ bốn góc lúc neo tới bốn góc lúc `t`, track không phẳng thì vẫn bám theo khung. Shader `censor_mix` lấy mỗi pixel ngược qua homography nghịch về hình chữ nhật đơn vị, rồi tính mép (chữ nhật hoặc elip, feather) theo pixel của một khung có cỡ bằng trung bình các cạnh đối của tứ giác. Inspector có ô "Phối cảnh" dưới chỗ chọn track của vùng effect khi track đó phẳng.
+- **Khoá khung phối cảnh:** `TrackLock.perspective` (chỉ cho track phẳng, validate từ chối track không có bốn góc). `Project::lock_pin` tính homography đưa bốn góc của vật lúc `t` (qua transform riêng của clip, chưa khoá) về bốn góc lúc neo, rồi phóng theo `zoom` quanh tâm bốn góc; `schedule::lock_transform` đặt nó vào `ClipTransform.pin`, nên compositor dùng lại đường corner pin. `FrameMapping` mang theo `pin`, nên overlay bám qua clip đã khoá phối cảnh và khung tracker trên preview vẫn nằm trên vật. Bake từ chối (`bake_perspective`), như bám phối cảnh. Mục khoá có ô "Phối cảnh" (tắt khi track không phẳng); `clip_lock_set` nhận `perspective`.
 
 Lựa chọn tạm (chờ user duyệt):
 
-- Track phẳng chỉ chạy được ở chế độ Nhanh; chọn Bền với sample có bốn góc thì NanoTrack theo khung của bốn góc và các sample mới không có `quad`.
+- Track phẳng chỉ chạy được ở chế độ Nhanh: run bắt đầu từ sample có bốn góc luôn chạy Nhanh, và inspector tắt lựa chọn Bền cho run đó.
 - Tracker phẳng lấy tối đa 200 điểm góc (gấp đôi tracker khung), cần ít nhất 8 điểm đồng thuận. Một bước mà diện tích đổi quá 4 lần hoặc tứ giác bị gập thì coi như luồng quang học thất bại và chuyển sang tìm lại.
 - Tìm lại chỉ dời và co giãn tứ giác, không thử đổi phối cảnh; vật đổi phối cảnh mạnh trong lúc bị che thì dừng lạc để sửa tay.
 - Bật "Phối cảnh" trên overlay thì bỏ qua hai ô bám scale và bám xoay (phối cảnh đã gồm cả hai). Bake keyframe của overlay phối cảnh chỉ ghi phần similarity (X/Y, Width, Rotation); keyframe không biểu diễn được phối cảnh.
 - Kéo góc của tứ giác dùng ánh xạ của clip tại đầu phát, như kéo khung.
 
+- Mép mịn của vùng che tứ giác tính theo khung có cỡ bằng trung bình các cạnh, không theo độ co giãn phối cảnh tại từng pixel, nên phía xa của mặt phẳng có mép mịn hơi rộng hơn mắt thấy.
+- Khoá phối cảnh bỏ qua hai ô giữ cỡ và giữ góc (phối cảnh đã gồm cả hai). Pose dùng cho gizmo của clip đã khoá phối cảnh vẫn là pose khung; overlay bám clip này qua `follow_pose` (khi không bật phối cảnh) chỉ gần đúng, còn `follow_pin` thì đúng.
+- Vùng effect bật phối cảnh mà track không phẳng thì cờ vẫn được lưu nhưng vùng bám theo khung.
+
 Việc còn lại:
 
-- Vùng che (clip che vùng) và vùng của effect chưa bám theo tứ giác: vẫn theo khung (tâm, cỡ, góc). Mask tứ giác cần đổi shader che vùng và định dạng `CensorRegion`.
-- Khoá khung theo vật (`TrackLock`) chưa có chế độ phối cảnh.
 - Chưa có test đầu cuối chạy tracker phẳng qua worker của editor trên video thật.
 
 ## Khoá khung theo vật (ổn định theo track)
@@ -190,7 +194,9 @@ Ngược với bám: clip video không đứng yên để sticker chạy theo v�
 - **Sửa clip:** khoá tính theo giờ nguồn nên split, trim, đổi speed, chạy ngược đều giữ khoá trên mọi mảnh, kể cả mảnh không chứa thời điểm neo. Xoá track hoặc track không còn đúng file thì khoá bị bỏ. Một clip không thể vừa bám vừa khoá.
 - **Bake:** `bake_lock` ghi keyframe X/Y, Width khi giữ cỡ hoặc có zoom, Rotation khi giữ góc. `track_bake_keyframes` bake khoá khi clip đang khoá.
 - **Giao diện:** trong mục Tracking của clip video có nút "Khoá khung theo vật" (neo tại đầu phát, dùng track đang chọn), khi đã khoá thì có hai ô giữ cỡ, giữ góc, thanh Phóng thêm, nút Bake và Bỏ khoá.
-- **Agent và MCP:** `clip_lock_set`, `clip_lock_clear`.
+- **Agent và MCP:** `clip_lock_set` (có `perspective`, xem [Tracking phối cảnh 4 góc](#tracking-phối-cảnh-4-góc-p4-phần-2)), `clip_lock_clear`. Vùng của effect đặt qua `effect_region_set` (hình, khung, feather, track liên kết với `follow_scale`, `follow_rotation`, `perspective`, neo tại `at`) và `effect_region_clear`; `set_effect_region` từ chối liên kết tới track không tồn tại hoặc của file khác thay vì lặng lẽ bỏ.
+- **Phím:** Esc tắt chế độ "Chọn vật" và bỏ luôn khung đang kéo dở (id vùng vẽ đổi theo `tracking_pick_round`, nên lần chọn sau không nhận cú nhả chuột cũ).
+- **Chế độ tracker:** sample mà lần chạy sẽ bắt đầu có bốn góc thì inspector tắt lựa chọn Bền, tooltip giải thích track phẳng luôn chạy Nhanh.
 
 Lựa chọn tạm (chờ user duyệt):
 
