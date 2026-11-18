@@ -215,7 +215,7 @@ fn edit_box(ui: &egui::Ui, state: &mut EditorState, track_id: u32, mapping: &Fra
 
 /// Drawing a box around the object to start a track: a drag over the picture, released.
 fn pick(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, area: Rect, picture: Rect) {
-    let response = ui.interact(picture.intersect(area), ui.scope_id().with(("tracking-pick", key)), Sense::drag());
+    let response = ui.interact(picture.intersect(area), ui.scope_id().with(("tracking-pick", key, state.ui.tracking_pick_round)), Sense::drag());
     let response = response.on_hover_cursor(CursorIcon::Crosshair);
     let painter = ui.painter_at(area);
     painter.rect_stroke(picture, 0.0, Stroke::new(1.0, PICK_COLOR.gamma_multiply(0.6)), egui::StrokeKind::Inside);
@@ -295,6 +295,44 @@ mod tests {
 
     fn button(at: Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    #[test]
+    fn a_box_drag_going_when_the_pick_is_cancelled_never_makes_a_track() {
+        let mut state = EditorState::default();
+        state.add_track(engine::TrackKind::Video);
+        state.add_clip_from_file(0, std::path::Path::new("a.mp4"));
+        let key = ClipKey { track: 0, clip: 0 };
+        state.select(Some(key));
+        let ctx = egui::Context::default();
+        let picture = Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(300.0, 200.0));
+        let mut frame = |state: &mut EditorState, events: Vec<egui::Event>| {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0))), events, ..Default::default() };
+            let mut output = ctx.run_ui(input, |ui| show(ui, state, picture, picture));
+            output.textures_delta.clear();
+        };
+        let draw = |state: &mut EditorState, frame: &mut dyn FnMut(&mut EditorState, Vec<egui::Event>), cancel: bool| {
+            let (from, to) = (Pos2::new(50.0, 60.0), Pos2::new(150.0, 120.0));
+            frame(state, vec![egui::Event::PointerMoved(from)]);
+            frame(state, vec![button(from, true)]);
+            frame(state, vec![egui::Event::PointerMoved(Pos2::new(100.0, 90.0))]);
+            frame(state, vec![egui::Event::PointerMoved(to)]);
+            if cancel {
+                assert!(state.cancel_track_pick(), "Escape ends the pick");
+                assert_eq!(state.track_pick(), None);
+                // Picking again while the button is still down: the old drag does not carry over.
+                state.toggle_track_pick(key);
+            }
+            frame(state, vec![button(to, false)]);
+            frame(state, vec![]);
+        };
+        state.toggle_track_pick(key);
+        draw(&mut state, &mut frame, true);
+        assert!(state.project().motion_tracks.is_empty(), "the cancelled drag made no track");
+        state.cancel_track_pick();
+        state.toggle_track_pick(key);
+        draw(&mut state, &mut frame, false);
+        assert_eq!(state.project().motion_tracks.len(), 1, "a drag of its own still makes one");
     }
 
     #[test]

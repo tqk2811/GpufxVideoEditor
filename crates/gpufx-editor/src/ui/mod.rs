@@ -255,6 +255,9 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
                 state.ui.cancel_splitter();
             } else if state.is_holding() {
                 state.cancel_drag();
+            } else if state.track_pick().is_some() {
+                // Ends "Pick object" and drops the box being drawn.
+                state.cancel_track_pick();
             } else if state.ui.fullscreen {
                 requests.push(UiRequest::ToggleFullscreen);
             }
@@ -1069,6 +1072,17 @@ mod tests {
         state.drag = Some(ClipDrag { key: ClipKey { track: 0, clip: 0 }, kind: DragKind::Move, grab_offset: Time::ZERO });
         assert!(press(&mut state, Key::Escape, Modifiers::NONE).is_empty(), "Escape cancels the drag first");
         assert_eq!(state.drag, None);
+    }
+
+    #[test]
+    fn escape_ends_picking_an_object_before_it_leaves_fullscreen() {
+        let mut state = state();
+        let key = ClipKey { track: 0, clip: 0 };
+        state.toggle_track_pick(key);
+        state.ui.fullscreen = true;
+        assert!(press(&mut state, Key::Escape, Modifiers::NONE).is_empty(), "Escape ends the pick first");
+        assert_eq!(state.track_pick(), None);
+        assert_eq!(press(&mut state, Key::Escape, Modifiers::NONE), vec![UiRequest::ToggleFullscreen]);
     }
 
     #[test]

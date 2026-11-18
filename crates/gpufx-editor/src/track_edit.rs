@@ -191,6 +191,16 @@ impl EditorState {
         };
     }
 
+    /// Ends drawing a box for a new motion track, with the drag of a box going, if any (Escape).
+    /// Whether a pick was going.
+    pub fn cancel_track_pick(&mut self) -> bool {
+        if self.ui.tracking_pick.take().is_none() {
+            return false;
+        }
+        self.ui.tracking_pick_round = self.ui.tracking_pick_round.wrapping_add(1);
+        true
+    }
+
     /// The clip whose preview takes a box for a new motion track: only while it is the selected
     /// clip and still shows the file it showed when the drawing started, so a delete, an undo or
     /// another selection that left the key on another clip does not draw on that one.

@@ -400,6 +400,9 @@ pub struct UiState {
     /// The video clip whose preview takes a box drawn for a new motion track, with its source
     /// file; read it through [`EditorState::track_pick`], which drops a stale one.
     pub tracking_pick: Option<(ClipKey, String)>,
+    /// Counts the picks ended by Escape: part of the id of the preview's drawing area, so a box
+    /// drag that was going when Escape ended the pick never finishes into a track.
+    pub tracking_pick_round: u32,
     /// The motion track the inspector, the preview and the timeline show, when it is of the
     /// selected clip's file.
     pub motion_track: Option<u32>,
