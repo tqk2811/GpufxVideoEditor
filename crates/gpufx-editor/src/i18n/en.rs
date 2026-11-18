@@ -608,6 +608,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::TrackingLost { count } => format!("Tracking lost the object after {}; fix the box on the marked frame and track again", counted(*count as i64, "frame")),
         Message::TrackingCancelled { count } => format!("Tracking stopped after {}", counted(*count as i64, "frame")),
         Message::TrackingFailed(reason) => format!("Tracking failed: {reason}"),
+        Message::TrackingStale => "The motion track changed while it was tracked, so nothing was written; track again".to_owned(),
         Message::MarkerAddShortcut => "Add a marker at the playhead (M)".to_owned(),
         Message::MarkerHint => "Drag to move, click to go there, right-click for more".to_owned(),
         Message::MarkerRemove => "Remove marker".to_owned(),

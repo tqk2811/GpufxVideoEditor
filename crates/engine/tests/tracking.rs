@@ -4,7 +4,7 @@ mod common;
 
 use common::*;
 use engine::{
-    add_clip, delete_clip, layers_at_frame, move_clip, remove_track, set_follow, set_track_sample, apply_track_run, split_clip, validate, AcceptAll, CensorContent, CensorMode, ClipKey, ClipPlacement, ClipProperty, EditError, EffectRegion, Follow, Keyframe, LayerContent, MotionTrack, Project, RegionShape, Time, TrackKind, TrackLink,
+    add_clip, delete_clip, layers_at_frame, move_clip, remove_track, set_follow, set_track_sample, apply_track_run, split_clip, TrackRun, validate, AcceptAll, CensorContent, CensorMode, ClipKey, ClipPlacement, ClipProperty, EditError, EffectRegion, Follow, Keyframe, LayerContent, MotionTrack, Project, RegionShape, Time, TrackKind, TrackLink,
     TrackSample, ValidationError,
 };
 
@@ -197,20 +197,68 @@ fn samples_are_kept_in_order_and_replaced_at_the_same_time() {
 #[test]
 fn a_tracker_run_replaces_the_tracker_samples_of_its_span_but_not_the_users() {
     let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
-    let p = set_track_sample(&p, 7, TrackSample { manual: true, ..sample(1.0, 0.2, 0.2) }).unwrap();
-    let run = [sample(0.5, 0.3, 0.5), TrackSample { manual: true, ..sample(1.0, 0.9, 0.9) }, sample(1.5, 0.4, 0.5)];
-    let next = apply_track_run(&p, 7, &run).unwrap();
+    let p = set_track_sample(&p, 7, sample(1.0, 0.1, 0.1)).unwrap();
+    let run = forward_run(&p, 0.0, vec![sample(0.5, 0.3, 0.5), sample(1.0, 0.9, 0.9), sample(1.5, 0.4, 0.5)]);
+    let next = apply_track_run(&p, &run).unwrap();
     let samples = &next.motion_tracks[0].samples;
-    let times: Vec<i64> = samples.iter().map(|s| s.source_time.ticks()).collect();
-    assert_eq!(times, [0, SECOND / 2, SECOND, SECOND * 3 / 2, 2 * SECOND]);
-    assert!(samples[2].manual && samples[2].cx == 0.2, "the user's sample stays");
-    assert!(!samples[1].manual && samples[1].cx == 0.3 && !samples[3].manual);
+    assert_eq!(times(&next), [0, SECOND / 2, SECOND, SECOND * 3 / 2, 2 * SECOND]);
+    assert!(samples[2].cx == 0.9 && samples.iter().all(|s| !s.manual), "the tracker's old sample is replaced");
     // A run over the whole track replaces the tracker's samples at its ends.
-    let next = apply_track_run(&p, 7, &[sample(0.0, 0.6, 0.6), sample(2.0, 0.7, 0.7)]).unwrap();
+    let next = apply_track_run(&p, &forward_run(&p, 0.0, vec![sample(0.0, 0.6, 0.6), sample(2.0, 0.7, 0.7)])).unwrap();
     let cx: Vec<f64> = next.motion_tracks[0].samples.iter().map(|s| s.cx).collect();
-    assert_eq!(cx, [0.6, 0.2, 0.7]);
-    assert_eq!(apply_track_run(&p, 7, &[]).unwrap(), p);
-    assert!(matches!(apply_track_run(&p, 1, &run), Err(EditError::MotionTrackNotFound { id: 1 })));
+    assert_eq!(cx, [0.6, 0.7]);
+    assert_eq!(apply_track_run(&p, &forward_run(&p, 0.0, Vec::new())).unwrap(), p);
+    assert!(matches!(apply_track_run(&p, &TrackRun { track_id: 1, ..run }), Err(EditError::MotionTrackNotFound { id: 1 })));
+}
+
+fn times(p: &Project) -> Vec<i64> {
+    p.motion_tracks[0].samples.iter().map(|s| s.source_time.ticks()).collect()
+}
+
+/// A run of track 7 forwards from its sample at `from` seconds.
+fn forward_run(p: &Project, from: f64, samples: Vec<TrackSample>) -> TrackRun {
+    let start = *p.motion_tracks[0].samples.iter().find(|s| s.source_time == t((from * SECOND as f64) as i64)).unwrap();
+    TrackRun { track_id: 7, media_path: "a.mp4".into(), start, forward: true, samples, lost: false }
+}
+
+#[test]
+fn a_run_that_no_longer_fits_its_track_is_not_written() {
+    let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
+    let run = forward_run(&p, 0.0, vec![sample(0.5, 0.3, 0.5)]);
+    // The user moved the start box while the run went.
+    let moved = set_track_sample(&p, 7, TrackSample { manual: true, ..sample(0.0, 0.4, 0.4) }).unwrap();
+    assert!(matches!(apply_track_run(&moved, &run), Err(EditError::TrackRunStale { id: 7 })));
+    let mut other_file = p.clone();
+    other_file.motion_tracks[0].media_path = "b.mp4".into();
+    assert!(matches!(apply_track_run(&other_file, &run), Err(EditError::TrackRunStale { id: 7 })));
+    assert!(apply_track_run(&p, &run).is_ok());
+}
+
+#[test]
+fn a_box_placed_by_hand_during_the_run_cuts_it_there() {
+    let p = rig(clip("a.mp4", 0, 0, 2 * SECOND), 0);
+    let run = forward_run(&p, 0.0, vec![sample(0.5, 0.3, 0.5), sample(1.0, 0.4, 0.5), sample(1.5, 0.5, 0.5)]);
+    let placed = set_track_sample(&p, 7, TrackSample { manual: true, ..sample(1.0, 0.9, 0.9) }).unwrap();
+    let next = apply_track_run(&placed, &run).unwrap();
+    assert_eq!(times(&next), [0, SECOND / 2, SECOND, 2 * SECOND], "nothing of the run at or past the user's box");
+    assert!(next.motion_tracks[0].samples[2].manual && next.motion_tracks[0].samples[2].cx == 0.9);
+    // Backwards the same, the other way.
+    let mut back = forward_run(&p, 2.0, vec![sample(1.5, 0.5, 0.5), sample(1.0, 0.4, 0.5), sample(0.5, 0.3, 0.5)]);
+    back.forward = false;
+    let next = apply_track_run(&placed, &back).unwrap();
+    assert_eq!(times(&next), [0, SECOND, SECOND * 3 / 2, 2 * SECOND]);
+}
+
+#[test]
+fn a_lost_run_takes_away_the_old_tracker_samples_past_the_loss() {
+    let mut p = rig(clip("a.mp4", 0, 0, 4 * SECOND), 0);
+    p.motion_tracks[0].samples = vec![sample(0.0, 0.2, 0.5), sample(1.0, 0.3, 0.5), sample(2.0, 0.4, 0.5), TrackSample { manual: true, ..sample(3.0, 0.5, 0.5) }, sample(3.5, 0.6, 0.5)];
+    let mut run = forward_run(&p, 0.0, vec![sample(0.5, 0.25, 0.5), sample(1.5, 0.3, 0.5)]);
+    run.lost = true;
+    let next = apply_track_run(&p, &run).unwrap();
+    assert_eq!(times(&next), [0, SECOND / 2, SECOND * 3 / 2, 3 * SECOND, SECOND * 7 / 2], "the old samples at 1 s and 2 s go, the user's box and what lies past it stay");
+    run.lost = false;
+    assert_eq!(times(&apply_track_run(&p, &run).unwrap()), [0, SECOND / 2, SECOND * 3 / 2, 2 * SECOND, 3 * SECOND, SECOND * 7 / 2], "without a loss the old sample past the run stays");
 }
 
 #[test]

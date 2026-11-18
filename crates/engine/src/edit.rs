@@ -116,6 +116,9 @@ pub enum EditError {
     NotCensor { key: ClipKey },
     /// The project has no motion track with this id.
     MotionTrackNotFound { id: u32 },
+    /// A tracker run ended after its motion track changed under it: another file, or the sample
+    /// it started from moved or went. Its samples would no longer fit, so none are written.
+    TrackRunStale { id: u32 },
     /// The result would not pass validation.
     Invalid(Vec<ValidationError>),
 }
@@ -178,6 +181,7 @@ impl fmt::Display for EditError {
             NotText { key } => write!(f, "track {}, clip {}: the clip shows no text", key.track, key.clip),
             NotCensor { key } => write!(f, "track {}, clip {}: the clip is no censor region", key.track, key.clip),
             MotionTrackNotFound { id } => write!(f, "motion track {id} does not exist"),
+            TrackRunStale { id } => write!(f, "motion track {id} changed while it was being tracked; the run was not written"),
             MarkerNotFound { marker } => write!(f, "marker {marker} does not exist"),
             Invalid(errors) => {
                 write!(f, "the result is not valid:")?;
@@ -1471,15 +1475,74 @@ pub fn set_track_sample(project: &Project, id: u32, sample: TrackSample) -> Resu
     finish(project, next)
 }
 
-/// Writes the samples of one tracker run to motion track `id`: the samples the tracker made
-/// before between the run's first and last source time go (the user's own stay, and a run never
-/// replaces one), then `samples` are put in. Nothing changes without samples.
-pub fn apply_track_run(project: &Project, id: u32, samples: &[TrackSample]) -> Result<Project, EditError> {
+/// One tracker run of a motion track: what it started from and what it made, checked against
+/// the project when it is written ([`apply_track_run`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackRun {
+    pub track_id: u32,
+    /// The `media_path` of the track when the run started.
+    pub media_path: String,
+    /// The sample the run started from, as it was then.
+    pub start: TrackSample,
+    /// Whether the run went forwards through the file.
+    pub forward: bool,
+    /// The samples made, in the order made.
+    pub samples: Vec<TrackSample>,
+    /// Whether the run ended on a lost step (its last sample).
+    pub lost: bool,
+}
+
+/// Tracker run `run` as it fits its motion track now: [`EditError::TrackRunStale`] when the track
+/// shows another file or its start sample changed, and cut before the first sample the user
+/// placed by hand inside the run since it started (then no longer lost: its end is not the loss).
+pub fn fit_track_run(project: &Project, run: &TrackRun) -> Result<TrackRun, EditError> {
+    let id = run.track_id;
+    let track = project.motion_track(id).ok_or(EditError::MotionTrackNotFound { id })?;
+    if track.media_path != run.media_path || !track.samples.iter().any(|s| *s == run.start) {
+        return Err(EditError::TrackRunStale { id });
+    }
+    let start = run.start.source_time;
+    let ahead = |at: Time| if run.forward { at > start } else { at < start };
+    let nearer = |a: Time, b: Time| if run.forward { a < b } else { a > b };
+    // The first sample placed by hand past the start, the way the run went.
+    let manual_ahead = track.samples.iter().filter(|s| s.manual && ahead(s.source_time)).map(|s| s.source_time).reduce(|a, b| if nearer(a, b) { a } else { b });
+    let samples: Vec<TrackSample> = run.samples.iter().filter(|s| manual_ahead.is_none_or(|bound| nearer(s.source_time, bound))).copied().collect();
+    let lost = run.lost && samples.len() == run.samples.len();
+    Ok(TrackRun { samples, lost, ..run.clone() })
+}
+
+/// Writes the samples of tracker run `run` to its motion track, as one edit.
+///
+/// The run must still fit the track: the same file and its start sample unchanged, else
+/// [`EditError::TrackRunStale`]. A sample the user placed by hand inside the run since it started
+/// cuts the run there. The samples the tracker made before between the run's first and last
+/// source time go (the user's own stay, and a run never replaces one), then the run's go in. A run
+/// that lost the object also takes away the tracker's older samples past the lost one, up to the
+/// next sample placed by hand that way, so the path is not stitched onto stale ones. Nothing
+/// changes without samples.
+pub fn apply_track_run(project: &Project, run: &TrackRun) -> Result<Project, EditError> {
+    let run = fit_track_run(project, run)?;
+    let id = run.track_id;
     let mut next = project.clone();
     let track = next.motion_tracks.iter_mut().find(|track| track.id == id).ok_or(EditError::MotionTrackNotFound { id })?;
-    let (Some(low), Some(high)) = (samples.iter().map(|s| s.source_time).min(), samples.iter().map(|s| s.source_time).max()) else {
+    let start = run.start.source_time;
+    let ahead = |at: Time| if run.forward { at > start } else { at < start };
+    let nearer = |a: Time, b: Time| if run.forward { a < b } else { a > b };
+    let manual_ahead = track.samples.iter().filter(|s| s.manual && ahead(s.source_time)).map(|s| s.source_time).reduce(|a, b| if nearer(a, b) { a } else { b });
+    let samples = &run.samples;
+    let (Some(first), Some(last)) = (samples.first().map(|s| s.source_time), samples.last().map(|s| s.source_time)) else {
         return Ok(project.clone());
     };
+    let (mut low, mut high) = (first.min(last), first.max(last));
+    if run.lost {
+        // Up to, not onto, the next sample placed by hand; with none, to the end that way.
+        match (run.forward, manual_ahead) {
+            (true, Some(bound)) => high = Time::from_ticks(bound.ticks() - 1),
+            (true, None) => high = Time::from_ticks(i64::MAX),
+            (false, Some(bound)) => low = Time::from_ticks(bound.ticks() + 1),
+            (false, None) => low = Time::from_ticks(i64::MIN),
+        }
+    }
     track.samples.retain(|s| s.manual || s.source_time < low || s.source_time > high);
     for sample in samples {
         let manual_there = track.samples.binary_search_by_key(&sample.source_time, |s| s.source_time).is_ok_and(|i| track.samples[i].manual);

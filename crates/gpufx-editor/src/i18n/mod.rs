@@ -638,6 +638,9 @@ pub enum Message {
     TrackingLost { count: usize },
     TrackingCancelled { count: usize },
     TrackingFailed(String),
+    /// The motion track changed while a run went (another file, or its start box moved or went),
+    /// so nothing of the run was written.
+    TrackingStale,
     MarkerAddShortcut,
     MarkerHint,
     MarkerRemove,
@@ -1057,6 +1060,7 @@ mod tests {
             Message::TrackingLost { count: 3 },
             Message::TrackingCancelled { count: 3 },
             Message::TrackingFailed("x".to_owned()),
+            Message::TrackingStale,
             Message::MarkerAddShortcut,
             Message::MarkerHint,
             Message::MarkerRemove,

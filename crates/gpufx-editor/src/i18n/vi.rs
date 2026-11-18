@@ -581,6 +581,7 @@ pub(super) fn text(message: &Message) -> String {
         Message::TrackingLost { count } => format!("Mất dấu vật sau {count} frame; sửa lại khung ở frame bị đánh dấu rồi track tiếp"),
         Message::TrackingCancelled { count } => format!("Đã dừng track sau {count} frame"),
         Message::TrackingFailed(reason) => format!("Track thất bại: {reason}"),
+        Message::TrackingStale => "Motion track đã đổi trong lúc track nên không ghi kết quả; hãy track lại".to_owned(),
         Message::MarkerAddShortcut => "Thêm điểm đánh dấu tại đầu phát (M)".to_owned(),
         Message::MarkerHint => "Kéo để di chuyển, nhấp để tới đó, nhấp phải để xem thêm".to_owned(),
         Message::MarkerRemove => "Xoá điểm đánh dấu".to_owned(),

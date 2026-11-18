@@ -4,6 +4,11 @@
 //! software at [`ANALYSIS_HEIGHT`] pixels, upright, and HDR sources tone mapped to SDR (see
 //! [`FrameSampler`]), then turned gray. Nothing here touches the project: the editor writes the
 //! samples of a finished run as one undo step ([`engine::apply_track_run`]).
+//!
+//! The frames asked for follow the frame rate the file states, but each sample takes the time of
+//! the frame the decoder really showed, and a frame shown twice is stepped over, so a file of
+//! variable frame rate is not given made-up times. Still a limit there: a stretch with more
+//! frames than the stated rate skips the extra ones, as only one frame is asked for per step.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -51,8 +56,9 @@ impl Direction {
 pub trait FrameSource {
     /// The frame rate (frames per second as `num / den`) and the length of the file, when stated.
     fn timing(&self) -> (Option<(i32, i32)>, Option<Time>);
-    /// The frame shown at source time `at`, gray.
-    fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<GrayImage, String>;
+    /// The frame shown at source time `at`, gray, and the source time of that frame as decoded:
+    /// later than `at` when no frame starts there, earlier past the end of the file.
+    fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String>;
 }
 
 /// A video file read with [`FrameSampler`] in exact mode.
@@ -77,9 +83,9 @@ impl FrameSource for FileFrames {
         (self.rate, self.length)
     }
 
-    fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<GrayImage, String> {
-        let picture = self.sampler.picture_at(at, cancelled).map_err(|error| format!("{error:?}"))?;
-        Ok(GrayImage::from_rgba(picture.width as usize, picture.height as usize, &picture.rgba))
+    fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String> {
+        let (picture, shown) = self.sampler.timed_picture_at(at, cancelled).map_err(|error| format!("{error:?}"))?;
+        Ok((GrayImage::from_rgba(picture.width as usize, picture.height as usize, &picture.rgba), shown))
     }
 }
 
@@ -87,6 +93,8 @@ impl FrameSource for FileFrames {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunRequest {
     pub track_id: u32,
+    /// The file of the track when the run starts, checked again before its samples are written.
+    pub media_path: String,
     /// The sample the run starts from.
     pub start: TrackSample,
     pub direction: Direction,
@@ -115,7 +123,7 @@ impl RunRequest {
             Direction::Forward => samples.iter().find(|s| s.manual && s.source_time > start.source_time).map(|s| s.source_time),
             Direction::Backward => samples.iter().rev().find(|s| s.manual && s.source_time < start.source_time).map(|s| s.source_time),
         };
-        Ok(Self { track_id: track.id, start, direction, stop, rotation })
+        Ok(Self { track_id: track.id, media_path: track.media_path.clone(), start, direction, stop, rotation })
     }
 }
 
@@ -155,19 +163,38 @@ pub fn run_times(request: &RunRequest, rate: Option<(i32, i32)>, length: Option<
     (frame_time(first, rate), times)
 }
 
-/// How a run ended, with the samples it made, in the order made.
+/// How a run ended, with the samples it made, in the order made, and what it started from, to
+/// check the track still fits before they are written.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunResult {
     pub track_id: u32,
+    pub media_path: String,
+    pub start: TrackSample,
+    pub direction: Direction,
     pub samples: Vec<TrackSample>,
     pub end: RunEnd,
+}
+
+impl RunResult {
+    /// The run as [`engine::apply_track_run`] writes it.
+    pub fn track_run(&self) -> engine::TrackRun {
+        engine::TrackRun {
+            track_id: self.track_id,
+            media_path: self.media_path.clone(),
+            start: self.start,
+            forward: self.direction == Direction::Forward,
+            samples: self.samples.clone(),
+            lost: self.end == RunEnd::Lost,
+        }
+    }
 }
 
 /// What a finished run did, kept for an agent that asks later.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunReport {
     pub track_id: u32,
-    /// `done`, `lost`, `cancelled` or `failed`.
+    /// `done`, `lost`, `cancelled`, `stale` (the track changed while it ran, nothing written)
+    /// or `failed`.
     pub outcome: &'static str,
     /// Samples written.
     pub count: usize,
@@ -308,32 +335,63 @@ fn run(request: &RunRequest, source: &mut dyn FrameSource, shared: &Shared) -> R
     let (start_time, times) = run_times(request, rate, length);
     shared.total.store(times.len(), Ordering::Relaxed);
     let cancelled = || shared.cancel.load(Ordering::Relaxed);
-    let first = source.frame_at(start_time, &cancelled)?;
+    let finished = |samples: Vec<TrackSample>, end: RunEnd| RunResult {
+        track_id: request.track_id,
+        media_path: request.media_path.clone(),
+        start: request.start,
+        direction: request.direction,
+        samples,
+        end,
+    };
+    let (first, first_shown) = match source.frame_at(start_time, &cancelled) {
+        Ok(first) => first,
+        // Cut short by the cancel: a cancelled run, with no samples, not a failed one.
+        Err(_) if cancelled() => return Ok(finished(Vec::new(), RunEnd::Cancelled)),
+        Err(error) => return Err(error),
+    };
     let (width, height) = (first.width, first.height);
     let area = TrackBox::from_sample(&request.start, width, height);
     let options = TrackerOptions { rotation: request.rotation, ..TrackerOptions::default() };
     let mut tracker = Tracker::new(first, area, options);
-    let frames = Frames { source, times: &times, next: 0, direction: request.direction, ahead: Vec::new(), cancel: &shared.cancel };
+    let mut shown = Vec::with_capacity(times.len());
+    let frames = Frames {
+        source,
+        times: &times,
+        next: 0,
+        direction: request.direction,
+        ahead: Vec::new(),
+        cancel: &shared.cancel,
+        last_shown: first_shown,
+        stop: request.stop,
+        shown: &mut shown,
+    };
     let (steps, end) = track_frames(&mut tracker, frames, &shared.cancel, |index, _| shared.done.store(index + 1, Ordering::Relaxed))?;
-    let samples = steps.iter().zip(&times).map(|(step, at)| step.area.to_sample(width, height, *at, step.confidence)).collect();
-    Ok(RunResult { track_id: request.track_id, samples, end })
+    let samples = steps.iter().zip(&shown).map(|(step, at)| step.area.to_sample(width, height, *at, step.confidence)).collect();
+    Ok(finished(samples, end))
 }
 
 /// The frames at `times`, in that order; backwards they are read a chunk at a time in file order.
+/// A frame the decoder shows at the time of the frame before, or the wrong way from it, is stepped
+/// over (a frame held longer than the stated rate); one before the time asked for going forwards
+/// means the file ended. Each frame given has its source time pushed to `shown`.
 struct Frames<'a> {
     source: &'a mut dyn FrameSource,
     times: &'a [Time],
     next: usize,
     direction: Direction,
-    /// Frames read ahead, the next one last.
-    ahead: Vec<GrayImage>,
+    /// Frames read ahead with their source times, the next one last.
+    ahead: Vec<(GrayImage, Time)>,
     cancel: &'a AtomicBool,
+    /// The source time of the frame given last (the start frame at first).
+    last_shown: Time,
+    /// The source time of the sample placed by hand that the run stops before.
+    stop: Option<Time>,
+    shown: &'a mut Vec<Time>,
 }
 
-impl Iterator for Frames<'_> {
-    type Item = Result<GrayImage, String>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl Frames<'_> {
+    /// The next frame read, with the time asked for and the time shown; `None` past `times`.
+    fn read(&mut self) -> Option<Result<(GrayImage, Time, Time), String>> {
         if self.next >= self.times.len() {
             return None;
         }
@@ -350,12 +408,41 @@ impl Iterator for Frames<'_> {
                 }
             }
         }
+        let asked = self.times[self.next];
         let frame = match self.direction {
             Direction::Backward => self.ahead.pop().map(Ok),
-            Direction::Forward => Some(self.source.frame_at(self.times[self.next], &cancelled)),
+            Direction::Forward => Some(self.source.frame_at(asked, &cancelled)),
         };
         self.next += 1;
-        frame
+        frame.map(|frame| frame.map(|(image, shown)| (image, asked, shown)))
+    }
+}
+
+impl Iterator for Frames<'_> {
+    type Item = Result<GrayImage, String>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (image, asked, shown) = match self.read()? {
+                Ok(frame) => frame,
+                Err(error) => return Some(Err(error)),
+            };
+            let (onwards, past_stop) = match self.direction {
+                Direction::Forward => (shown > self.last_shown, self.stop.is_some_and(|stop| shown >= stop)),
+                Direction::Backward => (shown < self.last_shown, self.stop.is_some_and(|stop| shown <= stop)),
+            };
+            if past_stop || (self.direction == Direction::Forward && !onwards && shown < asked) {
+                // At the sample placed by hand, or the file ended before its stated length.
+                self.next = self.times.len();
+                return None;
+            }
+            if !onwards {
+                continue;
+            }
+            self.last_shown = shown;
+            self.shown.push(shown);
+            return Some(Ok(image));
+        }
     }
 }
 
@@ -378,9 +465,15 @@ mod tests {
             (Some((30, 1)), Some(Time::from_ticks(TICKS_PER_SECOND * 2)))
         }
 
-        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<GrayImage, String> {
+        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String> {
             self.reads.fetch_add(1, Ordering::Relaxed);
-            let frame = frame_index(at, (30, 1)) as f64;
+            let index = frame_index(at, (30, 1));
+            Ok((self.picture(index as f64), frame_time(index, (30, 1))))
+        }
+    }
+
+    impl Sliding {
+        fn picture(&self, frame: f64) -> GrayImage {
             let left = 40.0 + self.speed * frame;
             let (width, height) = (160, 90);
             let mut data = Vec::with_capacity(width * height);
@@ -390,7 +483,7 @@ mod tests {
                     data.push(if inside { texture(x as f64 - left, y as f64) } else { 0.5 });
                 }
             }
-            Ok(GrayImage::new(width, height, data))
+            GrayImage::new(width, height, data)
         }
     }
 
@@ -428,8 +521,12 @@ mod tests {
     }
 
     fn run_on(source: Sliding, request: RunRequest) -> (u64, TrackRunner) {
+        run_on_source(Box::new(source), request)
+    }
+
+    fn run_on_source(source: Box<dyn FrameSource + Send>, request: RunRequest) -> (u64, TrackRunner) {
         let mut runner = TrackRunner::default();
-        let id = runner.start(request, move || Ok(Box::new(source) as Box<dyn FrameSource>)).unwrap();
+        let id = runner.start(request, move || Ok(source as Box<dyn FrameSource>)).unwrap();
         (id, runner)
     }
 
@@ -457,6 +554,8 @@ mod tests {
     struct Gated {
         inner: Sliding,
         gate: Arc<(Mutex<usize>, Condvar)>,
+        /// Fail a read the cancel cuts short, rather than finish it.
+        fail_on_cancel: bool,
     }
 
     impl FrameSource for Gated {
@@ -464,11 +563,15 @@ mod tests {
             self.inner.timing()
         }
 
-        fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<GrayImage, String> {
+        fn frame_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String> {
             let (allowed, signal) = &*self.gate;
             let mut allowed = allowed.lock().unwrap();
             while *allowed == 0 && !cancelled() {
                 allowed = signal.wait_timeout(allowed, Duration::from_millis(5)).unwrap().0;
+            }
+            if *allowed == 0 && self.fail_on_cancel {
+                // As the decoder does when it sees the cancel in the middle of a search.
+                return Err("cancelled".to_owned());
             }
             *allowed = allowed.saturating_sub(1);
             drop(allowed);
@@ -479,7 +582,7 @@ mod tests {
     #[test]
     fn a_cancelled_run_ends_with_the_samples_made_so_far() {
         let gate = Arc::new((Mutex::new(4usize), Condvar::new()));
-        let source = Gated { inner: Sliding { speed: 1.0, reads: Arc::default() }, gate: gate.clone() };
+        let source = Gated { inner: Sliding { speed: 1.0, reads: Arc::default() }, gate: gate.clone(), fail_on_cancel: false };
         let request = RunRequest::for_track(&track(vec![start(0, 40.0, true)]), None, Direction::Forward, true).unwrap();
         let mut runner = TrackRunner::default();
         let id = runner.start(request, move || Ok(Box::new(source) as Box<dyn FrameSource>)).unwrap();
@@ -506,5 +609,76 @@ mod tests {
         let id = runner.start(request, || Err("no such file".to_owned())).unwrap();
         runner.wait(id);
         assert_eq!(runner.status(id), Some(RunState::Failed("no such file".to_owned())));
+    }
+
+    /// Cancels a run on a source that fails the read the cancel cuts short, once `allowed` reads
+    /// have gone through and the run waits on the next.
+    fn cancel_while_reading(allowed: usize) -> RunState {
+        let gate = Arc::new((Mutex::new(allowed), Condvar::new()));
+        let source = Gated { inner: Sliding { speed: 1.0, reads: Arc::default() }, gate: gate.clone(), fail_on_cancel: true };
+        let request = RunRequest::for_track(&track(vec![start(0, 40.0, true)]), None, Direction::Forward, true).unwrap();
+        let mut runner = TrackRunner::default();
+        let id = runner.start(request, move || Ok(Box::new(source) as Box<dyn FrameSource>)).unwrap();
+        while *gate.0.lock().unwrap() > 0 || !matches!(runner.status(id), Some(RunState::Running { done, .. }) if done + 1 >= allowed) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        runner.cancel(id);
+        runner.wait(id);
+        runner.status(id).unwrap()
+    }
+
+    #[test]
+    fn a_cancel_that_cuts_a_read_short_keeps_the_samples_made() {
+        let RunState::Finished(result) = cancel_while_reading(4) else { panic!("a cancel is not a failure") };
+        assert_eq!(result.end, RunEnd::Cancelled);
+        assert_eq!(result.samples.len(), 3, "the start frame and three steps were read");
+        let RunState::Finished(result) = cancel_while_reading(0) else { panic!("a cancel during the first frame is not a failure") };
+        assert_eq!((result.end, result.samples.len()), (RunEnd::Cancelled, 0));
+    }
+
+    /// [`Sliding`] where every frame is held for two frames of the stated rate, and the file ends
+    /// after `frames` frames although it states two seconds.
+    struct Held {
+        inner: Sliding,
+        frames: i64,
+    }
+
+    impl FrameSource for Held {
+        fn timing(&self) -> (Option<(i32, i32)>, Option<Time>) {
+            self.inner.timing()
+        }
+
+        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(GrayImage, Time), String> {
+            // Only even frames exist: the first one at or after `at`, or the last one.
+            let last = (self.frames - 1) / 2 * 2;
+            let wanted = frame_index(at, (30, 1));
+            let index = (wanted + wanted % 2).min(last);
+            Ok((self.inner.picture(index as f64), frame_time(index, (30, 1))))
+        }
+    }
+
+    #[test]
+    fn samples_take_the_times_of_the_frames_really_shown() {
+        for direction in [Direction::Forward, Direction::Backward] {
+            let from = if direction == Direction::Forward { 0 } else { 40 };
+            let source = Held { inner: Sliding { speed: 1.0, reads: Arc::default() }, frames: 41 };
+            let request = RunRequest::for_track(&track(vec![start(from, 40.0 + from as f64, true)]), None, direction, false).unwrap();
+            let (id, runner) = run_on_source(Box::new(source), request);
+            runner.wait(id);
+            let Some(RunState::Finished(result)) = runner.status(id) else { panic!("{:?}", runner.status(id)) };
+            assert_eq!(result.end, RunEnd::Finished, "{direction:?}");
+            let frames: Vec<i64> = result.samples.iter().map(|s| frame_index(s.source_time, (30, 1))).collect();
+            let expected: Vec<i64> = match direction {
+                Direction::Forward => (1..=20).map(|i| 2 * i).collect(),
+                Direction::Backward => (0..20).rev().map(|i| 2 * i).collect(),
+            };
+            assert_eq!(frames, expected, "{direction:?}: one sample per frame shown, at its own time, none past the end of the file");
+            for (sample, frame) in result.samples.iter().zip(&frames) {
+                assert_eq!(sample.source_time, frame_time(*frame, (30, 1)));
+                let expected = (40.0 + *frame as f64 + 15.0) / 160.0;
+                assert!(((sample.cx - expected) * 160.0).abs() < 1.0, "{direction:?} frame {frame}: {}", sample.cx);
+            }
+        }
     }
 }

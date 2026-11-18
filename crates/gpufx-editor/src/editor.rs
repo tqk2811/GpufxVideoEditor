@@ -43,6 +43,8 @@ use std::path::{Path, PathBuf};
 use crate::layout::{PanelSizes, SplitterDrag};
 
 const UNDO_DEPTH: usize = 200;
+/// The reports of finished tracker runs kept for an agent that asks later.
+pub const MAX_TRACK_REPORTS: usize = 64;
 /// The project file of [`EditorState::font_paths`]: a font pack is found in the package roots only.
 pub const FONT_PATHS_FILE: &str = "fonts.json";
 
@@ -151,7 +153,7 @@ pub struct EditorState {
     /// Object tracker runs in the background; the samples of a finished one are written as one
     /// undo step by [`Self::poll_tracking`].
     pub tracking: crate::tracking::TrackRunner,
-    /// What finished runs did, by job id.
+    /// What finished runs did, by job id; the last [`MAX_TRACK_REPORTS`].
     pub track_reports: std::collections::BTreeMap<u64, crate::tracking::RunReport>,
     /// The tracker job started last.
     pub last_track_job: Option<u64>,
@@ -267,7 +269,7 @@ fn refusal_message(project: &Project, error: &EditError) -> Message {
         EditError::KeyframeNotFound { key, .. } => Message::EditKeyframeNotFound(label(key.track)),
         EditError::NoPlacement { key } => Message::EditNoPlacement(label(key.track)),
         EditError::MarkerNotFound { marker } => Message::EditMarkerNotFound(marker + 1),
-        EditError::NotText { .. } | EditError::NotCensor { .. } | EditError::MotionTrackNotFound { .. } => Message::EditInvalid(error.to_string()),
+        EditError::NotText { .. } | EditError::NotCensor { .. } | EditError::MotionTrackNotFound { .. } | EditError::TrackRunStale { .. } => Message::EditInvalid(error.to_string()),
         EditError::Invalid(errors) => Message::EditInvalid(errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")),
     }
 }
@@ -1894,18 +1896,33 @@ impl EditorState {
     }
 
     /// Writes the samples of finished tracker runs, each as one undo step, says so on the status
-    /// line and keeps a report; says whether a run still goes. While edits wait (a drag or an
-    /// export) finished runs wait too. A cancelled run writes the samples it made.
+    /// line and keeps a report (the last [`MAX_TRACK_REPORTS`]); says whether a run still goes.
+    /// While edits wait (a drag or an export) finished runs wait too. A cancelled run writes the
+    /// samples it made. A run whose track changed under it ([`engine::fit_track_run`]) writes
+    /// nothing, and one cut by a box placed by hand meanwhile writes what lies before that box.
     pub fn poll_tracking(&mut self) -> bool {
         if self.export.is_some() || self.is_holding() {
             return self.tracking.running();
         }
         for (id, track_id, result) in self.tracking.take_finished() {
             let report = match result {
-                Ok(run) => {
+                Ok(result) => {
+                    let run = match engine::fit_track_run(self.project(), &result.track_run()) {
+                        Ok(run) => run,
+                        Err(error) => {
+                            self.status = Status::Error(Message::TrackingStale);
+                            let report = crate::tracking::RunReport { track_id, outcome: "stale", count: 0, last: None, message: Some(error.to_string()) };
+                            self.keep_track_report(id, report);
+                            continue;
+                        }
+                    };
                     let count = run.samples.len();
-                    let written = count == 0 || self.run(|project| engine::apply_track_run(project, run.track_id, &run.samples));
-                    let (outcome, message) = match (written, run.end) {
+                    let written = count == 0 || self.run(|project| engine::apply_track_run(project, &run));
+                    let end = match result.end {
+                        engine::tracker::RunEnd::Lost if !run.lost => engine::tracker::RunEnd::Finished,
+                        end => end,
+                    };
+                    let (outcome, message) = match (written, end) {
                         (false, _) => ("failed", Some(format!("motion track {} could not take the samples", run.track_id))),
                         (true, engine::tracker::RunEnd::Finished) => ("done", None),
                         (true, engine::tracker::RunEnd::Lost) => ("lost", None),
@@ -1925,9 +1942,17 @@ impl EditorState {
                     crate::tracking::RunReport { track_id, outcome: "failed", count: 0, last: None, message: Some(message) }
                 }
             };
-            self.track_reports.insert(id, report);
+            self.keep_track_report(id, report);
         }
         self.tracking.running()
+    }
+
+    /// Keeps the report of tracker job `id`, forgetting the oldest past [`MAX_TRACK_REPORTS`].
+    fn keep_track_report(&mut self, id: u64, report: crate::tracking::RunReport) {
+        self.track_reports.insert(id, report);
+        while self.track_reports.len() > MAX_TRACK_REPORTS {
+            self.track_reports.pop_first();
+        }
     }
 
     /// Takes the beats off the source of clip `key`, so off every clip of it: one undo step.
@@ -5385,5 +5410,74 @@ lines"));
         assert_eq!(tempo_text(120.0), "120");
         assert_eq!(tempo_text(103.5), "103.5");
         assert_eq!(tempo_text(99.456), "99.46");
+    }
+
+    /// A still, textured picture of one second at 30 frames a second.
+    struct Still;
+
+    impl crate::tracking::FrameSource for Still {
+        fn timing(&self) -> (Option<(i32, i32)>, Option<Time>) {
+            (Some((30, 1)), Some(Time::from_ticks(engine::TICKS_PER_SECOND)))
+        }
+
+        fn frame_at(&mut self, at: Time, _: &dyn Fn() -> bool) -> Result<(engine::tracker::GrayImage, Time), String> {
+            let (width, height) = (160usize, 90usize);
+            let data = (0..width * height).map(|i| ((i % width) as f32 * 0.9).sin() * ((i / width) as f32 * 0.7).cos() * 0.25 + 0.5).collect();
+            let frame = at.ticks() * 30 / engine::TICKS_PER_SECOND;
+            Ok((engine::tracker::GrayImage::new(width, height, data), Time::from_ticks((frame * engine::TICKS_PER_SECOND + 29) / 30)))
+        }
+    }
+
+    fn box_at(source_time: Time, cx: f64, manual: bool) -> engine::TrackSample {
+        engine::TrackSample { source_time, cx, cy: 0.5, w: 0.2, h: 0.3, angle: 0.0, confidence: 1.0, manual }
+    }
+
+    /// A state with motion track 3 on `a.mp4`, its box placed by hand at the start, and a finished
+    /// tracker run forwards from it, not written yet.
+    fn state_with_a_finished_run() -> (EditorState, u64) {
+        let mut state = EditorState::default();
+        let mut project = state.project().clone();
+        project.motion_tracks.push(engine::MotionTrack { id: 3, media_path: "a.mp4".into(), aspect: 16.0 / 9.0, samples: vec![box_at(Time::ZERO, 0.5, true)] });
+        state.replace_project(project, None);
+        let request = crate::tracking::RunRequest::for_track(state.project().motion_track(3).unwrap(), None, crate::tracking::Direction::Forward, false).unwrap();
+        let id = state.tracking.start(request, || Ok(Box::new(Still) as Box<dyn crate::tracking::FrameSource>)).unwrap();
+        state.tracking.wait(id);
+        (state, id)
+    }
+
+    #[test]
+    fn a_finished_run_is_written_unless_its_track_changed_meanwhile() {
+        let (mut state, id) = state_with_a_finished_run();
+        state.poll_tracking();
+        assert_eq!(state.track_reports[&id].outcome, "done");
+        assert_eq!(state.project().motion_track(3).unwrap().samples.len(), 30);
+
+        let (mut state, id) = state_with_a_finished_run();
+        // The user moved the start box while the run went.
+        assert!(state.run(|project| engine::set_track_sample(project, 3, box_at(Time::ZERO, 0.4, true))));
+        state.poll_tracking();
+        assert_eq!(state.track_reports[&id].outcome, "stale");
+        assert_eq!(state.project().motion_track(3).unwrap().samples, vec![box_at(Time::ZERO, 0.4, true)], "nothing of the run is written");
+
+        let (mut state, id) = state_with_a_finished_run();
+        // A box placed by hand inside the run's span cuts the run there.
+        let placed = box_at(Time::from_ticks(engine::TICKS_PER_SECOND / 3), 0.6, true);
+        assert!(state.run(|project| engine::set_track_sample(project, 3, placed)));
+        state.poll_tracking();
+        let report = &state.track_reports[&id];
+        assert_eq!((report.outcome, report.count), ("done", 9));
+        let samples = &state.project().motion_track(3).unwrap().samples;
+        assert_eq!(samples.len(), 11);
+        assert!(samples.iter().all(|s| s.manual || s.source_time < placed.source_time));
+    }
+
+    #[test]
+    fn only_the_last_tracker_reports_are_kept() {
+        let mut state = EditorState::default();
+        for id in 1..=(MAX_TRACK_REPORTS as u64 + 6) {
+            state.keep_track_report(id, crate::tracking::RunReport { track_id: 1, outcome: "done", count: 0, last: None, message: None });
+        }
+        assert_eq!(state.track_reports.len(), MAX_TRACK_REPORTS);
+        assert_eq!(state.track_reports.keys().next(), Some(&7));
     }
 }
