@@ -57,6 +57,10 @@ pub(super) fn tracking_rows(ui: &mut egui::Ui, state: &mut EditorState, key: Cli
             state.delete_motion_track(current.id);
         }
     });
+    let mut planar = current.is_planar();
+    if ui.checkbox(&mut planar, language.t(Message::TrackPlanar)).on_hover_text(language.t(Message::TrackPlanarHint)).changed() {
+        state.set_track_planar(key, current.id, planar);
+    }
     mode_rows(ui, state);
     match state.track_progress(current.id) {
         Some(progress) => {
@@ -239,6 +243,10 @@ pub(super) fn follow_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipK
             let changed = ui.checkbox(&mut scale, language.t(Message::FollowScale)).changed() | ui.checkbox(&mut rotation, language.t(Message::FollowRotation)).changed();
             if changed {
                 state.set_follow_options(key, scale, rotation);
+            }
+            let mut perspective = follow.perspective;
+            if ui.checkbox(&mut perspective, language.t(Message::FollowPerspective)).on_hover_text(language.t(Message::FollowPerspectiveHint)).changed() {
+                state.set_follow_perspective(key, perspective);
             }
             ui.horizontal(|ui| {
                 if ui.button(language.t(Message::FollowBake)).clicked() {

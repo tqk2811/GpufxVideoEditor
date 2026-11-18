@@ -67,6 +67,11 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, pictu
     let painter = ui.painter_at(area);
     draw_path(&painter, state, key, &track, &mapping, picture);
     let Some((shown, on_frame)) = state.box_at_playhead(key, &track) else { return };
+    if let Some(quad) = shown.quad {
+        let color = if on_frame.is_some() { sample_color(&shown) } else { TRACKED_COLOR.gamma_multiply(0.7) };
+        show_quad(ui, state, key, &track, &mapping, area, picture, shown.source_time, quad, color);
+        return;
+    }
     let corners = box_corners(&shown).map(|corner| to_screen(mapping.to_frame(corner), picture));
     let color = if on_frame.is_some() { sample_color(&shown) } else { TRACKED_COLOR.gamma_multiply(0.7) };
     painter.add(Shape::closed_line(corners.to_vec(), Stroke::new(BOX_WIDTH, color)));
@@ -86,6 +91,68 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, pictu
         edit_box(ui, state, track.id, &mapping, picture, &response, shown, Some(index));
         response.on_hover_and_drag_cursor(if index % 2 == 0 { CursorIcon::ResizeNwSe } else { CursorIcon::ResizeNeSw });
         painter.rect_filled(Rect::from_center_size(corner, Vec2::splat(GRIP_SIZE)), 0.0, color);
+    }
+}
+
+/// The corners of a planar track at the playhead: the quad drawn, its body dragged to move it,
+/// each corner dragged alone. Each step is a sample placed by hand at `source_time`.
+#[allow(clippy::too_many_arguments)]
+fn show_quad(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, track: &engine::MotionTrack, mapping: &FrameMapping, area: Rect, picture: Rect, source_time: Time, quad: engine::Quad, color: Color32) {
+    let painter = ui.painter_at(area);
+    let corners = quad.map(|corner| to_screen(mapping.to_frame(corner), picture));
+    painter.add(Shape::closed_line(corners.to_vec(), Stroke::new(BOX_WIDTH, color)));
+    // The diagonals show the perspective of the plane.
+    painter.line_segment([corners[0], corners[2]], Stroke::new(1.0, color.gamma_multiply(0.4)));
+    painter.line_segment([corners[1], corners[3]], Stroke::new(1.0, color.gamma_multiply(0.4)));
+    if state.is_playing() || state.is_track_locked(key.track) {
+        return;
+    }
+    let scope = ui.scope_id().with(("tracking-quad", key, track.id));
+    let body = ui.interact(Rect::from_points(&corners).intersect(area), scope.with("body"), Sense::drag());
+    edit_quad(ui, state, track.id, mapping, picture, &body, source_time, quad, None);
+    body.on_hover_and_drag_cursor(CursorIcon::Move);
+    for (index, corner) in corners.into_iter().enumerate() {
+        let response = ui.interact(Rect::from_center_size(corner, Vec2::splat(GRIP_HIT_SIZE)).intersect(area), scope.with(("corner", index)), Sense::drag());
+        edit_quad(ui, state, track.id, mapping, picture, &response, source_time, quad, Some(index));
+        response.on_hover_and_drag_cursor(CursorIcon::Crosshair);
+        painter.circle_filled(corner, GRIP_SIZE / 2.0 + 1.0, color);
+    }
+}
+
+/// `start` with its corners moved by `delta` (parts of the picture): all of them, or corner
+/// `corner` alone. `None` when the result would fold (no longer convex) for a picture of `aspect`.
+fn moved_quad(start: engine::Quad, delta: [f64; 2], corner: Option<usize>, aspect: f64) -> Option<engine::Quad> {
+    let mut next = start;
+    for (index, point) in next.iter_mut().enumerate() {
+        if corner.is_none_or(|only| only == index) {
+            *point = [point[0] + delta[0], point[1] + delta[1]];
+        }
+    }
+    let square = next.map(|[x, y]| [x * aspect, y]);
+    engine::tracker::homography::is_convex(&square).then_some(next)
+}
+
+/// Runs one handle of a quad, as [`edit_box`] does for a box.
+#[allow(clippy::too_many_arguments)]
+fn edit_quad(ui: &egui::Ui, state: &mut EditorState, track_id: u32, mapping: &FrameMapping, picture: Rect, response: &egui::Response, source_time: Time, quad: engine::Quad, corner: Option<usize>) {
+    let id = start_id(response.id);
+    if response.drag_started() {
+        ui.data_mut(|data| data.insert_temp(id, quad));
+    }
+    if response.dragged() {
+        let start = ui.data(|data| data.get_temp::<engine::Quad>(id));
+        let pointer = ui.ctx().input(|input| input.pointer.press_origin().zip(input.pointer.latest_pos()));
+        let aspect = state.project().motion_track(track_id).map_or(1.0, |track| track.aspect);
+        if let Some((start, (from, to))) = start.zip(pointer) {
+            let (a, b) = (mapping.to_source(to_frame(from, picture)), mapping.to_source(to_frame(to, picture)));
+            if let Some(next) = moved_quad(start, [b[0] - a[0], b[1] - a[1]], corner, aspect) {
+                state.live_track_quad(track_id, source_time, next);
+            }
+        }
+    }
+    if response.drag_stopped() {
+        state.commit_live();
+        ui.data_mut(|data| data.remove::<engine::Quad>(id));
     }
 }
 
@@ -244,6 +311,17 @@ mod tests {
         assert_eq!(finished, Some(Rect::from_two_pos(from, to)), "the release leaves the box");
         let (shown, finished) = pick_frame(&ctx, picture, vec![]);
         assert_eq!((shown, finished), (None, None), "nothing after the release");
+    }
+
+    #[test]
+    fn a_corner_moves_alone_the_body_moves_all_and_a_fold_is_refused() {
+        let quad = [[0.2, 0.2], [0.6, 0.2], [0.6, 0.6], [0.2, 0.6]];
+        let one = moved_quad(quad, [0.05, -0.02], Some(2), 1.0).unwrap();
+        assert_eq!(one[2], [0.65, 0.58]);
+        assert_eq!(&one[..2], &quad[..2]);
+        let all = moved_quad(quad, [0.1, 0.1], None, 1.0).unwrap();
+        assert!(all.iter().zip(&quad).all(|(a, b)| (a[0] - b[0] - 0.1).abs() < 1e-12 && (a[1] - b[1] - 0.1).abs() < 1e-12));
+        assert!(moved_quad(quad, [-0.6, -0.6], Some(2), 1.0).is_none(), "dragging a corner past the opposite one folds the quad");
     }
 
     #[test]

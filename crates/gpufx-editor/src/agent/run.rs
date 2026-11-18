@@ -522,13 +522,13 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 .map_err(refused)?;
             result.insert("clip".to_owned(), clip_json(clip_at(state.project(), track, start)));
         }
-        AgentEdit::ClipFollowSet { clip, track_id, reference, at, follow_scale, follow_rotation, smooth } => state
+        AgentEdit::ClipFollowSet { clip, track_id, reference, at, follow_scale, follow_rotation, smooth, perspective } => state
             .apply_agent_command(|project| {
                 let shown = current_clip(project, reference)?;
                 let at = at.unwrap_or(shown.start);
                 let anchor_source_time = shown.source_time_at(at.saturating_sub(shown.start)).max(Time::ZERO);
                 let link = engine::TrackLink { track_id, anchor_source_time, follow_scale, follow_rotation, smooth };
-                engine::set_follow(project, clip.into(), Some(engine::Follow { link, ref_track: reference.track, ref_clip: reference.clip, offset: [0.0, 0.0], perspective: false }))
+                engine::set_follow(project, clip.into(), Some(engine::Follow { link, ref_track: reference.track, ref_clip: reference.clip, offset: [0.0, 0.0], perspective }))
             })
             .map_err(refused)?,
         AgentEdit::ClipFollowClear { clip } => state.apply_agent_command(|project| engine::set_follow(project, clip.into(), None)).map_err(refused)?,
@@ -545,13 +545,17 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
         AgentEdit::TrackSetSample { track_id, clip, sample } => {
             let id = match (track_id, clip) {
                 (Some(id), _) => {
+                    // A sample with four corners takes its box from them, in the picture of the track.
+                    let aspect = state.project().motion_track(id).map_or(1.0, |track| track.aspect);
+                    let sample = with_quad_box(sample, aspect);
                     state.apply_agent_command(|project| engine::set_track_sample(project, id, sample)).map_err(refused)?;
                     id
                 }
                 (None, Some(clip)) => {
                     let shown = current_clip(state.project(), clip).map_err(|error| AgentError::from_edit(&error))?.clone();
                     let id = state.project().next_motion_track_id();
-                    let track = engine::MotionTrack { id, media_path: shown.source.clone(), aspect: state.clip_aspect(&shown), samples: vec![sample] };
+                    let aspect = state.clip_aspect(&shown);
+                    let track = engine::MotionTrack { id, media_path: shown.source.clone(), aspect, samples: vec![with_quad_box(sample, aspect)] };
                     state.apply_agent_command(|project| engine::set_motion_track(project, track)).map_err(refused)?;
                     id
                 }
@@ -567,7 +571,8 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
             }
             let source_time = shown.source_time_at(at.saturating_sub(shown.start)).max(Time::ZERO);
             let id = state.project().next_motion_track_id();
-            let track = engine::MotionTrack { id, media_path: shown.source.clone(), aspect: state.clip_aspect(&shown), samples: vec![engine::TrackSample { source_time, confidence: 1.0, manual: true, ..sample }] };
+            let aspect = state.clip_aspect(&shown);
+            let track = engine::MotionTrack { id, media_path: shown.source.clone(), aspect, samples: vec![with_quad_box(engine::TrackSample { source_time, confidence: 1.0, manual: true, ..sample }, aspect)] };
             state.apply_agent_command(|project| engine::set_motion_track(project, track)).map_err(refused)?;
             result.insert("track_id".to_owned(), Value::from(id));
             result.insert("source_time".to_owned(), Value::from(source_time.ticks()));
@@ -1213,6 +1218,16 @@ fn with_revision(result: AgentResult, revision: u64) -> AgentResult {
     })
 }
 
+
+/// `sample` with its box taken from its four corners when it has them, for a picture of `aspect`
+/// (a box given beside corners is ignored).
+fn with_quad_box(sample: engine::TrackSample, aspect: f64) -> engine::TrackSample {
+    match sample.quad {
+        Some(quad) => engine::TrackSample::from_quad(sample.source_time, quad, aspect, sample.confidence, sample.manual),
+        None => sample,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1635,7 +1650,7 @@ mod tests {
         assert_eq!(host.state.project().motion_tracks[0].samples.len(), 2);
         assert_eq!(code(edit(&mut host, AgentEdit::TrackSetSample { track_id: Some(id + 5), clip: None, sample: sample(0, 0.2) })), "motion_track_not_found");
 
-        let follow = |track_id| AgentEdit::ClipFollowSet { clip: censor_clip, track_id, reference: video, at: None, follow_scale: false, follow_rotation: false, smooth: 0.0 };
+        let follow = |track_id| AgentEdit::ClipFollowSet { clip: censor_clip, track_id, reference: video, at: None, follow_scale: false, follow_rotation: false, smooth: 0.0, perspective: false };
         assert_eq!(code(edit(&mut host, follow(id + 5))), "invalid_project");
         edit(&mut host, follow(id)).expect("follow");
         let followed = host.state.project().tracks[censor_clip.track].clips[0].follow.expect("set");

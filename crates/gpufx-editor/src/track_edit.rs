@@ -178,7 +178,8 @@ impl EditorState {
         let clip = self.project().tracks.get(key.track)?.clips.get(key.clip)?;
         let time = self.source_rate(&clip.source).map_or(now, |rate| snap_to_frame(now, rate));
         let point = track.point_at(time, 0.0)?;
-        Some((TrackSample { source_time: time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false, quad: None }, None))
+        let quad = if track.is_planar() { track.quad_at(time, 0.0) } else { None };
+        Some((TrackSample { source_time: time, cx: point.cx, cy: point.cy, w: point.w, h: point.h, angle: point.angle, confidence: 1.0, manual: false, quad }, None))
     }
 
     /// Starts or ends drawing a box for a new motion track on the preview, for video clip `key`.
@@ -240,6 +241,30 @@ impl EditorState {
     pub fn live_track_sample(&mut self, id: u32, sample: TrackSample) {
         let sample = TrackSample { confidence: 1.0, manual: true, ..sample };
         self.live_edit(|project| engine::set_track_sample(project, id, sample));
+    }
+
+    /// Makes motion track `id` a planar (four corner) track, or a track of boxes again, for clip
+    /// `key`. Planar: the box at the playhead becomes a sample placed by hand with its corners, so
+    /// a run from it tracks in perspective. Boxes: every sample loses its corners. One undo step.
+    pub fn set_track_planar(&mut self, key: ClipKey, id: u32, planar: bool) {
+        let Some(track) = self.project().motion_track(id).cloned() else { return };
+        if planar {
+            let Some((shown, _)) = self.box_at_playhead(key, &track) else { return };
+            let quad = shown.corners(track.aspect);
+            let sample = TrackSample::from_quad(shown.source_time, quad, track.aspect, 1.0, true);
+            self.run(|project| engine::set_track_sample(project, id, sample));
+        } else {
+            let mut boxes = track;
+            boxes.samples.iter_mut().for_each(|sample| sample.quad = None);
+            self.run(|project| engine::set_motion_track(project, boxes));
+        }
+    }
+
+    /// Shows `quad` (parts of the source picture) as the corners of motion track `id` at
+    /// `source_time`, a sample placed by hand, while a drag goes on (see [`Self::commit_live`]).
+    pub fn live_track_quad(&mut self, id: u32, source_time: Time, quad: engine::Quad) {
+        let Some(aspect) = self.project().motion_track(id).map(|track| track.aspect) else { return };
+        self.live_track_sample(id, TrackSample::from_quad(source_time, quad, aspect, 1.0, true));
     }
 
     /// Removes motion track `id`; what followed it stays where it was placed. One undo step.
@@ -305,6 +330,12 @@ impl EditorState {
         let Some(follow) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.follow) else { return };
         let link = TrackLink { follow_scale, follow_rotation, ..follow.link };
         self.run(|project| engine::set_follow(project, key, Some(Follow { link, ..follow })));
+    }
+
+    /// Pins overlay `key` to its track's four corners in perspective, or not. One undo step.
+    pub fn set_follow_perspective(&mut self, key: ClipKey, perspective: bool) {
+        let Some(follow) = self.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)).and_then(|clip| clip.follow) else { return };
+        self.run(|project| engine::set_follow(project, key, Some(Follow { perspective, ..follow })));
     }
 
     /// Stops overlay `key` following its track.
@@ -474,6 +505,35 @@ mod tests {
             engine::follow_transform(project, follow, &mut transform, at);
         }
         transform.rect(16.0 / 9.0, clip.censor.unwrap().aspect).x
+    }
+
+    #[test]
+    fn a_track_turns_planar_at_the_playhead_and_back_and_a_follow_pins_in_perspective() {
+        let mut state = rigged();
+        let video = ClipKey { track: 0, clip: 0 };
+        state.set_playhead(Time::from_ticks(SECOND));
+        state.set_track_planar(video, 1, true);
+        let track = state.project().motion_track(1).unwrap().clone();
+        assert!(track.is_planar());
+        let planar = track.samples.iter().find(|s| s.quad.is_some()).expect("a sample with corners");
+        assert!(planar.manual && (planar.cx - 0.5).abs() < 1e-9, "the box at the playhead, half way: {planar:?}");
+        let (shown, _) = state.box_at_playhead(video, &track).unwrap();
+        assert_eq!(shown.quad, planar.quad);
+        // Between a box and a quad the corners are interpolated.
+        state.set_playhead(Time::from_ticks(SECOND / 2));
+        assert!(state.box_at_playhead(video, &track).unwrap().0.quad.is_some());
+        let moved = planar.quad.unwrap().map(|[x, y]| [x + 0.01, y]);
+        state.live_track_quad(1, planar.source_time, moved);
+        state.commit_live();
+        assert_eq!(state.project().motion_track(1).unwrap().samples.iter().find(|s| s.source_time == planar.source_time).unwrap().quad, Some(moved));
+        let overlay = ClipKey { track: 1, clip: 0 };
+        state.follow_motion_track(overlay, 1);
+        state.set_follow_perspective(overlay, true);
+        assert!(state.project().tracks[1].clips[0].follow.unwrap().perspective);
+        state.set_track_planar(video, 1, false);
+        assert!(!state.project().motion_track(1).unwrap().is_planar());
+        state.undo();
+        assert!(state.project().motion_track(1).unwrap().is_planar(), "one undo step");
     }
 
     #[test]

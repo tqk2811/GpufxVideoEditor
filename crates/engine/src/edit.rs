@@ -1538,7 +1538,7 @@ pub fn bake_follow(project: &Project, key: ClipKey, source_aspect: f64) -> Resul
     unlocked(project, key.track)?;
     let follow = clip_of(project, key)?.follow.ok_or(EditError::NotFollowing { key })?;
     let link = follow.link;
-    bake_motion(project, key, source_aspect, link.follow_scale, link.follow_rotation, |transform, t| crate::schedule::follow_transform(project, &follow, transform, t), |clip| clip.follow = None)
+    bake_motion(project, key, source_aspect, link.follow_scale || follow.perspective, link.follow_rotation || follow.perspective, |transform, t| crate::schedule::follow_transform(project, &follow, transform, t), |clip| clip.follow = None)
 }
 
 /// Turns the lock of clip `key` (a picture of `source_aspect`) into keyframes, as [`bake_follow`]

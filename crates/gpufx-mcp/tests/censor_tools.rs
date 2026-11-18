@@ -60,6 +60,32 @@ fn a_censor_region_follows_a_track_of_the_video_under_it() {
 }
 
 
+#[test]
+fn track_create_takes_four_corners_and_clip_follow_set_pins_in_perspective() {
+    let _lock = gpu_lock();
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let (clip_a, _) = clip_paths();
+    call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));
+    let now = revision(&call_ok(&mut session, "clip_add", json!({"expected_revision": 1, "track": 0, "source": clip_a, "start": 0, "duration": 180_000})));
+    let added = call_ok(&mut session, "censor_add", json!({"expected_revision": now, "start": 0, "duration": 180_000}));
+    let video = json!({"track": 0, "clip": 0});
+    assert_eq!(call_err(&mut session, "track_create", json!({"expected_revision": revision(&added), "clip": video, "cx": 0.5})).code, "invalid_params", "neither a whole box nor corners");
+    let folded = [[0.2, 0.2], [0.6, 0.6], [0.6, 0.2], [0.2, 0.6]];
+    assert_eq!(call_err(&mut session, "track_create", json!({"expected_revision": revision(&added), "clip": video, "quad": folded})).code, "invalid_project");
+    let quad = [[0.2, 0.2], [0.6, 0.25], [0.6, 0.6], [0.2, 0.7]];
+    let created = call_ok(&mut session, "track_create", json!({"expected_revision": revision(&added), "clip": video, "quad": quad}));
+    let id = created["track_id"].as_u64().expect("an id");
+    let project = project_of(&mut session);
+    let sample = project.motion_tracks[0].samples[0];
+    assert_eq!(sample.quad, Some(quad));
+    assert!((sample.cx - 0.4).abs() < 1e-9 && (sample.cy - (0.2 + 0.25 + 0.6 + 0.7) / 4.0).abs() < 1e-9, "the box comes from the corners: {sample:?}");
+    let followed = call_ok(&mut session, "clip_follow_set", json!({"expected_revision": revision(&created), "clip": {"track": 1, "clip": 0}, "track_id": id, "reference": video, "perspective": true}));
+    assert!(project_of(&mut session).tracks[1].clips[0].follow.expect("follows").perspective);
+    let more = call_ok(&mut session, "track_set_sample", json!({"expected_revision": revision(&followed), "track_id": id, "source_time": 90_000, "quad": [[0.3, 0.2], [0.7, 0.25], [0.7, 0.6], [0.3, 0.7]]}));
+    assert!(revision(&more) > revision(&followed));
+    assert_eq!(project_of(&mut session).motion_tracks[0].samples.len(), 2);
+}
+
 /// A 2 s, 30 fps, 320x180 clip of a 64x64 textured square on gray whose left edge is at
 /// x = 40 + 2n in frame n and top at y = 60.
 fn moving_square_clip() -> String {

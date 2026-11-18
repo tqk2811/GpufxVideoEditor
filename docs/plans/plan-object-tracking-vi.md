@@ -107,7 +107,7 @@ Chỉ dùng mã và model có giấy phép MIT, Apache hoặc BSD. Tự viết t
 | P1 | Tracker cổ điển (KLT + similarity + NCC phục hồi, có confidence); worker đọc frame qua decoder hoặc proxy, readback ảnh xám, tiến độ và huỷ | module mới `engine/src/tracking/` hoặc crate `gpufx-track`; `gpufx-editor/src/tracking.rs` | Chuỗi ảnh tổng hợp (ô vuông dịch, xoay, scale), sai số dưới 1 px; test huỷ |
 | P2 | Trải nghiệm: vẽ khung, track tiến/lùi, sửa tay, làm mượt, gắn overlay, undo, bake keyframe, tool agent/MCP, i18n | `ui/inspector.rs`, `ui/placement.rs`, `ui/player.rs`, timeline, `agent/*`, `gpufx-mcp/src/tools.rs` | Test logic gắn và offset, test lệnh agent |
 | P3 | Tracker NN (NanoTrack): thêm op vào `gpufx-core/nn` trên nhánh của submodule FFmpegGpuFilter (báo phiên ffmpeggpufilter trước); release model; tổng quát `matting_models.rs` thành bộ tải model chung; chế độ Nhanh/Bền | submodule FFmpegGpuFilter, `matting_models.rs` | So từng op với model gốc; so khung bao trên clip mẫu |
-| P4 (tuỳ chọn) | Tự động che mặt (detector + ghép theo IoU), tracking phối cảnh 4 góc. Phần 1 (che mặt) đã làm, xem mục "Tự động che mặt" | như P3; `gpufx-core/nn/face.rs`, `engine/src/faces.rs`, `gpufx-editor/src/face_censor.rs` | So từng đầu ra với onnxruntime; test ghép IoU; test đầu cuối với detector giả và với YuNet thật |
+| P4 (tuỳ chọn) | Tự động che mặt (detector + ghép theo IoU), tracking phối cảnh 4 góc. Phần 1 (che mặt) đã làm, xem mục "Tự động che mặt"; phần 2 (phối cảnh 4 góc) đã làm, xem mục "Tracking phối cảnh 4 góc" | như P3; `gpufx-core/nn/face.rs`, `engine/src/faces.rs`, `gpufx-editor/src/face_censor.rs`; `engine/src/tracker/homography.rs`, `tracker/planar.rs`, `d3d12-backend/src/pinned_place.rs` | So từng đầu ra với onnxruntime; test ghép IoU; test đầu cuối với detector giả và với YuNet thật |
 
 ## Lựa chọn UX tạm ở P2
 
@@ -154,6 +154,31 @@ Lựa chọn tạm (chờ user duyệt):
 - Model YuNet nằm cùng thư mục `gpufx_ai_tracking` và dùng chung bộ tải của tracker; `tracking_models.rs` nay quản lý cả hai model.
 - Dùng chung GPU device với tracker Bền.
 - Ảnh mẫu của golden test (`largest_selfie.jpg` của OpenCV Zoo) chỉ được script tải về `build/` để test, không đưa vào repo hay gói.
+
+## Tracking phối cảnh 4 góc (P4 phần 2)
+
+Dùng cho vật phẳng như màn hình, biển hiệu, trang giấy: track theo bốn góc thay vì một khung, rồi ghim bốn góc của overlay vào bốn góc của vật (corner pin).
+
+- **Dữ liệu:** `TrackSample.quad` (tuỳ chọn, mặc định không có) là bốn góc theo thứ tự trên trái, trên phải, dưới phải, dưới trái của vật, tính theo phần của ảnh nguồn. Khung (`cx`, `cy`, `w`, `h`, `angle`) vẫn được ghi, lấy từ bốn góc (tâm là trung bình bốn góc, cạnh là trung bình hai cạnh đối, góc là góc cạnh trên), nên mọi chỗ chỉ đọc khung vẫn chạy. Validate: toạ độ hữu hạn, trong khoảng ±8, tứ giác lồi và đúng thứ tự. Một track là "phẳng" khi có sample mang `quad`. `MotionTrack::quad_at` nội suy và làm mượt bốn góc như `point_at`; sample không có `quad` cho bốn góc của khung xoay.
+- **Tracker:** `PlanarTracker` (chỉ chế độ Nhanh). Mỗi bước lấy điểm góc trong tứ giác, theo dõi bằng KLT nhiều tầng kèm kiểm tra đi về, khớp homography bằng RANSAC (DLT chuẩn hoá Hartley, mẫu 4 điểm, khớp lại bằng bình phương nhỏ nhất trên điểm đồng thuận), rồi dời bốn góc. Độ tin cậy là NCC giữa mẫu (tứ giác nắn về hình vuông 24×24) với mẫu nhớ, nhân căn tỉ lệ điểm đồng thuận. Dưới ngưỡng thì tìm lại bằng NCC trên tứ giác nắn, dời và co giãn quanh chỗ dự đoán (giữ hình dạng); không thấy thì dừng và đánh dấu lạc (Q7). Run bắt đầu từ sample có `quad` ở chế độ Nhanh thì dùng tracker này; chế độ Bền vẫn chỉ theo khung.
+- **Bám:** `Follow.perspective` (mặc định tắt). `Project::follow_pin` tính homography, theo phần của khung output, đưa bốn góc của vật nhìn qua clip tham chiếu lúc neo tới bốn góc lúc `t` (qua placement, keyframe, animation và khoá của clip tham chiếu ở từng thời điểm), rồi cộng offset. `schedule::follow_transform` đặt nó vào `ClipTransform.pin`. Bốn góc của overlay là bốn góc của hình chữ nhật đặt của nó (chưa có bám, đã xoay theo góc riêng) đi qua homography (`ClipTransform::pinned_corners`). Khi bật phối cảnh thì pose bám cũng tính cả scale và xoay, để gizmo và khung trên preview gần đúng.
+- **Compositor:** gói dựng sẵn `pinned_place` lấy mỗi pixel output ngược qua homography nghịch về ảnh nguồn, nên lấy mẫu đúng phối cảnh (không chia hai tam giác). Màu lọc theo premultiplied, mép mịn theo khoảng cách tới cạnh tính bằng pixel output. Ma trận được nhân dấu để toạ độ thứ ba dương trong ảnh; pixel bên kia đường chân trời của mặt phẳng không hiện gì. Bốn góc không lồi thì quay về cách đặt hình chữ nhật cũ.
+- **Giao diện:** mục Tracking có ô "Phối cảnh 4 góc". Bật thì khung tại đầu phát thành sample đặt tay có bốn góc; tắt thì mọi sample bỏ bốn góc (một bước undo). Preview vẽ tứ giác và hai đường chéo; kéo thân là dời cả bốn góc, kéo một góc là dời riêng góc đó, không cho kéo thành tứ giác gập. Overlay đang bám có ô "Phối cảnh".
+- **Agent và MCP:** `track_create` và `track_set_sample` nhận `quad` (khi đó khung lấy từ bốn góc, `cx`, `cy`, `w`, `h` thành tuỳ chọn); `clip_follow_set` nhận `perspective`.
+
+Lựa chọn tạm (chờ user duyệt):
+
+- Track phẳng chỉ chạy được ở chế độ Nhanh; chọn Bền với sample có bốn góc thì NanoTrack theo khung của bốn góc và các sample mới không có `quad`.
+- Tracker phẳng lấy tối đa 200 điểm góc (gấp đôi tracker khung), cần ít nhất 8 điểm đồng thuận. Một bước mà diện tích đổi quá 4 lần hoặc tứ giác bị gập thì coi như luồng quang học thất bại và chuyển sang tìm lại.
+- Tìm lại chỉ dời và co giãn tứ giác, không thử đổi phối cảnh; vật đổi phối cảnh mạnh trong lúc bị che thì dừng lạc để sửa tay.
+- Bật "Phối cảnh" trên overlay thì bỏ qua hai ô bám scale và bám xoay (phối cảnh đã gồm cả hai). Bake keyframe của overlay phối cảnh chỉ ghi phần similarity (X/Y, Width, Rotation); keyframe không biểu diễn được phối cảnh.
+- Kéo góc của tứ giác dùng ánh xạ của clip tại đầu phát, như kéo khung.
+
+Việc còn lại:
+
+- Vùng che (clip che vùng) và vùng của effect chưa bám theo tứ giác: vẫn theo khung (tâm, cỡ, góc). Mask tứ giác cần đổi shader che vùng và định dạng `CensorRegion`.
+- Khoá khung theo vật (`TrackLock`) chưa có chế độ phối cảnh.
+- Chưa có test đầu cuối chạy tracker phẳng qua worker của editor trên video thật.
 
 ## Khoá khung theo vật (ổn định theo track)
 

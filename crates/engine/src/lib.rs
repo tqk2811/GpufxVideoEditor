@@ -74,5 +74,5 @@ pub use per_unit::{check_per_unit, line_ranges, unit_ranges, PerUnit, RangeSelec
 pub use srt::{format_timestamp, parse_srt, strip_tags, write_srt, SrtCue, SrtDocument, SrtWarning, SrtWarningKind};
 pub use frame_rate::FrameRate;
 pub use time::{Time, TICKS_PER_SECOND};
-pub use tracking::{follow_region, Follow, FollowPose, FrameMapping, MotionTrack, RegionBox, TrackLink, TrackLock, TrackPoint, TrackSample, MAX_FOLLOW_OFFSET, MAX_FOLLOW_SMOOTH, MAX_LOCK_ZOOM, MIN_LOCK_ZOOM, MAX_TRACK_SAMPLES};
+pub use tracking::{box_corners, follow_region, Follow, FollowPose, FrameMapping, MotionTrack, Quad, RegionBox, TrackLink, TrackLock, TrackPoint, TrackSample, MAX_FOLLOW_OFFSET, MAX_FOLLOW_SMOOTH, MAX_LOCK_ZOOM, MIN_LOCK_ZOOM, MAX_QUAD_COORDINATE, MAX_TRACK_SAMPLES};
 pub use validate::{text_style_problems, validate, AcceptAll, Resolver, TextStyleProblem, ValidationError};
