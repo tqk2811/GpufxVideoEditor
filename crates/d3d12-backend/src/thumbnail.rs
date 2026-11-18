@@ -19,6 +19,7 @@ const FORWARD_LIMIT_TICKS: i64 = TICKS_PER_SECOND * 2;
 /// `SWS_BILINEAR`.
 const SWS_BILINEAR: i32 = 2;
 /// Stop looking for the exact frame after this many frames: a very long GOP shows the nearest one.
+/// Exact mode ([`FrameSampler::set_exact`]) has no such quota, only its time budget.
 const MAX_DECODED_PER_REQUEST: u32 = 900;
 /// The same limit in wall-clock time, for sources that decode slowly.
 const MAX_DECODE_TIME: Duration = Duration::from_secs(3);
@@ -79,6 +80,14 @@ fn to_stream_pts(at: Time, start: i64, time_base: ffi::AVRational) -> i64 {
     i64::try_from(offset.div_euclid(denominator)).unwrap_or(i64::MAX).saturating_add(start)
 }
 
+/// The source position of stream timestamp `pts`, from the first video timestamp `start`, rounded
+/// up to a tick so that [`to_stream_pts`] gives `pts` back.
+fn from_stream_pts(pts: i64, start: i64, time_base: ffi::AVRational) -> Time {
+    let offset = i128::from(pts.saturating_sub(start)) * i128::from(TICKS_PER_SECOND) * i128::from(time_base.num.max(1));
+    let denominator = i128::from(time_base.den.max(1));
+    Time::from_ticks(i64::try_from(-((-offset).div_euclid(denominator))).unwrap_or(i64::MAX))
+}
+
 /// Picks frames of one video file at arbitrary positions.
 pub struct FrameSampler {
     format_context: *mut ffi::AVFormatContext,
@@ -104,6 +113,11 @@ pub struct FrameSampler {
     path: String,
     /// How long one search for a frame may take.
     decode_budget: Duration,
+    /// Set by [`FrameSampler::set_exact`]: no frame quota, and a search that runs out of time
+    /// before the frame asked for fails rather than showing an earlier one.
+    exact: bool,
+    /// The frame quota of one search outside exact mode, [`MAX_DECODED_PER_REQUEST`].
+    decode_quota: u32,
 }
 
 impl FrameSampler {
@@ -130,6 +144,8 @@ impl FrameSampler {
             shown_width: 1,
             path: text.to_owned(),
             decode_budget: MAX_DECODE_TIME,
+            exact: false,
+            decode_quota: MAX_DECODED_PER_REQUEST,
         };
         // SAFETY: on error, Drop releases whatever was created.
         unsafe { sampler.initialize(&c_path) }.map_err(|e| format!("{text}: {e}"))?;
@@ -189,6 +205,7 @@ impl FrameSampler {
             (*self.codec_context).skip_frame = ffi::AVDISCARD_DEFAULT;
         }
         self.decode_budget = budget;
+        self.exact = true;
     }
 
     /// Width and height of the pictures this sampler makes.
@@ -199,6 +216,12 @@ impl FrameSampler {
     /// The picture at source position `at` (the origin is the first video timestamp), or the
     /// nearest one the stream has. `cancelled` is polled between packets.
     pub fn picture_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<ThumbnailImage, ThumbnailError> {
+        self.timed_picture_at(at, cancelled).map(|(picture, _)| picture)
+    }
+
+    /// [`FrameSampler::picture_at`] with the source position of the frame shown, from its own
+    /// timestamp: later than `at` when no frame starts there, earlier past the end of the stream.
+    pub fn timed_picture_at(&mut self, at: Time, cancelled: &dyn Fn() -> bool) -> Result<(ThumbnailImage, Time), ThumbnailError> {
         let target = to_stream_pts(at, self.start_pts, self.time_base);
         // SAFETY: the contexts are valid after open.
         unsafe {
@@ -211,7 +234,10 @@ impl FrameSampler {
                 outcome = self.search(target, cancelled)?;
             }
             match outcome {
-                Search::Found => Ok(self.convert_kept()?),
+                Search::Found => {
+                    let shown = from_stream_pts(self.last_pts.unwrap_or(self.start_pts), self.start_pts, self.time_base);
+                    Ok((self.convert_kept()?, shown))
+                }
                 Search::OutOfTime => Err(ThumbnailError::TimedOut),
                 Search::NothingDecoded => Err(ThumbnailError::Failed(format!("{}: no frame could be decoded", self.path))),
             }
@@ -228,7 +254,7 @@ impl FrameSampler {
             if cancelled() {
                 return Err("cancelled".to_owned());
             }
-            if self.finished || decoded >= MAX_DECODED_PER_REQUEST {
+            if self.finished || (!self.exact && decoded >= self.decode_quota) {
                 break;
             }
             if started.elapsed() > self.decode_budget {
@@ -242,7 +268,9 @@ impl FrameSampler {
                 }
             }
         }
-        Ok(if self.last_pts.is_some() {
+        // In exact mode a frame before the target is the wrong frame, unless the stream ended.
+        let reached = !self.exact || self.finished || self.last_pts.is_some_and(|pts| pts >= target);
+        Ok(if self.last_pts.is_some() && reached {
             Search::Found
         } else if out_of_time {
             Search::OutOfTime
@@ -421,6 +449,40 @@ mod tests {
     fn a_position_maps_to_the_stream_from_the_first_timestamp() {
         let base = ffi::AVRational { num: 1, den: 90_000 };
         assert_eq!(to_stream_pts(Time::from_ticks(TICKS_PER_SECOND), 500, base), 90_500);
+    }
+
+    #[test]
+    fn a_timestamp_maps_back_to_the_position_it_came_from() {
+        let base = ffi::AVRational { num: 1001, den: 30_000 };
+        for pts in [0, 1, 7, 1000, 107_892] {
+            let at = from_stream_pts(pts + 33, 33, base);
+            assert_eq!(to_stream_pts(at, 33, base), pts + 33);
+        }
+    }
+
+    #[test]
+    fn exact_mode_reaches_a_frame_past_the_quota_of_one_request() {
+        // One keyframe, then more frames than the quota (made small here) lets one request decode.
+        let path = clip("long-gop.mp4", &["-f", "lavfi", "-i", "testsrc=s=32x32:r=30:d=4", "-c:v", "mpeg4", "-g", "300", "-bf", "0"]);
+        let wanted = Time::from_ticks(TICKS_PER_SECOND * 3 / 2);
+        let mut sampler = FrameSampler::open(&path, 16).expect("open");
+        sampler.set_exact(Duration::from_secs(60));
+        sampler.decode_quota = 10;
+        let (_, shown) = sampler.timed_picture_at(wanted, &never).expect("the frame");
+        let frame = |at: Time| at.ticks() * 30 / TICKS_PER_SECOND;
+        assert_eq!(frame(shown), frame(wanted), "the frame asked for, not the last one within the quota");
+    }
+
+    #[test]
+    fn exact_mode_out_of_time_before_the_frame_fails() {
+        let path = clip("exact-slow.mp4", &["-f", "lavfi", "-i", "testsrc=s=32x32:r=30:d=4", "-c:v", "mpeg4", "-g", "300"]);
+        let mut sampler = FrameSampler::open(&path, 16).expect("open");
+        sampler.set_exact(Duration::from_secs(60));
+        sampler.picture_at(Time::ZERO, &never).expect("the first frame");
+        sampler.decode_budget = Duration::ZERO;
+        // Near enough to decode on from the first frame, which is still the one kept.
+        let result = sampler.picture_at(Time::from_ticks(TICKS_PER_SECOND * 3 / 2), &never);
+        assert_eq!(result, Err(ThumbnailError::TimedOut), "an earlier frame is not passed off as the one asked for");
     }
 
     #[test]
