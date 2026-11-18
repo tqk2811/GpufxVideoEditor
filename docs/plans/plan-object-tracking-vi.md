@@ -2,7 +2,7 @@
 
 Mục tiêu: người dùng chọn một vật trong clip video. Sticker, text hoặc vùng che (blur, pixelate, hộp màu) gắn vào vật đó và tự di chuyển theo, có thể bám cả scale và góc xoay. Tham khảo: Tracking của CapCut, Motion tracking của DaVinci Resolve, Motion Tracker của Shotcut, tracker OpenCV trong Kdenlive.
 
-Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). Đang làm P0.
+Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). P0 và P1 đã xong: tracker cổ điển ở `crates/engine/src/tracker/`, worker nền ở `crates/gpufx-editor/src/tracking.rs`, tool `track_run`, `track_status`, `track_cancel`. Tiếp theo là P2.
 
 ## Hiện trạng
 
