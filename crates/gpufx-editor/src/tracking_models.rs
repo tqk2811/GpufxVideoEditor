@@ -73,14 +73,23 @@ fn model_in(folder: &Path) -> Option<PathBuf> {
     dir.join("tracker.json").is_file().then_some(dir)
 }
 
-/// Where the model was found when last looked, so the inspector does not touch the disk every
-/// frame. [`refresh`] looks again.
-static FOUND: Mutex<Option<Option<PathBuf>>> = Mutex::new(None);
+/// Where the model was found when last looked, with the package roots looked in, so the inspector
+/// does not scan every frame. [`refresh`] forgets it.
+static FOUND: Mutex<Option<(Vec<PathBuf>, PathBuf)>> = Mutex::new(None);
 
-/// Where the model is installed, looking in [`model_folders`] the first time after a [`refresh`].
+/// Where the model is installed. The place found last is kept while it still exists and the
+/// package roots are the same; otherwise [`model_folders`] are looked in again. Not finding it is
+/// not kept, so a model put in place by hand is seen.
 pub fn installed(package_roots: &[PathBuf]) -> Option<PathBuf> {
     let mut found = FOUND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    found.get_or_insert_with(|| model_folders(package_roots).iter().find_map(|folder| model_in(folder))).clone()
+    if let Some((roots, path)) = found.as_ref() {
+        if roots.as_slice() == package_roots && path.exists() {
+            return Some(path.clone());
+        }
+    }
+    let path = model_folders(package_roots).iter().find_map(|folder| model_in(folder));
+    *found = path.clone().map(|path| (package_roots.to_vec(), path));
+    path
 }
 
 /// Forgets where the model was found: after an import or a fetch.
@@ -206,5 +215,32 @@ mod tests {
         if let Some(released) = expected_zip_sha256() {
             assert_eq!(crate::model_download::file_sha256(&zip).unwrap(), released, "the zip was rebuilt: update sha256_zip of its source.json and the release");
         }
+    }
+
+    /// The place found is kept only while it exists and the package roots stay the same.
+    #[test]
+    fn the_found_model_follows_the_package_roots_and_the_disk() {
+        if installed(&[]).is_some() {
+            eprintln!("skipping: a model is installed outside the package roots");
+            return;
+        }
+        let place = |root: &Path| {
+            let folder = root.join("packages").join(TRACKING_FOLDER);
+            std::fs::create_dir_all(&folder).unwrap();
+            let zip = folder.join(format!("{MODEL_ID}.zip"));
+            std::fs::write(&zip, b"zip").unwrap();
+            zip
+        };
+        let (a, b) = (scratch("roots-a"), scratch("roots-b"));
+        let (zip_a, zip_b) = (place(&a), place(&b));
+        assert_eq!(installed(std::slice::from_ref(&a)), Some(zip_a.clone()));
+        assert_eq!(installed(std::slice::from_ref(&b)), Some(zip_b), "other package roots are looked in");
+        assert_eq!(installed(std::slice::from_ref(&a)), Some(zip_a.clone()));
+        std::fs::remove_file(&zip_a).unwrap();
+        assert_eq!(installed(std::slice::from_ref(&a)), None, "a deleted model is not given");
+        place(&a);
+        assert_eq!(installed(std::slice::from_ref(&a)), Some(zip_a), "not finding it is not kept");
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }

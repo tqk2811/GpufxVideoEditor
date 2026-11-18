@@ -451,6 +451,12 @@ fn run(request: &RunRequest, source: &mut dyn FrameSource, shared: &Shared) -> R
         shown: &mut shown,
     };
     let (steps, end) = track_frames(&mut tracker, frames, &shared.cancel, |index, _| shared.done.store(index + 1, Ordering::Relaxed))?;
+    if let RunTracker::Robust(robust) = &tracker {
+        if let Some(error) = &robust.error {
+            // The GPU failed, not the tracking: a failed run, not a lost one.
+            return Err(error.clone());
+        }
+    }
     let samples = steps.iter().zip(&shown).map(|(step, at)| step.area.to_sample(width, height, *at, step.confidence)).collect();
     Ok(finished(samples, end))
 }
@@ -476,16 +482,34 @@ pub const ROBUST_LOST_CONFIDENCE: f64 = 0.25;
 /// How much of each sure step's look goes into the look the robust tracker checks against.
 const ROBUST_TEMPLATE_RATE: f32 = 0.1;
 
-/// The GPU of the robust tracker: one device for every run of the session, made on first use.
+/// The device of the robust tracker, kept between runs; dropped by [`forget_tracking_gpu`].
+static TRACKING_GPU: Mutex<Option<Arc<gpufx_core::GpuContext>>> = Mutex::new(None);
+
+/// The GPU of the robust tracker: one device for every run of the session, made on first use and
+/// made again after a GPU error dropped it.
 fn tracking_gpu() -> Result<Arc<gpufx_core::GpuContext>, String> {
-    static CONTEXT: Mutex<Option<Arc<gpufx_core::GpuContext>>> = Mutex::new(None);
-    let mut context = CONTEXT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut context = TRACKING_GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(context) = context.as_ref() {
         return Ok(context.clone());
     }
     let made = gpufx_core::GpuContext::new(gpufx_core::Backend::Auto).map_err(|error| format!("the robust tracker needs a GPU: {error}"))?;
     *context = Some(made.clone());
     Ok(made)
+}
+
+/// Drops the kept device after `error` if it is a GPU error (a lost device would fail every
+/// later run otherwise), so the next run makes a new one.
+fn forget_tracking_gpu(error: &gpufx_core::Error) {
+    if matches!(error, gpufx_core::Error::Gpu(_)) {
+        *TRACKING_GPU.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+/// The upright box around `area` turned by its angle: NanoTrack finds upright boxes.
+fn upright_rect(area: &TrackBox) -> gpufx_core::nn::TrackRect {
+    let (sine, cosine) = area.angle.to_radians().sin_cos();
+    let (sine, cosine) = (sine.abs(), cosine.abs());
+    gpufx_core::nn::TrackRect { cx: area.cx as f32, cy: area.cy as f32, w: (area.w * cosine + area.h * sine) as f32, h: (area.w * sine + area.h * cosine) as f32 }
 }
 
 /// NanoTrack, with a check of the box's look: the network's score stays high on almost anything,
@@ -495,8 +519,15 @@ struct RobustTracker {
     nano: gpufx_core::nn::NanoTrack,
     /// The angle of the start sample, kept: NanoTrack finds upright boxes.
     angle: f64,
+    /// The start box's sides over the sides of the upright box around it: NanoTrack's upright box
+    /// is scaled by these back to the turned box.
+    side_ratio: (f64, f64),
     area: TrackBox,
     template: Vec<f32>,
+    /// The GPU error that stopped the run, which then failed rather than got lost.
+    error: Option<String>,
+    /// A step less sure than this is lost: [`ROBUST_LOST_CONFIDENCE`], changed by tests.
+    lost_below: f64,
 }
 
 fn rgba_image(rgba: &[u8], width: usize, height: usize) -> gpufx_core::Image<'_> {
@@ -505,27 +536,48 @@ fn rgba_image(rgba: &[u8], width: usize, height: usize) -> gpufx_core::Image<'_>
 
 impl RobustTracker {
     fn new(model: &Path, first: &TrackFrame, area: TrackBox) -> Result<Self, String> {
-        let mut nano = gpufx_core::nn::NanoTrack::open(tracking_gpu()?, model).map_err(|error| format!("the NanoTrack model failed to load: {error}"))?;
+        let mut nano = gpufx_core::nn::NanoTrack::open(tracking_gpu()?, model).map_err(|error| {
+            forget_tracking_gpu(&error);
+            format!("the NanoTrack model failed to load: {error}")
+        })?;
         let rgba = first.rgba();
-        let rect = gpufx_core::nn::TrackRect { cx: area.cx as f32, cy: area.cy as f32, w: area.w as f32, h: area.h as f32 };
-        nano.init(&rgba_image(&rgba, first.gray.width, first.gray.height), rect).map_err(|error| error.to_string())?;
+        let rect = upright_rect(&area);
+        nano.init(&rgba_image(&rgba, first.gray.width, first.gray.height), rect).map_err(|error| {
+            forget_tracking_gpu(&error);
+            error.to_string()
+        })?;
         let template = template::sample_patch(&Pyramid::new(first.gray.clone(), 3), &area);
-        Ok(Self { nano, angle: area.angle, area, template })
+        let side_ratio = (area.w / f64::from(rect.w).max(1e-6), area.h / f64::from(rect.h).max(1e-6));
+        Ok(Self { nano, angle: area.angle, side_ratio, area, template, error: None, lost_below: ROBUST_LOST_CONFIDENCE })
+    }
+
+    /// The turned box of the start angle for NanoTrack's upright box `rect`.
+    fn turned(&self, rect: gpufx_core::nn::TrackRect) -> TrackBox {
+        TrackBox { cx: f64::from(rect.cx), cy: f64::from(rect.cy), w: f64::from(rect.w) * self.side_ratio.0, h: f64::from(rect.h) * self.side_ratio.1, angle: self.angle }
     }
 
     fn step(&mut self, frame: TrackFrame) -> TrackStep {
         let lost = |area| TrackStep { area, confidence: 0.0, lost: true, recovered: false };
         let rgba = frame.rgba();
+        let before = self.nano.rect();
         let found = match self.nano.update(&rgba_image(&rgba, frame.gray.width, frame.gray.height)) {
             Ok(found) => found,
-            Err(_) => return lost(self.area),
+            Err(error) => {
+                eprintln!("robust tracker: the NanoTrack step failed: {error}");
+                forget_tracking_gpu(&error);
+                self.error = Some(format!("the robust tracker failed: {error}"));
+                return lost(self.area);
+            }
         };
-        let rect = found.rect;
-        let area = TrackBox { cx: f64::from(rect.cx), cy: f64::from(rect.cy), w: f64::from(rect.w), h: f64::from(rect.h), angle: self.angle };
+        let area = self.turned(found.rect);
         let patch = template::sample_patch(&Pyramid::new(frame.gray, 3), &area);
         let look = template::ncc(&self.template, &patch).clamp(0.0, 1.0);
         let confidence = (f64::from(found.score) * (0.5 + 0.5 * look)).clamp(0.0, 1.0);
-        if confidence < ROBUST_LOST_CONFIDENCE {
+        if confidence < self.lost_below {
+            // A lost step leaves the tracker where it was (`StepTracker`): NanoTrack moved its box.
+            if let Some(before) = before {
+                self.nano.set_rect(before);
+            }
             return TrackStep { confidence, ..lost(self.area) };
         }
         if confidence >= engine::tracker::LOST_CONFIDENCE {
@@ -947,5 +999,41 @@ mod tests {
             assert!(mean < mean_most, "{mode:?}: mean error {mean} px");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_upright_box_holds_the_turned_box() {
+        let area = TrackBox { cx: 50.0, cy: 40.0, w: 40.0, h: 20.0, angle: 90.0 };
+        let rect = upright_rect(&area);
+        assert!((rect.w - 20.0).abs() < 1e-3 && (rect.h - 40.0).abs() < 1e-3, "{rect:?}");
+        let rect = upright_rect(&TrackBox { angle: 30.0, ..area });
+        let (sine, cosine) = 30f64.to_radians().sin_cos();
+        assert!((f64::from(rect.w) - (40.0 * cosine + 20.0 * sine)).abs() < 1e-3 && (f64::from(rect.h) - (40.0 * sine + 20.0 * cosine)).abs() < 1e-3, "{rect:?}");
+        assert_eq!(upright_rect(&TrackBox { angle: 0.0, ..area }), gpufx_core::nn::TrackRect { cx: 50.0, cy: 40.0, w: 40.0, h: 20.0 });
+    }
+
+    /// A lost step of the robust tracker leaves NanoTrack's box where it was (`StepTracker`).
+    /// Needs the built NanoTrack model and a GPU, as the clip test.
+    #[test]
+    fn a_lost_robust_step_leaves_the_box() {
+        let model = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../external/FFmpegGpuFilter/build/packages/gpufx_ai_tracking/nanotrack-v2.zip");
+        if !model.is_file() {
+            eprintln!("skipping: nanotrack-v2.zip is not built");
+            return;
+        }
+        if let Err(error) = tracking_gpu() {
+            assert!(std::env::var_os("GPUFX_REQUIRE_GPU").is_none(), "GPUFX_REQUIRE_GPU is set, but {error}");
+            eprintln!("skipping: {error}");
+            return;
+        }
+        let source = Sliding { speed: 8.0, reads: Arc::default() };
+        let area = TrackBox { cx: 52.0, cy: 45.0, w: 24.0, h: 24.0, angle: 0.0 };
+        let mut tracker = RobustTracker::new(&model, &TrackFrame::gray(source.picture(0.0)), area).unwrap();
+        let before = tracker.nano.rect().unwrap();
+        tracker.lost_below = 2.0;
+        let step = tracker.step(TrackFrame::gray(source.picture(1.0)));
+        assert!(step.lost && tracker.error.is_none());
+        assert_eq!(step.area, area);
+        assert_eq!(tracker.nano.rect(), Some(before), "the lost step moved NanoTrack's box");
     }
 }
