@@ -31,6 +31,7 @@ mod orientation;
 mod paths;
 mod probe;
 mod progress;
+mod pinned_place;
 mod rotated_place;
 mod preset_effects;
 mod still;

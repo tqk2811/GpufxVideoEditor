@@ -35,6 +35,7 @@ use crate::gpu::Gpu;
 use crate::matte::{find_matting_model, matte_texture, MatteCache, MatteKey, MatteShaper, MATTE_CACHE_BYTES};
 use crate::packages::{CLIP_DURATION, CLIP_TIME};
 use crate::paths::ProjectPaths;
+use crate::pinned_place::{pin_params, pinned_place_effect};
 use crate::rotated_place::rotated_place_effect;
 use crate::censor_mix::censor_mix_effect;
 use crate::still::{aligned_rows, premultiplied_still, read_animation, read_still, AnimatedPicture, StillPicture};
@@ -820,6 +821,8 @@ pub struct D3d12Compositor {
     placer: EffectGraph,
     /// Draws a clip that is turned. Built the first time one is.
     rotator: Option<EffectGraph>,
+    /// The corner pin placer, loaded on first use (see [`crate::pinned_place`]).
+    pinner: Option<EffectGraph>,
     /// The gaussian blur of a blurred clip, loaded the first time one is drawn.
     blurrer: Option<EffectGraph>,
     /// Set once the blur package failed to load, so clips draw unblurred and the warning shows once.
@@ -913,7 +916,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, blurrer: None, blur_unavailable: false, censor_mixer: None, transparent: None, stills: HashMap::new(), stills_used: 0, animations: HashMap::new(), text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
+        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, pinner: None, blurrer: None, blur_unavailable: false, censor_mixer: None, transparent: None, stills: HashMap::new(), stills_used: 0, animations: HashMap::new(), text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
     }
 
     /// Why matting models could not be used, once per model: missing or failing to load. A clip
@@ -1686,6 +1689,15 @@ impl D3d12Compositor {
             transform.opacity = 0.0;
             transform.rotates = false;
         }
+        // A corner pinned picture (an overlay following a planar track in perspective) is warped
+        // to its four corners; corners that make no convex quad fall back to its placed rectangle.
+        if transform.opacity > 0.0 {
+            let aspect = f64::from(width) / f64::from(height);
+            let unfollowed = with_margin(transform.unfollowed_rect(aspect, source_aspect), margin);
+            if let Some(params) = transform.pinned_corners(unfollowed, aspect).and_then(|corners| pin_params(&corners, aspect)) {
+                return self.place_pinned(picture, params, transform.opacity, info);
+            }
+        }
         if rect.fills_frame(width, height) && !through_alpha && transform.opacity >= 1.0 && !transform.rotates {
             return Ok(picture);
         }
@@ -1706,6 +1718,31 @@ impl D3d12Compositor {
         }
         self.images[background.0].fence_value = inputs[0].fence_value;
         self.images[picture.0].fence_value = inputs[1].fence_value;
+        self.images[output.0].premultiplied = true;
+        self.release_image(picture);
+        Ok(output)
+    }
+
+    /// Draws `picture` with its corners pinned where `params` say (see [`pin_params`]), in
+    /// premultiplied colours on transparent.
+    fn place_pinned(&mut self, picture: ImageId, params: [f64; 9], opacity: f64, info: &FrameInfo) -> Result<ImageId, String> {
+        let (width, height) = (self.width, self.height);
+        let pinner = match &mut self.pinner {
+            Some(pinner) => pinner,
+            empty => empty.insert(load_pinner(&self.gpu.context)?),
+        };
+        for (index, value) in params.iter().enumerate() {
+            pinner.set_param(&format!("h{index}"), &[*value]).map_err(|e| format!("pinned place.h{index}: {e}"))?;
+        }
+        pinner.set_param("opacity", &[opacity]).map_err(|e| format!("pinned place.opacity: {e}"))?;
+        let output = self.acquire()?;
+        let pinner = self.pinner.as_mut().expect("built above");
+        let mut inputs = [self.images[picture.0].frame(width, height)];
+        if let Err(message) = Self::run_graph(&self.gpu, pinner, &mut inputs, &mut self.images, output, width, height, info) {
+            self.release_image(output);
+            return Err(message);
+        }
+        self.images[picture.0].fence_value = inputs[0].fence_value;
         self.images[output.0].premultiplied = true;
         self.release_image(picture);
         Ok(output)
@@ -1936,6 +1973,11 @@ const MAX_BLUR_PASSES: f64 = 8.0;
 fn load_censor_mixer(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
     let mut holder = Some(censor_mix_effect(context)?);
     EffectGraph::parse("censor", |_| Ok(("censor".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("censor mix graph: {e}"))
+}
+
+fn load_pinner(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
+    let mut holder = Some(pinned_place_effect(context)?);
+    EffectGraph::parse("place", |_| Ok(("place".to_owned(), holder.take().expect("one effect")))).map_err(|e| format!("pinned place graph: {e}"))
 }
 
 fn load_rotator(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
@@ -2351,6 +2393,45 @@ mod tests {
         assert_eq!(draw(0.0), (255, 0), "no blur leaves the edge as it is");
         let (left, right) = draw(MAX_BLUR_FRACTION);
         assert!(left < 250 && right > 5, "the largest blur, 8 pixels at this height, mixes both sides of the edge: {left} {right}");
+    }
+
+    #[test]
+    fn a_corner_pinned_picture_lands_on_its_corners_in_perspective() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let (width, height) = (compositor.width, compositor.height);
+        // A checker of 8 x 8 cells, white and black, each cell's colour known from its parity.
+        let rgba = (0..width * height).flat_map(|i| {
+            let (x, y) = (i % width, i / width);
+            if (x * 8 / width + y * 8 / height) % 2 == 0 { [255, 255, 255, 255] } else { [0, 0, 0, 255] }
+        }).collect();
+        let picture = StillPicture { width, height, rgba, has_alpha: false };
+        let corners = [[0.2, 0.2], [0.7, 0.1], [0.8, 0.9], [0.3, 0.7]];
+        let unit = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let pin = engine::tracker::homography::Homography::from_quads(&unit, &corners).unwrap();
+        let image = ImageId(compositor.images.push(Image::upload(&compositor.gpu, &picture).expect("an upload")));
+        let transform = ClipTransform { pin: Some(pin), ..ClipTransform::default() };
+        let placed = compositor.place(image, transform, f64::from(width) / f64::from(height), (0.0, 0.0), false, &FrameInfo::new(0.0, 0)).expect("placed");
+        let mut rgba = Vec::new();
+        compositor.read(placed, &mut rgba).expect("read");
+        compositor.release(placed);
+        let pixel = |point: [f64; 2]| {
+            let (x, y) = ((point[0] * f64::from(width)) as u32, (point[1] * f64::from(height)) as u32);
+            let at = ((y * width + x) * 4) as usize;
+            [rgba[at], rgba[at + 3]]
+        };
+        // Every cell's middle, taken through the homography, shows that cell's colour: an affine
+        // (two triangle) warp would put the inner cells off by more than half a cell here.
+        for j in 0..8 {
+            for i in 0..8 {
+                let middle = pin.apply([(f64::from(i) + 0.5) / 8.0, (f64::from(j) + 0.5) / 8.0]).unwrap();
+                let wanted = if (i + j) % 2 == 0 { 255 } else { 0 };
+                assert_eq!(pixel(middle), [wanted, 255], "cell {i}, {j} at {middle:?}");
+            }
+        }
+        // Outside the quad the frame stays transparent.
+        for outside in [[0.05, 0.05], [0.95, 0.5], [0.5, 0.95], [0.1, 0.9]] {
+            assert_eq!(pixel(outside)[1], 0, "{outside:?}");
+        }
     }
 
     /// A compositor of 640x360 on hardware, or `None` without one.
