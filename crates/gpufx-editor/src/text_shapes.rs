@@ -52,6 +52,18 @@ pub fn warm_up_shared() {
 /// The installed font families to offer for a text, sorted, or empty while the font scan of
 /// [`warm_up_shared`] is still running. Never waits for the scan or for a text being drawn; the
 /// list is made once and kept.
+/// The installed family the default font draws with (such as Segoe UI), or `None` while the font
+/// scan of [`warm_up_shared`] is still running or when no font is installed. Never waits.
+pub fn default_family() -> Option<String> {
+    static NAME: OnceLock<Option<String>> = OnceLock::new();
+    if let Some(name) = NAME.get() {
+        return name.clone();
+    }
+    let shared = gpufx_text::shared_if_ready()?;
+    let rasterizer = shared.try_lock().ok()?;
+    NAME.get_or_init(|| rasterizer.default_family().map(str::to_owned)).clone()
+}
+
 pub fn available_families() -> Arc<Vec<String>> {
     static LIST: OnceLock<Arc<Vec<String>>> = OnceLock::new();
     if let Some(list) = LIST.get() {

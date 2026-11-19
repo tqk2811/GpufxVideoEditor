@@ -123,6 +123,7 @@ mod tests {
     fn folding_drops_case_and_vietnamese_accents() {
         assert_eq!(fold("Đường Phố Hà Nội"), "duong pho ha noi");
         assert_eq!(fold("ĐĂNG KÝ"), "dang ky");
+        assert_eq!(fold("İstanbul"), "istanbul");
         assert_eq!(names(&["Mưa rơi", "Nắng"], "mua"), ["Mưa rơi"]);
         assert_eq!(names(&["Mua rơi"], "MƯA"), ["Mua rơi"]);
         assert_eq!(names(&["Đêm trăng"], "dem"), ["Đêm trăng"]);

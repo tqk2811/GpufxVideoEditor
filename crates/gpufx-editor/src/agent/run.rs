@@ -1005,7 +1005,10 @@ fn asset_list(state: &EditorState, kind: Option<&str>, filter: &str, limit: Opti
     let wanted = |name: &str| kind.is_none_or(|kind| kind == name);
     // Sounds and stickers are ranked together, so the best match of any type comes first.
     let mut found: Vec<(Value, crate::search::SearchFields)> = Vec::new();
-    for pack in state.audio_library.packs.iter().filter(|pack| wanted(pack.kind.name())) {
+    // Packs in name order, as the editor's sound list shows them, so an empty filter lists the same order.
+    let mut packs: Vec<_> = state.audio_library.packs.iter().filter(|pack| wanted(pack.kind.name())).collect();
+    packs.sort_by_key(|pack| pack.name.to_lowercase());
+    for pack in packs {
         for sound in &pack.sounds {
             let item = json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped});
             found.push((item, sound.search_fields().other([pack.name.as_str(), pack.id.as_str()])));
@@ -1606,6 +1609,9 @@ mod tests {
         assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("sticker".to_owned()), filter: None, limit: None })), ["asset:sticker/s/star.png"]);
         assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("music".to_owned()), filter: Some("kids".to_owned()), limit: None })), ["asset:music/m/Kids Fun.mp3"]);
         assert!(sources(host.run(AgentRequest::AssetList { kind: Some("sfx".to_owned()), filter: None, limit: None })).is_empty());
+        // Without a filter the packs come in name order, as in the editor, not in load order.
+        host.state.audio_library.packs.push(LibraryPack { kind: AudioPackKind::Music, id: "a".to_owned(), name: "A".to_owned(), version: "1".to_owned(), sounds: vec![LibrarySound { source: "asset:music/a/x.mp3".to_owned(), ..sound("x") }] });
+        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("music".to_owned()), filter: None, limit: None }))[0], "asset:music/a/x.mp3");
         assert_eq!(code(host.run(AgentRequest::AssetList { kind: Some("video".to_owned()), filter: None, limit: None })), "invalid_params");
     }
 

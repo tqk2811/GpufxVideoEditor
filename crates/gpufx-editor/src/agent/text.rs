@@ -11,7 +11,7 @@ use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStyleLibrary};
 use serde_json::{json, Value};
 
 use super::protocol::{AgentError, TextAnimationPatch, TextPatch};
-use crate::text_shapes::{available_families, warm_up_shared};
+use crate::text_shapes::{available_families, default_family, warm_up_shared};
 use crate::search::{rank, take_limit, SearchFields};
 
 fn invalid(message: impl Into<String>) -> AgentError {
@@ -368,7 +368,9 @@ pub fn font_list(library: &FontLibrary, filter: &str, limit: Option<usize>) -> V
     if families.is_empty() {
         warm_up_shared();
     }
-    let default = std::iter::once((json!({"kind": "default"}), SearchFields::new("default").other(["system"])));
+    // The default also matches the family it draws with, so a search for "segoe" finds it too.
+    let default_family = default_family();
+    let default = std::iter::once((json!({"kind": "default"}), SearchFields::new("default").other(default_family.as_deref().into_iter().chain(["system"]))));
     let system = families.iter().map(|family| (json!({"kind": "system", "family": family}), SearchFields::new(family).tags(["system"])));
     let packs = library.fonts.iter().map(|font| (json!({"kind": "pack", "pack": font.pack, "file": font.file, "name": font.name, "pack_name": font.pack_name, "family": font.family}), SearchFields::new(&font.name).tags(["pack"]).other(font.family.as_deref().into_iter().chain([font.pack.as_str(), font.pack_name.as_str(), font.file.as_str()]))));
     let fonts: Vec<Value> = take_limit(rank(default.chain(system).chain(packs), filter, |(_, fields)| fields.clone()), limit).into_iter().map(|(font, _)| font).collect();
