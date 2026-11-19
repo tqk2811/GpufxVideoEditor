@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -63,10 +64,11 @@ pub struct Localized {
     texts: Vec<(String, TextSet)>,
 }
 
-/// The translated parameters of an effect package, by language code.
+/// The translated parameters of an effect package, by language code. Shared: the inspector takes a
+/// copy each frame, which copies no text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParamTranslations {
-    files: Vec<(String, HashMap<String, ParamText>)>,
+    files: Arc<Vec<(String, HashMap<String, ParamText>)>>,
 }
 
 fn text_of(value: Option<&Value>) -> Option<String> {
@@ -189,7 +191,7 @@ impl PackTranslations {
 
     /// The parameters' texts.
     pub fn params(&self) -> ParamTranslations {
-        ParamTranslations { files: self.files.iter().filter(|(_, file)| !file.params.is_empty()).map(|(code, file)| (code.clone(), file.params.clone())).collect() }
+        ParamTranslations { files: Arc::new(self.files.iter().filter(|(_, file)| !file.params.is_empty()).map(|(code, file)| (code.clone(), file.params.clone())).collect()) }
     }
 }
 
@@ -346,6 +348,14 @@ mod tests {
         assert_eq!(pack.name("Vi", ""), "Một");
         assert_eq!(translations.params().label("VI", "a"), Some("Nhãn"));
         assert!(translations.params().json_for("Vi").is_some());
+    }
+
+    #[test]
+    fn a_copy_of_the_parameter_texts_shares_them_as_the_inspector_takes_one_each_frame() {
+        let params = translations().params();
+        let copy = params.clone();
+        assert!(std::sync::Arc::ptr_eq(&params.files, &copy.files), "a clone copies no text");
+        assert_eq!(copy.label("vi", "radius"), Some("Bán kính"));
     }
 
     #[test]
