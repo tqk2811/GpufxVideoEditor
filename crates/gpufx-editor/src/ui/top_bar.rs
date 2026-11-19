@@ -94,7 +94,7 @@ fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeCh
         ui.separator();
         ui.add_enabled_ui(!exporting, |ui| {
             ui.menu_button(language.t(Message::MenuLanguage), |ui| {
-                for choice in Language::ALL {
+                for choice in Language::all() {
                     if ui.radio(choice == language, choice.native_name()).clicked() {
                         requests.push(UiRequest::SetLanguage(choice));
                         ui.close();

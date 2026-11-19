@@ -3555,10 +3555,10 @@ mod tests {
     #[test]
     fn a_refused_edit_is_told_in_the_language_of_the_editor() {
         let mut state = EditorState::default();
-        state.set_language(Language::Vietnamese);
+        state.set_language(Language::from_code("vi").unwrap());
         state.add_clip_from_file(7, Path::new("a.mp4"));
         assert_eq!(state.status(), &Status::Refused(Message::EditTrackNotFound(8)));
-        assert_eq!(Language::Vietnamese.text(&Message::EditTrackNotFound(8)), "Track 8 không tồn tại");
+        assert_eq!(Language::from_code("vi").unwrap().text(&Message::EditTrackNotFound(8)), "Track 8 không tồn tại");
     }
 
     #[test]
@@ -3588,19 +3588,19 @@ mod tests {
         for error in &errors {
             let message = refusal_message(&project, error);
             assert!(!matches!(message, Message::Technical(_)), "{error:?}");
-            assert!(Language::English.text(&message).starts_with("Video track 2"), "{error:?}");
-            assert!(Language::Vietnamese.text(&message).starts_with("Track video 2"), "{error:?}");
+            assert!(Language::ENGLISH.text(&message).starts_with("Video track 2"), "{error:?}");
+            assert!(Language::from_code("vi").unwrap().text(&message).starts_with("Track video 2"), "{error:?}");
         }
         let start = refusal_message(&project, &EditError::TransitionOnEdge { key, edge: "start" });
         let end = refusal_message(&project, &EditError::TransitionOnEdge { key, edge: "end" });
-        assert_ne!(Language::Vietnamese.text(&start), Language::Vietnamese.text(&end));
+        assert_ne!(Language::from_code("vi").unwrap().text(&start), Language::from_code("vi").unwrap().text(&end));
 
         let mismatch = refusal_message(&project, &EditError::TrackKindMismatch { from: TrackKind::Audio, to: TrackKind::Video });
-        assert_eq!(Language::English.text(&mismatch), "A clip cannot move from an audio track to a video track");
-        assert_eq!(Language::Vietnamese.text(&mismatch), "Không thể chuyển clip từ track âm thanh sang track video");
+        assert_eq!(Language::ENGLISH.text(&mismatch), "A clip cannot move from an audio track to a video track");
+        assert_eq!(Language::from_code("vi").unwrap().text(&mismatch), "Không thể chuyển clip từ track âm thanh sang track video");
         assert_eq!(refusal_message(&project, &EditError::TrackNotFound { track: 9 }), Message::EditTrackNotFound(10));
         let invalid = refusal_message(&project, &EditError::Invalid(Vec::new()));
-        assert!(Language::Vietnamese.text(&invalid).starts_with("Kết quả không hợp lệ"));
+        assert!(Language::from_code("vi").unwrap().text(&invalid).starts_with("Kết quả không hợp lệ"));
     }
 
     #[test]

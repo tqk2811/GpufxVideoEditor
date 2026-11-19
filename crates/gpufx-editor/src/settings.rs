@@ -277,8 +277,8 @@ mod tests {
             write_theme(&file, choice).unwrap();
             assert_eq!(saved_theme(&file), choice);
         }
-        assert_eq!(saved_language(&file), Some(Language::Vietnamese), "saving the theme keeps the language");
-        write_language(&file, Language::English).unwrap();
+        assert_eq!(saved_language(&file), Some(Language::from_code("vi").unwrap()), "saving the theme keeps the language");
+        write_language(&file, Language::ENGLISH).unwrap();
         assert_eq!(saved_theme(&file), ThemeChoice::Light, "saving the language keeps the theme");
     }
 
@@ -312,10 +312,10 @@ mod tests {
     #[test]
     fn the_first_run_is_english_and_a_saved_choice_wins() {
         let file = temp_file("first-run");
-        assert_eq!(language_or_default(Some(&file)), Language::English);
-        assert_eq!(language_or_default(None), Language::English);
-        write_language(&file, Language::Vietnamese).unwrap();
-        assert_eq!(language_or_default(Some(&file)), Language::Vietnamese);
+        assert_eq!(language_or_default(Some(&file)), Language::ENGLISH);
+        assert_eq!(language_or_default(None), Language::ENGLISH);
+        write_language(&file, Language::from_code("vi").unwrap()).unwrap();
+        assert_eq!(language_or_default(Some(&file)), Language::from_code("vi").unwrap());
     }
 
     #[test]
@@ -325,11 +325,11 @@ mod tests {
         let sizes = PanelSizes { left: Some(300.0), right: None, timeline: Some(250.5) };
         write_panel_sizes(&file, &sizes).unwrap();
         assert_eq!(saved_panel_sizes(&file), sizes);
-        write_language(&file, Language::Vietnamese).unwrap();
+        write_language(&file, Language::from_code("vi").unwrap()).unwrap();
         assert_eq!(saved_panel_sizes(&file), sizes, "saving the language keeps the sizes");
         write_panel_sizes(&file, &PanelSizes::default()).unwrap();
         assert_eq!(saved_panel_sizes(&file), PanelSizes::default());
-        assert_eq!(saved_language(&file), Some(Language::Vietnamese), "saving the sizes keeps the language");
+        assert_eq!(saved_language(&file), Some(Language::from_code("vi").unwrap()), "saving the sizes keeps the language");
     }
 
     #[test]
@@ -346,10 +346,10 @@ mod tests {
     fn a_saved_language_is_read_back() {
         let file = temp_file("round-trip");
         assert_eq!(saved_language(&file), None);
-        write_language(&file, Language::Vietnamese).unwrap();
-        assert_eq!(saved_language(&file), Some(Language::Vietnamese));
-        write_language(&file, Language::English).unwrap();
-        assert_eq!(saved_language(&file), Some(Language::English));
+        write_language(&file, Language::from_code("vi").unwrap()).unwrap();
+        assert_eq!(saved_language(&file), Some(Language::from_code("vi").unwrap()));
+        write_language(&file, Language::ENGLISH).unwrap();
+        assert_eq!(saved_language(&file), Some(Language::ENGLISH));
     }
 
     #[test]
@@ -379,9 +379,9 @@ mod tests {
         let file = temp_file("corrupt");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "{ not json").unwrap();
-        write_language(&file, Language::Vietnamese).unwrap();
+        write_language(&file, Language::from_code("vi").unwrap()).unwrap();
         assert_eq!(std::fs::read_to_string(set_aside_file(&file)).unwrap(), "{ not json");
-        assert_eq!(saved_language(&file), Some(Language::Vietnamese));
+        assert_eq!(saved_language(&file), Some(Language::from_code("vi").unwrap()));
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
         let file = temp_file("not-an-object");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, "[1,2]").unwrap();
-        write_language(&file, Language::English).unwrap();
+        write_language(&file, Language::ENGLISH).unwrap();
         assert_eq!(std::fs::read_to_string(set_aside_file(&file)).unwrap(), "[1,2]");
     }
 
@@ -400,7 +400,7 @@ mod tests {
         std::fs::write(&file, r#"{"other":1}"#).unwrap();
         // Shared for deletion only: reading fails, but a rename over it would succeed.
         let lock = std::os::windows::fs::OpenOptionsExt::share_mode(&mut std::fs::OpenOptions::new(), 4).read(true).open(&file).unwrap();
-        assert!(write_language(&file, Language::Vietnamese).is_err());
+        assert!(write_language(&file, Language::from_code("vi").unwrap()).is_err());
         drop(lock);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"other":1}"#);
         assert!(!set_aside_file(&file).exists());
@@ -409,8 +409,8 @@ mod tests {
     #[test]
     fn a_missing_file_is_simply_created() {
         let file = temp_file("missing");
-        write_language(&file, Language::Vietnamese).unwrap();
-        assert_eq!(saved_language(&file), Some(Language::Vietnamese));
+        write_language(&file, Language::from_code("vi").unwrap()).unwrap();
+        assert_eq!(saved_language(&file), Some(Language::from_code("vi").unwrap()));
         assert!(!set_aside_file(&file).exists());
     }
 
@@ -419,7 +419,7 @@ mod tests {
         let file = temp_file("other");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, r#"{"other":1}"#).unwrap();
-        write_language(&file, Language::Vietnamese).unwrap();
+        write_language(&file, Language::from_code("vi").unwrap()).unwrap();
         assert_eq!(read_settings(&file).get("other"), Some(&json!(1)));
     }
 }

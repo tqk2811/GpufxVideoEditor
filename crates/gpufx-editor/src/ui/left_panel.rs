@@ -1079,16 +1079,16 @@ mod tests {
     #[test]
     fn the_tooltip_has_the_full_name_the_description_and_the_reason_of_a_missing_preview() {
         let described = entry("packages/gpufx/ffmpeg/blur", "Blur", "Softens the picture");
-        assert_eq!(tile_tooltip("Blur", &described, Language::English, &TileState::Pending), "Blur
+        assert_eq!(tile_tooltip("Blur", &described, Language::ENGLISH, &TileState::Pending), "Blur
 Softens the picture");
         let bare = entry("packages/gpufx/ffmpeg/blur", "Blur", "");
-        assert_eq!(tile_tooltip("Blur", &bare, Language::English, &TileState::Loading), "Blur
+        assert_eq!(tile_tooltip("Blur", &bare, Language::ENGLISH, &TileState::Loading), "Blur
 packages/gpufx/ffmpeg/blur");
-        let failed = tile_tooltip("Blur (ffmpeg)", &described, Language::English, &TileState::Failed("the shader did not compile".to_owned()));
+        let failed = tile_tooltip("Blur (ffmpeg)", &described, Language::ENGLISH, &TileState::Failed("the shader did not compile".to_owned()));
         assert!(failed.starts_with("Blur (ffmpeg)
 Softens the picture
 ") && failed.ends_with("the shader did not compile"), "{failed}");
-        let unavailable = tile_tooltip("Blur", &described, Language::Vietnamese, &TileState::Unavailable("no helper".to_owned()));
+        let unavailable = tile_tooltip("Blur", &described, Language::from_code("vi").unwrap(), &TileState::Unavailable("no helper".to_owned()));
         assert!(unavailable.ends_with("no helper") && unavailable.lines().count() == 3, "{unavailable}");
     }
 }

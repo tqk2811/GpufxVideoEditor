@@ -411,7 +411,7 @@ mod tests {
             let raw = egui::RawInput { events, screen_rect: Some(screen), time: Some(self.time), ..Default::default() };
             let (library, text, request, id) = (&self.library, &mut self.text, &mut self.request, self.id);
             let mut output = self.ctx.run_ui(raw, |ui| {
-                let mut layers = Layers::new(Language::English, library);
+                let mut layers = Layers::new(Language::ENGLISH, library);
                 show(ui, id, text, &mut layers);
                 *request = request.or(layers.file_request);
             });

@@ -502,7 +502,7 @@ mod tests {
         let mut frame = |events: Vec<egui::Event>| {
             let raw = egui::RawInput { events, screen_rect: Some(screen), ..Default::default() };
             let mut output = ctx.run_ui(raw, |ui| {
-                font_combo(ui, id, &mut text, &library, Language::English);
+                font_combo(ui, id, &mut text, &library, Language::ENGLISH);
             });
             output.textures_delta.clear();
         };

@@ -310,7 +310,7 @@ impl ProxyMaker for ChildProxyMaker {
         match outcome {
             Ok(crate::export::ExportOutcome::Finished(_)) => MakeOutcome::Done,
             Ok(crate::export::ExportOutcome::Cancelled) => MakeOutcome::Cancelled,
-            Ok(crate::export::ExportOutcome::Failed(message)) => MakeOutcome::Failed(crate::i18n::Language::English.t(message)),
+            Ok(crate::export::ExportOutcome::Failed(message)) => MakeOutcome::Failed(crate::i18n::Language::ENGLISH.t(message)),
             Err(_) => MakeOutcome::Failed("the proxy thread panicked".to_owned()),
         }
     }

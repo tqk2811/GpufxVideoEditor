@@ -1097,11 +1097,11 @@ mod tests {
     #[test]
     fn tracks_are_numbered_within_their_kind() {
         let kinds = [TrackKind::Video, TrackKind::Audio, TrackKind::Video];
-        assert_eq!(track_label(Language::Vietnamese, &kinds, 0).0, "V1");
-        assert_eq!(track_label(Language::Vietnamese, &kinds, 1).0, "A1");
-        assert_eq!(track_label(Language::Vietnamese, &kinds, 2), ("V2".to_owned(), "Track video 2".to_owned()));
+        assert_eq!(track_label(Language::from_code("vi").unwrap(), &kinds, 0).0, "V1");
+        assert_eq!(track_label(Language::from_code("vi").unwrap(), &kinds, 1).0, "A1");
+        assert_eq!(track_label(Language::from_code("vi").unwrap(), &kinds, 2), ("V2".to_owned(), "Track video 2".to_owned()));
         let kinds = [TrackKind::Sticker, TrackKind::Text, TrackKind::Sticker];
-        assert_eq!(track_label(Language::English, &kinds, 1), ("T1".to_owned(), "Text track 1".to_owned()));
-        assert_eq!(track_label(Language::English, &kinds, 2), ("S2".to_owned(), "Sticker track 2".to_owned()));
+        assert_eq!(track_label(Language::ENGLISH, &kinds, 1), ("T1".to_owned(), "Text track 1".to_owned()));
+        assert_eq!(track_label(Language::ENGLISH, &kinds, 2), ("S2".to_owned(), "Sticker track 2".to_owned()));
     }
 }

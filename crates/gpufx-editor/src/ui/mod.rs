@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn the_status_tooltip_holds_every_message_in_full() {
         let mut state = state();
-        state.set_language(Language::Vietnamese);
+        state.set_language(Language::from_code("vi").unwrap());
         state.report_refused(Message::Technical("too long to fit".to_owned()));
         state.set_preview_error(Some("preview broke".to_owned()));
         state.set_no_sound(Some("no device".to_owned()));
@@ -1026,15 +1026,15 @@ mod tests {
         let mut state = state();
         state.report_refused(Message::Technical("too long".to_owned()));
         assert!(status_summary(&state).contains("Refused: too long"), "the default language");
-        state.set_language(Language::Vietnamese);
+        state.set_language(Language::from_code("vi").unwrap());
         assert!(status_summary(&state).contains("Từ chối: too long"));
-        state.set_language(Language::English);
+        state.set_language(Language::ENGLISH);
         assert!(status_summary(&state).contains("Refused: too long"));
     }
 
     #[test]
     fn the_whole_ui_draws_in_every_language_at_the_narrow_size() {
-        for language in Language::ALL {
+        for language in Language::all() {
             let mut state = state();
             state.set_language(language);
             let ctx = egui::Context::default();

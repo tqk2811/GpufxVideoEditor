@@ -1100,7 +1100,7 @@ fn export_json(state: &EditorState, record: &AgentExport) -> Value {
         None => json!({"state": "running", "done": progress.map_or(0, |p| p.done), "total": progress.map_or(0, |p| p.total)}),
         Some(ExportOutcome::Finished(report)) => json!({"state": "finished", "report": report}),
         Some(ExportOutcome::Cancelled) => json!({"state": "cancelled"}),
-        Some(ExportOutcome::Failed(message)) => json!({"state": "failed", "message": Language::English.text(message)}),
+        Some(ExportOutcome::Failed(message)) => json!({"state": "failed", "message": Language::ENGLISH.text(message)}),
     };
     if let (Value::Object(target), Value::Object(fields)) = (&mut value, fields) {
         target.extend(fields);
@@ -1118,7 +1118,7 @@ fn export_start<H: AgentHost>(host: &mut H, out: &Path, overwrite: bool, codec: 
         return Err(busy(reason));
     }
     if let Some(reason) = export_blocker(state.project()) {
-        return Err(AgentError::new("nothing_to_export", Language::English.text(&reason)));
+        return Err(AgentError::new("nothing_to_export", Language::ENGLISH.text(&reason)));
     }
     let out = std::path::absolute(out).map_err(|e| AgentError::new("invalid_path", e.to_string()))?;
     if out.exists() && !overwrite {
