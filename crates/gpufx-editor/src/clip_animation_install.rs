@@ -2,28 +2,29 @@
 //!
 //! A zip with `"type": "clip-animation"` is unpacked once to
 //! `<user root>/packages/clip-animation/<id lower-cased>/` through the same path as a sticker pack.
-//! It holds no media: only the manifest, whose items are animation curves, and its licence files.
+//! It holds no media: only the manifest, the file of each item under `items/` (see
+//! [`d3d12_backend::clip_animation_pack`] for the layout) and its licence files.
 //! A clip names an item as `"<pack id>/<item id>"` (see [`crate::clip_animation_library`]).
 //!
 //! A shared module for every pack type was considered; the user chose one install module per pack
 //! type, which share only the helpers of [`crate::asset_install`].
 
 use std::fs::{self, File};
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
 use d3d12_backend as shared;
-pub use d3d12_backend::{is_clip_animation_type, ClipAnimationManifest, ClipAnimationManifestItem, CLIP_KINDS, MAX_DEFAULT_DURATION};
-use d3d12_backend::{ManifestProblem, CLIP_ANIMATION_FOLDER};
+pub use d3d12_backend::{is_clip_animation_type, ClipAnimationManifest, ClipAnimationManifestFile, ClipAnimationManifestItem, CLIP_KINDS, MAX_DEFAULT_DURATION};
+use d3d12_backend::{ManifestProblem, CLIP_ANIMATION_FOLDER, CLIP_ANIMATION_ITEMS_FOLDER};
 use zip::ZipArchive;
 
-use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_named_files, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, ExtractLimits, Unpacked, MANIFEST, MAX_COMPRESSION_RATIO};
-use crate::package_import::{entries_of, read_manifest, validate_entries, ImportOutcome, ImportProblem, Limits, MIB};
+use crate::asset_install::{list_pack_folders, ListedPack, PackSummary, check_entry_extensions, check_named_files, clean_leftovers, lock_installs, rename_with_retries, unpack_into_place, ExtractLimits, Unpacked, MAX_COMPRESSION_RATIO};
+use crate::package_import::{entries_of, read_manifest, validate_entries, EntryKind, ImportOutcome, ImportProblem, Limits, ZipEntry, ARCHIVE_LIMITS, MIB};
 
 /// What the `type` of a clip animation pack says, and the folder it goes to.
 pub const CLIP_ANIMATION_TYPE: &str = CLIP_ANIMATION_FOLDER;
-/// A pack is a manifest and a few licence files.
-pub const CLIP_ANIMATION_LIMITS: Limits = Limits { files: 64, total_bytes: 16 * MIB, file_bytes: 8 * MIB };
+/// A pack is a manifest, one small file per item and a few licence files.
+pub const CLIP_ANIMATION_LIMITS: Limits = Limits { files: ARCHIVE_LIMITS.files, total_bytes: 64 * MIB, file_bytes: 8 * MIB };
 const CLIP_ANIMATION_EXTRACT: ExtractLimits = ExtractLimits { limits: CLIP_ANIMATION_LIMITS, max_ratio: MAX_COMPRESSION_RATIO };
 
 /// A clip animation pack that was installed.
@@ -34,8 +35,8 @@ pub struct InstalledClipAnimationPack {
     pub replaced: bool,
 }
 
-/// Parses a manifest. The fields are exactly those of the format.
-pub fn parse_clip_animation_manifest(bytes: &[u8]) -> Result<ClipAnimationManifest, ImportProblem> {
+/// Parses `manifest.json`. The fields are exactly those of the format.
+pub fn parse_clip_animation_manifest(bytes: &[u8]) -> Result<ClipAnimationManifestFile, ImportProblem> {
     shared::parse_clip_animation_manifest(bytes).map_err(import_problem)
 }
 
@@ -53,18 +54,44 @@ fn import_problem(problem: ManifestProblem) -> ImportProblem {
     }
 }
 
-/// A pack holds no media file.
-fn no_media(_: &str) -> bool {
-    false
+/// A pack holds no media file, only the files of its items besides the manifest and documents.
+fn is_item_file(name: &str) -> bool {
+    name.strip_prefix(CLIP_ANIMATION_ITEMS_FOLDER).and_then(|rest| rest.strip_prefix('/')).is_some_and(|file| file.to_ascii_lowercase().ends_with(".json"))
 }
 
-/// The clip animation packs installed under `root`, as the package manager lists them.
+/// The files of the zip under `items/`: the name relative to that folder, and the entry's own name.
+fn item_entries(entries: &[ZipEntry]) -> Vec<(String, String)> {
+    let prefix = format!("{CLIP_ANIMATION_ITEMS_FOLDER}/");
+    entries.iter().filter(|entry| entry.kind == EntryKind::File).filter_map(|entry| entry.name.replace('\\', "/").strip_prefix(&prefix).map(|file| (file.to_owned(), entry.name.clone()))).collect()
+}
+
+/// The bytes of the entry `name`, at most `limit` of them.
+fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let mut entry = zip.by_name(name).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    entry.by_ref().take(limit + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > limit {
+        return Err("it is too large".to_owned());
+    }
+    Ok(bytes)
+}
+
+/// The clip animation packs installed under `root`, as the package manager lists them. A pack whose
+/// item files do not fit its manifest is listed with the problem, as the reader refuses it.
 pub fn list_installed(root: &Path) -> Vec<ListedPack> {
-    list_pack_folders(root, CLIP_ANIMATION_TYPE, |bytes| {
+    let mut listed = list_pack_folders(root, CLIP_ANIMATION_TYPE, |bytes| {
         let manifest = parse_clip_animation_manifest(bytes)?;
-        check_clip_animation_fields(&manifest)?;
+        shared::check_clip_animation_manifest_file(&manifest).map_err(import_problem)?;
         Ok(PackSummary { id: manifest.id, name: manifest.name, version: manifest.version, items: manifest.items.len() })
-    })
+    });
+    for pack in &mut listed {
+        if pack.read.is_ok() {
+            if let Err(message) = shared::read_clip_animation_pack(&pack.folder) {
+                pack.read = Err(message);
+            }
+        }
+    }
+    listed
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. An existing pack of the same id is
@@ -80,14 +107,20 @@ pub fn install_clip_animation_pack(source: &Path, user_root: &Path, overwrite: b
     let mut zip = ZipArchive::new(BufReader::new(file)).map_err(|e| ImportProblem::NotAZip(e.to_string()))?;
     let entries = entries_of(&mut zip, CLIP_ANIMATION_LIMITS)?;
     validate_entries(&entries, CLIP_ANIMATION_LIMITS)?;
-    check_entry_extensions(&entries, no_media)?;
-    let manifest = parse_clip_animation_manifest(&read_manifest(&mut zip)?)?;
-    check_clip_animation_fields(&manifest)?;
-    check_named_files(&manifest.license.files, std::iter::empty(), &entries, no_media, "media")?;
+    check_entry_extensions(&entries, is_item_file)?;
+    let file = parse_clip_animation_manifest(&read_manifest(&mut zip)?)?;
+    let items = item_entries(&entries);
+    let names: Vec<String> = items.iter().map(|(file, _)| file.clone()).collect();
+    let manifest = shared::assemble_clip_animation_pack(file, &names, |file| {
+        let entry = items.iter().find(|(name, _)| name == file).map(|(_, entry)| entry.as_str()).unwrap_or(file);
+        read_entry(&mut zip, entry, CLIP_ANIMATION_LIMITS.file_bytes)
+    })
+    .map_err(import_problem)?;
+    check_named_files(&manifest.license.files, std::iter::empty(), &entries, is_item_file, "an item")?;
 
     let id = manifest.id.to_ascii_lowercase();
     let check_unpacked = |temporary: &Path| {
-        let unpacked = parse_clip_animation_manifest(&fs::read(temporary.join(MANIFEST)).map_err(|e| ImportProblem::WriteFailed(e.to_string()))?)?;
+        let unpacked = shared::read_clip_animation_pack(temporary).map_err(ImportProblem::BadManifest)?;
         if unpacked == manifest {
             Ok(())
         } else {
@@ -130,8 +163,22 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
+    /// The zip of a pack written with its items inside the manifest, split into the files of the
+    /// format, with `extra` files added.
+    fn pack_with(manifest: &str, extra: &[(&str, &[u8])]) -> Vec<u8> {
+        let files = d3d12_backend::split_clip_animation_pack(manifest);
+        let mut all: Vec<(&str, &[u8])> = files.iter().map(|(name, text)| (name.as_str(), text.as_bytes())).collect();
+        all.push(("LICENSE.txt", b"license"));
+        all.extend_from_slice(extra);
+        zip_of(&all)
+    }
+
     fn pack(manifest: &str) -> Vec<u8> {
-        zip_of(&[("manifest.json", manifest.as_bytes()), ("LICENSE.txt", b"license")])
+        pack_with(manifest, &[])
+    }
+
+    fn installed(root: &Path) -> ClipAnimationManifest {
+        d3d12_backend::read_clip_animation_pack(&installed_folder(root)).unwrap()
     }
 
     fn written(dir: &Path, bytes: &[u8]) -> PathBuf {
@@ -150,8 +197,9 @@ mod tests {
         let root = dir.join("root");
         let outcome = install_zip(&written(&dir, &pack(MANIFEST_JSON)), &root, false).unwrap();
         assert_eq!(outcome, ImportOutcome::ClipAnimationInstalled(InstalledClipAnimationPack { id: "avs-moves".to_owned(), name: "Moves".to_owned(), replaced: false }));
-        let manifest = parse_clip_animation_manifest(&fs::read(installed_folder(&root).join("manifest.json")).unwrap()).unwrap();
+        let manifest = installed(&root);
         assert_eq!(manifest.items[0].group(), Some(AnimationGroup::Enter));
+        assert!(installed_folder(&root).join("items/rise.json").is_file());
         assert!(!root.join("packages/.install-tmp").exists(), "no working folder stays");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -175,7 +223,8 @@ mod tests {
             ("no track", full.replace(r#""tracks":{"dy""#, r#""tracks":{},"x":{"dy""#), "BadManifest"),
             ("an unknown property", full.replace(r#""opacity":"#, r#""hue":"#), "BadManifest"),
             ("an unsafe item id", full.replace(r#""id":"rise""#, r#""id":"a/b""#), "BadManifest"),
-            ("a duplicate item id", full.replace(item, &format!("{item},{}", item.replace(r#""id":"rise""#, r#""id":"RISE""#))), "BadManifest"),
+            // items/rise.json and items/RISE.json are one name to the zip check, which refuses it first.
+            ("a duplicate item id", full.replace(item, &format!("{item},{}", item.replace(r#""id":"rise""#, r#""id":"RISE""#))), "Entry"),
             ("another format", full.replacen(r#""format":1"#, r#""format":2"#, 1), "BadManifest"),
             ("no items", full.split(r#""items""#).next().unwrap().to_owned() + r#""items":[]}"#, "BadManifest"),
             ("a licence file not in the zip", full.replace(r#""LICENSE.txt""#, r#""GONE.txt""#), "BadManifest"),
@@ -191,14 +240,16 @@ mod tests {
 
     #[test]
     fn an_effect_is_kept_but_a_media_file_is_refused() {
-        let with_effect = MANIFEST_JSON.replace(r#""kind":"in""#, r#""kind":"in","effect":{"package":"x.y"}"#);
-        let manifest = parse_clip_animation_manifest(with_effect.as_bytes()).unwrap();
-        check_clip_animation_fields(&manifest).unwrap();
-        assert!(manifest.items[0].effect.is_some());
-
         let dir = scratch("entries");
         let root = dir.join("root");
-        let image = zip_of(&[("manifest.json", MANIFEST_JSON.as_bytes()), ("LICENSE.txt", b"l"), ("smile.png", b"p")]);
+        let with_effect = MANIFEST_JSON.replace(r#""kind":"in""#, r#""kind":"in","effect":{"package":"x.y"}"#);
+        install_zip(&written(&dir, &pack(&with_effect)), &root, false).unwrap();
+        let manifest = installed(&root);
+        check_clip_animation_fields(&manifest).unwrap();
+        assert!(manifest.items[0].effect.is_some());
+        let _ = fs::remove_dir_all(&root);
+
+        let image = pack_with(MANIFEST_JSON, &[("smile.png", b"p")]);
         assert_eq!(install_zip(&written(&dir, &image), &root, false), Err(ImportProblem::Entry { entry: "smile.png".to_owned(), problem: EntryProblem::ExtensionNotAllowed }));
         assert!(!root.join("packages/clip-animation").exists());
         let _ = fs::remove_dir_all(&dir);
@@ -212,9 +263,58 @@ mod tests {
         let newer = written(&dir, &pack(&MANIFEST_JSON.replace(r#""name":"Moves""#, r#""name":"New Name""#)));
         assert_eq!(install_zip(&newer, &root, false), Ok(ImportOutcome::AlreadyInstalled { name: "Moves".to_owned() }));
         assert!(matches!(install_zip(&newer, &root, true), Ok(ImportOutcome::ClipAnimationInstalled(InstalledClipAnimationPack { replaced: true, .. }))));
-        let manifest = parse_clip_animation_manifest(&fs::read(installed_folder(&root).join("manifest.json")).unwrap()).unwrap();
-        assert_eq!(manifest.name, "New Name");
+        assert_eq!(installed(&root).name, "New Name");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    const ITEM_A: &str = r#"{"id":"a","name":"A","kind":"in","default_duration":0.5,"curve":{"tracks":{"opacity":[{"t":0,"value":0},{"t":1,"value":1,"ease":"bounce"}]}}}"#;
+
+    fn head(items: &str) -> String {
+        format!(r#"{{"format":1,"type":"clip-animation","id":"Avs-Moves","name":"Moves","version":"1.0.0","license":{{"spdx":"MIT","files":["LICENSE.txt"]}},"items":[{items}]}}"#)
+    }
+
+    fn item(id: &str) -> String {
+        ITEM_A.replace(r#""id":"a""#, &format!(r#""id":"{id}""#))
+    }
+
+    #[test]
+    fn a_pack_of_item_files_keeps_the_order_of_its_manifest() {
+        let dir = scratch("order");
+        let root = dir.join("root");
+        // The zip holds the files in another order than the manifest lists them.
+        let zip = zip_of(&[
+            ("items/c.json", item("c").as_bytes()),
+            ("manifest.json", head(r#""b","c","a""#).as_bytes()),
+            ("items/a.json", item("a").as_bytes()),
+            ("LICENSE.txt", b"l"),
+            ("items/b.json", item("b").replace("\"bounce\"", r#"{"steps":{"count":3,"position":"start"}}"#).as_bytes()),
+        ]);
+        install_zip(&written(&dir, &zip), &root, false).unwrap();
+        let manifest = installed(&root);
+        assert_eq!(manifest.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec!["b", "c", "a"]);
+        assert_eq!(list_installed(&root)[0].read.as_ref().map(|summary| summary.items), Ok(3));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn item_files_that_do_not_fit_the_manifest_are_refused() {
+        let cases: [(&str, Vec<(String, String)>, &str); 6] = [
+            ("a missing item file", vec![("manifest.json".into(), head(r#""a","b""#)), ("items/a.json".into(), item("a"))], "no file"),
+            ("an id that is not the file name", vec![("manifest.json".into(), head(r#""a","b""#)), ("items/a.json".into(), item("a")), ("items/b.json".into(), item("c"))], "not \"b\""),
+            ("a file the manifest does not list", vec![("manifest.json".into(), head(r#""a""#)), ("items/a.json".into(), item("a")), ("items/extra.json".into(), item("extra"))], "not an item the manifest lists"),
+            ("an id listed twice", vec![("manifest.json".into(), head(r#""a","A""#)), ("items/a.json".into(), item("a"))], "used twice"),
+            ("an item list of objects", vec![("manifest.json".into(), head(ITEM_A)), ("items/a.json".into(), item("a"))], "invalid type"),
+            ("an ease with bad numbers", vec![("manifest.json".into(), head(r#""a""#)), ("items/a.json".into(), ITEM_A.replace("\"bounce\"", r#"{"bounce":{"bounces":0}}"#))], "bad numbers"),
+        ];
+        for (name, files, wanted) in cases {
+            let dir = scratch("layout");
+            let mut all: Vec<(&str, &[u8])> = files.iter().map(|(name, text)| (name.as_str(), text.as_bytes())).collect();
+            all.push(("LICENSE.txt", b"l"));
+            let error = install_zip(&written(&dir, &zip_of(&all)), &dir.join("root"), false).unwrap_err();
+            assert!(matches!(&error, ImportProblem::BadManifest(message) if message.contains(wanted)), "{name}: {error:?}");
+            assert!(!dir.join("root/packages/clip-animation").exists(), "{name}: nothing installed");
+            let _ = fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

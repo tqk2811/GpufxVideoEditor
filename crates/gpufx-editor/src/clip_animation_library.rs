@@ -183,11 +183,10 @@ mod tests {
 
     fn write_pack(root: &Path, folder: &str, name: &str) {
         let path = root.join("packages/clip-animation").join(folder);
-        std::fs::create_dir_all(&path).unwrap();
         let manifest = format!(
             r#"{{"format":1,"type":"clip-animation","id":"{folder}","name":"{name}","version":"1.0.0","license":{{"spdx":"MIT","files":["LICENSE.txt"]}},"items":[{{"id":"rise","name":"Rise","kind":"in","default_duration":0.5,"applies_to":["text"],"curve":{{"tracks":{{"dy":[{{"t":0,"value":0.1}},{{"t":1,"value":0}}]}}}}}},{{"id":"wave","name":"Wave","kind":"loop","default_duration":2,"curve":{{"tracks":{{"rotation":[{{"t":0,"value":0}},{{"t":0.5,"value":10}},{{"t":1,"value":0}}]}}}}}}]}}"#
         );
-        std::fs::write(path.join("manifest.json"), manifest).unwrap();
+        d3d12_backend::write_clip_animation_pack(&path, &manifest);
     }
 
     #[test]
@@ -219,14 +218,13 @@ mod tests {
         // pack of the same id in root b is the one both readers use.
         write_pack(&b, "shared", "From B");
         write_pack(&a, "shared", "From A");
-        let manifest = a.join("packages/clip-animation/shared/manifest.json");
-        let broken = std::fs::read_to_string(&manifest).unwrap().replace(r#""t":1,"value":0"#, r#""t":2,"value":0"#);
-        std::fs::write(&manifest, broken).unwrap();
+        let item = a.join("packages/clip-animation/shared/items/rise.json");
+        let broken = std::fs::read_to_string(&item).unwrap().replace(r#""t":1,"value":0"#, r#""t":2,"value":0"#);
+        std::fs::write(&item, broken).unwrap();
         write_pack(&a, "only-a", "Only A");
         // An item with only an effect whose package is not installed is offered by neither.
         let effect_only = a.join("packages/clip-animation/effect-only");
-        std::fs::create_dir_all(&effect_only).unwrap();
-        std::fs::write(effect_only.join("manifest.json"), r#"{"format":1,"type":"clip-animation","id":"effect-only","name":"E","version":"1.0.0","license":{"spdx":"MIT","files":["LICENSE.txt"]},"items":[{"id":"wipe","name":"Wipe","kind":"in","default_duration":1,"effect":{"package":"test.absent"}}]}"#).unwrap();
+        d3d12_backend::write_clip_animation_pack(&effect_only, r#"{"format":1,"type":"clip-animation","id":"effect-only","name":"E","version":"1.0.0","license":{"spdx":"MIT","files":["LICENSE.txt"]},"items":[{"id":"wipe","name":"Wipe","kind":"in","default_duration":1,"effect":{"package":"test.absent"}}]}"#);
 
         let roots = [a, b];
         let library = scan_clip_animation_packs(&roots);

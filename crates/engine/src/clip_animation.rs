@@ -79,9 +79,42 @@ impl AnimationGroup {
     }
 }
 
-/// How a segment of a curve goes from one keyframe to the next. `apply(0)` is 0 and `apply(1)` is
-/// 1; between them a value may leave 0..1 (back, elastic).
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+/// Which end of a [`Ease::Power`] curve is slow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PowerMode {
+    /// `u^e`: starts slow.
+    #[default]
+    In,
+    /// `1 - (1 - u)^e`: ends slow.
+    Out,
+    /// The in curve over the first half and the out curve over the second.
+    InOut,
+}
+
+/// Where the jumps of a [`Ease::Steps`] staircase are, as the jump terms of CSS `steps()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StepPosition {
+    /// A jump at the start of every step (CSS `jump-start`).
+    Start,
+    /// A jump at the end of every step (CSS `jump-end`).
+    #[default]
+    End,
+    /// Jumps at both ends (CSS `jump-both`): `count + 1` jumps.
+    Both,
+    /// No jump at either end (CSS `jump-none`): `count - 1` jumps, so `count` must be 2 or more.
+    None,
+}
+
+/// How a segment of a curve goes from one keyframe to the next. `apply(0)` is exactly 0 and
+/// `apply(1)` exactly 1; between them a value may leave 0..1 (back, elastic, wave).
+///
+/// In JSON (camelCase): a bare name such as `"outCubic"`, or an object with the numbers, such as
+/// `{"backOut":{"amplitude":1.70158}}`. `"elastic"` and `"bounce"` may also be written bare, for
+/// their defaults; the numbers of `power`, `elastic`, `bounce`, `steps` and `wave` that are left out
+/// take their defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Ease {
     #[default]
@@ -102,26 +135,224 @@ pub enum Ease {
     BackIn { amplitude: f64 },
     /// Goes past 1 a little before settling; `amplitude` 1.70158 is the usual one.
     BackOut { amplitude: f64 },
-    /// Springs past 1 and back a few times before settling (out elastic).
-    Elastic,
-    /// Bounces on 1 like a dropped ball (out bounce).
-    Bounce,
+    /// Springs past 1 and back a few times before settling (out elastic, the easings.net form):
+    /// `1 + a * 2^(-10u) * sin((u - s) * 2π / p)` with `s = p / 2π * asin(1 / a)`, so it starts at
+    /// 0. `amplitude` (`a`, at least 1) scales the swings and `period` (`p`, above 0) is their length
+    /// in parts of the segment. The defaults (1 and 0.3) are the classic out elastic.
+    Elastic { amplitude: f64, period: f64 },
+    /// Falls onto 1 like a dropped ball and bounces on it: `bounces` arcs touch 1 in all (the fall
+    /// and `bounces - 1` rebounds, 1 to 20), the last at the end. Each rebound leaves with `decay`
+    /// (in 0..1) times the speed of the one before, so it lasts `decay` times as long and rises
+    /// `decay²` times as high (a coefficient of restitution). The defaults (4 and 0.5) give exactly
+    /// the classic out bounce (rebounds of 1/4, 1/16 and 1/64).
+    Bounce { bounces: u32, decay: f64 },
+    /// A power curve of `exponent` (finite, above 0); see [`PowerMode`].
+    Power { exponent: f64, mode: PowerMode },
+    /// A staircase of `count` steps (1 to 1000) as CSS `steps(count, position)`. Its ends stay 0
+    /// and 1 whatever the position: a staircase that jumps at its start still begins at 0.
+    Steps { count: u32, position: StepPosition },
+    /// Linear progress with a sine wobble that is 0 at both ends:
+    /// `u + amplitude * (sin(2π c u) - u * sin(2π c)) * (1 - u)^decay`, `c` being `cycles` (above
+    /// 0). The `- u * sin(2π c)` term only matters when `cycles` is not whole, and makes the end
+    /// exactly 1 whatever `decay` is; `decay` (at least 0) fades the wobble toward the end, 0 keeps
+    /// it even. `amplitude` may be negative.
+    Wave { amplitude: f64, cycles: f64, decay: f64 },
     /// A CSS `cubic-bezier(x1, y1, x2, y2)`.
     CubicBezier([f64; 4]),
+}
+
+/// What the JSON of an [`Ease`] may hold: the object forms with their defaults. A bare `"elastic"`
+/// or `"bounce"` is handled before (see the `Deserialize` of [`Ease`]).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+enum EaseData {
+    Linear,
+    Hold,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    InCubic,
+    OutCubic,
+    InSine,
+    OutSine,
+    InOutSine,
+    OutExpo,
+    BackIn {
+        amplitude: f64,
+    },
+    BackOut {
+        amplitude: f64,
+    },
+    Elastic {
+        #[serde(default = "default_elastic_amplitude")]
+        amplitude: f64,
+        #[serde(default = "default_elastic_period")]
+        period: f64,
+    },
+    Bounce {
+        #[serde(default = "default_bounces")]
+        bounces: u32,
+        #[serde(default = "default_bounce_decay")]
+        decay: f64,
+    },
+    Power {
+        #[serde(default = "default_power_exponent")]
+        exponent: f64,
+        #[serde(default)]
+        mode: PowerMode,
+    },
+    Steps {
+        #[serde(default = "default_step_count")]
+        count: u32,
+        #[serde(default)]
+        position: StepPosition,
+    },
+    Wave {
+        #[serde(default = "default_wave_amplitude")]
+        amplitude: f64,
+        #[serde(default = "default_wave_cycles")]
+        cycles: f64,
+        #[serde(default)]
+        decay: f64,
+    },
+    CubicBezier([f64; 4]),
+}
+
+fn default_elastic_amplitude() -> f64 {
+    Ease::ELASTIC.amplitude()
+}
+fn default_elastic_period() -> f64 {
+    0.3
+}
+fn default_bounces() -> u32 {
+    4
+}
+fn default_bounce_decay() -> f64 {
+    0.5
+}
+fn default_power_exponent() -> f64 {
+    3.0
+}
+fn default_step_count() -> u32 {
+    4
+}
+fn default_wave_amplitude() -> f64 {
+    0.1
+}
+fn default_wave_cycles() -> f64 {
+    2.0
+}
+
+impl From<EaseData> for Ease {
+    fn from(data: EaseData) -> Self {
+        match data {
+            EaseData::Linear => Ease::Linear,
+            EaseData::Hold => Ease::Hold,
+            EaseData::EaseIn => Ease::EaseIn,
+            EaseData::EaseOut => Ease::EaseOut,
+            EaseData::EaseInOut => Ease::EaseInOut,
+            EaseData::InCubic => Ease::InCubic,
+            EaseData::OutCubic => Ease::OutCubic,
+            EaseData::InSine => Ease::InSine,
+            EaseData::OutSine => Ease::OutSine,
+            EaseData::InOutSine => Ease::InOutSine,
+            EaseData::OutExpo => Ease::OutExpo,
+            EaseData::BackIn { amplitude } => Ease::BackIn { amplitude },
+            EaseData::BackOut { amplitude } => Ease::BackOut { amplitude },
+            EaseData::Elastic { amplitude, period } => Ease::Elastic { amplitude, period },
+            EaseData::Bounce { bounces, decay } => Ease::Bounce { bounces, decay },
+            EaseData::Power { exponent, mode } => Ease::Power { exponent, mode },
+            EaseData::Steps { count, position } => Ease::Steps { count, position },
+            EaseData::Wave { amplitude, cycles, decay } => Ease::Wave { amplitude, cycles, decay },
+            EaseData::CubicBezier(points) => Ease::CubicBezier(points),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Ease {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value.as_str() {
+            Some("elastic") => Ok(Ease::ELASTIC),
+            Some("bounce") => Ok(Ease::BOUNCE),
+            _ => EaseData::deserialize(value).map(Ease::from).map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 impl Ease {
     /// The usual amplitude of [`Ease::BackIn`] and [`Ease::BackOut`].
     pub const BACK_AMPLITUDE: f64 = 1.70158;
+    /// The out elastic with its default numbers (what a bare `"elastic"` is).
+    pub const ELASTIC: Ease = Ease::Elastic { amplitude: 1.0, period: 0.3 };
+    /// The out bounce with its default numbers (what a bare `"bounce"` is).
+    pub const BOUNCE: Ease = Ease::Bounce { bounces: 4, decay: 0.5 };
+    /// The most steps of [`Ease::Steps`] and bounces of [`Ease::Bounce`].
+    pub const MAX_STEPS: u32 = 1000;
+    pub const MAX_BOUNCES: u32 = 20;
 
-    /// Whether the numbers of the ease make a curve: a finite amplitude, and a bezier with finite
-    /// points whose x lie in 0..1, as CSS asks.
+    /// The amplitude of an elastic, back or wave ease; 0 for the others.
+    fn amplitude(self) -> f64 {
+        match self {
+            Ease::Elastic { amplitude, .. } | Ease::BackIn { amplitude } | Ease::BackOut { amplitude } | Ease::Wave { amplitude, .. } => amplitude,
+            _ => 0.0,
+        }
+    }
+
+    /// Whether the numbers of the ease make a curve: a finite back amplitude, a bezier with finite
+    /// points whose x lie in 0..1 (as CSS asks), and the ranges each parametric ease documents.
     pub fn is_valid(self) -> bool {
         match self {
             Ease::BackIn { amplitude } | Ease::BackOut { amplitude } => amplitude.is_finite(),
             Ease::CubicBezier(points) => points.iter().all(|p| p.is_finite()) && (0.0..=1.0).contains(&points[0]) && (0.0..=1.0).contains(&points[2]),
+            Ease::Elastic { amplitude, period } => amplitude.is_finite() && amplitude >= 1.0 && period.is_finite() && period > 0.0,
+            Ease::Bounce { bounces, decay } => (1..=Self::MAX_BOUNCES).contains(&bounces) && decay.is_finite() && decay > 0.0 && decay < 1.0,
+            Ease::Power { exponent, .. } => exponent.is_finite() && exponent > 0.0,
+            Ease::Steps { count, position } => (1..=Self::MAX_STEPS).contains(&count) && (position != StepPosition::None || count >= 2),
+            Ease::Wave { amplitude, cycles, decay } => amplitude.is_finite() && cycles.is_finite() && cycles > 0.0 && decay.is_finite() && decay >= 0.0,
             _ => true,
         }
+    }
+
+    /// Bounds of `apply` over 0..1: no value of the ease is below the first or above the second.
+    /// Exact for the eases that stay in 0..1, from the formula for a wave and a bezier, and
+    /// measured densely, with a margin, for back and elastic.
+    pub fn range(self) -> (f64, f64) {
+        match self {
+            Ease::BackIn { .. } | Ease::BackOut { .. } => self.sampled_range(),
+            Ease::Elastic { amplitude, period } => {
+                // A short period swings faster than the samples could follow; |sin| <= 1 bounds it.
+                if period >= 0.02 {
+                    self.sampled_range()
+                } else {
+                    (1.0 - amplitude, 1.0 + amplitude)
+                }
+            }
+            Ease::Wave { amplitude, cycles, .. } => {
+                // |sin(2π c u) - u sin(2π c)| <= 1 + |sin(2π c)|, and (1 - u)^decay <= 1.
+                let swing = amplitude.abs() * (1.0 + (2.0 * PI * cycles).sin().abs());
+                (-swing, 1.0 + swing)
+            }
+            // The curve stays in the hull of its control points.
+            Ease::CubicBezier([_, y1, _, y2]) => (0f64.min(y1).min(y2), 1f64.max(y1).max(y2)),
+            _ => (0.0, 1.0),
+        }
+    }
+
+    /// The range of `apply` from samples, widened by how far a smooth curve can bulge between two
+    /// samples (`f'' h² / 8` for a bound `f''` of its second derivative), doubled.
+    fn sampled_range(self) -> (f64, f64) {
+        const SAMPLES: u32 = 8192;
+        let step = 1.0 / f64::from(SAMPLES);
+        let amplitude = self.amplitude().abs();
+        let curvature = match self {
+            Ease::Elastic { period, .. } => amplitude * (2.0 * PI / period + 10.0 * std::f64::consts::LN_2).powi(2),
+            // (a + 1) t³ - a t²: |f''| <= 6 (a + 1) + 2 a.
+            _ => 8.0 * amplitude + 6.0,
+        };
+        let margin = curvature * step * step / 4.0 + 1e-12;
+        let (low, high) = (0..=SAMPLES).map(|i| self.apply(f64::from(i) * step)).fold((0.0f64, 1.0f64), |(low, high), v| (low.min(v), high.max(v)));
+        (low - margin, high + margin)
     }
 
     /// Where `t`, between 0 and 1, lands on the curve.
@@ -153,34 +384,83 @@ impl Ease {
             }
             Ease::BackIn { amplitude } => (amplitude + 1.0) * t * t * t - amplitude * t * t,
             Ease::BackOut { amplitude } => 1.0 + (amplitude + 1.0) * (t - 1.0).powi(3) + amplitude * (t - 1.0).powi(2),
-            Ease::Elastic => {
+            Ease::Elastic { amplitude, period } => {
                 if t <= 0.0 || t >= 1.0 {
                     t
                 } else {
-                    2f64.powf(-10.0 * t) * ((t * 10.0 - 0.75) * (2.0 * PI / 3.0)).sin() + 1.0
+                    let shift = period / (2.0 * PI) * (1.0 / amplitude).asin();
+                    amplitude * 2f64.powf(-10.0 * t) * ((t - shift) * (2.0 * PI / period)).sin() + 1.0
                 }
             }
-            Ease::Bounce => out_bounce(t),
+            Ease::Bounce { bounces, decay } => out_bounce(t, bounces, decay),
+            Ease::Power { exponent, mode } => match mode {
+                PowerMode::In => t.powf(exponent),
+                PowerMode::Out => 1.0 - (1.0 - t).powf(exponent),
+                PowerMode::InOut => {
+                    if t < 0.5 {
+                        0.5 * (2.0 * t).powf(exponent)
+                    } else {
+                        1.0 - 0.5 * (2.0 - 2.0 * t).powf(exponent)
+                    }
+                }
+            },
+            Ease::Steps { count, position } => steps(t, count, position),
+            Ease::Wave { amplitude, cycles, decay } => {
+                if t >= 1.0 {
+                    1.0
+                } else {
+                    let turn = 2.0 * PI * cycles;
+                    t + amplitude * ((turn * t).sin() - t * turn.sin()) * (1.0 - t).powf(decay)
+                }
+            }
             Ease::CubicBezier([x1, y1, x2, y2]) => cubic_bezier(x1, y1, x2, y2, t),
         }
     }
 }
 
-fn out_bounce(t: f64) -> f64 {
-    const N: f64 = 7.5625;
-    const D: f64 = 2.75;
-    if t < 1.0 / D {
-        N * t * t
-    } else if t < 2.0 / D {
-        let t = t - 1.5 / D;
-        N * t * t + 0.75
-    } else if t < 2.5 / D {
-        let t = t - 2.25 / D;
-        N * t * t + 0.9375
-    } else {
-        let t = t - 2.625 / D;
-        N * t * t + 0.984375
+/// The out bounce of [`Ease::Bounce`]. In units where the fall lasts 1, arc `k` (from 1) lasts
+/// `2 decay^k` and rises `decay^(2k)` below 1.
+fn out_bounce(t: f64, bounces: u32, decay: f64) -> f64 {
+    if t >= 1.0 {
+        return 1.0;
     }
+    let total = 1.0 + (1..bounces).map(|k| 2.0 * decay.powi(k as i32)).sum::<f64>();
+    let mut x = t * total;
+    if x < 1.0 {
+        return x * x;
+    }
+    x -= 1.0;
+    for k in 1..bounces {
+        let half = decay.powi(k as i32);
+        if x < 2.0 * half || k + 1 == bounces {
+            let c = (x - half).min(half);
+            return 1.0 - half * half + c * c;
+        }
+        x -= 2.0 * half;
+    }
+    1.0
+}
+
+/// CSS `steps(count, position)` at `t`, with its ends kept at 0 and 1.
+fn steps(t: f64, count: u32, position: StepPosition) -> f64 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let count = f64::from(count);
+    let mut step = (t * count).floor();
+    if matches!(position, StepPosition::Start | StepPosition::Both) {
+        step += 1.0;
+    }
+    let jumps = match position {
+        StepPosition::Start | StepPosition::End => count,
+        StepPosition::Both => count + 1.0,
+        StepPosition::None => count - 1.0,
+    }
+    .max(1.0);
+    (step.min(jumps) / jumps).clamp(0.0, 1.0)
 }
 
 /// The `y` of the CSS cubic Bézier through (0,0), (x1,y1), (x2,y2), (1,1) where its `x` is `x`.
@@ -358,18 +638,28 @@ struct Built {
     max_scale: f64,
 }
 
-/// How many steps of `t` measure the largest scale of a curve.
-const MEASURE_STEPS: u32 = 2000;
+/// The largest size the track of `property` ever gives, by the bounds of its eases (see
+/// [`Ease::range`]), so an ease that overshoots between samples is bounded all the same. The rest
+/// value when the curve has no such track.
+fn track_bound(curve: &AnimationCurve, property: CurveProperty) -> f64 {
+    let Some(keys) = curve.tracks.get(&property).filter(|keys| !keys.is_empty()) else {
+        return property.rest().abs();
+    };
+    let mut bound = keys.iter().map(|key| key.value.abs()).fold(0.0, f64::max);
+    for pair in keys.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let (low, high) = a.ease.range();
+        bound = bound.max((a.value + (b.value - a.value) * low).abs()).max((a.value + (b.value - a.value) * high).abs());
+    }
+    bound
+}
 
-/// Whether `curve` turns the picture, and the largest scale it gives.
+/// Whether `curve` turns the picture, and a bound of the largest scale it gives: the bound of the
+/// scale track times the larger bound of the width and height tracks.
 fn measure(curve: &AnimationCurve) -> (bool, f64) {
     let rotates = curve.tracks.get(&CurveProperty::Rotation).is_some_and(|keys| keys.iter().any(|key| key.value != 0.0));
-    let max_scale = (0..=MEASURE_STEPS)
-        .map(|step| {
-            let pose = evaluate_curve(curve, f64::from(step) / f64::from(MEASURE_STEPS));
-            pose.scale * pose.scale_x.max(pose.scale_y)
-        })
-        .fold(1.0, f64::max);
+    let bound = |property| track_bound(curve, property);
+    let max_scale = (bound(CurveProperty::Scale) * bound(CurveProperty::ScaleX).max(bound(CurveProperty::ScaleY))).max(1.0);
     (rotates, max_scale)
 }
 
@@ -1175,8 +1465,8 @@ mod tests {
             Ease::OutExpo,
             Ease::BackIn { amplitude: 1.70158 },
             Ease::BackOut { amplitude: 1.70158 },
-            Ease::Elastic,
-            Ease::Bounce,
+            Ease::ELASTIC,
+            Ease::BOUNCE,
             Ease::CubicBezier([0.25, 0.1, 0.25, 1.0]),
         ];
         for ease in eases {
@@ -1187,6 +1477,183 @@ mod tests {
         // CSS `ease` at x=0.5 is about 0.8024.
         assert!((Ease::CubicBezier([0.25, 0.1, 0.25, 1.0]).apply(0.5) - 0.8024).abs() < 1e-3);
         assert_eq!(Ease::Hold.apply(0.99), 0.0);
+    }
+
+    /// The classic out elastic and out bounce, as they were before they took numbers.
+    fn classic_elastic(t: f64) -> f64 {
+        if t <= 0.0 || t >= 1.0 {
+            t
+        } else {
+            2f64.powf(-10.0 * t) * ((t * 10.0 - 0.75) * (2.0 * PI / 3.0)).sin() + 1.0
+        }
+    }
+
+    fn classic_bounce(t: f64) -> f64 {
+        const N: f64 = 7.5625;
+        const D: f64 = 2.75;
+        if t < 1.0 / D {
+            N * t * t
+        } else if t < 2.0 / D {
+            let t = t - 1.5 / D;
+            N * t * t + 0.75
+        } else if t < 2.5 / D {
+            let t = t - 2.25 / D;
+            N * t * t + 0.9375
+        } else {
+            let t = t - 2.625 / D;
+            N * t * t + 0.984375
+        }
+    }
+
+    fn parametric_eases() -> Vec<Ease> {
+        let mut eases = vec![
+            Ease::ELASTIC,
+            Ease::Elastic { amplitude: 1.8, period: 0.45 },
+            Ease::Elastic { amplitude: 3.0, period: 0.005 },
+            Ease::BOUNCE,
+            Ease::Bounce { bounces: 1, decay: 0.5 },
+            Ease::Bounce { bounces: 20, decay: 0.9 },
+            Ease::Bounce { bounces: 7, decay: 0.01 },
+            Ease::Wave { amplitude: 0.1, cycles: 2.0, decay: 0.0 },
+            Ease::Wave { amplitude: -0.3, cycles: 2.37, decay: 0.0 },
+            Ease::Wave { amplitude: 0.5, cycles: 0.25, decay: 3.0 },
+            Ease::Wave { amplitude: 0.2, cycles: 500.5, decay: 1.0 },
+        ];
+        for mode in [PowerMode::In, PowerMode::Out, PowerMode::InOut] {
+            for exponent in [0.3, 1.0, 3.0, 12.5] {
+                eases.push(Ease::Power { exponent, mode });
+            }
+        }
+        for position in [StepPosition::Start, StepPosition::End, StepPosition::Both, StepPosition::None] {
+            for count in [2, 3, 1000] {
+                eases.push(Ease::Steps { count, position });
+            }
+        }
+        eases.push(Ease::Steps { count: 1, position: StepPosition::End });
+        eases.push(Ease::Steps { count: 1, position: StepPosition::Start });
+        eases
+    }
+
+    #[test]
+    fn parametric_eases_end_exactly_on_0_and_1_and_stay_in_their_range() {
+        for ease in parametric_eases() {
+            assert!(ease.is_valid(), "{ease:?}");
+            assert_eq!(ease.apply(0.0), 0.0, "{ease:?}");
+            assert_eq!(ease.apply(1.0), 1.0, "{ease:?}");
+            let (low, high) = ease.range();
+            for i in 0..=100_000 {
+                let v = ease.apply(f64::from(i) / 100_000.0);
+                assert!(v.is_finite() && v >= low && v <= high, "{ease:?} at {i}: {v} not in {low}..{high}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_elastic_and_bounce_are_the_classic_ones() {
+        for i in 0..=10_000 {
+            let t = f64::from(i) / 10_000.0;
+            assert!((Ease::ELASTIC.apply(t) - classic_elastic(t)).abs() < 1e-12, "elastic at {t}");
+            assert!((Ease::BOUNCE.apply(t) - classic_bounce(t)).abs() < 1e-12, "bounce at {t}");
+        }
+    }
+
+    #[test]
+    fn parametric_eases_have_the_shapes_they_say() {
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(near(Ease::Power { exponent: 3.0, mode: PowerMode::In }.apply(0.5), 0.125));
+        assert!(near(Ease::Power { exponent: 2.0, mode: PowerMode::Out }.apply(0.5), 0.75));
+        let in_out = Ease::Power { exponent: 4.0, mode: PowerMode::InOut };
+        assert!(near(in_out.apply(0.5), 0.5) && near(in_out.apply(0.25), 0.5 * 0.5f64.powi(4)) && near(in_out.apply(0.25) + in_out.apply(0.75), 1.0), "symmetric halves");
+        // CSS steps(4, end) and steps(4, start).
+        let end = Ease::Steps { count: 4, position: StepPosition::End };
+        assert_eq!([0.1, 0.25, 0.6, 0.99].map(|t| end.apply(t)), [0.0, 0.25, 0.5, 0.75]);
+        let start = Ease::Steps { count: 4, position: StepPosition::Start };
+        assert_eq!([0.1, 0.25, 0.6, 0.99].map(|t| start.apply(t)), [0.25, 0.5, 0.75, 1.0]);
+        let both = Ease::Steps { count: 4, position: StepPosition::Both };
+        assert_eq!([0.1, 0.99].map(|t| both.apply(t)), [0.2, 0.8]);
+        let none = Ease::Steps { count: 5, position: StepPosition::None };
+        assert_eq!([0.1, 0.5, 0.99].map(|t| none.apply(t)), [0.0, 0.5, 1.0]);
+        // The wave of whole cycles is the plain sine wobble.
+        let wave = Ease::Wave { amplitude: 0.1, cycles: 2.0, decay: 0.0 };
+        assert!((wave.apply(0.125) - (0.125 + 0.1)).abs() < 1e-12);
+        let fading = Ease::Wave { amplitude: 0.1, cycles: 2.0, decay: 2.0 };
+        assert!((fading.apply(0.125) - (0.125 + 0.1 * 0.875f64.powi(2))).abs() < 1e-12);
+        assert!(Ease::Elastic { amplitude: 2.0, period: 0.3 }.apply(0.1) > Ease::ELASTIC.apply(0.1), "a larger amplitude swings further");
+        // A ball that bounces once more lands 4 times... and touches 1 at each landing.
+        let bounce = Ease::Bounce { bounces: 3, decay: 0.5 };
+        assert!(near(bounce.apply(1.0 / 2.5), 1.0) && near(bounce.apply(2.0 / 2.5), 1.0));
+        assert!(near(bounce.apply(1.5 / 2.5), 0.75), "the first rebound rises decay² = 1/4");
+    }
+
+    #[test]
+    fn eases_with_bad_numbers_are_not_valid() {
+        let bad = [
+            Ease::Elastic { amplitude: 0.5, period: 0.3 },
+            Ease::Elastic { amplitude: 1.0, period: 0.0 },
+            Ease::Elastic { amplitude: f64::NAN, period: 0.3 },
+            Ease::Elastic { amplitude: 1.0, period: f64::INFINITY },
+            Ease::Bounce { bounces: 0, decay: 0.5 },
+            Ease::Bounce { bounces: 21, decay: 0.5 },
+            Ease::Bounce { bounces: 4, decay: 0.0 },
+            Ease::Bounce { bounces: 4, decay: 1.0 },
+            Ease::Bounce { bounces: 4, decay: f64::NAN },
+            Ease::Power { exponent: 0.0, mode: PowerMode::In },
+            Ease::Power { exponent: -2.0, mode: PowerMode::Out },
+            Ease::Power { exponent: f64::INFINITY, mode: PowerMode::InOut },
+            Ease::Steps { count: 0, position: StepPosition::End },
+            Ease::Steps { count: 1001, position: StepPosition::End },
+            Ease::Steps { count: 1, position: StepPosition::None },
+            Ease::Wave { amplitude: f64::NAN, cycles: 2.0, decay: 0.0 },
+            Ease::Wave { amplitude: 0.1, cycles: 0.0, decay: 0.0 },
+            Ease::Wave { amplitude: 0.1, cycles: f64::INFINITY, decay: 0.0 },
+            Ease::Wave { amplitude: 0.1, cycles: 2.0, decay: -1.0 },
+        ];
+        for ease in bad {
+            assert!(!ease.is_valid(), "{ease:?}");
+            let curve = curve().with(CurveProperty::Scale, ramp(0.0, 1.0, ease));
+            assert!(check_curve(&curve).is_err(), "{ease:?} refused in a curve");
+        }
+        for json in [r#"{"bounce":{"bounces":2.5}}"#, r#"{"steps":{"count":-1}}"#, r#"{"power":{"mode":"sideways"}}"#, r#"{"wave":{"amplitude":0.1,"speed":2}}"#, r#""wave""#, r#""power""#] {
+            assert!(serde_json::from_str::<Ease>(json).is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn parametric_eases_go_through_json_with_their_defaults() {
+        let read = |json: &str| serde_json::from_str::<Ease>(json).unwrap();
+        assert_eq!(read(r#""elastic""#), Ease::ELASTIC);
+        assert_eq!(read(r#""bounce""#), Ease::BOUNCE);
+        assert_eq!(read(r#"{"elastic":{}}"#), Ease::Elastic { amplitude: 1.0, period: 0.3 });
+        assert_eq!(read(r#"{"elastic":{"period":0.5}}"#), Ease::Elastic { amplitude: 1.0, period: 0.5 });
+        assert_eq!(read(r#"{"bounce":{"decay":0.3}}"#), Ease::Bounce { bounces: 4, decay: 0.3 });
+        assert_eq!(read(r#"{"power":{}}"#), Ease::Power { exponent: 3.0, mode: PowerMode::In });
+        assert_eq!(read(r#"{"power":{"exponent":2,"mode":"inOut"}}"#), Ease::Power { exponent: 2.0, mode: PowerMode::InOut });
+        assert_eq!(read(r#"{"steps":{}}"#), Ease::Steps { count: 4, position: StepPosition::End });
+        assert_eq!(read(r#"{"steps":{"count":3,"position":"both"}}"#), Ease::Steps { count: 3, position: StepPosition::Both });
+        assert_eq!(read(r#"{"wave":{}}"#), Ease::Wave { amplitude: 0.1, cycles: 2.0, decay: 0.0 });
+        assert_eq!(read(r#""outCubic""#), Ease::OutCubic);
+        assert_eq!(read(r#"{"backOut":{"amplitude":2}}"#), Ease::BackOut { amplitude: 2.0 });
+        for ease in parametric_eases().into_iter().chain([Ease::Linear, Ease::Hold, Ease::BackIn { amplitude: 1.2 }, Ease::CubicBezier([0.1, 0.2, 0.3, 0.4])]) {
+            let json = serde_json::to_string(&ease).unwrap();
+            assert_eq!(read(&json), ease, "{json}");
+        }
+        let written: AnimationCurve = serde_json::from_str(r#"{"tracks":{"scale":[{"t":0,"value":0,"ease":"bounce"},{"t":1,"value":1}]}}"#).unwrap();
+        assert_eq!(written.tracks[&CurveProperty::Scale][0].ease, Ease::BOUNCE);
+    }
+
+    #[test]
+    fn the_max_scale_bounds_overshoot_between_samples() {
+        // A wave of many cycles peaks between any fixed samples of the curve.
+        for ease in parametric_eases() {
+            let preset = PackPreset::new("p/x".to_owned(), AnimationGroup::Enter, curve().with(CurveProperty::Scale, ramp(0.0, 1.0, ease)).with(CurveProperty::ScaleX, ramp(1.0, 1.5, ease)));
+            for i in 0..=200_000 {
+                let pose = evaluate_curve(&preset.curve, f64::from(i) / 200_000.0);
+                let scale = pose.scale * pose.scale_x.max(pose.scale_y);
+                assert!(scale <= preset.max_scale(), "{ease:?} at {i}: {scale} above {}", preset.max_scale());
+            }
+        }
+        let elastic = PackPreset::new("p/e".to_owned(), AnimationGroup::Enter, curve().with(CurveProperty::Scale, ramp(0.0, 1.0, Ease::ELASTIC)));
+        assert!(elastic.max_scale() > 1.3 && elastic.max_scale() < 1.4, "tight for a smooth ease: {}", elastic.max_scale());
     }
 
     #[test]

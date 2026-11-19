@@ -181,7 +181,7 @@ pub fn resolve_item_effects(roots: &[PathBuf], packs: &[ClipAnimationManifest]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clip_animation_pack::{check_clip_animation_fields, parse_clip_animation_manifest, scan_clip_animation_folders};
+    use crate::clip_animation_pack::{assemble_clip_animation_pack, parse_clip_animation_manifest, scan_clip_animation_folders, split_clip_animation_pack, write_clip_animation_pack};
 
     fn manifest(items: &str) -> String {
         format!(r#"{{"format":1,"type":"clip-animation","id":"fx","name":"N","version":"1.0.0","license":{{"spdx":"MIT","files":["LICENSE.txt"]}},"items":[{items}]}}"#)
@@ -192,8 +192,10 @@ mod tests {
     }
 
     fn check(items: &str) -> Result<(), String> {
-        let parsed = parse_clip_animation_manifest(manifest(items).as_bytes()).map_err(|e| e.to_string())?;
-        check_clip_animation_fields(&parsed).map_err(|e| e.to_string())
+        let files: std::collections::HashMap<String, String> = split_clip_animation_pack(&manifest(items)).into_iter().collect();
+        let parsed = parse_clip_animation_manifest(files["manifest.json"].as_bytes()).map_err(|e| e.to_string())?;
+        let names: Vec<String> = files.keys().filter_map(|name| name.strip_prefix("items/")).map(str::to_owned).collect();
+        assemble_clip_animation_pack(parsed, &names, |file| Ok(files[&format!("items/{file}")].clone().into_bytes())).map(|_| ()).map_err(|e| e.to_string())
     }
 
     #[test]
@@ -239,9 +241,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("gpufx-preset-effects-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         write_probe(&root, "packages/gpufx/test/probe", "Test.Probe");
-        let pack = root.join("packages/clip-animation/fx");
-        std::fs::create_dir_all(&pack).unwrap();
-        std::fs::write(pack.join("manifest.json"), manifest(items)).unwrap();
+        write_clip_animation_pack(&root.join("packages/clip-animation/fx"), &manifest(items));
         root
     }
 

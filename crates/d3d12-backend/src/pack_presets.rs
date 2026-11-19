@@ -43,9 +43,7 @@ mod tests {
     }
 
     fn write(dir: &std::path::Path, root: &str, folder: &str, text: &str) {
-        let path = dir.join(root).join("packages/clip-animation").join(folder);
-        std::fs::create_dir_all(&path).unwrap();
-        std::fs::write(path.join("manifest.json"), text).unwrap();
+        crate::clip_animation_pack::write_clip_animation_pack(&dir.join(root).join("packages/clip-animation").join(folder), text);
     }
 
     const GOOD: &str = r#"{"id":"rise","name":"Rise","kind":"in","default_duration":1,"curve":{"tracks":{"opacity":[{"t":0,"value":0},{"t":1,"value":1}]}}}"#;

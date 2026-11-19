@@ -381,14 +381,13 @@ fn a_hold_and_a_transition_on_one_cut_say_what_they_took_away() {
 fn clip_animation_set_refuses_a_pack_preset_that_is_not_for_the_kind_of_clip() {
     let root = scratch("animation-applies-to");
     let folder = root.join("packages/clip-animation/kinds");
-    std::fs::create_dir_all(&folder).unwrap();
     let item = |id: &str, applies_to: &str| format!(r#"{{"id":"{id}","name":"{id}","kind":"in","default_duration":0.5,"applies_to":{applies_to},"curve":{{"tracks":{{"opacity":[{{"t":0,"value":0}},{{"t":1,"value":1}}]}}}}}}"#);
     let manifest = format!(
         r#"{{"format":1,"type":"clip-animation","id":"kinds","name":"Kinds","version":"1.0.0","license":{{"spdx":"MIT","files":["LICENSE.txt"]}},"items":[{},{}]}}"#,
         item("sticker-only", r#"["sticker"]"#),
         item("video-ok", r#"["video","text"]"#)
     );
-    std::fs::write(folder.join("manifest.json"), manifest).unwrap();
+    d3d12_backend::write_clip_animation_pack(&folder, &manifest);
     let mut session = FileSession::with_roots(vec![root]);
     let (video, _) = clip_paths();
     call_ok(&mut session, "track_add", json!({"expected_revision": 0, "kind": "video"}));

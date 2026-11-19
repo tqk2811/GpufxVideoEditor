@@ -46,7 +46,7 @@ pub use encoder::{auto_select, encoder_available, encoder_exists, needs_gpl, pro
 pub use export::{overwritten_input, reserve_temporary, same_file, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;
 pub use matte::{check_matting_package, find_matting_model, matte_radii, model_folders, model_in, user_models_dir, MatteCache, MATTE_CACHE_BYTES, MATTING_FOLDER, MATTING_MODELS_ENV};
-pub use clip_animation_pack::{check_clip_animation_fields, is_clip_animation_type, parse_clip_animation_manifest, scan_clip_animation_folders, ClipAnimationManifest, ClipAnimationManifestItem, ClipAnimationScan, ItemEffect, ManifestProblem, PackLicense, PackReadProblem, CLIP_ANIMATION_FOLDER, CLIP_KINDS, DEFAULT_PROGRESS_PARAM, MAX_DEFAULT_DURATION, MAX_MANIFEST_ITEMS as MAX_CLIP_ANIMATION_ITEMS};
+pub use clip_animation_pack::{assemble_clip_animation_pack, check_clip_animation_fields, check_clip_animation_manifest_file, is_clip_animation_type, parse_clip_animation_item, parse_clip_animation_manifest, read_clip_animation_pack, scan_clip_animation_folders, split_clip_animation_pack, write_clip_animation_pack, ClipAnimationManifest, ClipAnimationManifestFile, CLIP_ANIMATION_ITEMS_FOLDER, ClipAnimationManifestItem, ClipAnimationScan, ItemEffect, ManifestProblem, PackLicense, PackReadProblem, CLIP_ANIMATION_FOLDER, CLIP_KINDS, DEFAULT_PROGRESS_PARAM, MAX_DEFAULT_DURATION, MAX_MANIFEST_ITEMS as MAX_CLIP_ANIMATION_ITEMS};
 pub use pack_presets::read_pack_presets;
 pub use preset_effects::{effect_mismatch, resolve_item_effects, ItemEffects};
 pub use packages::{expression_error, read_package_info, read_zip_package_info, PackageInfo, ParamInfo, ParamKind, CLIP_DURATION, CLIP_TIME};

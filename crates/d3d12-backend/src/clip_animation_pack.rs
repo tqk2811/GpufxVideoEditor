@@ -1,12 +1,26 @@
 //! The one strict reader of the clip animation packs installed on a machine, for the editor and for
 //! an export alike.
 //!
-//! A pack is a folder `<root>/packages/clip-animation/<id lower-cased>/` with a `manifest.json`. A
-//! pack is taken whole or not at all: any field the format does not allow, an id that is not the
+//! A pack is a folder `<root>/packages/clip-animation/<id lower-cased>/` (or a zip of the same
+//! files) laid out as:
+//!
+//! ```text
+//! manifest.json          {"format":1,"type":"clip-animation","id","name","version",
+//!                         "license":{"spdx","files"},"items":["fade-in","fade-out",...]}
+//! items/<item id>.json   one item: id, name, kind, default_duration, applies_to?, curve?,
+//!                         effect?, per_unit? (see [`ClipAnimationManifestItem`])
+//! LICENSE.txt, ...       the files license.files names
+//! ```
+//!
+//! `items` of the manifest lists the ids of the items, in the order they are offered: not empty, no
+//! id twice (in any case), each a safe id. Every listed id has its file in `items/`, whose `id` is
+//! the file name; a file in `items/` the manifest does not list is an error too.
+//!
+//! A pack is taken whole or not at all: any field the format does not allow, an id that is not the
 //! folder name, one item with a curve that cannot play, and the pack is refused. Only an accepted
 //! pack takes its id, so a refused pack in an earlier root lets a pack of the same id in a later
 //! root be used, the same in the editor and in an export. The installer checks a zip with
-//! [`check_clip_animation_fields`] too, so what installs is what reads.
+//! [`assemble_clip_animation_pack`] too, so what installs is what reads.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -39,11 +53,27 @@ pub struct PackLicense {
     pub files: Vec<String>,
 }
 
+/// The folder of a pack that holds one file per item.
+pub const CLIP_ANIMATION_ITEMS_FOLDER: &str = "items";
+
+/// What `manifest.json` of a pack holds: the items by id, in their order.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClipAnimationManifest {
+pub struct ClipAnimationManifestFile {
     pub format: u32,
     #[serde(rename = "type")]
+    pub kind: String,
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub license: PackLicense,
+    pub items: Vec<String>,
+}
+
+/// A whole pack: its manifest with the items read from their files, in the manifest's order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipAnimationManifest {
+    pub format: u32,
     pub kind: String,
     pub id: String,
     pub name: String,
@@ -157,9 +187,126 @@ impl std::fmt::Display for ManifestProblem {
     }
 }
 
-/// Parses a manifest. The fields are exactly those of the format.
-pub fn parse_clip_animation_manifest(bytes: &[u8]) -> Result<ClipAnimationManifest, ManifestProblem> {
+/// Parses `manifest.json`. The fields are exactly those of the format.
+pub fn parse_clip_animation_manifest(bytes: &[u8]) -> Result<ClipAnimationManifestFile, ManifestProblem> {
     serde_json::from_slice(bytes).map_err(|e| ManifestProblem::BadManifest(e.to_string()))
+}
+
+/// Parses the file of one item. The fields are exactly those of the format.
+pub fn parse_clip_animation_item(bytes: &[u8]) -> Result<ClipAnimationManifestItem, ManifestProblem> {
+    serde_json::from_slice(bytes).map_err(|e| ManifestProblem::BadManifest(e.to_string()))
+}
+
+/// Checks what `manifest.json` says: the type, format, id, names, licence and the list of item ids.
+pub fn check_clip_animation_manifest_file(manifest: &ClipAnimationManifestFile) -> Result<(), ManifestProblem> {
+    if !is_clip_animation_type(&manifest.kind) {
+        return Err(ManifestProblem::UnknownType(manifest.kind.clone()));
+    }
+    if manifest.format != SUPPORTED_FORMAT {
+        return bad(format!("format {} is not supported", manifest.format));
+    }
+    if !is_safe_id(&manifest.id) {
+        return Err(ManifestProblem::BadId(manifest.id.clone()));
+    }
+    if manifest.name.trim().is_empty() || manifest.version.trim().is_empty() || manifest.license.spdx.trim().is_empty() {
+        return bad("name, version and license.spdx must not be empty".to_owned());
+    }
+    if manifest.license.files.is_empty() {
+        return bad("license.files is empty".to_owned());
+    }
+    let count = manifest.items.len();
+    if count == 0 {
+        return bad("items is empty".to_owned());
+    }
+    if count > MAX_MANIFEST_ITEMS {
+        return bad(format!("items lists {count} animations, more than the {MAX_MANIFEST_ITEMS} allowed"));
+    }
+    let mut ids = HashSet::new();
+    for id in &manifest.items {
+        if !is_safe_id(id) {
+            return bad(format!("the item id \"{id}\" may only hold letters, digits, '.', '-' and '_'"));
+        }
+        if !ids.insert(id.to_lowercase()) {
+            return bad(format!("the item id \"{id}\" is used twice"));
+        }
+    }
+    Ok(())
+}
+
+/// The whole pack of `manifest`: `item_files` are the names of the files in `items/` (as
+/// `"rise.json"`), and `read` gives the bytes of one of them. Checks the files against the list of
+/// the manifest (see the module notes) and the items as [`check_clip_animation_fields`] does.
+pub fn assemble_clip_animation_pack(manifest: ClipAnimationManifestFile, item_files: &[String], mut read: impl FnMut(&str) -> Result<Vec<u8>, String>) -> Result<ClipAnimationManifest, ManifestProblem> {
+    check_clip_animation_manifest_file(&manifest)?;
+    let listed: HashSet<&str> = manifest.items.iter().map(String::as_str).collect();
+    let mut present = HashSet::new();
+    for file in item_files {
+        match file.strip_suffix(".json").filter(|id| listed.contains(id)) {
+            Some(id) => {
+                present.insert(id);
+            }
+            None => return bad(format!("\"{CLIP_ANIMATION_ITEMS_FOLDER}/{file}\" is not an item the manifest lists")),
+        }
+    }
+    let mut items = Vec::with_capacity(manifest.items.len());
+    for id in &manifest.items {
+        if !present.contains(id.as_str()) {
+            return bad(format!("the item \"{id}\" has no file \"{CLIP_ANIMATION_ITEMS_FOLDER}/{id}.json\""));
+        }
+        let file = format!("{id}.json");
+        let bytes = read(&file).or_else(|message| bad(format!("\"{CLIP_ANIMATION_ITEMS_FOLDER}/{file}\" cannot be read ({message})")))?;
+        let item = parse_clip_animation_item(&bytes).map_err(|problem| ManifestProblem::BadManifest(format!("{CLIP_ANIMATION_ITEMS_FOLDER}/{file}: {problem}")))?;
+        if item.id != *id {
+            return bad(format!("\"{CLIP_ANIMATION_ITEMS_FOLDER}/{file}\" holds the item \"{}\", not \"{id}\"", item.id));
+        }
+        items.push(item);
+    }
+    let ClipAnimationManifestFile { format, kind, id, name, version, license, .. } = manifest;
+    let pack = ClipAnimationManifest { format, kind, id, name, version, license, items };
+    check_clip_animation_fields(&pack)?;
+    Ok(pack)
+}
+
+/// Reads and checks the whole pack in `folder`, whatever the folder's name.
+pub fn read_clip_animation_pack(folder: &Path) -> Result<ClipAnimationManifest, String> {
+    let bytes = std::fs::read(folder.join("manifest.json")).map_err(|e| format!("its manifest cannot be read ({e})"))?;
+    let manifest = parse_clip_animation_manifest(&bytes).map_err(|e| e.to_string())?;
+    let items = folder.join(CLIP_ANIMATION_ITEMS_FOLDER);
+    let mut files = Vec::new();
+    if items.is_dir() {
+        for entry in std::fs::read_dir(&items).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().into_string().map_err(|name| format!("\"{CLIP_ANIMATION_ITEMS_FOLDER}/{}\" is not a name the format allows", name.to_string_lossy()))?;
+            if !entry.path().is_file() {
+                return Err(format!("\"{CLIP_ANIMATION_ITEMS_FOLDER}/{name}\" is not a file"));
+            }
+            files.push(name);
+        }
+    }
+    assemble_clip_animation_pack(manifest, &files, |file| std::fs::read(items.join(file)).map_err(|e| e.to_string())).map_err(|e| e.to_string())
+}
+
+/// The files of a pack written with its items inside `manifest.json`, the way tests find easiest
+/// to write one: `manifest.json` with the item ids, and `items/<id>.json` for each item. Not for
+/// reading packs: the reader only takes the layout of the module notes.
+#[doc(hidden)]
+pub fn split_clip_animation_pack(inline: &str) -> Vec<(String, String)> {
+    let mut manifest: serde_json::Value = serde_json::from_str(inline).expect("a manifest with its items inside");
+    let items = manifest["items"].take();
+    let items = items.as_array().cloned().unwrap_or_default();
+    manifest["items"] = serde_json::Value::Array(items.iter().map(|item| item["id"].clone()).collect());
+    let mut files = vec![("manifest.json".to_owned(), manifest.to_string())];
+    files.extend(items.iter().map(|item| (format!("{CLIP_ANIMATION_ITEMS_FOLDER}/{}.json", item["id"].as_str().unwrap_or_default()), item.to_string())));
+    files
+}
+
+/// Writes the files of [`split_clip_animation_pack`] into `folder`, for tests.
+#[doc(hidden)]
+pub fn write_clip_animation_pack(folder: &Path, inline: &str) {
+    std::fs::create_dir_all(folder.join(CLIP_ANIMATION_ITEMS_FOLDER)).expect("the folder of a pack");
+    for (name, text) in split_clip_animation_pack(inline) {
+        std::fs::write(folder.join(name), text).expect("a file of a pack");
+    }
 }
 
 fn bad<T>(message: String) -> Result<T, ManifestProblem> {
@@ -259,9 +406,7 @@ pub struct ClipAnimationScan {
 
 /// Reads and checks the pack in `folder`, whose name is the pack id.
 fn read_pack(folder: &Path, label: &str) -> Result<ClipAnimationManifest, String> {
-    let bytes = std::fs::read(folder.join("manifest.json")).map_err(|e| e.to_string())?;
-    let manifest = parse_clip_animation_manifest(&bytes).map_err(|e| e.to_string())?;
-    check_clip_animation_fields(&manifest).map_err(|e| e.to_string())?;
+    let manifest = read_clip_animation_pack(folder)?;
     if !manifest.id.eq_ignore_ascii_case(label) {
         return Err(format!("its manifest does not match the folder ({})", manifest.id));
     }

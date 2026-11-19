@@ -68,7 +68,7 @@ impl ProbeRoot {
                 {{"id":"out","name":"Out","kind":"out","default_duration":1,"effect":{effect}}},
                 {{"id":"gone","name":"Gone","kind":"in","default_duration":1,"effect":{{"package":"test.not-installed"}},"curve":{{"tracks":{{"opacity":[{{"t":0,"value":1}}]}}}}}}]}}"#
         );
-        std::fs::write(pack.join("manifest.json"), pack_manifest).expect("pack");
+        d3d12_backend::write_clip_animation_pack(&pack, &pack_manifest);
         Self(root)
     }
 }
