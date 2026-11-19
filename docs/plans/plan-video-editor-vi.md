@@ -102,11 +102,29 @@ Giai đoạn 0 là cửa quyết định, không đạt thì dừng hoặc đổ
 
 Đã làm (2026-11-19). Chữ của editor nằm trong file JSON `i18n/<mã ngôn ngữ>.json`, không còn là bảng Rust.
 
-- `crates/gpufx-editor/i18n/en.json` được nhúng vào binary (`include_str!`) và là nơi dự phòng cuối cùng. `vi.json` và các ngôn ngữ khác đi kèm app nằm trong thư mục `i18n` cạnh exe; `scripts/build-variants.ps1` chép thư mục này vào `target\release\i18n`. Bản debug không có thư mục đó cạnh exe thì đọc thẳng `crates/gpufx-editor/i18n` của checkout.
-- Mỗi key tra theo thứ tự: file của user cùng mã, file đi kèm app cùng mã, rồi tiếng Anh nhúng sẵn. File hỏng được báo trên stderr và bỏ qua, app không dừng. Mã ngôn ngữ lưu trong settings là tên file; mã không còn file thì về tiếng Anh.
+- `crates/gpufx-editor/i18n/en.json` được nhúng vào binary (`include_str!`) và là nơi dự phòng cuối cùng. `vi.json` và các ngôn ngữ khác đi kèm app nằm trong thư mục `i18n` cạnh exe; `scripts/build-variants.ps1` chép các file này (trừ `en.json`, vì tiếng Anh đã nhúng) vào `target\release\i18n`. Chỉ bản debug và test, khi không có thư mục đó cạnh exe, mới đọc thẳng `crates/gpufx-editor/i18n` của checkout; bản release không bao giờ đọc thư mục lúc build.
+- Mỗi key tra theo thứ tự: file của user cùng mã, file đi kèm app cùng mã, rồi tiếng Anh nhúng sẵn. Với số nhiều, dạng đúng (`.one`/`.other`) được tìm qua mọi file của ngôn ngữ trước, rồi mới tới dạng còn lại, nên file của user chỉ có một dạng không che dạng đúng ở file bên dưới. File hỏng được báo trên stderr và bỏ qua, app không dừng. Mã ngôn ngữ lưu trong settings là tên file; mã không còn file thì về tiếng Anh.
 - Cú pháp: key phẳng hoặc có dấu chấm (object lồng nhau cũng đọc thành key có dấu chấm), `{name}` là tham số, `{{` và `}}` là dấu ngoặc nhọn thật. Số nhiều là hai key anh em `<key>.one` và `<key>.other`, chọn theo tham số đếm; tiếng Việt chỉ cần `.other`. Giá trị enum nằm trong câu (loại luồng, loại track, mép clip, lý do gói bị từ chối...) và mạo từ tiếng Anh ("a video", "an audio") là key riêng, code dịch trước rồi truyền vào làm tham số.
 - `_meta.name` là tên ngôn ngữ viết bằng chính nó, hiện trong menu Ngôn ngữ.
 - Code: `Message::to_text` trong `crates/gpufx-editor/src/i18n/mod.rs` là một `match` đủ mọi biến thể, trả về key và tham số, nên thêm `Message` mà quên key thì không biên dịch được. Test kiểm mọi key code dùng đều có trong `en.json` với đúng tên tham số, và mọi key của `vi.json` đều có trong `en.json`, chỉ dùng tham số mà bản tiếng Anh dùng. Bộ đọc file (`i18n/catalog.rs`) không biết gì về `Message`, để sau này đọc bản dịch của gói.
+
+### Bản dịch của gói
+
+Đã làm (2026-11-20). Gói (effect, transition, gói animation clip, kiểu chữ, kiểu phụ đề, sticker, sfx, nhạc) có thể kèm `i18n/<mã>.json` ở gốc thư mục gói hoặc trong zip:
+
+```json
+{"name": "...", "description": "...", "tags": ["..."],
+ "params": {"<tên tham số>": {"label": "...", "description": "..."}},
+ "items": {"<id item>": {"name": "...", "description": "...", "category": "...", "tags": ["..."]}}}
+```
+
+- Mọi trường đều tuỳ chọn. Id item là `id` của item trong manifest (gói animation: cũng là tên file `items/<id>.json`); gói effect chỉ có `params`, khoá theo tên tham số trong manifest. Ví dụ dữ liệu: nhánh `i18n/vi-effects`, `i18n/vi-gl-transitions` của repo packages và `i18n/vi` của GpufxVideoEditor-Assets.
+- Code: `crates/gpufx-editor/src/i18n/pack.rs` (`PackTranslations` đọc thư mục hoặc zip, `Localized` cho gói/item, `ParamTranslations` cho tham số). Mỗi lần quét gói đọc luôn bản dịch; file hỏng, quá 1 MiB hoặc tên không phải mã ngôn ngữ thì bỏ qua, gói vẫn nạp.
+- Hiển thị: danh sách effect/transition, ô sticker, danh sách âm thanh, combo animation và kiểu chữ, nhãn và tooltip tham số trong inspector, trình quản lý gói đều dùng ngôn ngữ đang chọn, thiếu trường nào thì trường đó hiện tiếng Anh của manifest. Bộ lọc nhóm sticker vẫn theo nhóm tiếng Anh (nhóm là khoá lọc chung của nhiều gói).
+- Tìm kiếm (`crates/gpufx-editor/src/search.rs`): khớp bản gốc và bản dịch của **mọi** ngôn ngữ gói mang theo, không chỉ ngôn ngữ đang chọn. Tên dịch được tính như tên (cùng hạng điểm, kể cả thưởng trùng hẳn hoặc bắt đầu bằng `filter`), tag và nhóm dịch tính như tag, mô tả dịch tính như trường khác. Lý do: người dùng gõ tiếng Việt hay tiếng Anh đều ra cùng thứ hạng, bất kể giao diện đang ở ngôn ngữ nào.
+- MCP: các tool danh sách giữ id và trường tiếng Anh, thêm object `translation` theo ngôn ngữ của editor (xem `spec-mcp-server-vi.md`).
+- Cài gói từ zip giữ thư mục `i18n/` (các trình cài chấp nhận `i18n/<mã>.json`, không chấp nhận JSON khác). Gói shader giữ nguyên zip, bản dịch đọc thẳng trong zip.
+- Chưa có lớp ghi đè bản dịch gói của user (`%LOCALAPPDATA%\gpufx-editor\i18n\packs`): chỉ đọc file của chính gói.
 
 ### User thêm một ngôn ngữ
 
