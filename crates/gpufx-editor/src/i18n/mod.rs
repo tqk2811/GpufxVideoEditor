@@ -10,11 +10,6 @@
 pub mod catalog;
 pub mod text;
 
-#[cfg(test)]
-mod en;
-#[cfg(test)]
-mod vi;
-
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -2371,15 +2366,6 @@ mod tests {
         for language in Language::all() {
             assert!(language.t(Message::Added("clip.mp4".to_owned())).contains("clip.mp4"));
             assert!(language.t(Message::ExportProgress { done: 3, total: 9 }).contains('9'));
-        }
-    }
-
-    /// Temporary: the language files give the same text as the Rust tables they replace.
-    #[test]
-    fn the_json_files_say_what_the_old_tables_said() {
-        for message in samples() {
-            assert_eq!(Language::ENGLISH.text(&message), en::text(&message), "{message:?}");
-            assert_eq!(vietnamese().text(&message), vi::text(&message), "{message:?}");
         }
     }
 }
