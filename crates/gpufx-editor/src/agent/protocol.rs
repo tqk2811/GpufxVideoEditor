@@ -249,13 +249,14 @@ pub enum AgentRequest {
     PackagesList { filter: Option<String> },
     /// The installed packs of every kind, or of `kind`, as the package manager lists them. Read only.
     InstalledPacks { kind: Option<String> },
-    /// The font families a text can name.
-    FontList,
-    /// The preset animations a clip with a picture can name: id, group and default duration.
-    ClipAnimationList,
+    /// The font families a text can name, only those matching `filter` (see [`crate::search`]).
+    FontList { filter: Option<String> },
+    /// The preset animations a clip with a picture can name: id, group and default duration, only
+    /// those matching `filter`.
+    ClipAnimationList { filter: Option<String> },
     /// The styles of the installed text (`text`) or subtitle (`subtitle`) style packs; both when
-    /// `kind` is `None`.
-    TextStyleList { kind: Option<String> },
+    /// `kind` is `None`, only those matching `filter`.
+    TextStyleList { kind: Option<String>, filter: Option<String> },
     /// The items of the installed music, sfx and sticker packs, each with the `asset:` source
     /// `clip_add` takes; only `kind` when given, and only items matching every word of `filter`.
     AssetList { kind: Option<String>, filter: Option<String> },
