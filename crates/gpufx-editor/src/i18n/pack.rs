@@ -12,6 +12,8 @@
 //! parameter name. Searches match every language a pack brings, so a pack is found by its English
 //! name and by any translation of it. A file that cannot be read is skipped: a translation never
 //! stops a pack from loading.
+//!
+//! A pack's `i18n/en.json` is ignored: the manifest is its English text.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -114,8 +116,9 @@ pub fn language_file_code(path: &str) -> Option<&str> {
 impl PackTranslations {
     /// The language files of `(code, text)`; a file that is not a JSON object is skipped. Codes are
     /// lower-cased, and of two files whose codes differ only in case the first is kept.
+    /// `en.json` is skipped: the manifest is the English, so the editor and the agent show the same.
     pub fn from_files(files: impl IntoIterator<Item = (String, String)>) -> Self {
-        let mut files: Vec<(String, PackFile)> = files.into_iter().filter(|(code, _)| usable_code(code)).filter_map(|(code, text)| parse_file(&text).map(|file| (code.to_ascii_lowercase(), file))).take(MAX_FILES).collect();
+        let mut files: Vec<(String, PackFile)> = files.into_iter().filter(|(code, _)| usable_code(code) && !code.eq_ignore_ascii_case(crate::i18n::catalog::ENGLISH_CODE)).filter_map(|(code, text)| parse_file(&text).map(|file| (code.to_ascii_lowercase(), file))).take(MAX_FILES).collect();
         files.sort_by(|a, b| a.0.cmp(&b.0));
         files.dedup_by(|a, b| a.0 == b.0);
         Self { files }
@@ -356,6 +359,14 @@ mod tests {
         let copy = params.clone();
         assert!(std::sync::Arc::ptr_eq(&params.files, &copy.files), "a clone copies no text");
         assert_eq!(copy.label("vi", "radius"), Some("Bán kính"));
+    }
+
+    #[test]
+    fn an_english_file_of_a_pack_is_ignored_as_the_manifest_is_the_english() {
+        let translations = PackTranslations::from_files([("EN".to_owned(), r#"{"name": "Other English", "params": {"a": {"label": "A"}}}"#.to_owned()), ("vi".to_owned(), r#"{"name": "Việt"}"#.to_owned())]);
+        assert_eq!(translations.codes().collect::<Vec<_>>(), ["vi"]);
+        assert_eq!(translations.pack().name("en", "Manifest"), "Manifest", "the editor and the agent both show the manifest's English");
+        assert_eq!(translations.params().label("en", "a"), None);
     }
 
     #[test]
