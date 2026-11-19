@@ -655,6 +655,9 @@ fn clip_animation_list_keeps_the_presets_matching_the_filter_best_first() {
     let loops = loops["presets"].as_array().unwrap();
     assert!(loops.iter().any(|preset| preset["id"] == "bounce"));
     assert!(loops.iter().all(|preset| preset["group"] == "loop"), "every word must match");
+    // limit cuts after ranking: the best match is kept, not the first preset in list order.
+    let best = call_ok(&mut session, "clip_animation_list", json!({"filter": "fade", "limit": 1}));
+    assert_eq!(best["presets"], json!([presets[0]]), "{best}");
 }
 
 #[test]

@@ -160,6 +160,13 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_word_name_equal_to_or_starting_with_the_filter_comes_first() {
+        let items = ["Blur Zoom Strong", "Zoom Blur Strong", "Zoom  Blur", "Strong Zoom Blur"];
+        assert_eq!(names(&items, "zoom blur"), ["Zoom  Blur", "Zoom Blur Strong", "Blur Zoom Strong", "Strong Zoom Blur"]);
+        assert_eq!(names(&items, "ZOOM BLUR STRONG"), ["Zoom Blur Strong", "Blur Zoom Strong", "Strong Zoom Blur"]);
+    }
+
+    #[test]
     fn a_limit_keeps_the_first_items() {
         assert_eq!(take_limit(vec![1, 2, 3], Some(2)), [1, 2]);
         assert_eq!(take_limit(vec![1, 2, 3], None), [1, 2, 3]);
