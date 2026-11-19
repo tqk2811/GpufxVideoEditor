@@ -80,7 +80,10 @@ foreach ($capcut in $capcutRepos) {
     }
     New-Item -ItemType Directory -Force -Path $groupDir | Out-Null
     $count = 0
-    foreach ($package in Get-ChildItem -LiteralPath $clone -Directory) {
+    # The packages sit in src\ of the repository; an older clone kept them at its root.
+    $source = Join-Path $clone 'src'
+    if (-not (Test-Path -LiteralPath $source)) { $source = $clone }
+    foreach ($package in Get-ChildItem -LiteralPath $source -Directory) {
         if (-not (Test-Path -LiteralPath (Join-Path $package.FullName 'manifest.json'))) { continue }
         New-Junction (Join-Path $groupDir $package.Name) $package.FullName
         $count++
