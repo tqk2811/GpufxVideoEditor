@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use d3d12_backend::{animation_timing, asset_source, still_dimensions, AnimationTiming, ProjectPaths};
 use engine::Time;
-
+
+use crate::i18n::pack::{Localized, PackTranslations};
 use crate::audio_library::LibraryProblem;
 use crate::editor::DEFAULT_IMAGE_DURATION;
 use crate::media::{MediaItem, MediaKind};
@@ -24,6 +25,8 @@ pub struct LibrarySticker {
     /// How long a loop lasts and how many times it plays, for an animated sticker; `None` for a
     /// still one or when the file could not be read.
     pub animation: Option<AnimationTiming>,
+    /// The name, category and tags in the languages its pack brings.
+    pub i18n: Localized,
 }
 
 impl LibrarySticker {
@@ -42,8 +45,14 @@ impl LibrarySticker {
         self.animation.map_or(DEFAULT_IMAGE_DURATION, |timing| animated_duration(DEFAULT_IMAGE_DURATION, timing))
     }
 
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
+    }
+
+    /// The fields a search looks at, in English and in every language the pack brings.
     pub(crate) fn search_fields(&self) -> crate::search::SearchFields<'_> {
-        crate::search::SearchFields::new(&self.name).tags(std::iter::once(self.category.as_str()).chain(self.tags.iter().map(String::as_str)))
+        self.i18n.search(crate::search::SearchFields::new(&self.name).tags(std::iter::once(self.category.as_str()).chain(self.tags.iter().map(String::as_str))))
     }
 }
 
@@ -66,6 +75,8 @@ pub struct StickerPack {
     pub id: String,
     pub name: String,
     pub stickers: Vec<LibrarySticker>,
+    /// The pack's name, description and tags in the languages it brings.
+    pub i18n: Localized,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -119,6 +130,7 @@ fn read_pack(root: &Path, folder: &Path, library: &mut StickerLibrary) -> Option
     }
     // Each sticker goes through what a clip goes through, so nothing listed can leave the pack.
     let paths = ProjectPaths::roots_only(Path::new("library.json"), vec![root.to_path_buf()]);
+    let translations = PackTranslations::read_folder(folder);
     let mut stickers = Vec::new();
     for item in manifest.items {
         let source = asset_source(STICKER_TYPE, &manifest.id, &item.file);
@@ -133,9 +145,9 @@ fn read_pack(root: &Path, folder: &Path, library: &mut StickerLibrary) -> Option
         let size = still_dimensions(&path).ok();
         // Only an animated WebP's chunks or a GIF's blocks are read for its timing; no frame is decoded.
         let animation = animation_timing(&path).ok().flatten();
-        stickers.push(LibrarySticker { source, name: item.name, tags: item.tags, category: item.category, size, animation });
+        stickers.push(LibrarySticker { i18n: translations.item(&item.id), source, name: item.name, tags: item.tags, category: item.category, size, animation });
     }
-    Some(StickerPack { id: manifest.id.to_ascii_lowercase(), name: manifest.name, stickers })
+    Some(StickerPack { i18n: translations.pack(), id: manifest.id.to_ascii_lowercase(), name: manifest.name, stickers })
 }
 
 /// Reads the packs under every root. A pack in an earlier root hides one of the same id in a later
@@ -168,11 +180,11 @@ mod tests {
     use super::*;
 
     fn sticker(name: &str, tags: &[&str], category: &str) -> LibrarySticker {
-        LibrarySticker { source: format!("asset:sticker/p/{name}.png"), name: name.to_owned(), tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), size: None, animation: None }
+        LibrarySticker { i18n: Default::default(), source: format!("asset:sticker/p/{name}.png"), name: name.to_owned(), tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), size: None, animation: None }
     }
 
     fn library() -> StickerLibrary {
-        StickerLibrary { packs: vec![StickerPack { id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker("Smile", &["face", "happy"], "people"), sticker("Dog", &["pet"], "animals"), sticker("Sad", &["face"], "people")] }], problems: Vec::new(), loaded: true }
+        StickerLibrary { packs: vec![StickerPack { i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker("Smile", &["face", "happy"], "people"), sticker("Dog", &["pet"], "animals"), sticker("Sad", &["face"], "people")] }], problems: Vec::new(), loaded: true }
     }
 
     #[test]

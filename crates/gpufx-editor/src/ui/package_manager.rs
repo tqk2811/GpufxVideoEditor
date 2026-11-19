@@ -111,7 +111,7 @@ fn confirm_removal(ui: &mut egui::Ui, language: Language, ui_state: &mut Package
         return;
     };
     ui.separator();
-    ui.strong(language.t(Message::PackRemoveQuestion(pack.name.clone())));
+    ui.strong(language.t(Message::PackRemoveQuestion(pack.display_name(language.code()).to_owned())));
     if !uses.is_empty() {
         ui.colored_label(theme::refused(), language.t(Message::PackUsedBy(uses.len())));
         egui::ScrollArea::vertical().id_salt("pack-uses").max_height(90.0).show(ui, |ui| {
@@ -189,8 +189,11 @@ fn pack_table(ui: &mut egui::Ui, language: Language, ui_state: &PackageManagerUi
 fn name_cell(ui: &mut egui::Ui, language: Language, pack: &InstalledPack) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            let name = if pack.problem.is_some() { egui::RichText::new(&pack.name).color(theme::refused()) } else { egui::RichText::new(&pack.name) };
-            ui.label(name).on_hover_text(pack.path.display().to_string());
+            let shown = pack.display_name(language.code());
+            let name = if pack.problem.is_some() { egui::RichText::new(shown).color(theme::refused()) } else { egui::RichText::new(shown) };
+            let description = pack.i18n.get(language.code()).and_then(|texts| texts.description.as_deref());
+            let hover = description.map_or_else(|| pack.path.display().to_string(), |description| format!("{description}\n{}", pack.path.display()));
+            ui.label(name).on_hover_text(hover);
             if pack.hidden {
                 ui.label(egui::RichText::new(language.t(Message::PackInternal)).small().color(theme::text_dim()));
             }

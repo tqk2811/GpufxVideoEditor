@@ -1,0 +1,17 @@
+{
+  "name": "Tách alpha",
+  "description": "Lấy kênh alpha thành ảnh xám (matte), dùng cho đầu ra không chứa được alpha.",
+  "tags": [
+    "alpha",
+    "matte",
+    "mặt nạ",
+    "tách kênh",
+    "trong suốt"
+  ],
+  "params": {
+    "invert": {
+      "label": "Đảo ngược",
+      "description": "Trắng ở vùng trong suốt thay vì vùng đục"
+    }
+  }
+}

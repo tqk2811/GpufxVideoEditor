@@ -606,7 +606,7 @@ mod tests {
         let mut text_style = library.packs[0].styles[0].clone();
         text_style.kind = crate::text_style_library::StyleKind::Text;
         text_style.style.fill = Some(crate::text_clip::texture_paint(text_picture.clone()));
-        library.packs.push(crate::text_style_library::TextStylePack { id: "t".to_owned(), name: "T".to_owned(), kind: crate::text_style_library::StyleKind::Text, styles: vec![text_style] });
+        library.packs.push(crate::text_style_library::TextStylePack { i18n: Default::default(), id: "t".to_owned(), name: "T".to_owned(), kind: crate::text_style_library::StyleKind::Text, styles: vec![text_style] });
         assert_eq!(pack_images(&library), vec![picture, text_picture]);
     }
 }

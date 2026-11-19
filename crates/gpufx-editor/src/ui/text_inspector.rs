@@ -114,7 +114,7 @@ enum SubtitleAction {
 fn subtitle_section(ui: &mut egui::Ui, id: egui::Id, state: &EditorState, track: usize, text: &TextContent, language: Language) -> Option<SubtitleAction> {
     let library = &state.text_style_library;
     let current = state.project().tracks.get(track).and_then(|track| track.subtitle.as_ref()).and_then(|subtitle| subtitle.style.clone());
-    let shown = current.as_deref().map_or_else(|| language.t(Message::SubtitleStyleNone), |reference| library.find(reference).map_or_else(|| reference.to_owned(), |style| style.name.clone()));
+    let shown = current.as_deref().map_or_else(|| language.t(Message::SubtitleStyleNone), |reference| library.find(reference).map_or_else(|| reference.to_owned(), |style| style.display_name(language.code()).to_owned()));
     let mut action = None;
     ui.label(egui::RichText::new(language.t(Message::SubtitleTrack)).strong());
     ui.horizontal(|ui| {
@@ -122,7 +122,7 @@ fn subtitle_section(ui: &mut egui::Ui, id: egui::Id, state: &EditorState, track:
         egui::ComboBox::from_id_salt(id.with("subtitle-style")).selected_text(shown).width(ui.available_width()).height(FONT_LIST_HEIGHT).show_ui(ui, |ui| {
             for (pack, style) in library.styles(Some(StyleKind::Subtitle)) {
                 let selected = current.as_deref() == Some(style.reference.as_str());
-                if ui.selectable_label(selected, format!("{} \u{b7} {}", style.name, pack.name)).clicked() {
+                if ui.selectable_label(selected, format!("{} \u{b7} {}", style.display_name(language.code()), pack.display_name(language.code()))).clicked() {
                     action = Some(SubtitleAction::TrackStyle(style.reference.clone()));
                 }
             }
@@ -153,7 +153,7 @@ fn style_combo(ui: &mut egui::Ui, id: egui::Id, state: &EditorState, language: L
                 }
                 ui.colored_label(theme::text_dim(), language.t(title));
                 for (pack, style) in library.styles(Some(kind)) {
-                    if ui.selectable_label(false, format!("{} \u{b7} {}", style.name, pack.name)).clicked() {
+                    if ui.selectable_label(false, format!("{} \u{b7} {}", style.display_name(language.code()), pack.display_name(language.code()))).clicked() {
                         chosen = Some(style.reference.clone());
                     }
                 }

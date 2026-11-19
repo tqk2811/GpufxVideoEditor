@@ -24,6 +24,7 @@ use engine::{FontRef, Project};
 use crate::asset_install::{lock_installs, rename_with_retries, AudioPackKind, ListedPack};
 use crate::clip_animation_install::CLIP_ANIMATION_TYPE;
 use crate::font_install::FONT_TYPE;
+use crate::i18n::pack::{Localized, PackTranslations};
 use crate::packages::{classify, PackageKind};
 use crate::sticker_install::STICKER_TYPE;
 use crate::subtitle_style_install::SUBTITLE_STYLE_TYPE;
@@ -108,12 +109,19 @@ pub struct InstalledPack {
     pub problem: Option<String>,
     /// A root searched earlier holds a pack of the same key, which is the one used.
     pub shadowed: bool,
+    /// The pack's name, description and tags in the languages it brings (`i18n/<code>.json`).
+    pub i18n: Localized,
 }
 
 impl InstalledPack {
     /// Only what the user installed can be removed; what comes with the app is read only.
     pub fn removable(&self) -> bool {
         self.source == PackSource::User
+    }
+
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
     }
 }
 
@@ -141,9 +149,9 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
                         Some(PackageKind::Effect) => (PackTab::Effect, None),
                         None => (PackTab::Effect, Some(format!("it takes {} inputs, which no clip can give it", info.inputs))),
                     };
-                    InstalledPack { tab, key, id, name: info.name, version: info.version, source, path: shader.path, items: 1, bytes, enabled: true, hidden: info.hidden, problem, shadowed: false }
+                    InstalledPack { tab, key, id, name: info.name, version: info.version, source, path: shader.path, items: 1, bytes, enabled: true, hidden: info.hidden, problem, shadowed: false, i18n: Localized::default() }
                 }
-                Err(message) => InstalledPack { tab: PackTab::Effect, name: id.clone(), key, id, version: String::new(), source, path: shader.path, items: 0, bytes, enabled: true, hidden: false, problem: Some(message), shadowed: false },
+                Err(message) => InstalledPack { tab: PackTab::Effect, name: id.clone(), key, id, version: String::new(), source, path: shader.path, items: 0, bytes, enabled: true, hidden: false, problem: Some(message), shadowed: false, i18n: Localized::default() },
             };
             found.push(pack);
         }
@@ -161,12 +169,13 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
                 let key = pack_key(&format!("{type_folder}/{}", pack.id));
                 let bytes = disk_size(&pack.folder);
                 found.push(match pack.read {
-                    Ok(summary) => InstalledPack { tab, key, id: pack.id, name: summary.name, version: summary.version, source, path: pack.folder, items: summary.items, bytes, enabled: true, hidden: false, problem: None, shadowed: false },
-                    Err(message) => InstalledPack { tab, key, name: pack.id.clone(), id: pack.id, version: String::new(), source, path: pack.folder, items: 0, bytes, enabled: true, hidden: false, problem: Some(message), shadowed: false },
+                    Ok(summary) => InstalledPack { tab, key, id: pack.id, name: summary.name, version: summary.version, source, path: pack.folder, items: summary.items, bytes, enabled: true, hidden: false, problem: None, shadowed: false, i18n: Localized::default() },
+                    Err(message) => InstalledPack { tab, key, name: pack.id.clone(), id: pack.id, version: String::new(), source, path: pack.folder, items: 0, bytes, enabled: true, hidden: false, problem: Some(message), shadowed: false, i18n: Localized::default() },
                 });
             }
         }
         for mut pack in found {
+            pack.i18n = PackTranslations::read_package(&pack.path).pack();
             pack.enabled = !disabled.contains(&pack.key);
             pack.shadowed = !seen.insert(pack.key.clone());
             packs.push(pack);
@@ -176,18 +185,11 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
     packs
 }
 
-/// The packs of `tab` whose name, id or version holds every word of `filter`, ignoring case.
+/// The packs of `tab` whose name (in English or any language the pack brings), id, version, tags or
+/// description holds every word of `filter`, ignoring case and accents, in their order.
 pub fn filter_packs<'a>(packs: &'a [InstalledPack], tab: PackTab, filter: &str) -> Vec<&'a InstalledPack> {
-    let filter = filter.to_lowercase();
-    let words: Vec<&str> = filter.split_whitespace().collect();
-    packs
-        .iter()
-        .filter(|pack| pack.tab == tab)
-        .filter(|pack| {
-            let haystack = format!("{} {} {}", pack.name.to_lowercase(), pack.id.to_lowercase(), pack.version.to_lowercase());
-            words.iter().all(|word| haystack.contains(word))
-        })
-        .collect()
+    let query = crate::search::Query::new(filter);
+    packs.iter().filter(|pack| pack.tab == tab).filter(|pack| query.score(&pack.i18n.search(crate::search::SearchFields::new(&pack.name).other([pack.id.as_str(), pack.version.as_str()]))).is_some()).collect()
 }
 
 /// The size of a file, or of everything in a folder; links are not followed.

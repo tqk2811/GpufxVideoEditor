@@ -7,6 +7,7 @@ use d3d12_backend::{asset_source, ProjectPaths};
 use engine::{Time, TICKS_PER_SECOND};
 
 use crate::asset_install::{check_manifest_fields, parse_audio_manifest, AudioPackKind};
+use crate::i18n::pack::{Localized, PackTranslations};
 use crate::media::{MediaItem, MediaKind};
 
 const PACK_TYPES: [AudioPackKind; 2] = [AudioPackKind::Sfx, AudioPackKind::Music];
@@ -22,6 +23,8 @@ pub struct LibrarySound {
     pub tags: Vec<String>,
     pub category: String,
     pub looped: bool,
+    /// The name, category and tags in the languages its pack brings.
+    pub i18n: Localized,
 }
 
 impl LibrarySound {
@@ -30,8 +33,14 @@ impl LibrarySound {
         MediaItem { source: self.source.clone(), name: self.name.clone(), kind: MediaKind::Audio, duration: self.duration, estimated: true }
     }
 
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
+    }
+
+    /// The fields a search looks at, in English and in every language the pack brings.
     pub(crate) fn search_fields(&self) -> crate::search::SearchFields<'_> {
-        crate::search::SearchFields::new(&self.name).tags(std::iter::once(self.category.as_str()).chain(self.tags.iter().map(String::as_str)))
+        self.i18n.search(crate::search::SearchFields::new(&self.name).tags(std::iter::once(self.category.as_str()).chain(self.tags.iter().map(String::as_str))))
     }
 }
 
@@ -43,6 +52,15 @@ pub struct LibraryPack {
     pub name: String,
     pub version: String,
     pub sounds: Vec<LibrarySound>,
+    /// The pack's name, description and tags in the languages it brings.
+    pub i18n: Localized,
+}
+
+impl LibraryPack {
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
+    }
 }
 
 /// A pack that could not be read, or a sound of one that is gone.
@@ -92,6 +110,7 @@ fn read_pack(root: &Path, kind: AudioPackKind, folder: &Path, library: &mut Audi
     }
     // Each sound goes through what a clip goes through, so nothing listed can leave the pack.
     let paths = ProjectPaths::roots_only(Path::new("library.json"), vec![root.to_path_buf()]);
+    let translations = PackTranslations::read_folder(folder);
     let mut sounds = Vec::new();
     for item in manifest.items {
         let source = asset_source(kind.name(), &manifest.id, &item.file);
@@ -99,9 +118,9 @@ fn read_pack(root: &Path, kind: AudioPackKind, folder: &Path, library: &mut Audi
             problem(error.to_string());
             continue;
         }
-        sounds.push(LibrarySound { source, name: item.name, duration: seconds_to_time(item.duration), tags: item.tags, category: item.category, looped: item.looped });
+        sounds.push(LibrarySound { i18n: translations.item(&item.id), source, name: item.name, duration: seconds_to_time(item.duration), tags: item.tags, category: item.category, looped: item.looped });
     }
-    Some(LibraryPack { kind, id: manifest.id.to_ascii_lowercase(), name: manifest.name, version: manifest.version, sounds })
+    Some(LibraryPack { i18n: translations.pack(), kind, id: manifest.id.to_ascii_lowercase(), name: manifest.name, version: manifest.version, sounds })
 }
 
 /// Reads the packs under every root. A pack in an earlier root hides one of the same id in a later
@@ -135,11 +154,11 @@ mod tests {
     use super::*;
 
     fn sound(name: &str, tags: &[&str], category: &str) -> LibrarySound {
-        LibrarySound { source: format!("asset:sfx/p/{name}.flac"), name: name.to_owned(), duration: None, tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), looped: false }
+        LibrarySound { i18n: Default::default(), source: format!("asset:sfx/p/{name}.flac"), name: name.to_owned(), duration: None, tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), looped: false }
     }
 
     fn pack(name: &str, sounds: Vec<LibrarySound>) -> LibraryPack {
-        LibraryPack { kind: AudioPackKind::Sfx, id: name.to_lowercase(), name: name.to_owned(), version: "1.0.0".to_owned(), sounds }
+        LibraryPack { i18n: Default::default(), kind: AudioPackKind::Sfx, id: name.to_lowercase(), name: name.to_owned(), version: "1.0.0".to_owned(), sounds }
     }
 
     fn library() -> AudioLibrary {

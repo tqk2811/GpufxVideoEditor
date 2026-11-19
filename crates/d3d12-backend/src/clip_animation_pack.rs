@@ -401,6 +401,8 @@ pub struct PackReadProblem {
 pub struct ClipAnimationScan {
     /// The manifests in the order they were read; the `id` of each is the folder name, any case.
     pub packs: Vec<ClipAnimationManifest>,
+    /// The folder of each pack of `packs`, in the same order.
+    pub folders: Vec<PathBuf>,
     pub problems: Vec<PackReadProblem>,
 }
 
@@ -433,6 +435,7 @@ pub fn scan_clip_animation_folders(roots: &[PathBuf]) -> ClipAnimationScan {
                 Ok(manifest) => {
                     taken.insert(id);
                     scan.packs.push(manifest);
+                    scan.folders.push(folder.clone());
                 }
                 Err(message) => scan.problems.push(PackReadProblem { pack: label, message }),
             }

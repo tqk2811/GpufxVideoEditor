@@ -14,6 +14,7 @@ use d3d12_backend::{resolve_item_effects, scan_clip_animation_folders, ClipAnima
 use engine::{AnimationCurve, AnimationGroup, Clip, PackPreset, PackPresets, PerUnit, PresetEffect, Time};
 
 use crate::audio_library::LibraryProblem;
+use crate::i18n::pack::{Localized, PackTranslations};
 use crate::timecode::from_seconds;
 
 /// The kind of clip an animation can be offered for.
@@ -78,9 +79,15 @@ pub struct LibraryAnimation {
     pub effect: Option<PresetEffect>,
     /// How it moves the units of a text one by one, for an animation of text clips.
     pub per_unit: Option<PerUnit>,
+    /// The name, description and tags in the languages its pack brings.
+    pub i18n: Localized,
 }
 
 impl LibraryAnimation {
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
+    }
     /// Whether the animation is offered for a clip of `kind`.
     pub fn applies_to(&self, kind: AnimatedClipKind) -> bool {
         self.applies_to.as_ref().is_none_or(|kinds| kinds.contains(&kind))
@@ -93,6 +100,15 @@ pub struct ClipAnimationPack {
     pub id: String,
     pub name: String,
     pub animations: Vec<LibraryAnimation>,
+    /// The pack's name, description and tags in the languages it brings.
+    pub i18n: Localized,
+}
+
+impl ClipAnimationPack {
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -106,8 +122,8 @@ pub struct ClipAnimationLibrary {
 impl ClipAnimationLibrary {
     /// Every animation of `group` offered for a clip of `kind`, with the name of its pack, packs in
     /// the order of the library.
-    pub fn offered(&self, group: AnimationGroup, kind: AnimatedClipKind) -> Vec<(&str, &LibraryAnimation)> {
-        self.packs.iter().flat_map(|pack| pack.animations.iter().map(move |animation| (pack.name.as_str(), animation))).filter(|(_, animation)| animation.group == group && animation.applies_to(kind)).collect()
+    pub fn offered(&self, group: AnimationGroup, kind: AnimatedClipKind) -> Vec<(&ClipAnimationPack, &LibraryAnimation)> {
+        self.packs.iter().flat_map(|pack| pack.animations.iter().map(move |animation| (pack, animation))).filter(|(_, animation)| animation.group == group && animation.applies_to(kind)).collect()
     }
 
     /// The curves of every animation, for [`engine::set_pack_presets`].
@@ -116,8 +132,8 @@ impl ClipAnimationLibrary {
     }
 
     /// The animation a clip names as `reference` in `group`.
-    pub fn find(&self, group: AnimationGroup, reference: &str) -> Option<(&str, &LibraryAnimation)> {
-        self.packs.iter().flat_map(|pack| pack.animations.iter().map(move |animation| (pack.name.as_str(), animation))).find(|(_, animation)| animation.group == group && animation.reference == reference)
+    pub fn find(&self, group: AnimationGroup, reference: &str) -> Option<(&ClipAnimationPack, &LibraryAnimation)> {
+        self.packs.iter().flat_map(|pack| pack.animations.iter().map(move |animation| (pack, animation))).find(|(_, animation)| animation.group == group && animation.reference == reference)
     }
 }
 
@@ -126,7 +142,7 @@ pub fn pack_reference(pack: &str, item: &str) -> String {
     format!("{}{}{item}", pack.to_ascii_lowercase(), engine::PACK_PRESET_SEPARATOR)
 }
 
-fn library_pack(manifest: ClipAnimationManifest, effects: &mut HashMap<String, PresetEffect>) -> ClipAnimationPack {
+fn library_pack(manifest: ClipAnimationManifest, translations: &PackTranslations, effects: &mut HashMap<String, PresetEffect>) -> ClipAnimationPack {
     let id = manifest.id.to_ascii_lowercase();
     let animations = manifest
         .items
@@ -140,6 +156,7 @@ fn library_pack(manifest: ClipAnimationManifest, effects: &mut HashMap<String, P
                 return None;
             }
             Some(LibraryAnimation {
+                i18n: translations.item(&item.id),
                 per_unit: item.per_unit,
                 effect,
                 effect_package: item.effect.map(|effect| effect.package),
@@ -152,7 +169,7 @@ fn library_pack(manifest: ClipAnimationManifest, effects: &mut HashMap<String, P
             })
         })
         .collect();
-    ClipAnimationPack { id, name: manifest.name, animations }
+    ClipAnimationPack { i18n: translations.pack(), id, name: manifest.name, animations }
 }
 
 /// Reads the packs under every root with the reader an export uses
@@ -164,7 +181,7 @@ pub fn scan_clip_animation_packs(roots: &[PathBuf]) -> ClipAnimationLibrary {
     let effects = resolve_item_effects(roots, &scan.packs);
     let mut ready = effects.ready;
     let problems = scan.problems.into_iter().chain(effects.problems).map(|problem| LibraryProblem { pack: problem.pack, message: problem.message }).collect();
-    let mut packs: Vec<ClipAnimationPack> = scan.packs.into_iter().map(|manifest| library_pack(manifest, &mut ready)).collect();
+    let mut packs: Vec<ClipAnimationPack> = scan.packs.into_iter().zip(&scan.folders).map(|(manifest, folder)| library_pack(manifest, &PackTranslations::read_folder(folder), &mut ready)).collect();
     packs.sort_by_key(|pack| pack.name.to_lowercase());
     ClipAnimationLibrary { packs, problems, loaded: true }
 }
@@ -211,6 +228,26 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_and_its_items_bring_their_translations() {
+        let dir = scratch("i18n");
+        write_pack(&dir, "moves", "Moves");
+        let folder = dir.join("packages/clip-animation/moves");
+        std::fs::create_dir_all(folder.join("i18n")).unwrap();
+        std::fs::write(folder.join("i18n/vi.json"), r#"{"name": "Chuyển động", "items": {"rise": {"name": "Nâng lên", "tags": ["bay"]}}}"#).unwrap();
+
+        let library = scan_clip_animation_packs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let pack = &library.packs[0];
+        assert_eq!((pack.display_name("vi"), pack.display_name("en")), ("Chuyển động", "Moves"));
+        let rise = pack.animations.iter().find(|animation| animation.reference == "moves/rise").unwrap();
+        let wave = pack.animations.iter().find(|animation| animation.reference == "moves/wave").unwrap();
+        assert_eq!(rise.display_name("vi"), "Nâng lên");
+        assert_eq!(wave.display_name("vi"), "Wave", "an item the file leaves out keeps its English name");
+        assert_eq!(rise.i18n.tags("vi", &[]), ["bay"]);
+    }
+
+    #[test]
     fn the_editor_and_an_export_read_the_same_packs() {
         let dir = scratch("same-reader");
         let (a, b) = (dir.join("a"), dir.join("b"));
@@ -246,7 +283,7 @@ mod tests {
         let dir = scratch("offered");
         write_pack(&dir, "p", "P");
         let library = scan_clip_animation_packs(&[dir.clone()]);
-        let names = |group, kind| library.offered(group, kind).iter().map(|(pack, animation)| format!("{pack}:{}", animation.name)).collect::<Vec<_>>();
+        let names = |group, kind| library.offered(group, kind).iter().map(|(pack, animation)| format!("{}:{}", pack.name, animation.name)).collect::<Vec<_>>();
         assert_eq!(names(AnimationGroup::Enter, AnimatedClipKind::Text), vec!["P:Rise"]);
         assert!(names(AnimationGroup::Enter, AnimatedClipKind::Video).is_empty(), "Rise is for text only");
         assert_eq!(names(AnimationGroup::Repeat, AnimatedClipKind::Sticker), vec!["P:Wave"], "no applies_to: every kind");

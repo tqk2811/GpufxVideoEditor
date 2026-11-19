@@ -269,9 +269,10 @@ fn style_tile(ui: &mut egui::Ui, state: &EditorState, pack: &TextStylePack, styl
     }
     let fill = style.style.background.map_or(theme::thumb_bg(), |background| rgba(background.color));
     let stroke = style.style.outline.map_or(Stroke::NONE, |outline| Stroke::new(1.5, rgba(outline.color)));
-    let hover = match &style.category {
-        Some(category) => format!("{} · {} ({category})", style.name, pack.name),
-        None => format!("{} · {}", style.name, pack.name),
+    let code = state.language().code();
+    let hover = match style.display_category(code) {
+        Some(category) => format!("{} · {} ({category})", style.display_name(code), pack.display_name(code)),
+        None => format!("{} · {}", style.display_name(code), pack.display_name(code)),
     };
     if let Some(cover) = &style.cover {
         let side = Vec2::splat(COVER_TILE_SIDE);
@@ -358,7 +359,7 @@ fn sticker_tile(ui: &mut egui::Ui, state: &EditorState, sticker: &LibrarySticker
     }
     let stroke = if response.hovered() { Stroke::new(1.0, theme::accent()) } else { Stroke::new(1.0, theme::border()) };
     painter.rect_stroke(picture, radius, stroke, StrokeKind::Inside);
-    let mut job = egui::text::LayoutJob::simple_singleline(sticker.name.clone(), FontId::proportional(12.0), theme::text());
+    let mut job = egui::text::LayoutJob::simple_singleline(sticker.display_name(state.language().code()).to_owned(), FontId::proportional(12.0), theme::text());
     job.wrap = egui::text::TextWrapping::truncate_at_width((side - 4.0).max(1.0));
     let galley = painter.layout_job(job);
     painter.galley(egui::pos2(rect.left() + 2.0, picture.bottom() + (TILE_CAPTION - galley.size().y) / 2.0), galley, theme::text());
@@ -395,10 +396,21 @@ fn sticker_motion_frame(ctx: &egui::Context, state: &EditorState, sticker: &Libr
 }
 
 fn sticker_tooltip(sticker: &LibrarySticker, language: Language) -> String {
-    let tags = if sticker.tags.is_empty() { sticker.category.clone() } else { format!("{} [{}]", sticker.category, sticker.tags.join(", ")) };
+    let code = language.code();
+    let tags = tags_line(sticker.i18n.category(code, &sticker.category), sticker.i18n.tags(code, &sticker.tags));
+    let name = sticker.display_name(code);
     match sticker.animation {
-        Some(timing) => format!("{}\n{tags}\n{}", sticker.name, language.t(Message::AnimatedSticker { loop_ms: timing.loop_ms, loops: timing.loops })),
-        None => format!("{}\n{tags}", sticker.name),
+        Some(timing) => format!("{name}\n{tags}\n{}", language.t(Message::AnimatedSticker { loop_ms: timing.loop_ms, loops: timing.loops })),
+        None => format!("{name}\n{tags}"),
+    }
+}
+
+/// A category followed by its tags in brackets, or the category alone when there are none.
+fn tags_line(category: &str, tags: &[String]) -> String {
+    if tags.is_empty() {
+        category.to_owned()
+    } else {
+        format!("{category} [{}]", tags.join(", "))
     }
 }
 
@@ -474,7 +486,7 @@ fn audio_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
             ui.label(egui::RichText::new(language.t(Message::InstalledPacks)).strong());
         }
         for (pack, sounds) in &found {
-            egui::CollapsingHeader::new(format!("{} ({})", pack.name, sounds.len())).id_salt(("audio-pack", pack.kind.name(), &pack.id)).default_open(true).show(ui, |ui| {
+            egui::CollapsingHeader::new(format!("{} ({})", pack.display_name(language.code()), sounds.len())).id_salt(("audio-pack", pack.kind.name(), &pack.id)).default_open(true).show(ui, |ui| {
                 if let Some(done) = sound_rows(ui, state, sounds) {
                     acted = Some(done);
                 }
@@ -552,8 +564,8 @@ fn sound_row(ui: &mut egui::Ui, state: &EditorState, sound: &LibrarySound) -> So
     let length_at = egui::pos2(add_rect.left() - 6.0 - length_text.size().x, rect.center().y - length_text.size().y / 2.0);
     let name_rect = Rect::from_min_max(egui::pos2(listen_rect.right() + 6.0, rect.top()), egui::pos2(length_at.x - 4.0, rect.bottom()));
     painter.galley(length_at, length_text, theme::text_dim());
-    painter.with_clip_rect(name_rect).text(name_rect.left_center(), Align2::LEFT_CENTER, &sound.name, FontId::proportional(12.0), theme::text());
-    let response = response.on_hover_text(sound_tooltip(sound));
+    painter.with_clip_rect(name_rect).text(name_rect.left_center(), Align2::LEFT_CENTER, sound.display_name(language.code()), FontId::proportional(12.0), theme::text());
+    let response = response.on_hover_text(sound_tooltip(sound, language.code()));
     // The second click of a double click adds, and leaves the sound its first click started playing.
     if add.clicked() || response.double_clicked() {
         SoundAction::Add
@@ -568,10 +580,11 @@ fn sound_row(ui: &mut egui::Ui, state: &EditorState, sound: &LibrarySound) -> So
     }
 }
 
-/// The name of a sound, what it is filed under, and the source a clip would store.
-fn sound_tooltip(sound: &LibrarySound) -> String {
-    let tags = if sound.tags.is_empty() { sound.category.clone() } else { format!("{} [{}]", sound.category, sound.tags.join(", ")) };
-    format!("{}\n{tags}\n{}", sound.name, sound.source)
+/// The name of a sound, what it is filed under, and the source a clip would store, in language
+/// `code` where its pack brings it.
+fn sound_tooltip(sound: &LibrarySound, code: &str) -> String {
+    let tags = tags_line(sound.i18n.category(code, &sound.category), sound.i18n.tags(code, &sound.tags));
+    format!("{}\n{tags}\n{}", sound.display_name(code), sound.source)
 }
 
 /// What an empty grid says: a filter that matches nothing is not an empty library.
@@ -750,7 +763,8 @@ fn tile_look(tile: &TileState) -> TileLook {
 /// The tooltip of a tile: the full name, what the package says about itself (its path when it says
 /// nothing), and the reason a preview is missing, if there is one.
 fn tile_tooltip(label: &str, entry: &PackageEntry, language: Language, tile: &TileState) -> String {
-    let about = if entry.description.is_empty() { entry.package.as_str() } else { entry.description.as_str() };
+    let description = entry.display_description(language.code());
+    let about = if description.is_empty() { entry.package.as_str() } else { description };
     let mut text = format!("{label}\n{about}");
     match tile {
         TileState::Failed(reason) => text.push_str(&format!("\n{}", language.t(Message::PreviewFailed(reason.clone())))),
@@ -907,7 +921,7 @@ fn picker_list(ui: &mut egui::Ui, state: &mut EditorState, which: PickerFor, may
                     let selected = picker.selected.as_deref() == Some(&entry.package);
                     // The borrow ends here: nothing below holds it across the drawing.
                     let tile = state.previews.borrow_mut().tile(&entry.package);
-                    let label = list_label(entry, &duplicates);
+                    let label = list_label(entry, &duplicates, language.code());
                     let (previews, tile_hover) = (&state.previews, &mut tile_hover);
                     let view = |hovered: bool| tile_view(&ctx, now, kind, &entry.package, &tile, tile_hover.observe(&entry.package, hovered, now), previews);
                     let response = package_tile(ui, side, &label, selected, &tile, view).on_hover_text(tile_tooltip(&label, entry, language, &tile));
@@ -958,7 +972,7 @@ mod tests {
     fn sound_row_actions(frames: Vec<Vec<egui::Event>>) -> Vec<SoundAction> {
         let ctx = egui::Context::default();
         let state = EditorState::default();
-        let sound = crate::audio_library::LibrarySound { source: "asset:music/p/a.mp3".to_owned(), name: "A".to_owned(), duration: None, tags: Vec::new(), category: String::new(), looped: false };
+        let sound = crate::audio_library::LibrarySound { i18n: Default::default(), source: "asset:music/p/a.mp3".to_owned(), name: "A".to_owned(), duration: None, tags: Vec::new(), category: String::new(), looped: false };
         let mut actions = Vec::new();
         for (index, events) in std::iter::once(Vec::new()).chain(frames).enumerate() {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(300.0, 200.0))), events, time: Some(index as f64 * 0.05), ..Default::default() };
@@ -1000,9 +1014,17 @@ mod tests {
 
     #[test]
     fn a_sound_tooltip_names_its_tags_and_source() {
-        let sound = LibrarySound { source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned(), "low".to_owned()], category: "impact".to_owned(), looped: false };
-        let text = sound_tooltip(&sound);
+        let sound = LibrarySound { i18n: Default::default(), source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned(), "low".to_owned()], category: "impact".to_owned(), looped: false };
+        let text = sound_tooltip(&sound, "en");
         assert!(text.contains("Boom") && text.contains("hit, low") && text.contains("impact") && text.ends_with("asset:sfx/p/a.flac"), "{text}");
+    }
+
+    #[test]
+    fn a_sound_tooltip_is_in_the_language_of_the_editor_field_by_field() {
+        let translations = crate::i18n::pack::PackTranslations::from_files([("vi".to_owned(), r#"{"items": {"a": {"name": "Bùm", "tags": ["va chạm"]}}}"#.to_owned())]);
+        let sound = LibrarySound { i18n: translations.item("a"), source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned()], category: "impact".to_owned(), looped: false };
+        assert_eq!(sound_tooltip(&sound, "vi"), "Bùm\nimpact [va chạm]\nasset:sfx/p/a.flac", "the category has no translation, so it stays English");
+        assert_eq!(sound_tooltip(&sound, "en"), "Boom\nimpact [hit]\nasset:sfx/p/a.flac");
     }
 
     #[test]
@@ -1036,7 +1058,7 @@ mod tests {
     }
 
     fn entry(package: &str, name: &str, description: &str) -> PackageEntry {
-        PackageEntry { package: package.to_owned(), name: name.to_owned(), description: description.to_owned(), kind: PackageKind::Effect, params: Vec::new(), hidden: false }
+        PackageEntry { i18n: Default::default(), param_i18n: Default::default(), package: package.to_owned(), name: name.to_owned(), description: description.to_owned(), kind: PackageKind::Effect, params: Vec::new(), hidden: false }
     }
 
     #[test]

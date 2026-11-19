@@ -2,7 +2,8 @@
 //! the caller decides what that edit means.
 
 use super::numeric::{self, drag_field};
-use super::theme;
+use super::theme;
+use crate::i18n::pack::ParamTranslations;
 use crate::params::{bool_value, color_json, color_value, display_name, editable, enum_value, expression_value, number_json, number_value, vector_json, vector_value, widget_for, with_value, ParamWidget};
 use d3d12_backend::{expression_error, ParamInfo, ParamKind};
 use crate::i18n::{Language, Message};
@@ -71,11 +72,13 @@ pub struct RowKeyframes<'a> {
 }
 
 /// The rows of every editable parameter in `infos`, with `params` as their values.
-pub fn rows(ui: &mut egui::Ui, id: egui::Id, language: Language, infos: &[ParamInfo], params: &Map<String, Value>, mut keyframes: Option<&mut RowKeyframes<'_>>) -> Option<Map<String, Value>> {
+/// `texts` gives the labels and descriptions in the language of the editor, where the package
+/// brings them; a parameter without one shows its name and the manifest's description.
+pub fn rows(ui: &mut egui::Ui, id: egui::Id, language: Language, infos: &[ParamInfo], texts: &ParamTranslations, params: &Map<String, Value>, mut keyframes: Option<&mut RowKeyframes<'_>>) -> Option<Map<String, Value>> {
     let mut changed = None;
     for info in editable(infos) {
         ui.push_id((id, info.name.as_str()), |ui| {
-            if let Some(next) = row(ui, language, info, params, keyframes.as_deref_mut()) {
+            if let Some(next) = row(ui, language, info, texts, params, keyframes.as_deref_mut()) {
                 changed = Some(next);
             }
         });
@@ -85,12 +88,14 @@ pub fn rows(ui: &mut egui::Ui, id: egui::Id, language: Language, infos: &[ParamI
 
 /// The label of a row, with the keyframe diamond of a float parameter. A float with keyframes can
 /// only be changed where the playhead gives it a time, so that returns whether the row may change.
-fn row_header(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>, keyframes: Option<&mut RowKeyframes<'_>>) -> bool {
+fn row_header(ui: &mut egui::Ui, language: Language, info: &ParamInfo, texts: &ParamTranslations, params: &Map<String, Value>, keyframes: Option<&mut RowKeyframes<'_>>) -> bool {
     let mut enabled = true;
     ui.horizontal(|ui| {
-        let label = ui.label(display_name(info));
-        if !info.description.is_empty() {
-            label.on_hover_text(&info.description);
+        let code = language.code();
+        let label = ui.label(texts.label(code, &info.name).map_or_else(|| display_name(info), str::to_owned));
+        let description = texts.description(code, &info.name, &info.description);
+        if !description.is_empty() {
+            label.on_hover_text(description);
         }
         let Some(keyframes) = keyframes.filter(|_| info.kind == ParamKind::Float) else { return };
         let keys = keyframes.keyframes.get(&info.name).map_or(&[][..], Vec::as_slice);
@@ -114,8 +119,8 @@ fn row_header(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &
     enabled
 }
 
-fn row(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>, keyframes: Option<&mut RowKeyframes<'_>>) -> Option<Map<String, Value>> {
-    let enabled = row_header(ui, language, info, params, keyframes);
+fn row(ui: &mut egui::Ui, language: Language, info: &ParamInfo, texts: &ParamTranslations, params: &Map<String, Value>, keyframes: Option<&mut RowKeyframes<'_>>) -> Option<Map<String, Value>> {
+    let enabled = row_header(ui, language, info, texts, params, keyframes);
     ui.add_enabled_ui(enabled, |ui| row_value(ui, language, info, params)).inner
 }
 

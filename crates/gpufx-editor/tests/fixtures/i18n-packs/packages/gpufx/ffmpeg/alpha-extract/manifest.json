@@ -1,0 +1,30 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.alpha-extract",
+  "name": "Alpha extract",
+  "used_for": ["gpufx"],
+  "version": "1.0.0",
+  "description": "Alpha channel as a gray picture (a matte), for outputs that cannot carry alpha.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "invert",
+      "type": "bool",
+      "default": false,
+      "description": "White where transparent instead of where opaque"
+    }
+  ],
+  "groups": [
+    {
+      "passes": [
+        {
+          "shader": "shaders/alpha_extract.wgsl"
+        }
+      ]
+    }
+  ]
+}

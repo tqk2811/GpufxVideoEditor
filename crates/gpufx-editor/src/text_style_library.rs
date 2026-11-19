@@ -13,6 +13,7 @@ use engine::{AnimationRef, ClipAnimation, ClipPlacement, FontRef, TextContent, T
 use crate::audio_library::LibraryProblem;
 use crate::clip_animation_library::pack_reference;
 use crate::font_library::LibraryFont;
+use crate::i18n::pack::{Localized, PackTranslations};
 use crate::package_import::ImportProblem;
 use crate::subtitle_style_install::{check_subtitle_style_fields, parse_subtitle_style_manifest, SubtitleKaraoke, SubtitleLayout, SUBTITLE_STYLE_TYPE};
 use crate::text_clip::default_text;
@@ -64,9 +65,20 @@ pub struct LibraryTextStyle {
     /// The cover picture of the pack the library shows in place of the preview text, when the item
     /// names one (see [`crate::text_style_install::TextStyleManifestItem::cover`]).
     pub cover: Option<PathBuf>,
+    /// The name, description, category and tags in the languages its pack brings.
+    pub i18n: Localized,
 }
 
 impl LibraryTextStyle {
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
+    }
+
+    /// The category in language `code`, else the manifest's.
+    pub fn display_category(&self, code: &str) -> Option<&str> {
+        self.category.as_deref().map(|category| self.i18n.category(code, category)).or_else(|| self.i18n.get(code).and_then(|texts| texts.category.as_deref()))
+    }
     /// `current` in this style: its content stays, the size too when the style has none, and the
     /// font when no family of the style's `font_hint` is among `families` (the system fonts) or the
     /// fonts of the installed font packs `pack_fonts` (see [`pick_font`]).
@@ -133,6 +145,15 @@ pub struct TextStylePack {
     pub name: String,
     pub kind: StyleKind,
     pub styles: Vec<LibraryTextStyle>,
+    /// The pack's name, description and tags in the languages it brings.
+    pub i18n: Localized,
+}
+
+impl TextStylePack {
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -161,6 +182,7 @@ impl TextStyleLibrary {
 fn read_pack(folder: &Path, label: &str, kind: StyleKind) -> Result<TextStylePack, String> {
     let bytes = std::fs::read(folder.join("manifest.json")).map_err(|e| e.to_string())?;
     let describe = |problem: ImportProblem| format!("{problem:?}");
+    let translations = PackTranslations::read_folder(folder);
     let (id, name, styles) = match kind {
         StyleKind::Text => {
             let manifest = parse_text_style_manifest(&bytes).map_err(describe)?;
@@ -169,7 +191,7 @@ fn read_pack(folder: &Path, label: &str, kind: StyleKind) -> Result<TextStylePac
             let styles = manifest
                 .items
                 .into_iter()
-                .map(|item| LibraryTextStyle { reference: pack_reference(&id, &item.id), preview_text: item.preview_text.unwrap_or_else(|| item.name.clone()), name: item.name, category: item.category, kind, animation: item.animation.as_ref().map(clip_animation), cover: item.cover.as_deref().map(|file| folder.join(file)), style: item.style, layout: None, karaoke: None })
+                .map(|item| LibraryTextStyle { i18n: translations.item(&item.id), reference: pack_reference(&id, &item.id), preview_text: item.preview_text.unwrap_or_else(|| item.name.clone()), name: item.name, category: item.category, kind, animation: item.animation.as_ref().map(clip_animation), cover: item.cover.as_deref().map(|file| folder.join(file)), style: item.style, layout: None, karaoke: None })
                 .collect();
             (manifest.id, manifest.name, styles)
         }
@@ -180,7 +202,7 @@ fn read_pack(folder: &Path, label: &str, kind: StyleKind) -> Result<TextStylePac
             let styles = manifest
                 .items
                 .into_iter()
-                .map(|item| LibraryTextStyle { reference: pack_reference(&id, &item.id), preview_text: item.preview_text.unwrap_or_else(|| item.name.clone()), name: item.name, category: item.category, kind, animation: item.animation.as_ref().map(clip_animation), style: item.style, layout: Some(item.layout), karaoke: item.karaoke, cover: None })
+                .map(|item| LibraryTextStyle { i18n: translations.item(&item.id), reference: pack_reference(&id, &item.id), preview_text: item.preview_text.unwrap_or_else(|| item.name.clone()), name: item.name, category: item.category, kind, animation: item.animation.as_ref().map(clip_animation), style: item.style, layout: Some(item.layout), karaoke: item.karaoke, cover: None })
                 .collect();
             (manifest.id, manifest.name, styles)
         }
@@ -188,7 +210,7 @@ fn read_pack(folder: &Path, label: &str, kind: StyleKind) -> Result<TextStylePac
     if !id.eq_ignore_ascii_case(label) {
         return Err(format!("its manifest does not match the folder ({id})"));
     }
-    Ok(TextStylePack { id: id.to_ascii_lowercase(), name, kind, styles })
+    Ok(TextStylePack { i18n: translations.pack(), id: id.to_ascii_lowercase(), name, kind, styles })
 }
 
 /// Reads the text and subtitle style packs under every root. A pack is accepted whole or reported,
@@ -227,6 +249,7 @@ pub fn scan_text_style_packs(roots: &[PathBuf]) -> TextStyleLibrary {
 #[cfg(test)]
 pub(crate) fn subtitle_library_for_test(font_hint: &[&str]) -> TextStyleLibrary {
     let style = LibraryTextStyle {
+        i18n: Default::default(),
         reference: "s/low".to_owned(),
         name: "Low".to_owned(),
         category: None,
@@ -238,7 +261,7 @@ pub(crate) fn subtitle_library_for_test(font_hint: &[&str]) -> TextStyleLibrary 
         karaoke: None,
         cover: None,
     };
-    TextStyleLibrary { packs: vec![TextStylePack { id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![style] }], problems: Vec::new(), loaded: true }
+    TextStyleLibrary { packs: vec![TextStylePack { i18n: Default::default(), id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![style] }], problems: Vec::new(), loaded: true }
 }
 
 #[cfg(test)]
@@ -331,7 +354,7 @@ mod tests {
 
     #[test]
     fn a_style_without_animation_or_size_keeps_the_clips() {
-        let style = LibraryTextStyle { reference: "p/s".to_owned(), name: "S".to_owned(), category: None, preview_text: "S".to_owned(), kind: StyleKind::Text, style: PackTextStyle::default(), animation: None, layout: None, karaoke: None, cover: None };
+        let style = LibraryTextStyle { i18n: Default::default(), reference: "p/s".to_owned(), name: "S".to_owned(), category: None, preview_text: "S".to_owned(), kind: StyleKind::Text, style: PackTextStyle::default(), animation: None, layout: None, karaoke: None, cover: None };
         let mut current = default_text("x");
         current.size = 0.3;
         assert_eq!(style.apply(&current, &[], &[]).size, 0.3);
@@ -376,9 +399,9 @@ mod tests {
         assert_eq!(karaoke.mode, engine::KaraokeMode::Color);
         assert_eq!(karaoke.active.and_then(|look| look.color), Some([255, 220, 0, 255]));
         assert_eq!(karaoke.words.len(), 2, "times set by hand stay");
-        let plain_subtitle = LibraryTextStyle { karaoke: None, ..style.clone() };
+        let plain_subtitle = LibraryTextStyle { i18n: Default::default(), karaoke: None, ..style.clone() };
         assert_eq!(plain_subtitle.apply(&styled_text_with_karaoke(), &[], &[]).karaoke, None, "a subtitle style without karaoke turns it off");
-        let text_style = LibraryTextStyle { karaoke: None, kind: StyleKind::Text, ..style.clone() };
+        let text_style = LibraryTextStyle { i18n: Default::default(), karaoke: None, kind: StyleKind::Text, ..style.clone() };
         assert!(text_style.apply(&styled_text_with_karaoke(), &[], &[]).karaoke.is_some(), "a text style leaves it");
         let _ = std::fs::remove_dir_all(&dir);
     }

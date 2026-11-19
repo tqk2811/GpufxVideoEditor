@@ -29,7 +29,7 @@ const MAX_FILE_BYTES: u64 = 1 << 20;
 const MAX_FILES: usize = 64;
 
 /// The translated texts of a pack or of one item, in one language. A missing field is `None`.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextSet {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -38,13 +38,13 @@ pub struct TextSet {
 }
 
 /// The translated label and description of one parameter.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParamText {
     pub label: Option<String>,
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PackFile {
     pack: TextSet,
     params: HashMap<String, ParamText>,
@@ -52,19 +52,19 @@ struct PackFile {
 }
 
 /// Every language file of one pack, by code.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PackTranslations {
     files: Vec<(String, PackFile)>,
 }
 
 /// The translations of one thing (a pack or an item), by language code, sorted by code.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Localized {
     texts: Vec<(String, TextSet)>,
 }
 
 /// The translated parameters of an effect package, by language code.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ParamTranslations {
     files: Vec<(String, HashMap<String, ParamText>)>,
 }

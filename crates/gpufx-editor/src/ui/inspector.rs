@@ -902,7 +902,8 @@ fn effects(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, editable: b
                                 toggled: None,
                                 jump: None,
                             };
-                            if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &shown, Some(&mut keyframes)) {
+                            let texts = state.catalog.param_texts_of(&effect.package).cloned().unwrap_or_default();
+                            if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &texts, &shown, Some(&mut keyframes)) {
                                 state.live_effect_params_shown(index, next);
                             }
                             if let Some((param, value)) = keyframes.toggled.take() {
@@ -966,8 +967,9 @@ fn transition_controls(ui: &mut egui::Ui, state: &mut EditorState, track: usize,
     }
     let infos: Option<Vec<d3d12_backend::ParamInfo>> = state.catalog.params_of(&transition.package).map(<[_]>::to_vec);
     let params: Map<String, Value> = transition.params.clone();
+    let texts = state.catalog.param_texts_of(&transition.package).cloned().unwrap_or_default();
     if let Some(infos) = infos {
-        if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &params, None) {
+        if let Some(next) = param_widgets::rows(ui, ui.scope_id(), language, &infos, &texts, &params, None) {
             state.live_transition(track, transition.after_clip, next, transition.duration);
         }
     }
