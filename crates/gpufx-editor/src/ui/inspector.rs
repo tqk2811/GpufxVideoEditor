@@ -38,7 +38,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     } else {
         Message::ProjectTitle
     });
-    ui.painter_at(rect).text(header.left_center() + Vec2::new(12.0, 0.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(14.0), theme::accent_text());
+    let title = ui.painter().layout_no_wrap(title, egui::FontId::proportional(14.0), theme::accent_text());
+    let title_width = title.size().x;
+    ui.painter_at(rect).galley(egui::pos2(header.left() + 12.0, header.center().y - title.size().y / 2.0), title, theme::accent_text());
+    if let Some(name) = key.and_then(|key| clip_of(state, key)).map(clip_name) {
+        header_name(ui, header, title_width, &name);
+    }
     ui.painter_at(rect).hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::border()));
     let body = Rect::from_min_max(egui::pos2(rect.left(), header.bottom()), rect.max).shrink2(Vec2::new(10.0, 8.0));
     if body.width() < 1.0 || body.height() < 1.0 {
@@ -61,6 +66,57 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
             (None, None) => project_summary(ui, state),
         });
     });
+}
+
+/// The clip's name on the right of the header, cut short with an ellipsis, and whole in a tooltip,
+/// when the title leaves too little room.
+fn header_name(ui: &mut egui::Ui, header: Rect, title_width: f32, name: &str) {
+    let left = header.left() + 12.0 + title_width + 16.0;
+    let right = header.right() - 12.0;
+    if right - left < 16.0 {
+        return;
+    }
+    let area = Rect::from_min_max(egui::pos2(left, header.top()), egui::pos2(right, header.bottom()));
+    ui.scope_builder(UiBuilder::new().max_rect(area).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate().show_tooltip_when_elided(true));
+    });
+}
+
+/// A row of tabs: the shown one in the accent colour over an accent bar, the others dim and lit
+/// under the pointer. With `baseline` a line runs under the whole row. Returns the tab clicked.
+fn tab_row<T: PartialEq + Copy>(ui: &mut egui::Ui, tabs: &[(T, String)], shown: T, font_size: f32, baseline: bool) -> Option<T> {
+    let line = ui.painter().add(egui::Shape::Noop);
+    let mut clicked = None;
+    let row = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (tab, label) in tabs {
+                let selected = *tab == shown;
+                let colour = if selected { theme::accent_text() } else { theme::text_dim() };
+                let galley = ui.painter().layout_no_wrap(label.clone(), egui::FontId::proportional(font_size), colour);
+                let (rect, response) = ui.allocate_exact_size(galley.size() + Vec2::new(20.0, 12.0), egui::Sense::click());
+                let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+                response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, label));
+                let painter = ui.painter();
+                if response.hovered() && !selected {
+                    painter.rect_filled(rect.shrink2(Vec2::new(0.0, 2.0)), theme::CONTROL_RADIUS, theme::hover());
+                }
+                painter.galley(rect.center() - galley.size() / 2.0, galley, colour);
+                if selected {
+                    let bar = Rect::from_min_max(egui::pos2(rect.left() + 4.0, rect.bottom() - 2.0), egui::pos2(rect.right() - 4.0, rect.bottom()));
+                    painter.rect_filled(bar, 1.0, theme::accent());
+                }
+                if response.clicked() {
+                    clicked = Some(*tab);
+                }
+            }
+        })
+        .response;
+    if baseline {
+        let y = row.rect.bottom() - 0.5;
+        ui.painter().set(line, egui::Shape::hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::border())));
+    }
+    clicked
 }
 
 /// The inspector title for a clip on a track of `kind`: what the clip is, not just "Clip".
@@ -163,27 +219,30 @@ fn clip_header(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey) -> Clip
     let language = state.language();
     let Some(clip) = clip_of(state, key).cloned() else { return ClipTab::General };
     let kind = state.project().tracks[key.track].kind;
-    ui.add(egui::Label::new(egui::RichText::new(clip_name(&clip)).strong()).truncate());
     if state.is_track_locked(key.track) {
         ui.add(egui::Label::new(egui::RichText::new(language.t(Message::TrackLockedNote)).color(theme::text_dim())).wrap());
     }
     let tabs = clip_tabs(kind, &clip);
     let mut shown = shown_clip_tab(state.ui.clip_tab, &tabs);
-    ui.horizontal_wrapped(|ui| {
-        for tab in tabs {
-            if ui.selectable_value(&mut shown, tab, language.t(clip_tab_label(tab, kind, &clip))).clicked() {
-                state.ui.clip_tab = tab;
-            }
-        }
-    });
-    if shown == ClipTab::Picture {
-        ui.horizontal_wrapped(|ui| {
-            ui.selectable_value(&mut state.ui.picture_tab, PictureTab::Properties, language.t(Message::ClipTabProperties));
-            ui.selectable_value(&mut state.ui.picture_tab, PictureTab::Animation, language.t(Message::TabAnimation));
-            ui.selectable_value(&mut state.ui.picture_tab, PictureTab::Effects, language.t(Message::TabEffects));
-        });
+    let labelled: Vec<(ClipTab, String)> = tabs.iter().map(|&tab| (tab, language.t(clip_tab_label(tab, kind, &clip)))).collect();
+    if let Some(tab) = tab_row(ui, &labelled, shown, 14.0, true) {
+        state.ui.clip_tab = tab;
+        shown = tab;
     }
-    ui.separator();
+    if shown == ClipTab::Picture {
+        ui.add_space(2.0);
+        let picture_tabs = [
+            (PictureTab::Properties, language.t(Message::ClipTabProperties)),
+            (PictureTab::Animation, language.t(Message::TabAnimation)),
+            (PictureTab::Effects, language.t(Message::TabEffects)),
+        ];
+        if let Some(tab) = tab_row(ui, &picture_tabs, state.ui.picture_tab, 13.0, false) {
+            state.ui.picture_tab = tab;
+        }
+        ui.separator();
+    } else {
+        ui.add_space(6.0);
+    }
     shown
 }
 
@@ -948,6 +1007,31 @@ mod tests {
             collect(&clipped.shape, &mut texts);
         }
         texts
+    }
+
+    #[test]
+    fn the_clip_name_sits_in_the_header_cut_short_when_narrow() {
+        const NAME: &str = "a-rather-long-clip-name-for-the-header.mp4";
+        let ctx = egui::Context::default();
+        let mut state = EditorState::default();
+        state.add_track(engine::TrackKind::Video);
+        state.add_clip_from_file(0, Path::new(NAME));
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        frame(&ctx, &mut state);
+        assert_eq!(name_elided(&ctx, &mut state, None), Some(false));
+        let narrow = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(200.0, 600.0));
+        assert_eq!(name_elided(&ctx, &mut state, Some(narrow)), Some(true));
+    }
+
+    /// Whether the header's clip name was cut short, `None` when it is not drawn.
+    fn name_elided(ctx: &egui::Context, state: &mut EditorState, screen: Option<Rect>) -> Option<bool> {
+        let input = egui::RawInput { screen_rect: screen, ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| show(ui, state, &mut Vec::new()));
+        output.textures_delta.clear();
+        output.shapes.iter().find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text().starts_with("a-rather") => Some(text.galley.elided),
+            _ => None,
+        })
     }
 
     #[test]
