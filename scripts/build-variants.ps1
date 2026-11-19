@@ -40,6 +40,10 @@ function Build-Variant {
         $built = Join-Path $TargetDir "release\$name"
         if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { throw "$built was not built" }
     }
+    # English is built into the editor; the other languages are read from the i18n folder beside it.
+    $i18n = Join-Path $TargetDir 'release\i18n'
+    if (Test-Path -LiteralPath $i18n) { Remove-Item -LiteralPath $i18n -Recurse -Force }
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\gpufx-editor\i18n') -Destination $i18n -Recurse
 }
 
 Push-Location $repoRoot
