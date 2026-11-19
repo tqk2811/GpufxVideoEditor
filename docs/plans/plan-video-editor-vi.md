@@ -98,6 +98,24 @@ Giai đoạn 0 là cửa quyết định, không đạt thì dừng hoặc đổ
 - Tách clip chữ thì mỗi nửa chạy lại hiệu ứng vào/ra của nó (giống CapCut), vì đồng hồ hiệu ứng đếm theo thời gian từng clip hiện trên màn hình.
 - Clip có preset xoay (`spin`) luôn đi đường vẽ xoay suốt clip, kể cả lúc đứng thẳng, để cách vẽ không đổi giữa các khung; chấp nhận chi phí thêm một pass.
 
+## Ngôn ngữ giao diện
+
+Đã làm (2026-11-19). Chữ của editor nằm trong file JSON `i18n/<mã ngôn ngữ>.json`, không còn là bảng Rust.
+
+- `crates/gpufx-editor/i18n/en.json` được nhúng vào binary (`include_str!`) và là nơi dự phòng cuối cùng. `vi.json` và các ngôn ngữ khác đi kèm app nằm trong thư mục `i18n` cạnh exe; `scripts/build-variants.ps1` chép thư mục này vào `target\release\i18n`. Bản debug không có thư mục đó cạnh exe thì đọc thẳng `crates/gpufx-editor/i18n` của checkout.
+- Mỗi key tra theo thứ tự: file của user cùng mã, file đi kèm app cùng mã, rồi tiếng Anh nhúng sẵn. File hỏng được báo trên stderr và bỏ qua, app không dừng. Mã ngôn ngữ lưu trong settings là tên file; mã không còn file thì về tiếng Anh.
+- Cú pháp: key phẳng hoặc có dấu chấm (object lồng nhau cũng đọc thành key có dấu chấm), `{name}` là tham số, `{{` và `}}` là dấu ngoặc nhọn thật. Số nhiều là hai key anh em `<key>.one` và `<key>.other`, chọn theo tham số đếm; tiếng Việt chỉ cần `.other`. Giá trị enum nằm trong câu (loại luồng, loại track, mép clip, lý do gói bị từ chối...) và mạo từ tiếng Anh ("a video", "an audio") là key riêng, code dịch trước rồi truyền vào làm tham số.
+- `_meta.name` là tên ngôn ngữ viết bằng chính nó, hiện trong menu Ngôn ngữ.
+- Code: `Message::to_text` trong `crates/gpufx-editor/src/i18n/mod.rs` là một `match` đủ mọi biến thể, trả về key và tham số, nên thêm `Message` mà quên key thì không biên dịch được. Test kiểm mọi key code dùng đều có trong `en.json` với đúng tên tham số, và mọi key của `vi.json` đều có trong `en.json`, chỉ dùng tham số mà bản tiếng Anh dùng. Bộ đọc file (`i18n/catalog.rs`) không biết gì về `Message`, để sau này đọc bản dịch của gói.
+
+### User thêm một ngôn ngữ
+
+1. Chép `en.json` (trong thư mục `i18n` cạnh exe, hoặc trong repo) vào `%LOCALAPPDATA%\gpufx-editor\i18n\`, đổi tên theo mã ngôn ngữ, ví dụ `fr.json`.
+2. Sửa `"_meta": {"name": "Français"}` và dịch các giá trị. Giữ nguyên key và tên trong `{...}`. Key nào xoá đi thì hiện tiếng Anh.
+3. Khởi động lại editor rồi chọn ngôn ngữ trong menu Ngôn ngữ.
+
+File trùng mã với ngôn ngữ có sẵn (ví dụ `vi.json`) thì chỉ cần ghi các key muốn sửa; các key còn lại lấy từ file đi kèm app.
+
 ## Rủi ro giấy phép và pháp lý
 
 Đây là hiểu biết chung, không phải tư vấn pháp lý.
