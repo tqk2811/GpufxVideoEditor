@@ -9,7 +9,7 @@
 //! `face_detector`.
 //!
 //! Fetching: the converted zips are release assets of `tqk2811/FFmpegGpuFilter`
-//! ([`DEFAULT_BASE_URL`], tag `models-tracking-v1`, overridable with [`BASE_URL_ENV`]), each checked
+//! ([`DEFAULT_BASE_URL`], tag `models-tracking-v0.1.0`, overridable with [`BASE_URL_ENV`]), each checked
 //! against `sha256_zip` of its package's `source.json`. Until that release exists the hash is
 //! empty and fetching stays off: the model can still be imported from a zip.
 
@@ -74,7 +74,7 @@ pub const TRACKING_MODELS_ENV: &str = "GPUFX_TRACKING_MODELS";
 pub const BASE_URL_ENV: &str = "GPUFX_TRACKING_MODEL_BASE_URL";
 
 /// The built-in base URL: the release of the tracking models of FFmpegGpuFilter.
-pub const DEFAULT_BASE_URL: &str = "https://github.com/tqk2811/FFmpegGpuFilter/releases/download/models-tracking-v1";
+pub const DEFAULT_BASE_URL: &str = "https://github.com/tqk2811/FFmpegGpuFilter/releases/download/models-tracking-v0.1.0";
 
 /// The SHA-256 of the released zip of `model`: `sha256_zip` of the package's `source.json`, built
 /// in; `None` while it is empty (no release yet).
@@ -247,7 +247,7 @@ pub(crate) mod tests {
         for model in TrackingModel::ALL {
             assert!(fetch_with_progress(model, &none, &folder, &Progress::default()).unwrap_err().contains("no download source"));
             assert_eq!(source(model).sha256, expected_zip_sha256(model));
-            assert!(source(model).base_url.unwrap().ends_with("models-tracking-v1"));
+            assert!(source(model).base_url.unwrap().ends_with("models-tracking-v0.1.0"));
         }
         assert_eq!(TrackingModel::NanoTrack.id(), MODEL_ID);
     }

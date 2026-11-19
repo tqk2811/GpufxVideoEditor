@@ -2,7 +2,7 @@
 
 Mục tiêu: người dùng chọn một vật trong clip video. Sticker, text hoặc vùng che (blur, pixelate, hộp màu) gắn vào vật đó và tự di chuyển theo, có thể bám cả scale và góc xoay. Tham khảo: Tracking của CapCut, Motion tracking của DaVinci Resolve, Motion Tracker của Shotcut, tracker OpenCV trong Kdenlive.
 
-Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). P0 và P1 đã xong: tracker cổ điển ở `crates/engine/src/tracker/`, worker nền ở `crates/gpufx-editor/src/tracking.rs`, tool `track_run`, `track_status`, `track_cancel`. P2 đã xong: mục Tracking trong inspector của clip video (`ui/tracking_inspector.rs`), vẽ quỹ đạo và sửa khung trên preview (`ui/tracking_overlay.rs`), dải độ tin cậy trên timeline, thao tác ở `track_edit.rs`, tool `track_create`, `track_smooth`, `track_bake_keyframes`, `track_run` với `direction: both`. P3 đã xong, model phát hành ở release `models-tracking-v1`: op `correlation` và activation `exp` trong `gpufx-core/nn`, `NanoTrack` (`gpufx-core/src/nn/track.rs`, cắt ảnh và giải mã khung bao bằng WGSL), script `scripts/convert-tracking-models.py` của FFmpegGpuFilter, bộ tải model chung `model_download.rs`, model tracker ở `tracking_models.rs`, chế độ Nhanh/Bền trong inspector và tham số `mode` của `track_run`.
+Trạng thái: đã duyệt, các câu hỏi đã chốt ở [Câu hỏi cần chốt](#câu-hỏi-cần-chốt). P0 và P1 đã xong: tracker cổ điển ở `crates/engine/src/tracker/`, worker nền ở `crates/gpufx-editor/src/tracking.rs`, tool `track_run`, `track_status`, `track_cancel`. P2 đã xong: mục Tracking trong inspector của clip video (`ui/tracking_inspector.rs`), vẽ quỹ đạo và sửa khung trên preview (`ui/tracking_overlay.rs`), dải độ tin cậy trên timeline, thao tác ở `track_edit.rs`, tool `track_create`, `track_smooth`, `track_bake_keyframes`, `track_run` với `direction: both`. P3 đã xong, model phát hành ở release `models-tracking-v0.1.0`: op `correlation` và activation `exp` trong `gpufx-core/nn`, `NanoTrack` (`gpufx-core/src/nn/track.rs`, cắt ảnh và giải mã khung bao bằng WGSL), script `scripts/convert-tracking-models.py` của FFmpegGpuFilter, bộ tải model chung `model_download.rs`, model tracker ở `tracking_models.rs`, chế độ Nhanh/Bền trong inspector và tham số `mode` của `track_run`.
 
 ## Hiện trạng
 
@@ -77,7 +77,7 @@ Chỉ dùng mã và model có giấy phép MIT, Apache hoặc BSD. Tự viết t
     - cross-correlation depthwise, dùng template làm kernel động lúc chạy;
     - crop và resize theo vùng;
     - giải mã khung bao.
-  - Model host trên release của FFmpegGpuFilter (`models-tracking-v1`), giống model tách nền.
+  - Model host trên release của FFmpegGpuFilter (`models-tracking-v0.1.0`), giống model tách nền.
 - **Pha 4:**
   - Detector khuôn mặt YuNet (MIT) hoặc BlazeFace (Apache) để tự động che mặt.
   - Tracking phối cảnh 4 góc.
@@ -138,7 +138,7 @@ Các điểm dưới đây do phiên làm P3 tự chọn khi user vắng, user �
 
 ## Tự động che mặt (P4 phần 1)
 
-- **Model:** YuNet `face_detection_yunet_2023mar.onnx` của [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet), giấy phép MIT (README của thư mục ghi mọi file trong đó, gồm cả trọng số, theo MIT), ghim ở commit `eb9f4f2d` kèm sha256. Gói `gpufx_ai_tracking/yunet-2023mar.zip` gồm `model.json`, `weights.bin`, `io.json` (role `face_detector`), `LICENSE`, `README.md`; phát hành chung release `models-tracking-v1` với NanoTrack.
+- **Model:** YuNet `face_detection_yunet_2023mar.onnx` của [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet), giấy phép MIT (README của thư mục ghi mọi file trong đó, gồm cả trọng số, theo MIT), ghim ở commit `eb9f4f2d` kèm sha256. Gói `gpufx_ai_tracking/yunet-2023mar.zip` gồm `model.json`, `weights.bin`, `io.json` (role `face_detector`), `LICENSE`, `README.md`; phát hành chung release `models-tracking-v0.1.0` với NanoTrack.
 - **Chạy model:** `scripts/convert-tracking-models.py` cắt graph trước các Reshape ở đầu ra (bỏ nhánh landmark), pnnx với hai cỡ ảnh để Resize đi theo tỉ lệ, rồi `gpufx-nnconv`. Không cần thêm op. `FaceDetector` của gpufx-core co cạnh dài của frame về 640, đệm số 0 tới bội 32, chạy trên GPU, đọc về các map của stride 8, 16, 32, giải mã khung và NMS trên CPU. Test so từng đầu ra với onnxruntime (CPU reference và GPU) và so khung tìm được trên một frame của ảnh mẫu OpenCV Zoo.
 - **Ghép theo IoU:** `engine::faces::face_tracks` gán khung của mỗi frame cho đường đang mở theo IoU lớn nhất trước. Khung không đường nào nhận thì mở đường mới. Đường lỡ quá `max_gap` frame liền thì đóng. Đường ngắn hoặc điểm trung bình thấp bị bỏ.
 - **Luồng chạy:** worker đọc frame như tracker (proxy nếu có, 360 dòng), có tiến độ và huỷ. Khi xong, mỗi đường thành một `MotionTrack` (sample có confidence là điểm của detector) và một clip che vùng bám theo nó, tất cả trong một bước undo.

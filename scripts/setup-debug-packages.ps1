@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $assetsRepo = 'tqk2811/GpufxVideoEditor-Assets'
-$releases = @('audio-v1', 'stickers-v1', 'animations-v0.1.0')
+$releases = @('audio-v0.1.0', 'stickers-v0.1.0', 'animations-v0.1.0')
 $capcutRepos = @(
     @{ Repo = 'tqk2811/FFmpegGpuFilter-packages-capcut'; Group = 'capcut' }
 )

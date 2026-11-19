@@ -25,7 +25,7 @@ use crate::model_download::Downloads;
 pub const MODEL_BASE_URL_ENV: &str = "GPUFX_MODEL_BASE_URL";
 
 /// The built-in base URL of the models: the release of the matting models of FFmpegGpuFilter.
-pub const DEFAULT_MODEL_BASE_URL: Option<&str> = Some("https://github.com/tqk2811/FFmpegGpuFilter/releases/download/models-matting-v1");
+pub const DEFAULT_MODEL_BASE_URL: Option<&str> = Some("https://github.com/tqk2811/FFmpegGpuFilter/releases/download/models-matting-v0.1.0");
 
 /// The SHA-256 of the released zip of each model: `sha256_zip` of the package's `source.json`
 /// in the FFmpegGpuFilter checkout, built into the editor.
