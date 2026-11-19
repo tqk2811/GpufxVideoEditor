@@ -8,6 +8,7 @@
 //! reason.
 
 pub mod catalog;
+pub mod pack;
 pub mod text;
 
 use std::path::{Path, PathBuf};

@@ -5,6 +5,12 @@
 //! to the filter, then a name starting with it, then words found at the start of a word of the name,
 //! inside the name, in a tag or category, and last in the other fields. Items that score the same
 //! keep their order, and an empty filter keeps every item in its order.
+//!
+//! An item may have more names than one: the translations its pack brings (see
+//! [`crate::i18n::pack`]). Every name, English or translated, of every language the pack brings, is
+//! matched as a name, the best one counting, so a word typed in any of them ranks alike whatever the
+//! language of the editor. Translated tags and categories are tags, translated descriptions other
+//! fields.
 
 use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
@@ -22,6 +28,8 @@ pub fn fold(text: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct SearchFields<'a> {
     pub name: &'a str,
+    /// More names: the translations of the name.
+    pub names: Vec<&'a str>,
     /// Tags and categories.
     pub tags: Vec<&'a str>,
     /// Ids, keys, pack names and descriptions.
@@ -66,21 +74,21 @@ impl Query {
         if self.is_empty() {
             return Some(0);
         }
-        let name = fold(fields.name);
+        let names: Vec<String> = std::iter::once(fields.name).chain(fields.names.iter().copied()).map(fold).collect();
         let tags: Vec<String> = fields.tags.iter().map(|tag| fold(tag)).collect();
         let other: Vec<String> = fields.other.iter().map(|text| fold(text)).collect();
         let mut score = 0;
         for word in &self.words {
-            let in_name = name.match_indices(word.as_str()).map(|(at, _)| if starts_word(&name, at) { 30 } else { 20 }).max();
+            let in_name = names.iter().flat_map(|name| name.match_indices(word.as_str()).map(|(at, _)| if starts_word(name, at) { 30 } else { 20 })).max();
             let best = in_name
                 .or_else(|| tags.iter().any(|tag| tag.contains(word.as_str())).then_some(10))
                 .or_else(|| other.iter().any(|text| text.contains(word.as_str())).then_some(5))?;
             score += best;
         }
-        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        if name == self.whole {
+        let whole = |name: &String| name.split_whitespace().collect::<Vec<_>>().join(" ");
+        if names.iter().map(whole).any(|name| name == self.whole) {
             score += 2000;
-        } else if name.starts_with(&self.whole) {
+        } else if names.iter().map(whole).any(|name| name.starts_with(&self.whole)) {
             score += 1000;
         }
         Some(score)
@@ -164,6 +172,18 @@ mod tests {
         let items = ["Blur Zoom Strong", "Zoom Blur Strong", "Zoom  Blur", "Strong Zoom Blur"];
         assert_eq!(names(&items, "zoom blur"), ["Zoom  Blur", "Zoom Blur Strong", "Blur Zoom Strong", "Strong Zoom Blur"]);
         assert_eq!(names(&items, "ZOOM BLUR STRONG"), ["Zoom Blur Strong", "Blur Zoom Strong", "Strong Zoom Blur"]);
+    }
+
+    #[test]
+    fn a_translated_name_ranks_as_a_name() {
+        let items = [("Pop", "Bật ra"), ("Bounce", ""), ("Other", "")];
+        fn fields<'r>(item: &'r (&str, &str)) -> SearchFields<'r> {
+            SearchFields { name: item.0, names: vec![item.1], tags: vec![], other: vec![] }
+        }
+        let ranked: Vec<&str> = rank(items, "bat ra", fields).into_iter().map(|item| item.0).collect();
+        assert_eq!(ranked, ["Pop"]);
+        let score = |item: (&'static str, &'static str), filter| Query::new(filter).score(&fields(&item)).unwrap();
+        assert_eq!(score(("Pop", "Bật ra"), "bật ra"), score(("Bật ra", ""), "bat ra"), "a translated name scores as the name does");
     }
 
     #[test]
