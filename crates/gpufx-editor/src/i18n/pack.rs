@@ -110,9 +110,10 @@ pub fn language_file_code(path: &str) -> Option<&str> {
 }
 
 impl PackTranslations {
-    /// The language files of `(code, text)`; a file that is not a JSON object is skipped.
+    /// The language files of `(code, text)`; a file that is not a JSON object is skipped. Codes are
+    /// lower-cased, and of two files whose codes differ only in case the first is kept.
     pub fn from_files(files: impl IntoIterator<Item = (String, String)>) -> Self {
-        let mut files: Vec<(String, PackFile)> = files.into_iter().filter(|(code, _)| usable_code(code)).filter_map(|(code, text)| parse_file(&text).map(|file| (code, file))).take(MAX_FILES).collect();
+        let mut files: Vec<(String, PackFile)> = files.into_iter().filter(|(code, _)| usable_code(code)).filter_map(|(code, text)| parse_file(&text).map(|file| (code.to_ascii_lowercase(), file))).take(MAX_FILES).collect();
         files.sort_by(|a, b| a.0.cmp(&b.0));
         files.dedup_by(|a, b| a.0 == b.0);
         Self { files }
@@ -204,7 +205,7 @@ impl Localized {
 
     /// The texts in language `code`, if the pack brings that language.
     pub fn get(&self, code: &str) -> Option<&TextSet> {
-        self.texts.iter().find(|(language, _)| language == code).map(|(_, texts)| texts)
+        self.texts.iter().find(|(language, _)| language.eq_ignore_ascii_case(code)).map(|(_, texts)| texts)
     }
 
     /// The name in `code`, else `english`.
@@ -262,7 +263,7 @@ impl Localized {
 
 impl ParamTranslations {
     fn get(&self, code: &str, param: &str) -> Option<&ParamText> {
-        self.files.iter().find(|(language, _)| language == code).and_then(|(_, params)| params.get(param))
+        self.files.iter().find(|(language, _)| language.eq_ignore_ascii_case(code)).and_then(|(_, params)| params.get(param))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -282,7 +283,7 @@ impl ParamTranslations {
     /// The translated parameters in `code`, as `{"<param>": {"label", "description"}}` with only the
     /// fields translated, or `None` when there are none.
     pub fn json_for(&self, code: &str) -> Option<Value> {
-        let (_, params) = self.files.iter().find(|(language, _)| language == code)?;
+        let (_, params) = self.files.iter().find(|(language, _)| language.eq_ignore_ascii_case(code))?;
         let mut json = serde_json::Map::new();
         for (name, text) in params {
             let mut entry = serde_json::Map::new();
@@ -333,6 +334,18 @@ mod tests {
         assert_eq!(params.label("vi", "radius"), Some("Bán kính"));
         assert_eq!(params.label("vi", "other"), None);
         assert_eq!(params.description("vi", "radius", "Radius in pixels"), "Radius in pixels");
+    }
+
+    #[test]
+    fn language_codes_ignore_case_in_files_and_lookups() {
+        let translations = PackTranslations::from_files([("VI".to_owned(), r#"{"name": "Một", "params": {"a": {"label": "Nhãn"}}}"#.to_owned()), ("vi".to_owned(), r#"{"name": "Hai"}"#.to_owned()), ("pt-BR".to_owned(), r#"{"name": "Três"}"#.to_owned())]);
+        assert_eq!(translations.codes().collect::<Vec<_>>(), ["pt-br", "vi"], "codes are lower-cased and a code is kept once");
+        let pack = translations.pack();
+        assert_eq!(pack.name("pt-br", ""), "Três");
+        assert_eq!(pack.name("PT-BR", ""), "Três");
+        assert_eq!(pack.name("Vi", ""), "Một");
+        assert_eq!(translations.params().label("VI", "a"), Some("Nhãn"));
+        assert!(translations.params().json_for("Vi").is_some());
     }
 
     #[test]

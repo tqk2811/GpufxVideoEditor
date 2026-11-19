@@ -186,7 +186,7 @@ fn pick_translations(value: &mut Value, code: &str) {
     match value {
         Value::Object(map) => {
             if let Some(Value::Object(mut all)) = map.remove(PENDING_TRANSLATIONS) {
-                if let Some(translation) = all.remove(code).filter(|_| code != crate::i18n::catalog::ENGLISH_CODE) {
+                if let Some(translation) = all.remove(&code.to_ascii_lowercase()).filter(|_| code != crate::i18n::catalog::ENGLISH_CODE) {
                     map.insert("translation".to_owned(), translation);
                 }
             }
