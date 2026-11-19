@@ -20,6 +20,7 @@ use crate::subtitle_track::track_srt;
 use crate::clip_animation_library::AnimatedClipKind;
 use crate::editor::{even_side, new_clip, AgentExport, MAX_OUTPUT_SIDE, EditorState, DEFAULT_CLIP_DURATION, DEFAULT_IMAGE_DURATION, DEFAULT_TRANSITION_DURATION};
 use crate::export::{export_blocker, ExportOutcome};
+use crate::i18n::pack::{Localized, ParamTranslations};
 use crate::i18n::Language;
 use crate::media::{choose_track, TrackChoice};
 use crate::package_manager::{PackSource, PackTab};
@@ -155,8 +156,69 @@ fn package_problem(package: &str, package_roots: &[PathBuf]) -> Option<AgentErro
     paths.package_path(package).is_none().then(|| AgentError::new("package_not_found", format!("no package {package} in the package roots")))
 }
 
+/// The key under which a list read in [`prepare`], before the editor's language is known, keeps
+/// every translation of an item; [`pick_translations`] replaces it with the one of that language.
+const PENDING_TRANSLATIONS: &str = "_translations";
+
+/// Every translation of an item as `{"<code>": translation}` (see
+/// [`crate::i18n::pack::Localized::translation_json`]), with the translated parameters of a package
+/// under `params`; `None` when the pack brings none.
+fn all_translations(i18n: &Localized, params: Option<&ParamTranslations>) -> Option<Value> {
+    let mut codes: Vec<&str> = i18n.codes().chain(params.into_iter().flat_map(ParamTranslations::codes)).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    let all: Map<String, Value> = codes
+        .into_iter()
+        .filter_map(|code| {
+            let mut translation = i18n.translation_json(code).unwrap_or_else(|| json!({"language": code}));
+            if let Some(params) = params.and_then(|params| params.json_for(code)) {
+                translation["params"] = params;
+            }
+            translation.as_object().is_some_and(|object| object.len() > 1).then(|| (code.to_owned(), translation))
+        })
+        .collect();
+    (!all.is_empty()).then_some(Value::Object(all))
+}
+
+/// Replaces every pending set of translations in `value` with `translation`, the one of language
+/// `code`, or with nothing for English or a language the pack does not bring.
+fn pick_translations(value: &mut Value, code: &str) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::Object(mut all)) = map.remove(PENDING_TRANSLATIONS) {
+                if let Some(translation) = all.remove(code).filter(|_| code != crate::i18n::catalog::ENGLISH_CODE) {
+                    map.insert("translation".to_owned(), translation);
+                }
+            }
+            map.values_mut().for_each(|value| pick_translations(value, code));
+        }
+        Value::Array(items) => items.iter_mut().for_each(|value| pick_translations(value, code)),
+        _ => {}
+    }
+}
+
+/// A list read in [`prepare`], with the translations of the editor's language `code` picked.
+fn localized_list(list: Option<Value>, code: &str) -> Value {
+    let mut list = list.unwrap_or_default();
+    pick_translations(&mut list, code);
+    list
+}
+
+/// `json` with `translation`, the item's texts in the editor's language `code`, when the pack brings
+/// that language and it is not English.
+pub(crate) fn with_translation(mut json: Value, i18n: &Localized, code: &str) -> Value {
+    if let Some(translation) = i18n.translation_json(code) {
+        json["translation"] = translation;
+    }
+    json
+}
+
 fn entry_json(entry: &&PackageEntry) -> Value {
-    json!({"package": entry.package, "name": entry.name, "description": entry.description, "params": entry.params.iter().filter(|param| !crate::params::is_clip_clock(&param.name)).map(|param| &param.name).collect::<Vec<_>>()})
+    let mut json = json!({"package": entry.package, "name": entry.name, "description": entry.description, "params": entry.params.iter().filter(|param| !crate::params::is_clip_clock(&param.name)).map(|param| &param.name).collect::<Vec<_>>()});
+    if let Some(all) = all_translations(&entry.i18n, Some(&entry.param_i18n)) {
+        json[PENDING_TRANSLATIONS] = all;
+    }
+    json
 }
 
 fn package_list(package_roots: &[PathBuf], filter: Option<&str>, limit: Option<usize>) -> Value {
@@ -177,7 +239,7 @@ fn installed_packs(package_roots: &[PathBuf], kind: Option<&str>) -> Value {
         .into_iter()
         .filter(|pack| tab.is_none_or(|tab| pack.tab == tab))
         .map(|pack| {
-            json!({
+            let mut json = json!({
                 "kind": pack.tab.code(),
                 "key": pack.key,
                 "id": pack.id,
@@ -190,7 +252,11 @@ fn installed_packs(package_roots: &[PathBuf], kind: Option<&str>) -> Value {
                 "hidden": pack.hidden,
                 "shadowed": pack.shadowed,
                 "problem": pack.problem,
-            })
+            });
+            if let Some(all) = all_translations(&pack.i18n, None) {
+                json[PENDING_TRANSLATIONS] = all;
+            }
+            json
         })
         .collect();
     json!({"packs": packs})
@@ -1006,19 +1072,20 @@ fn asset_list(state: &EditorState, kind: Option<&str>, filter: &str, limit: Opti
     // Sounds and stickers are ranked together, so the best match of any type comes first.
     let mut found: Vec<(Value, crate::search::SearchFields)> = Vec::new();
     // Packs in name order, as the editor's sound list shows them, so an empty filter lists the same order.
+    let code = state.language().code();
     let mut packs: Vec<_> = state.audio_library.packs.iter().filter(|pack| wanted(pack.kind.name())).collect();
     packs.sort_by_key(|pack| pack.name.to_lowercase());
     for pack in packs {
         for sound in &pack.sounds {
-            let item = json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped});
-            found.push((item, sound.search_fields().other([pack.name.as_str(), pack.id.as_str()])));
+            let item = with_translation(json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped}), &sound.i18n, code);
+            found.push((item, pack.i18n.search(sound.search_fields().other([pack.name.as_str(), pack.id.as_str()]))));
         }
     }
     if wanted("sticker") {
         for pack in &state.sticker_library.packs {
             for sticker in &pack.stickers {
-                let item = json!({"type": "sticker", "source": sticker.source, "name": sticker.name, "category": sticker.category, "tags": sticker.tags, "size": sticker.size});
-                found.push((item, sticker.search_fields().other([pack.name.as_str(), pack.id.as_str()])));
+                let item = with_translation(json!({"type": "sticker", "source": sticker.source, "name": sticker.name, "category": sticker.category, "tags": sticker.tags, "size": sticker.size}), &sticker.i18n, code);
+                found.push((item, pack.i18n.search(sticker.search_fields().other([pack.name.as_str(), pack.id.as_str()]))));
             }
         }
     }
@@ -1171,14 +1238,20 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         AgentRequest::ProjectOpen { path, discard_changes } => project_open(host, &path, discard_changes, loaded),
         AgentRequest::ProjectSave { path, overwrite } => project_save(host, path.as_deref(), overwrite),
         AgentRequest::ProjectGet => Ok(project_summary(host.state().project())),
-        AgentRequest::PackagesList { .. } => Ok(package_list.unwrap_or_default()),
+        AgentRequest::PackagesList { .. } => Ok(localized_list(package_list, host.state().language().code())),
         AgentRequest::InstalledPacks { kind } => match kind.as_deref().filter(|kind| PackTab::from_code(kind).is_none()) {
             Some(kind) => Err(AgentError::new("invalid_kind", format!("no pack kind {kind}; use one of {}", PackTab::ALL.map(PackTab::code).join(", ")))),
-            None => Ok(package_list.unwrap_or_default()),
+            None => Ok(localized_list(package_list, host.state().language().code())),
         },
         AgentRequest::FontList { filter, limit } => Ok(font_list(&host.state().font_library, filter.as_deref().unwrap_or(""), limit)),
-        AgentRequest::ClipAnimationList { filter, limit } => Ok(animation_list(&host.state().clip_animation_library, filter.as_deref().unwrap_or(""), limit)),
-        AgentRequest::TextStyleList { kind, filter, limit } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref(), filter.as_deref().unwrap_or(""), limit),
+        AgentRequest::ClipAnimationList { filter, limit } => {
+            let state = &*host.state();
+            Ok(animation_list(&state.clip_animation_library, filter.as_deref().unwrap_or(""), limit, state.language().code()))
+        }
+        AgentRequest::TextStyleList { kind, filter, limit } => {
+            let state = &*host.state();
+            super::text::text_style_list(&state.text_style_library, kind.as_deref(), filter.as_deref().unwrap_or(""), limit, state.language().code())
+        }
         AgentRequest::AssetList { kind, filter, limit } => asset_list(host.state(), kind.as_deref(), filter.as_deref().unwrap_or(""), limit),
         AgentRequest::SubtitleExport { track, path, overwrite } => subtitle_export(host, track, path.as_deref(), overwrite),
         AgentRequest::MarkersList => Ok(markers_list(host.state().project())),
@@ -1593,6 +1666,25 @@ mod tests {
     }
 
     #[test]
+    fn a_package_list_read_before_the_language_is_known_keeps_only_the_translation_of_the_editor() {
+        let translations = crate::i18n::pack::PackTranslations::from_files([
+            ("vi".to_owned(), r#"{"name": "Tuyết rơi", "params": {"amount": {"label": "Lượng"}}}"#.to_owned()),
+            ("fr".to_owned(), r#"{"params": {"amount": {"description": "Quantité"}}}"#.to_owned()),
+        ]);
+        let entry = PackageEntry { i18n: translations.pack(), param_i18n: translations.params(), package: "packages/gpufx/a/snow".into(), name: "Snow".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
+        let pending = json!({"effects": [entry_json(&&entry)]});
+        assert_eq!(pending["effects"][0][PENDING_TRANSLATIONS]["fr"], json!({"language": "fr", "params": {"amount": {"description": "Quantité"}}}), "a language with only parameters is kept");
+        let vietnamese = localized_list(Some(pending.clone()), "vi");
+        assert_eq!(vietnamese["effects"][0]["translation"], json!({"language": "vi", "name": "Tuyết rơi", "params": {"amount": {"label": "Lượng"}}}));
+        assert_eq!(vietnamese["effects"][0]["name"], "Snow");
+        assert!(vietnamese["effects"][0].get(PENDING_TRANSLATIONS).is_none());
+        for code in ["en", "de"] {
+            let list = localized_list(Some(pending.clone()), code);
+            assert!(list["effects"][0].get("translation").is_none() && list["effects"][0].get(PENDING_TRANSLATIONS).is_none(), "{code}: {list}");
+        }
+    }
+
+    #[test]
     fn asset_list_names_sounds_and_stickers_by_type_and_filter() {
         use crate::asset_install::AudioPackKind;
         use crate::audio_library::{LibraryPack, LibrarySound};
@@ -1609,6 +1701,19 @@ mod tests {
         assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("sticker".to_owned()), filter: None, limit: None })), ["asset:sticker/s/star.png"]);
         assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("music".to_owned()), filter: Some("kids".to_owned()), limit: None })), ["asset:music/m/Kids Fun.mp3"]);
         assert!(sources(host.run(AgentRequest::AssetList { kind: Some("sfx".to_owned()), filter: None, limit: None })).is_empty());
+        // A translated pack is found by its translation and, in a language it brings, lists it too.
+        let translations = crate::i18n::pack::PackTranslations::from_files([("vi".to_owned(), r#"{"name": "Nhãn dán", "items": {"star": {"name": "Ngôi sao", "tags": ["vui"]}}}"#.to_owned())]);
+        host.state.sticker_library.packs[0].i18n = translations.pack();
+        host.state.sticker_library.packs[0].stickers[0].i18n = translations.item("star");
+        let star = |host: &mut FakeHost, filter: &str| host.run(AgentRequest::AssetList { kind: Some("sticker".to_owned()), filter: Some(filter.to_owned()), limit: None }).expect("list")["items"].clone();
+        let english = star(&mut host, "ngoi sao");
+        assert_eq!(english[0]["name"], "Star", "the English name stays");
+        assert!(english[0].get("translation").is_none(), "no translation while the editor is in English");
+        assert_eq!(star(&mut host, "nhan dan").as_array().unwrap().len(), 1, "the pack's translated name is matched");
+        host.state.set_language(Language::from_code("vi").unwrap());
+        let vietnamese = star(&mut host, "star");
+        assert_eq!(vietnamese[0]["translation"], json!({"language": "vi", "name": "Ngôi sao", "tags": ["vui"]}));
+        host.state.set_language(Language::ENGLISH);
         // Without a filter the packs come in name order, as in the editor, not in load order.
         host.state.audio_library.packs.push(LibraryPack { i18n: Default::default(), kind: AudioPackKind::Music, id: "a".to_owned(), name: "A".to_owned(), version: "1".to_owned(), sounds: vec![LibrarySound { i18n: Default::default(), source: "asset:music/a/x.mp3".to_owned(), ..sound("x") }] });
         assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("music".to_owned()), filter: None, limit: None }))[0], "asset:music/a/x.mp3");

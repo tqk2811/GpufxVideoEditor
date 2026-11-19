@@ -197,6 +197,11 @@ impl Localized {
         self.texts.is_empty()
     }
 
+    /// The codes of the languages translated, by code.
+    pub fn codes(&self) -> impl Iterator<Item = &str> {
+        self.texts.iter().map(|(code, _)| code.as_str())
+    }
+
     /// The texts in language `code`, if the pack brings that language.
     pub fn get(&self, code: &str) -> Option<&TextSet> {
         self.texts.iter().find(|(language, _)| language == code).map(|(_, texts)| texts)
@@ -222,6 +227,27 @@ impl Localized {
         self.get(code).map(|texts| texts.tags.as_slice()).filter(|tags| !tags.is_empty()).unwrap_or(english)
     }
 
+    /// What the agent's list tools add to an item for the editor's language `code`: `{"language",
+    /// "name", "description", "category", "tags"}` with only the fields the pack translates, or
+    /// `None` for English or a language the pack does not bring. The English fields stay as they are.
+    pub fn translation_json(&self, code: &str) -> Option<Value> {
+        if code == crate::i18n::catalog::ENGLISH_CODE {
+            return None;
+        }
+        let texts = self.get(code)?;
+        let mut json = serde_json::Map::new();
+        json.insert("language".to_owned(), Value::from(code));
+        for (key, value) in [("name", &texts.name), ("description", &texts.description), ("category", &texts.category)] {
+            if let Some(value) = value {
+                json.insert(key.to_owned(), Value::from(value.as_str()));
+            }
+        }
+        if !texts.tags.is_empty() {
+            json.insert("tags".to_owned(), Value::from(texts.tags.clone()));
+        }
+        Some(Value::Object(json))
+    }
+
     /// `fields` with every language's names as more names, tags and categories as tags, and
     /// descriptions as the other fields.
     pub fn search<'a>(&'a self, mut fields: SearchFields<'a>) -> SearchFields<'a> {
@@ -243,9 +269,34 @@ impl ParamTranslations {
         self.files.is_empty()
     }
 
+    /// The codes of the languages with translated parameters.
+    pub fn codes(&self) -> impl Iterator<Item = &str> {
+        self.files.iter().map(|(code, _)| code.as_str())
+    }
+
     /// The label of `param` in `code`, if translated.
     pub fn label(&self, code: &str, param: &str) -> Option<&str> {
         self.get(code, param).and_then(|text| text.label.as_deref())
+    }
+
+    /// The translated parameters in `code`, as `{"<param>": {"label", "description"}}` with only the
+    /// fields translated, or `None` when there are none.
+    pub fn json_for(&self, code: &str) -> Option<Value> {
+        let (_, params) = self.files.iter().find(|(language, _)| language == code)?;
+        let mut json = serde_json::Map::new();
+        for (name, text) in params {
+            let mut entry = serde_json::Map::new();
+            if let Some(label) = &text.label {
+                entry.insert("label".to_owned(), Value::from(label.as_str()));
+            }
+            if let Some(description) = &text.description {
+                entry.insert("description".to_owned(), Value::from(description.as_str()));
+            }
+            if !entry.is_empty() {
+                json.insert(name.clone(), Value::Object(entry));
+            }
+        }
+        (!json.is_empty()).then_some(Value::Object(json))
     }
 
     /// The description of `param` in `code`, else `english`.

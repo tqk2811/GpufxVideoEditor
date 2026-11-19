@@ -11,6 +11,7 @@ use crate::text_style_library::{LibraryTextStyle, StyleKind, TextStyleLibrary};
 use serde_json::{json, Value};
 
 use super::protocol::{AgentError, TextAnimationPatch, TextPatch};
+use super::run::with_translation;
 use crate::text_shapes::{available_families, default_family, warm_up_shared};
 use crate::search::{rank, take_limit, SearchFields};
 
@@ -341,18 +342,21 @@ pub fn subtitle_style(library: &TextStyleLibrary, families: &[String], style_id:
 /// its id to give as `style_id`, its name, type, category, preview text, pack, the style values it
 /// copies into a text, its animations and, for a subtitle style, its layout. `state` is `loading`
 /// while the packs are still being read. Only the styles matching `filter` (see [`crate::search`])
-/// are listed, best first. At most `limit` when given.
-pub fn text_style_list(library: &TextStyleLibrary, kind: Option<&str>, filter: &str, limit: Option<usize>) -> Result<Value, AgentError> {
+/// are listed, best first, matched in English and in every language a pack brings. At most `limit`
+/// when given. A style whose pack brings the editor's language `code` (not English) has its texts in
+/// it under `translation`, its pack too.
+pub fn text_style_list(library: &TextStyleLibrary, kind: Option<&str>, filter: &str, limit: Option<usize>, code: &str) -> Result<Value, AgentError> {
     let kind = match kind {
         None => None,
         Some(name) => Some(StyleKind::from_name(name).ok_or_else(|| invalid(format!("type must be text or subtitle, not '{name}'")))?),
     };
-    let found = rank(library.styles(kind), filter, |(pack, style)| SearchFields::new(&style.name).tags(style.category.as_deref().into_iter().chain([style.kind.name()])).other([style.reference.as_str(), pack.id.as_str(), pack.name.as_str(), style.preview_text.as_str()]));
+    let found = rank(library.styles(kind), filter, |(pack, style)| pack.i18n.search(style.i18n.search(SearchFields::new(&style.name).tags(style.category.as_deref().into_iter().chain([style.kind.name()])).other([style.reference.as_str(), pack.id.as_str(), pack.name.as_str(), style.preview_text.as_str()]))));
     let styles: Vec<Value> = take_limit(found, limit)
         .into_iter()
         .map(|(pack, style)| {
             let animation = style.animation.as_ref().map(|animation| serde_json::to_value(animation).unwrap_or(Value::Null));
-            json!({"id": style.reference, "name": style.name, "type": style.kind.name(), "category": style.category, "preview_text": style.preview_text, "pack": {"id": pack.id, "name": pack.name}, "style": style.style, "animation": animation, "layout": style.layout})
+            let pack_json = with_translation(json!({"id": pack.id, "name": pack.name}), &pack.i18n, code);
+            with_translation(json!({"id": style.reference, "name": style.name, "type": style.kind.name(), "category": style.category, "preview_text": style.preview_text, "pack": pack_json, "style": style.style, "animation": animation, "layout": style.layout}), &style.i18n, code)
         })
         .collect();
     let problems: Vec<Value> = library.problems.iter().map(|problem| json!({"pack": problem.pack, "message": problem.message})).collect();
@@ -381,8 +385,10 @@ pub fn font_list(library: &FontLibrary, filter: &str, limit: Option<usize>) -> V
 /// Every preset animation: its id, the name of its group in a project (`in`, `out` or `loop`) and
 /// the duration a new one gets, in ticks. A preset of an installed pack also names its pack, its
 /// own name and the kinds of clip it is made for. Only the presets matching `filter` (see
-/// [`crate::search`]) are listed, best first. At most `limit` when given.
-pub fn animation_list(library: &ClipAnimationLibrary, filter: &str, limit: Option<usize>) -> Value {
+/// [`crate::search`]) are listed, best first, a pack preset matched in English and in every language
+/// its pack brings. At most `limit` when given. A pack preset whose pack brings the editor's language
+/// `code` (not English) has its texts in it under `translation`, its pack too.
+pub fn animation_list(library: &ClipAnimationLibrary, filter: &str, limit: Option<usize>, code: &str) -> Value {
     let built_in = ANIMATION_PRESETS.iter().map(|preset| {
         let per_unit = preset.per_unit().is_some();
         let mut entry = json!({"id": preset.id, "group": preset.group.name(), "default_duration": preset.default_duration.ticks(), "per_unit": per_unit});
@@ -395,8 +401,9 @@ pub fn animation_list(library: &ClipAnimationLibrary, filter: &str, limit: Optio
         pack.animations.iter().map(move |animation| {
             let applies_to = animation.applies_to.as_ref().map(|kinds| kinds.iter().map(|kind| kind.name()).collect::<Vec<_>>());
             let effect = animation.effect_package.as_ref().map(|package| json!({"package": package, "available": animation.effect.is_some()}));
-            let fields = SearchFields::new(&animation.name).tags([animation.group.name()]).other([animation.reference.as_str(), pack.id.as_str(), pack.name.as_str()]);
-            (json!({"id": animation.reference, "group": animation.group.name(), "default_duration": animation.default_duration.ticks(), "name": animation.name, "pack": {"id": pack.id, "name": pack.name}, "applies_to": applies_to, "effect": effect, "per_unit": animation.per_unit.is_some()}), fields)
+            let fields = pack.i18n.search(animation.i18n.search(SearchFields::new(&animation.name).tags([animation.group.name()]).other([animation.reference.as_str(), pack.id.as_str(), pack.name.as_str()])));
+            let pack_json = with_translation(json!({"id": pack.id, "name": pack.name}), &pack.i18n, code);
+            (with_translation(json!({"id": animation.reference, "group": animation.group.name(), "default_duration": animation.default_duration.ticks(), "name": animation.name, "pack": pack_json, "applies_to": applies_to, "effect": effect, "per_unit": animation.per_unit.is_some()}), &animation.i18n, code), fields)
         })
     });
     let presets: Vec<Value> = take_limit(rank(built_in.chain(packs), filter, |(_, fields)| fields.clone()), limit).into_iter().map(|(preset, _)| preset).collect();
@@ -468,13 +475,32 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_preset_is_found_by_its_translation_and_lists_the_one_of_the_editor_language() {
+        use crate::clip_animation_library::{ClipAnimationLibrary, ClipAnimationPack, LibraryAnimation};
+        let translations = crate::i18n::pack::PackTranslations::from_files([("vi".to_owned(), r#"{"name": "Gói chuyển động", "items": {"rise": {"name": "Nâng lên"}}}"#.to_owned())]);
+        let rise = LibraryAnimation { i18n: translations.item("rise"), per_unit: None, reference: "p/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default(), effect_package: None, effect: None };
+        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { i18n: translations.pack(), id: "p".to_owned(), name: "Moves".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
+
+        let found = animation_list(&library, "nang len", None, "vi");
+        let presets = found["presets"].as_array().unwrap();
+        assert_eq!(presets.len(), 1, "{presets:?}");
+        assert_eq!((presets[0]["id"].as_str(), presets[0]["name"].as_str()), (Some("p/rise"), Some("Rise")), "the id and the English name stay");
+        assert_eq!(presets[0]["translation"], json!({"language": "vi", "name": "Nâng lên"}));
+        assert_eq!(presets[0]["pack"]["translation"]["name"], "Gói chuyển động");
+        let english = animation_list(&library, "goi chuyen dong", None, "en");
+        let presets = english["presets"].as_array().unwrap();
+        assert_eq!(presets.len(), 1, "the pack's translated name is matched whatever the language");
+        assert!(presets[0].get("translation").is_none() && presets[0]["pack"].get("translation").is_none(), "no translation for English");
+    }
+
+    #[test]
     fn a_pack_preset_is_listed_with_its_pack_and_accepted_for_the_kinds_it_applies_to() {
         use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary, ClipAnimationPack, LibraryAnimation};
         let curve = engine::AnimationCurve::default().with(engine::CurveProperty::Opacity, vec![engine::CurveKey { t: 0.0, value: 0.0, ease: engine::Ease::Linear }, engine::CurveKey { t: 1.0, value: 1.0, ease: engine::Ease::Linear }]);
         let rise = LibraryAnimation { i18n: Default::default(), per_unit: None, reference: "agent-pack/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(45_000), applies_to: Some(vec![AnimatedClipKind::Text]), curve, effect_package: None, effect: None };
         let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { i18n: Default::default(), id: "agent-pack".to_owned(), name: "Agent Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
 
-        let list = animation_list(&library, "", None);
+        let list = animation_list(&library, "", None, "en");
         let presets = list["presets"].as_array().unwrap();
         assert_eq!(presets.len(), ANIMATION_PRESETS.len() + 1);
         let pack = presets.iter().find(|preset| preset["id"] == "agent-pack/rise").unwrap();
@@ -507,7 +533,7 @@ mod tests {
         let ready = engine::PresetEffect { package: "packages/gpufx/x/wipe".to_owned(), progress: "progress".to_owned(), params: serde_json::Map::new() };
         let animations = vec![animation("plain", None, None), animation("ready", Some("io.x.wipe"), Some(ready)), animation("missing", Some("io.x.gone"), None)];
         let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), animations }], problems: Vec::new(), loaded: true };
-        let list = animation_list(&library, "", None);
+        let list = animation_list(&library, "", None, "en");
         let effect = |id: &str| list["presets"].as_array().unwrap().iter().find(|preset| preset["id"] == format!("p/{id}")).unwrap()["effect"].clone();
         assert_eq!(effect("plain"), Value::Null);
         assert_eq!(effect("ready"), json!({"package": "io.x.wipe", "available": true}));
