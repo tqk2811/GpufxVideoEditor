@@ -70,19 +70,6 @@ impl Strings {
     pub fn name(&self) -> Option<&str> {
         self.name.as_deref()
     }
-
-    /// The template of `key` in this file. With a count, `<key>.one` or `<key>.other` as the count
-    /// asks, then the other form, then `key` itself.
-    fn template(&self, key: &str, count: Option<i64>) -> Option<&str> {
-        if let Some(count) = count {
-            for form in plural_forms(count) {
-                if let Some(text) = self.map.get(&format!("{key}.{form}")) {
-                    return Some(text);
-                }
-            }
-        }
-        self.get(key)
-    }
 }
 
 /// One language: its code, its name and its files, the most specific first.
@@ -182,10 +169,25 @@ impl Catalog {
         &self.english
     }
 
-    /// The template of `key` in `language`, falling back to the built-in English.
+    /// The template of `key` in `language`, falling back to the built-in English. With a count, the
+    /// form the count asks is looked for in every file of the language first, then the other form,
+    /// then `key` itself, so a file holding only the other form does not hide the right one in a
+    /// file below it. The files of English and the built-in English are one language here; for any
+    /// other language the built-in English is only looked in when the language has no form at all.
     pub fn template(&self, language: usize, key: &str, count: Option<i64>) -> Option<&str> {
         let layers = self.languages.get(language).map(|entry| entry.layers.as_slice()).unwrap_or_default();
-        layers.iter().chain([&self.english]).find_map(|strings| strings.template(key, count))
+        let english = [&self.english];
+        let groups: Vec<Vec<&Strings>> = if language == 0 { vec![layers.iter().chain(english).collect()] } else { vec![layers.iter().collect(), english.to_vec()] };
+        groups.iter().find_map(|group| {
+            count
+                .into_iter()
+                .flat_map(plural_forms)
+                .find_map(|form| {
+                    let plural = format!("{key}.{form}");
+                    group.iter().find_map(|strings| strings.get(&plural))
+                })
+                .or_else(|| group.iter().find_map(|strings| strings.get(key)))
+        })
     }
 
     /// `text` in `language`.
@@ -352,6 +354,13 @@ mod tests {
         assert!(catalog.problems().iter().any(|problem| problem.contains("fr.json")));
         assert!(catalog.problems().iter().any(|problem| problem.contains("bad name.json")));
         assert!(catalog.problems().iter().any(|problem| problem.contains("count")));
+    }
+
+    #[test]
+    fn an_upper_layer_with_only_the_other_plural_form_does_not_hide_the_right_form_below() {
+        let catalog = catalog(vec![("en", r#"{"files.one": "{count} single"}"#)]);
+        assert_eq!(say(&catalog, "en", &Text::key("files").count("count", 5)), "5 files", "the built-in other form wins over the user's one form");
+        assert_eq!(say(&catalog, "en", &Text::key("files").count("count", 1)), "1 single");
     }
 
     #[test]

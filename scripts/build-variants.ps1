@@ -43,7 +43,9 @@ function Build-Variant {
     # English is built into the editor; the other languages are read from the i18n folder beside it.
     $i18n = Join-Path $TargetDir 'release\i18n'
     if (Test-Path -LiteralPath $i18n) { Remove-Item -LiteralPath $i18n -Recurse -Force }
-    Copy-Item -LiteralPath (Join-Path $repoRoot 'crates\gpufx-editor\i18n') -Destination $i18n -Recurse
+    New-Item -ItemType Directory -Path $i18n | Out-Null
+    # en.json is left out: the built-in English is the one the editor uses.
+    Get-ChildItem -LiteralPath (Join-Path $repoRoot 'crates\gpufx-editor\i18n') -File -Filter '*.json' | Where-Object { $_.Name -ne 'en.json' } | Copy-Item -Destination $i18n
 }
 
 Push-Location $repoRoot

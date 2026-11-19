@@ -21,15 +21,18 @@ pub use text::Text;
 
 /// The English file, built in so that every key has a text even with no folder beside the app.
 pub const EMBEDDED_ENGLISH: &str = include_str!("../../i18n/en.json");
-/// The language files of a checkout, used when there is no `i18n` folder beside the executable.
+/// The language files of a checkout, used by a debug build or a test when there is no `i18n` folder
+/// beside the executable.
 const DEV_LANGUAGE_FOLDER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/i18n");
 /// The folder of language files, beside the app and under the user's root.
 pub const LANGUAGE_FOLDER: &str = "i18n";
 
-/// The folder of language files that come with the app: beside the executable, else the checkout's.
+/// The folder of language files that come with the app: beside the executable, else, in a debug
+/// build or a test only, the checkout's. A release build never reads the folder it was built from.
 fn shipped_language_folder() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
-    [exe_dir.map(|dir| dir.join(LANGUAGE_FOLDER)), Some(PathBuf::from(DEV_LANGUAGE_FOLDER))].into_iter().flatten().find(|folder| folder.is_dir())
+    let dev = (cfg!(debug_assertions) || cfg!(test)).then(|| PathBuf::from(DEV_LANGUAGE_FOLDER));
+    [exe_dir.map(|dir| dir.join(LANGUAGE_FOLDER)), dev].into_iter().flatten().find(|folder| folder.is_dir())
 }
 
 /// `%LOCALAPPDATA%\gpufx-editor\i18n`, where the user adds or overrides language files. Tests leave
