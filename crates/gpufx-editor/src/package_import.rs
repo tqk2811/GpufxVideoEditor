@@ -536,6 +536,20 @@ mod tests {
     }
 
     #[test]
+    fn a_shader_zip_keeps_its_language_files_and_the_catalog_reads_them() {
+        let dir = scratch("i18n");
+        let root = dir.join("root");
+        let vi = r#"{"name": "Hiệu ứng của tôi", "params": {"amount": {"label": "Lượng"}}}"#;
+        let zip = zip_bytes(&[("manifest.json", &manifest("t.demo")), ("a.wgsl", b"fn main() {}"), ("i18n/vi.json", vi.as_bytes())]);
+        install_zip(&written(&dir, &zip), &root, false).unwrap();
+        let catalog = crate::packages::scan(std::slice::from_ref(&root), d3d12_backend::read_package_info);
+        let entry = catalog.effects.iter().find(|entry| entry.package == "packages/gpufx/user/t.demo.zip").expect("installed");
+        assert_eq!((entry.display_name("vi"), entry.display_name("en")), ("Hiệu ứng của tôi", "My Effect"));
+        assert_eq!(entry.param_i18n.label("vi", "amount"), Some("Lượng"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_name_already_installed_asks_first_and_overwrites_when_allowed() {
         let dir = scratch("overwrite");
         let root = dir.join("root");

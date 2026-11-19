@@ -211,12 +211,12 @@ fn check_manifest_files(manifest: &AudioManifest, entries: &[ZipEntry]) -> Resul
     check_named_files(&manifest.license.files, manifest.items.iter().map(|item| item.file.as_str()), entries, is_audio_file, "an audio file")
 }
 
-/// Only the media of the pack (what `is_media` accepts), its documents and the manifest at the root
-/// may be in it.
+/// Only the media of the pack (what `is_media` accepts), its documents, its language files
+/// (`i18n/<code>.json`, see [`crate::i18n::pack`]) and the manifest at the root may be in it.
 pub(crate) fn check_entry_extensions(entries: &[ZipEntry], is_media: fn(&str) -> bool) -> Result<(), ImportProblem> {
     for entry in entries.iter().filter(|entry| entry.kind == EntryKind::File) {
         let name = entry.name.replace('\\', "/");
-        let allowed = name == MANIFEST || is_media(&name) || DOCUMENT_EXTENSIONS.contains(&extension(&name).as_str());
+        let allowed = name == MANIFEST || is_media(&name) || DOCUMENT_EXTENSIONS.contains(&extension(&name).as_str()) || crate::i18n::pack::language_file_code(&name).is_some();
         if !allowed {
             return Err(ImportProblem::Entry { entry: entry.name.clone(), problem: EntryProblem::ExtensionNotAllowed });
         }
@@ -586,6 +586,24 @@ mod tests {
         assert_eq!(fs::read(pack.join("audio/boom.flac")).unwrap(), b"sound");
         assert!(pack.join("manifest.json").is_file() && pack.join("LICENSE.txt").is_file());
         assert_eq!(folders(&root), vec!["sfx"], "no temporary folder stays");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_language_files_of_a_pack_are_installed_with_it_and_other_json_is_not() {
+        let dir = scratch("i18n");
+        let root = dir.join("root");
+        let vi = r#"{"name": "SFX: Va chạm", "items": {"boom": {"name": "Bùm"}}}"#;
+        let manifest = manifest_json("p", "sfx");
+        let files: [(&str, &[u8]); 5] = [("manifest.json", manifest.as_bytes()), ("LICENSE.txt", b"license"), ("NOTICE.txt", b"notice"), ("audio/boom.flac", b"sound"), ("i18n/vi.json", vi.as_bytes())];
+        install_audio_pack(&written(&dir, &zip_of(&files)), &root, false).unwrap();
+        let pack = pack_folder(&root, AudioPackKind::Sfx, "p");
+        assert_eq!(fs::read_to_string(pack.join("i18n/vi.json")).unwrap(), vi);
+        let library = crate::audio_library::scan_audio_packs(std::slice::from_ref(&root));
+        assert_eq!(library.packs[0].display_name("vi"), "SFX: Va chạm");
+        assert_eq!(library.packs[0].sounds[0].display_name("vi"), "Bùm");
+        let stray: [(&str, &[u8]); 5] = [("manifest.json", manifest.as_bytes()), ("LICENSE.txt", b"license"), ("NOTICE.txt", b"notice"), ("audio/boom.flac", b"sound"), ("i18n/deep/vi.json", vi.as_bytes())];
+        assert!(matches!(install_audio_pack(&written(&dir, &zip_of(&stray)), &dir.join("other"), false), Err(ImportProblem::Entry { problem: EntryProblem::ExtensionNotAllowed, .. })), "only i18n/<code>.json is a language file");
         let _ = fs::remove_dir_all(&dir);
     }
 
