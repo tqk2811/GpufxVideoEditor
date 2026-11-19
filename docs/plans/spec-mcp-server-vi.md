@@ -49,15 +49,15 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `project_new`, `project_open`, `project_save` | Tạo, mở, lưu project |
 | `project_get` | Trả project JSON, thời lượng và số khung |
 | `project_set_output` | Đổi kích thước khung xuất (2 đến 7680 mỗi cạnh, cạnh lẻ làm tròn xuống số chẵn) và `frame_rate` (phân số `{num, den}` khung mỗi giây, 1 đến 60 fps, vd `{num: 30000, den: 1001}` là 29,97); trường vắng giữ nguyên, phải có ít nhất một trường. Một bước undo, trả `output` đang dùng |
-| `packages_list` | Danh sách effect và transition, lọc theo chuỗi |
+| `packages_list` | Danh sách effect và transition, lọc theo `filter` (tên, nhóm, gói, mô tả) |
 | `track_add` | Thêm track |
 | `track_set_locked`, `track_set_hidden` | Khoá hoặc ẩn track. Sửa track đang khoá bị từ chối với lỗi `track_locked` |
 | `clip_add`, `clip_move`, `clip_trim_start`, `clip_trim_end`, `clip_split`, `clip_delete` | Sửa clip |
 | `effect_add`, `effect_remove`, `transition_add`, `transition_remove` | Hiệu ứng và transition |
 | `text_add`, `text_set` | Thêm và sửa clip chữ, xem mục `Chữ` |
-| `font_list`, `clip_animation_list` | Danh sách font và danh sách preset animation (id, nhóm `in`/`out`/`loop`, thời lượng mặc định) |
-| `asset_list` | Danh sách nhạc, sfx và sticker của các gói đã cài, lọc theo `type` (`music`/`sfx`/`sticker`) và chuỗi `filter` (mọi từ phải có trong tên, nhóm hoặc tag); mỗi mục có `source` dạng `asset:` để đưa vào `clip_add` |
-| `text_style_list` | Danh sách kiểu chữ và kiểu phụ đề của các gói `text-style`/`subtitle-style` đã cài, lọc theo `type` (`text`/`subtitle`) |
+| `font_list`, `clip_animation_list` | Danh sách font và danh sách preset animation (id, nhóm `in`/`out`/`loop`, thời lượng mặc định), lọc theo `filter` (font: family, tên, gói; preset: id, tên, nhóm, gói) |
+| `asset_list` | Danh sách nhạc, sfx và sticker của các gói đã cài, lọc theo `type` (`music`/`sfx`/`sticker`) và `filter` (tên, nhóm, tag, tên gói); mỗi mục có `source` dạng `asset:` để đưa vào `clip_add` |
+| `text_style_list` | Danh sách kiểu chữ và kiểu phụ đề của các gói `text-style`/`subtitle-style` đã cài, lọc theo `type` (`text`/`subtitle`) và `filter` (tên, nhóm, id, gói, chữ xem trước) |
 | `subtitle_import_srt`, `subtitle_set_style`, `subtitle_export_srt` | Nhập SRT thành track phụ đề, đổi kiểu phụ đề của track, xuất track ra SRT, xem mục `Phụ đề` |
 | `clip_animation_set` | Đặt animation `in`, `out`, `loop` cho một clip có hình (video, ảnh, sticker, chữ) |
 | `clip_set_gain`, `clip_set_muted`, `clip_set_fades` | Âm lượng và fade |
@@ -71,6 +71,8 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `undo`, `redo` | Hoàn tác, mỗi tool sửa là một bước; `track_set_locked` không phải một bước, giống nút khoá |
 | `frame_capture` | Chụp khung đã ghép |
 | `export_start`, `export_status`, `export_cancel` | Xuất nền |
+
+Các tool danh sách `packages_list`, `font_list`, `clip_animation_list`, `asset_list`, `text_style_list` cùng nhận `filter` và `limit` tuỳ chọn, dùng chung một hàm so khớp (`crates/gpufx-editor/src/search.rs`). `filter` tách thành từ; mỗi từ phải là chuỗi con của ít nhất một trường, không phân biệt hoa thường và dấu tiếng Việt (`đ` coi như `d`). Kết quả xếp theo điểm: tên trùng hẳn `filter`, rồi tên bắt đầu bằng `filter`, rồi từ khớp đầu một từ của tên, khớp giữa tên, khớp nhóm/tag, cuối cùng khớp trường khác (id, gói, mô tả); cùng điểm thì giữ thứ tự gốc. `filter` rỗng hoặc vắng thì trả hết theo thứ tự gốc. `limit` (số nguyên dương, `0` bị từ chối `invalid_params`) giữ `limit` mục đầu sau khi xếp, với `packages_list` là mỗi danh sách effect và transition; vắng thì không giới hạn. Ô tìm kiếm của editor (effect, nhạc, sticker) dùng cùng hàm này.
 
 ### `frame_capture`
 

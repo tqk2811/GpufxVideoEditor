@@ -30,8 +30,8 @@ impl LibrarySound {
         MediaItem { source: self.source.clone(), name: self.name.clone(), kind: MediaKind::Audio, duration: self.duration, estimated: true }
     }
 
-    fn matches(&self, word: &str) -> bool {
-        self.name.to_lowercase().contains(word) || self.category.to_lowercase().contains(word) || self.tags.iter().any(|tag| tag.to_lowercase().contains(word))
+    pub(crate) fn search_fields(&self) -> crate::search::SearchFields<'_> {
+        crate::search::SearchFields::new(&self.name).tags(std::iter::once(self.category.as_str()).chain(self.tags.iter().map(String::as_str)))
     }
 }
 
@@ -61,11 +61,10 @@ pub struct AudioLibrary {
 }
 
 impl AudioLibrary {
-    /// The packs with the sounds matching every word of `search`, by name, tag or category.
+    /// The packs with the sounds matching `search` by name, tag or category, best first (see
+    /// [`crate::search`]).
     pub fn matching(&self, search: &str) -> Vec<(&LibraryPack, Vec<&LibrarySound>)> {
-        let search = search.to_lowercase();
-        let words: Vec<&str> = search.split_whitespace().collect();
-        let mut found: Vec<(&LibraryPack, Vec<&LibrarySound>)> = self.packs.iter().map(|pack| (pack, pack.sounds.iter().filter(|sound| words.iter().all(|word| sound.matches(word))).collect::<Vec<_>>())).filter(|(_, sounds)| !sounds.is_empty()).collect();
+        let mut found: Vec<(&LibraryPack, Vec<&LibrarySound>)> = self.packs.iter().map(|pack| (pack, crate::search::rank(&pack.sounds, search, |sound| sound.search_fields()))).filter(|(_, sounds)| !sounds.is_empty()).collect();
         found.sort_by_key(|(pack, _)| pack.name.to_lowercase());
         found
     }

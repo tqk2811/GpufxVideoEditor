@@ -630,3 +630,66 @@ fn layers_no_text_can_have_are_refused_and_change_nothing() {
     let text = text_of(&mut session, key["track"].as_u64().unwrap() as usize, key["clip"].as_u64().unwrap() as usize);
     assert!(matches!(text.fill, engine::TextPaint::Gradient { .. }) && text.bloom.is_some(), "{text:?}");
 }
+
+#[test]
+fn text_style_list_keeps_the_styles_matching_the_filter() {
+    let mut session = FileSession::with_roots(vec![style_root()]);
+    let ids = |session: &mut FileSession, params: Value| -> Vec<String> {
+        let list = call_ok(session, "text_style_list", params);
+        list["styles"].as_array().unwrap().iter().map(|style| style["id"].as_str().unwrap().to_owned()).collect()
+    };
+    assert_eq!(ids(&mut session, json!({"filter": "LÔW"})), ["subs/low"], "case and accents are ignored");
+    assert_eq!(ids(&mut session, json!({"filter": "styles"})), ["styles/bold"], "the pack is searched");
+    assert_eq!(ids(&mut session, json!({"filter": "bold", "type": "subtitle"})), Vec::<String>::new());
+    assert_eq!(ids(&mut session, json!({"filter": ""})), ["styles/bold", "subs/low"]);
+}
+
+#[test]
+fn clip_animation_list_keeps_the_presets_matching_the_filter_best_first() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let list = call_ok(&mut session, "clip_animation_list", json!({"filter": "FADE"}));
+    let presets = list["presets"].as_array().unwrap();
+    assert!(!presets.is_empty(), "{list}");
+    assert_eq!(presets[0]["id"], "fade", "the exact name comes first: {list}");
+    let loops = call_ok(&mut session, "clip_animation_list", json!({"filter": "bounce loop"}));
+    let loops = loops["presets"].as_array().unwrap();
+    assert!(loops.iter().any(|preset| preset["id"] == "bounce"));
+    assert!(loops.iter().all(|preset| preset["group"] == "loop"), "every word must match");
+}
+
+#[test]
+fn font_list_keeps_the_fonts_matching_the_filter() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let list = loop {
+        let list = call_ok(&mut session, "font_list", json!({}));
+        if list["state"] == "ready" {
+            break list;
+        }
+        assert!(Instant::now() < deadline, "the font scan never ended");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(call_ok(&mut session, "font_list", json!({"filter": "default"}))["fonts"], json!([{"kind": "default"}]));
+    assert_eq!(call_ok(&mut session, "font_list", json!({"filter": "no such font 0xbeef"}))["fonts"], json!([]));
+    if let Some(family) = list["fonts"].as_array().unwrap().iter().find(|font| font["kind"] == "system").and_then(|font| font["family"].as_str()) {
+        let found = call_ok(&mut session, "font_list", json!({"filter": family.to_uppercase()}));
+        assert_eq!(found["fonts"][0], json!({"kind": "system", "family": family}), "{found}");
+    }
+}
+
+#[test]
+fn a_list_tool_keeps_the_first_limit_items_after_ranking() {
+    let mut session = FileSession::with_roots(vec![style_root()]);
+    let styles = call_ok(&mut session, "text_style_list", json!({"limit": 1}));
+    assert_eq!(styles["styles"].as_array().unwrap().len(), 1);
+    assert_eq!(styles["styles"][0]["id"], "styles/bold");
+    let low = call_ok(&mut session, "text_style_list", json!({"filter": "low", "limit": 5}));
+    assert_eq!(low["styles"].as_array().unwrap().len(), 1);
+    let presets = call_ok(&mut session, "clip_animation_list", json!({"limit": 2}));
+    assert_eq!(presets["presets"].as_array().unwrap().len(), 2);
+    let fonts = call_ok(&mut session, "font_list", json!({"limit": 1}));
+    assert_eq!(fonts["fonts"], json!([{"kind": "default"}]));
+    for tool in ["text_style_list", "clip_animation_list", "font_list", "asset_list", "packages_list"] {
+        assert_eq!(call_err(&mut session, tool, json!({"limit": 0})).code, "invalid_params", "{tool}");
+    }
+}

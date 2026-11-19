@@ -24,6 +24,7 @@ use crate::i18n::Language;
 use crate::media::{choose_track, TrackChoice};
 use crate::package_manager::{PackSource, PackTab};
 use crate::packages::{filter_entries, scan, PackageEntry, PackageKind};
+use crate::search::take_limit;
 use crate::text_clip::{default_text, natural_placement};
 use crate::text_shapes::available_families;
 use crate::text_style_library::subtitle_placement;
@@ -107,7 +108,7 @@ pub fn prepare(request: AgentRequest, package_roots: &[PathBuf]) -> Prepared {
     let mut prepared = Prepared { request, loaded: None, probe: None, animation: None, packages_problem: None, package_list: None };
     match &prepared.request {
         AgentRequest::ProjectOpen { path, .. } => prepared.loaded = Some(load(path, package_roots)),
-        AgentRequest::PackagesList { filter } => prepared.package_list = Some(package_list(package_roots, filter.as_deref())),
+        AgentRequest::PackagesList { filter, limit } => prepared.package_list = Some(package_list(package_roots, filter.as_deref(), *limit)),
         AgentRequest::InstalledPacks { kind } => prepared.package_list = Some(installed_packs(package_roots, kind.as_deref())),
         AgentRequest::Edit { edit: AgentEdit::ClipAdd { source, .. }, .. } => {
             prepared.probe = Some(probe(source, package_roots));
@@ -158,10 +159,10 @@ fn entry_json(entry: &&PackageEntry) -> Value {
     json!({"package": entry.package, "name": entry.name, "description": entry.description, "params": entry.params.iter().filter(|param| !crate::params::is_clip_clock(&param.name)).map(|param| &param.name).collect::<Vec<_>>()})
 }
 
-fn package_list(package_roots: &[PathBuf], filter: Option<&str>) -> Value {
+fn package_list(package_roots: &[PathBuf], filter: Option<&str>, limit: Option<usize>) -> Value {
     let catalog = scan(package_roots, read_package_info);
     let filter = filter.unwrap_or("");
-    let list = |kind| filter_entries(catalog.entries(kind), filter).iter().map(entry_json).collect::<Vec<_>>();
+    let list = |kind| take_limit(filter_entries(catalog.entries(kind), filter), limit).iter().map(entry_json).collect::<Vec<_>>();
     json!({"effects": list(PackageKind::Effect), "transitions": list(PackageKind::Transition)})
 }
 
@@ -995,27 +996,30 @@ fn project_save<H: AgentHost>(host: &mut H, path: Option<&Path>, overwrite: bool
 /// The text clips of subtitle track `track` as SRT, also written to `path` when given. A file that
 /// is there is refused unless `overwrite`, and a file the project reads always is.
 /// The installed music, sfx and sticker items matching `filter`, as `asset_list` answers.
-fn asset_list(state: &EditorState, kind: Option<&str>, filter: &str) -> Result<Value, AgentError> {
+fn asset_list(state: &EditorState, kind: Option<&str>, filter: &str, limit: Option<usize>) -> Result<Value, AgentError> {
     if let Some(name) = kind {
         if !matches!(name, "music" | "sfx" | "sticker") {
             return Err(AgentError::new("invalid_params", format!("type must be music, sfx or sticker, not '{name}'")));
         }
     }
     let wanted = |name: &str| kind.is_none_or(|kind| kind == name);
-    let mut items = Vec::new();
-    for (pack, sounds) in state.audio_library.matching(filter) {
-        if !wanted(pack.kind.name()) {
-            continue;
-        }
-        for sound in sounds {
-            items.push(json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped}));
+    // Sounds and stickers are ranked together, so the best match of any type comes first.
+    let mut found: Vec<(Value, crate::search::SearchFields)> = Vec::new();
+    for pack in state.audio_library.packs.iter().filter(|pack| wanted(pack.kind.name())) {
+        for sound in &pack.sounds {
+            let item = json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped});
+            found.push((item, sound.search_fields().other([pack.name.as_str(), pack.id.as_str()])));
         }
     }
     if wanted("sticker") {
-        for sticker in state.sticker_library.matching(filter, None) {
-            items.push(json!({"type": "sticker", "source": sticker.source, "name": sticker.name, "category": sticker.category, "tags": sticker.tags, "size": sticker.size}));
+        for pack in &state.sticker_library.packs {
+            for sticker in &pack.stickers {
+                let item = json!({"type": "sticker", "source": sticker.source, "name": sticker.name, "category": sticker.category, "tags": sticker.tags, "size": sticker.size});
+                found.push((item, sticker.search_fields().other([pack.name.as_str(), pack.id.as_str()])));
+            }
         }
     }
+    let items: Vec<Value> = take_limit(crate::search::rank(found, filter, |(_, fields)| fields.clone()), limit).into_iter().map(|(item, _)| item).collect();
     let loaded = state.audio_library.loaded && state.sticker_library.loaded;
     let problems: Vec<Value> = state.audio_library.problems.iter().chain(&state.sticker_library.problems).map(|problem| json!({"pack": problem.pack, "message": problem.message})).collect();
     Ok(json!({"state": if loaded { "ready" } else { "loading" }, "items": items, "problems": problems}))
@@ -1169,10 +1173,10 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
             Some(kind) => Err(AgentError::new("invalid_kind", format!("no pack kind {kind}; use one of {}", PackTab::ALL.map(PackTab::code).join(", ")))),
             None => Ok(package_list.unwrap_or_default()),
         },
-        AgentRequest::FontList => Ok(font_list(&host.state().font_library)),
-        AgentRequest::ClipAnimationList => Ok(animation_list(&host.state().clip_animation_library)),
-        AgentRequest::TextStyleList { kind } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref()),
-        AgentRequest::AssetList { kind, filter } => asset_list(host.state(), kind.as_deref(), filter.as_deref().unwrap_or("")),
+        AgentRequest::FontList { filter, limit } => Ok(font_list(&host.state().font_library, filter.as_deref().unwrap_or(""), limit)),
+        AgentRequest::ClipAnimationList { filter, limit } => Ok(animation_list(&host.state().clip_animation_library, filter.as_deref().unwrap_or(""), limit)),
+        AgentRequest::TextStyleList { kind, filter, limit } => super::text::text_style_list(&host.state().text_style_library, kind.as_deref(), filter.as_deref().unwrap_or(""), limit),
+        AgentRequest::AssetList { kind, filter, limit } => asset_list(host.state(), kind.as_deref(), filter.as_deref().unwrap_or(""), limit),
         AgentRequest::SubtitleExport { track, path, overwrite } => subtitle_export(host, track, path.as_deref(), overwrite),
         AgentRequest::MarkersList => Ok(markers_list(host.state().project())),
         AgentRequest::BeatsDetect { expected_revision, clip, retry } => beats_detect(host, expected_revision, clip, retry),
@@ -1597,11 +1601,12 @@ mod tests {
         host.state.sticker_library.packs.push(StickerPack { id: "s".to_owned(), name: "S".to_owned(), stickers: vec![LibrarySticker { source: "asset:sticker/s/star.png".to_owned(), name: "Star".to_owned(), tags: vec!["happy".to_owned()], category: String::new(), size: Some((64, 64)), animation: None }] });
         host.state.sticker_library.loaded = true;
         let sources = |result: AgentResult| result.expect("list")["items"].as_array().unwrap().iter().map(|item| item["source"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: None, filter: Some("happy".to_owned()) })).len(), 3);
-        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("sticker".to_owned()), filter: None })), ["asset:sticker/s/star.png"]);
-        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("music".to_owned()), filter: Some("kids".to_owned()) })), ["asset:music/m/Kids Fun.mp3"]);
-        assert!(sources(host.run(AgentRequest::AssetList { kind: Some("sfx".to_owned()), filter: None })).is_empty());
-        assert_eq!(code(host.run(AgentRequest::AssetList { kind: Some("video".to_owned()), filter: None })), "invalid_params");
+        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: None, filter: Some("happy".to_owned()), limit: None })).len(), 3);
+        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: None, filter: Some("happy".to_owned()), limit: Some(2) })).len(), 2);
+        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("sticker".to_owned()), filter: None, limit: None })), ["asset:sticker/s/star.png"]);
+        assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("music".to_owned()), filter: Some("kids".to_owned()), limit: None })), ["asset:music/m/Kids Fun.mp3"]);
+        assert!(sources(host.run(AgentRequest::AssetList { kind: Some("sfx".to_owned()), filter: None, limit: None })).is_empty());
+        assert_eq!(code(host.run(AgentRequest::AssetList { kind: Some("video".to_owned()), filter: None, limit: None })), "invalid_params");
     }
 
     #[test]
