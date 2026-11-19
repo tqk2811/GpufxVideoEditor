@@ -31,6 +31,7 @@ pub mod project_file;
 pub mod project_lock;
 pub mod proxy;
 pub mod recovery;
+pub mod search;
 pub mod settings;
 pub mod clip_animation_install;
 pub mod clip_animation_library;

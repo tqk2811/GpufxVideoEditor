@@ -42,8 +42,8 @@ impl LibrarySticker {
         self.animation.map_or(DEFAULT_IMAGE_DURATION, |timing| animated_duration(DEFAULT_IMAGE_DURATION, timing))
     }
 
-    fn matches(&self, word: &str) -> bool {
-        self.name.to_lowercase().contains(word) || self.category.to_lowercase().contains(word) || self.tags.iter().any(|tag| tag.to_lowercase().contains(word))
+    pub(crate) fn search_fields(&self) -> crate::search::SearchFields<'_> {
+        crate::search::SearchFields::new(&self.name).tags(std::iter::once(self.category.as_str()).chain(self.tags.iter().map(String::as_str)))
     }
 }
 
@@ -88,12 +88,11 @@ impl StickerLibrary {
         self.packs.iter().flat_map(|pack| &pack.stickers).map(|sticker| sticker.category.as_str()).filter(|category| !category.is_empty()).collect::<BTreeSet<_>>().into_iter().collect()
     }
 
-    /// The stickers in `category` (any when `None`) that match every word of `search`, by name, tag
-    /// or category.
+    /// The stickers in `category` (any when `None`) that match `search` by name, tag or category, best
+    /// first (see [`crate::search`]).
     pub fn matching(&self, search: &str, category: Option<&str>) -> Vec<&LibrarySticker> {
-        let search = search.to_lowercase();
-        let words: Vec<&str> = search.split_whitespace().collect();
-        self.packs.iter().flat_map(|pack| &pack.stickers).filter(|sticker| category.is_none_or(|wanted| sticker.category == wanted)).filter(|sticker| words.iter().all(|word| sticker.matches(word))).collect()
+        let stickers = self.packs.iter().flat_map(|pack| &pack.stickers).filter(|sticker| category.is_none_or(|wanted| sticker.category == wanted));
+        crate::search::rank(stickers, search, |sticker| sticker.search_fields())
     }
 }
 

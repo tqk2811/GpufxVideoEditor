@@ -1002,20 +1002,23 @@ fn asset_list(state: &EditorState, kind: Option<&str>, filter: &str) -> Result<V
         }
     }
     let wanted = |name: &str| kind.is_none_or(|kind| kind == name);
-    let mut items = Vec::new();
-    for (pack, sounds) in state.audio_library.matching(filter) {
-        if !wanted(pack.kind.name()) {
-            continue;
-        }
-        for sound in sounds {
-            items.push(json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped}));
+    // Sounds and stickers are ranked together, so the best match of any type comes first.
+    let mut found: Vec<(Value, crate::search::SearchFields)> = Vec::new();
+    for pack in state.audio_library.packs.iter().filter(|pack| wanted(pack.kind.name())) {
+        for sound in &pack.sounds {
+            let item = json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped});
+            found.push((item, sound.search_fields().other([pack.name.as_str(), pack.id.as_str()])));
         }
     }
     if wanted("sticker") {
-        for sticker in state.sticker_library.matching(filter, None) {
-            items.push(json!({"type": "sticker", "source": sticker.source, "name": sticker.name, "category": sticker.category, "tags": sticker.tags, "size": sticker.size}));
+        for pack in &state.sticker_library.packs {
+            for sticker in &pack.stickers {
+                let item = json!({"type": "sticker", "source": sticker.source, "name": sticker.name, "category": sticker.category, "tags": sticker.tags, "size": sticker.size});
+                found.push((item, sticker.search_fields().other([pack.name.as_str(), pack.id.as_str()])));
+            }
         }
     }
+    let items: Vec<Value> = crate::search::rank(found, filter, |(_, fields)| fields.clone()).into_iter().map(|(item, _)| item).collect();
     let loaded = state.audio_library.loaded && state.sticker_library.loaded;
     let problems: Vec<Value> = state.audio_library.problems.iter().chain(&state.sticker_library.problems).map(|problem| json!({"pack": problem.pack, "message": problem.message})).collect();
     Ok(json!({"state": if loaded { "ready" } else { "loading" }, "items": items, "problems": problems}))

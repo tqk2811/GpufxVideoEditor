@@ -146,15 +146,10 @@ pub fn list_installed(root: &Path, read: impl Fn(&Path) -> Result<PackageInfo, S
         .collect()
 }
 
-/// The entries a user may pick whose name or package contains every word of `filter`, ignoring
-/// case. A hidden entry is never listed.
+/// The entries a user may pick matching `filter` by name, group, package or description, best first
+/// (see [`crate::search`]). A hidden entry is never listed.
 pub fn filter_entries<'a>(entries: &'a [PackageEntry], filter: &str) -> Vec<&'a PackageEntry> {
-    let filter = filter.to_lowercase();
-    let words: Vec<&str> = filter.split_whitespace().collect();
-    entries.iter().filter(|entry| !entry.hidden).filter(|entry| {
-        let haystack = format!("{} {}", entry.name.to_lowercase(), entry.package.to_lowercase());
-        words.iter().all(|word| haystack.contains(word))
-    }).collect()
+    crate::search::rank(entries.iter().filter(|entry| !entry.hidden), filter, |entry| crate::search::SearchFields::new(&entry.name).tags([package_group(&entry.package)]).other([entry.package.as_str(), entry.description.as_str()]))
 }
 
 /// The last part of a package name, for showing it, without the `.zip` of a zipped package.
