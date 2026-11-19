@@ -676,3 +676,20 @@ fn font_list_keeps_the_fonts_matching_the_filter() {
         assert_eq!(found["fonts"][0], json!({"kind": "system", "family": family}), "{found}");
     }
 }
+
+#[test]
+fn a_list_tool_keeps_the_first_limit_items_after_ranking() {
+    let mut session = FileSession::with_roots(vec![style_root()]);
+    let styles = call_ok(&mut session, "text_style_list", json!({"limit": 1}));
+    assert_eq!(styles["styles"].as_array().unwrap().len(), 1);
+    assert_eq!(styles["styles"][0]["id"], "styles/bold");
+    let low = call_ok(&mut session, "text_style_list", json!({"filter": "low", "limit": 5}));
+    assert_eq!(low["styles"].as_array().unwrap().len(), 1);
+    let presets = call_ok(&mut session, "clip_animation_list", json!({"limit": 2}));
+    assert_eq!(presets["presets"].as_array().unwrap().len(), 2);
+    let fonts = call_ok(&mut session, "font_list", json!({"limit": 1}));
+    assert_eq!(fonts["fonts"], json!([{"kind": "default"}]));
+    for tool in ["text_style_list", "clip_animation_list", "font_list", "asset_list", "packages_list"] {
+        assert_eq!(call_err(&mut session, tool, json!({"limit": 0})).code, "invalid_params", "{tool}");
+    }
+}
