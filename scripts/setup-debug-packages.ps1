@@ -15,8 +15,10 @@
 #   GpufxVideoEditor-Assets releases ($releases below), one item per pack. Only the aggregate of each release
 #   (*-packs.zip, a stored zip of the per-item pack zips) is downloaded and unpacked two levels: aggregate ->
 #   pack zips -> pack folders, the way the editor installs them, with the translations (i18n\) of the
-#   GpufxVideoEditor-Assets checkout for a pack whose id it has, which may be newer than the releases. These
-#   type folders are emptied first, so packs of an older layout (one pack per set) do not show twice.
+#   GpufxVideoEditor-Assets checkout for a pack whose id it has, which may be newer than the releases. A tag
+#   with no release yet is skipped with a warning. Once every download succeeded, each type folder that a
+#   release or the CapCut private checkout fills is emptied first, so packs of an older layout (one pack per
+#   set) do not show twice; a type folder with no source is left as it is.
 # - the private CapCut packs (one folder per item), copied from a GpufxVideoEditor-Assets-capcut-private
 #   checkout next to this repository (or -CapcutPrivate) when there is one.
 # The editor uses the packages next to its executable before those of the checkout, so once this folder
@@ -197,15 +199,28 @@ if (-not $SkipModels) {
     }
 }
 
+# The tags are provisional until they are published: a tag with no release is skipped with a warning.
+$available = @()
 foreach ($release in $releases) {
     $folder = Join-Path $download $release
     if (-not (Test-Path -LiteralPath $folder) -or @(Get-ChildItem -LiteralPath $folder -File -Filter '*-packs.zip').Count -eq 0) {
+        & gh release view $release -R $assetsRepo --json tagName 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "release $release of $assetsRepo not found, skipped"
+            continue
+        }
         & gh release download $release -R $assetsRepo -D $folder -p '*-packs.zip' --clobber
         if ($LASTEXITCODE -ne 0) { throw "downloading release $release failed ($LASTEXITCODE)" }
     }
+    $available += $release
 }
 
-# Unpacks one pack zip (manifest.json at its root) into packages\<type>\<id lower-cased>.
+# The release packs are unpacked here first, laid out <type>\<id>, and moved into packages once all are.
+$contentStaging = Join-Path $download 'content-staging'
+if (Test-Path -LiteralPath $contentStaging) { Remove-Item -LiteralPath $contentStaging -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $contentStaging | Out-Null
+
+# Unpacks one pack zip (manifest.json at its root) into <staging>\<type>\<id lower-cased>.
 function Install-PackZip([string]$ZipPath) {
     $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
     try {
@@ -219,18 +234,14 @@ function Install-PackZip([string]$ZipPath) {
     if ($manifest.type -notin @('sfx', 'music', 'sticker', 'clip-animation', 'text-animation', 'text-style', 'subtitle-style', 'font')) { throw "$ZipPath has an unknown type '$($manifest.type)'" }
     # text-animation is the older name of clip-animation; the editor installs both to clip-animation.
     $typeFolder = if ($manifest.type -eq 'text-animation') { 'clip-animation' } else { $manifest.type }
-    $packDir = Join-Path $packagesDir "$typeFolder\$($manifest.id.ToLowerInvariant())"
+    $packDir = Join-Path $contentStaging "$typeFolder\$($manifest.id.ToLowerInvariant())"
     if (Test-Path -LiteralPath $packDir) {
         Remove-Item -LiteralPath $packDir -Recurse -Force
     }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $packDir)
 }
 
-foreach ($typeFolder in $contentTypes) {
-    $typeDir = Join-Path $packagesDir $typeFolder
-    if (Test-Path -LiteralPath $typeDir) { Clear-Packages $typeDir }
-}
-foreach ($release in $releases) {
+foreach ($release in $available) {
     $folder = Join-Path $download $release
     foreach ($aggregate in Get-ChildItem -LiteralPath $folder -File -Filter '*-packs.zip') {
         # First level: the aggregate holds the per-item pack zips, flat.
@@ -243,7 +254,29 @@ foreach ($release in $releases) {
             Install-PackZip $zip.FullName
             $count++
         }
-        Write-Host "unpacked $count packs of $($aggregate.Name) -> $packagesDir"
+        Write-Host "unpacked $count packs of $($aggregate.Name) -> $contentStaging"
+    }
+}
+
+# Every download and unpack succeeded: a type folder is emptied only when the releases or the CapCut private
+# checkout fill it again, so a type with no source keeps what an earlier run put there.
+if ($CapcutPrivate -eq '') { $CapcutPrivate = Join-Path (Split-Path -Parent $repoRoot) 'GpufxVideoEditor-Assets-capcut-private' }
+$hasCapcutPrivate = Test-Path -LiteralPath $CapcutPrivate -PathType Container
+foreach ($typeFolder in $contentTypes) {
+    $staged = Join-Path $contentStaging $typeFolder
+    $fromReleases = Test-Path -LiteralPath $staged -PathType Container
+    $fromCapcut = $hasCapcutPrivate -and (Test-Path -LiteralPath (Join-Path $CapcutPrivate $typeFolder) -PathType Container)
+    if (-not $fromReleases -and -not $fromCapcut) {
+        Write-Warning "no source for packages\$typeFolder, left as it is"
+        continue
+    }
+    $typeDir = Join-Path $packagesDir $typeFolder
+    if (Test-Path -LiteralPath $typeDir) { Clear-Packages $typeDir }
+    New-Item -ItemType Directory -Force -Path $typeDir | Out-Null
+    if ($fromReleases) {
+        foreach ($pack in Get-ChildItem -LiteralPath $staged -Directory) {
+            Move-Item -LiteralPath $pack.FullName -Destination (Join-Path $typeDir $pack.Name)
+        }
     }
 }
 
@@ -279,8 +312,7 @@ foreach ($typeFolder in $contentTypes) {
 
 # The private CapCut packs: one folder per item (its manifest names the collection), copied as they are. Their
 # type folders were emptied above, so no pack of the older one-pack-per-set layout is left beside them.
-if ($CapcutPrivate -eq '') { $CapcutPrivate = Join-Path (Split-Path -Parent $repoRoot) 'GpufxVideoEditor-Assets-capcut-private' }
-if (Test-Path -LiteralPath $CapcutPrivate -PathType Container) {
+if ($hasCapcutPrivate) {
     foreach ($kind in $contentTypes) {
         $kindDir = Join-Path $CapcutPrivate $kind
         if (-not (Test-Path -LiteralPath $kindDir)) { continue }
