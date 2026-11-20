@@ -10,7 +10,7 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
-use d3d12_backend::{is_wrapper_manifest, parse_wrapper_manifest, read_package_info, read_zip_package_info, WrapperManifest};
+use d3d12_backend::{classify_folder, classify_manifest, parse_wrapper_manifest, read_package_info, read_zip_package_info, strip_bom, ManifestKind, WrapperManifest};
 use serde_json::Value;
 use zip::ZipArchive;
 
@@ -36,7 +36,7 @@ fn check(files: &Files) -> Result<(WrapperManifest, d3d12_backend::PackageInfo, 
     let file = |name: &str| files.iter().find(|(file, _)| file == name).map(|(_, bytes)| bytes);
     let manifest = parse_wrapper_manifest(file(MANIFEST).ok_or(ImportProblem::NoManifest)?).map_err(ImportProblem::BadManifest)?;
     for (name, _) in files {
-        let allowed = name == MANIFEST || *name == manifest.package || language_file_code(name).is_some_and(|_| !name[5..].contains('/'));
+        let allowed = name == MANIFEST || *name == manifest.package || (language_file_code(name).is_some() && name.strip_prefix("i18n/").is_some_and(|file| !file.contains('/')));
         if !allowed {
             return Err(ImportProblem::WrapperStrayFile(name.clone()));
         }
@@ -106,7 +106,7 @@ fn walk(folder: &Path, prefix: &str, found: &mut Vec<(ZipEntry, PathBuf)>, limit
 /// Checks the wrapper folder `source` and installs a copy of it under `user_root`.
 pub fn install_wrapper_folder(source: &Path, user_root: &Path, overwrite: bool) -> Result<ImportOutcome, ImportProblem> {
     let manifest = fs::read(source.join(MANIFEST)).map_err(|_| ImportProblem::NoManifest)?;
-    if !is_wrapper_manifest(&manifest) {
+    if !matches!(classify_manifest(&manifest), ManifestKind::Wrapper(_)) {
         return Err(ImportProblem::NotAWrapper);
     }
     let mut found = Vec::new();
@@ -138,47 +138,111 @@ fn write_all(folder: &Path, files: &[(String, Vec<u8>)]) -> std::io::Result<()> 
     Ok(())
 }
 
-/// Writes the checked `files` to `<user root>/packages/gpufx/user/<name>`, through a folder no
-/// scan reads, replacing what was there only once the copy is whole.
+/// The id of the user's gpufx package at `path`, lower-cased: a wrapper folder's manifest id, a bare
+/// gpufx folder's or `.zip`'s manifest id. `None` for anything else.
+fn user_package_id(path: &Path) -> Option<String> {
+    let id_of = |bytes: &[u8]| -> Option<String> {
+        if classify_manifest(bytes) != ManifestKind::BareGpufx {
+            return None;
+        }
+        let manifest: Value = serde_json::from_slice(strip_bom(bytes)).ok()?;
+        manifest.get("id")?.as_str().map(str::to_ascii_lowercase)
+    };
+    if path.is_dir() {
+        return match classify_folder(path) {
+            ManifestKind::Wrapper(manifest) => manifest.ok().map(|manifest| manifest.id.to_ascii_lowercase()),
+            ManifestKind::BareGpufx => id_of(&fs::read(path.join(MANIFEST)).ok()?),
+            ManifestKind::Other => None,
+        };
+    }
+    if !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("zip")) {
+        return None;
+    }
+    let mut zip = ZipArchive::new(fs::File::open(path).ok()?).ok()?;
+    let entry = zip.by_name(MANIFEST).ok()?;
+    let mut bytes = Vec::new();
+    entry.take(1 << 20).read_to_end(&mut bytes).ok()?;
+    id_of(&bytes)
+}
+
+/// The user's gpufx packages, wrappers or bare, whose id is `id` (ignoring case), but `except`.
+/// Installing a package of an id replaces them, so one id is one package.
+pub(crate) fn same_id_user_packages(user_root: &Path, id: &str, except: &Path) -> Vec<PathBuf> {
+    let folder = user_root.join("packages").join("gpufx").join(USER_GROUP);
+    let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
+    let mut found: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).filter(|path| path != except && !path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.'))).filter(|path| user_package_id(path).is_some_and(|found| found.eq_ignore_ascii_case(id))).collect();
+    found.sort();
+    found
+}
+
+/// Removes the package at `path`, a folder or a file.
+pub(crate) fn remove_package(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+/// Writes the checked `files` to `<user root>/packages/gpufx/user/<name>` (`<name>` lower-cased, as
+/// Windows file names ignore case), through a folder no scan reads, replacing what was there only
+/// once the copy is whole. The user's other packages of the same id are replaced too.
 fn install_files(files: &Files, user_root: &Path, overwrite: bool) -> Result<ImportOutcome, ImportProblem> {
+    install_files_with(files, user_root, overwrite, &mut crate::asset_install::rename_with_retries)
+}
+
+fn install_files_with(files: &Files, user_root: &Path, overwrite: bool, rename: &mut dyn FnMut(&Path, &Path) -> std::io::Result<()>) -> Result<ImportOutcome, ImportProblem> {
     let (manifest, info, kind) = check(files)?;
-    let name = manifest.name().to_owned();
+    let name = manifest.name().to_ascii_lowercase();
     let packages = user_root.join("packages");
     let target = packages.join("gpufx").join(USER_GROUP).join(&name);
-    let replaced = target.exists();
+    let same_id = same_id_user_packages(user_root, &manifest.id, &target);
+    let target_exists = target.exists();
+    let replaced = target_exists || !same_id.is_empty();
     if replaced {
         // An installed package that cannot be read does not stop its replacement.
-        let installed = read_package_info(&target).ok();
-        if let Some(existing) = installed.as_ref().and_then(classify) {
+        let installed: Vec<d3d12_backend::PackageInfo> = target_exists.then_some(&target).into_iter().chain(&same_id).filter_map(|path| read_package_info(path).ok()).collect();
+        if let Some(existing) = installed.iter().find_map(classify) {
             if existing != kind {
                 return Err(ImportProblem::KindChanged { existing, new: kind });
             }
         }
         if !overwrite {
-            return Ok(ImportOutcome::AlreadyInstalled { name: installed.map_or(info.name, |installed| installed.name) });
+            return Ok(ImportOutcome::AlreadyInstalled { name: installed.into_iter().next().map_or(info.name, |installed| installed.name) });
         }
     }
     let unique = crate::package_manager::next_unique();
     let staging = packages.join(format!(".importing-{unique}"));
     let old = packages.join(format!(".replaced-{unique}"));
     let failed = |e: std::io::Error| ImportProblem::WriteFailed(e.to_string());
-    let result = (|| {
-        write_all(&staging, files)?;
-        fs::create_dir_all(target.parent().expect("under the user group"))?;
-        if replaced {
-            crate::asset_install::rename_with_retries(&target, &old)?;
+    let written = write_all(&staging, files).and_then(|()| fs::create_dir_all(target.parent().expect("under the user group")));
+    if let Err(error) = written {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(failed(error));
+    }
+    if target_exists {
+        if let Err(error) = rename(&target, &old) {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(failed(error));
         }
-        if let Err(error) = crate::asset_install::rename_with_retries(&staging, &target) {
-            if replaced {
-                let _ = crate::asset_install::rename_with_retries(&old, &target);
+    }
+    if let Err(error) = rename(&staging, &target) {
+        let _ = fs::remove_dir_all(&staging);
+        // The old package is deleted only once the new one is in place: when it cannot go back,
+        // it stays where it is and the error says where.
+        if target_exists {
+            if let Err(restore) = rename(&old, &target) {
+                return Err(ImportProblem::WriteFailed(format!("{error}; the installed package could not be put back and is kept at {}: {restore}", old.display())));
             }
-            return Err(error);
         }
-        Ok(())
-    })();
-    let _ = fs::remove_dir_all(&staging);
-    let _ = fs::remove_dir_all(&old);
-    result.map_err(failed)?;
+        return Err(failed(error));
+    }
+    if target_exists {
+        let _ = fs::remove_dir_all(&old);
+    }
+    for path in &same_id {
+        let _ = remove_package(path);
+    }
     Ok(ImportOutcome::Installed(InstalledPackage { package: format!("packages/gpufx/{USER_GROUP}/{name}"), name: info.name, kind, replaced }))
 }
 
@@ -321,6 +385,74 @@ mod tests {
         crate::package_manager::set_enabled(&root, &pack.key, true).unwrap();
         crate::package_manager::uninstall(std::slice::from_ref(&root), &root, pack).unwrap();
         assert!(installed(&dir).is_empty(), "the whole folder is gone");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A wrapper whose inner zip is `package` (`<stem>.zip`) with the id `id`.
+    fn named(package: &str, id: &str) -> Vec<(String, Vec<u8>)> {
+        let manifest = format!(r#"{{"format":1,"type":"gpufx","id":"{id}","version":"1.0.0","package":"{package}"}}"#);
+        vec![("manifest.json".to_owned(), manifest.into_bytes()), (package.to_owned(), inner(id))]
+    }
+
+    #[test]
+    fn a_failed_replace_whose_old_package_cannot_go_back_keeps_it_and_names_where() {
+        let dir = scratch("restore");
+        let root = dir.join("root");
+        install(&dir, &files("t.iris", true, None), false, false).unwrap();
+        let mut calls = 0;
+        let mut rename = |from: &Path, to: &Path| {
+            calls += 1;
+            if calls == 1 {
+                fs::rename(from, to)
+            } else {
+                Err(std::io::Error::other("refused"))
+            }
+        };
+        let Err(ImportProblem::WriteFailed(message)) = install_files_with(&files("t.iris", true, None), &root, true, &mut rename) else { panic!("the replace fails") };
+        let kept: Vec<PathBuf> = fs::read_dir(root.join("packages")).unwrap().flatten().map(|entry| entry.path()).filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(".replaced-")).collect();
+        assert_eq!(kept.len(), 1, "the old package is not deleted: {message}");
+        assert!(kept[0].join("iris.zip").is_file());
+        assert!(message.contains(&kept[0].display().to_string()), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_replace_puts_the_old_package_back() {
+        let dir = scratch("restore-ok");
+        let root = dir.join("root");
+        install(&dir, &files("t.iris", true, None), false, false).unwrap();
+        let mut calls = 0;
+        let mut rename = |from: &Path, to: &Path| {
+            calls += 1;
+            if calls == 2 {
+                Err(std::io::Error::other("refused"))
+            } else {
+                fs::rename(from, to)
+            }
+        };
+        assert!(matches!(install_files_with(&files("t.iris", true, None), &root, true, &mut rename), Err(ImportProblem::WriteFailed(_))));
+        assert_eq!(installed(&dir), vec!["iris"]);
+        assert!(fs::read_dir(root.join("packages")).unwrap().flatten().all(|entry| !entry.file_name().to_string_lossy().starts_with('.')), "nothing is left beside it");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_id_is_one_package_whatever_its_file_name_or_form() {
+        let dir = scratch("same-id");
+        let root = dir.join("root");
+        let install_named = |package: &str, id: &str, overwrite: bool| install(&dir, &named(package, id), false, overwrite);
+        install_named("iris.zip", "t.iris", false).unwrap();
+        assert_eq!(install_named("iris2.zip", "T.Iris", false), Ok(ImportOutcome::AlreadyInstalled { name: "Iris".to_owned() }), "another file name, the same id");
+        assert!(matches!(install_named("iris2.zip", "T.Iris", true), Ok(ImportOutcome::Installed(InstalledPackage { replaced: true, .. }))));
+        assert_eq!(installed(&dir), vec!["iris2"], "the old wrapper is gone");
+        // A bare zip of the id, then a wrapper of it, then a bare zip again.
+        let bare = dir.join("bare.zip");
+        fs::write(&bare, inner("t.iris")).unwrap();
+        assert!(matches!(crate::package_import::install_package(&bare, &root, true), Ok(ImportOutcome::Installed(InstalledPackage { replaced: true, .. }))));
+        assert_eq!(installed(&dir), vec!["t.iris.zip"], "the bare zip replaced the wrapper");
+        assert!(matches!(install_named("Iris.zip", "t.iris", true), Ok(ImportOutcome::Installed(InstalledPackage { replaced: true, .. }))));
+        assert_eq!(installed(&dir), vec!["iris"], "the wrapper replaced the bare zip, in a lower-case folder");
+        assert_eq!(crate::packages::scan(std::slice::from_ref(&root), read_package_info).effects.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -47,14 +47,55 @@ impl WrapperManifest {
     }
 }
 
-/// Whether the manifest `bytes` declare a wrapper: a JSON object with `format` and `"type":"gpufx"`.
-/// A wrapper that is invalid otherwise is still one, so its problem is reported.
-pub fn is_wrapper_manifest(bytes: &[u8]) -> bool {
-    let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(strip_bom(bytes)) else { return false };
-    object.contains_key("format") && object.get("type").and_then(Value::as_str) == Some(WRAPPER_TYPE)
+/// A gpufx manifest is read up to this size to tell what it is; a larger one is [`ManifestKind::Other`].
+const MAX_CLASSIFIED_MANIFEST_BYTES: u64 = 16 << 20;
+
+/// What a `manifest.json` declares, as far as gpufx packages go. The one place that tells a wrapper
+/// from a bare gpufx package from anything else; a UTF-8 BOM is ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestKind {
+    /// A JSON object with `format` and `"type":"gpufx"`: a wrapper, with its checked manifest or why
+    /// it is invalid. A wrapper that is invalid otherwise is still one, so its problem is reported.
+    Wrapper(Result<WrapperManifest, String>),
+    /// A JSON object with no `type`: a gpufx package without the editor's wrapper.
+    BareGpufx,
+    /// Anything else: another pack type, or not a JSON object.
+    Other,
 }
 
-fn strip_bom(bytes: &[u8]) -> &[u8] {
+/// Tells what the manifest `bytes` declare.
+pub fn classify_manifest(bytes: &[u8]) -> ManifestKind {
+    let bytes = strip_bom(bytes);
+    let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(bytes) else { return ManifestKind::Other };
+    if object.contains_key("format") && object.get("type").and_then(Value::as_str) == Some(WRAPPER_TYPE) {
+        if bytes.len() as u64 > MAX_WRAPPER_MANIFEST_BYTES {
+            return ManifestKind::Wrapper(Err("the manifest is too large".to_owned()));
+        }
+        return ManifestKind::Wrapper(parse_wrapper_manifest(bytes));
+    }
+    if object.contains_key("type") {
+        ManifestKind::Other
+    } else {
+        ManifestKind::BareGpufx
+    }
+}
+
+/// Tells what the `manifest.json` of the folder `folder` declares: [`ManifestKind::Other`] when it
+/// is not a folder or has no readable manifest.
+pub fn classify_folder(folder: &Path) -> ManifestKind {
+    if !folder.is_dir() {
+        return ManifestKind::Other;
+    }
+    let Ok(file) = std::fs::File::open(folder.join("manifest.json")) else { return ManifestKind::Other };
+    let mut bytes = Vec::new();
+    if std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_CLASSIFIED_MANIFEST_BYTES + 1), &mut bytes).is_err() || bytes.len() as u64 > MAX_CLASSIFIED_MANIFEST_BYTES {
+        return ManifestKind::Other;
+    }
+    classify_manifest(&bytes)
+}
+
+/// `bytes` without a leading UTF-8 BOM.
+pub fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
 }
 
@@ -81,19 +122,10 @@ pub fn parse_wrapper_manifest(bytes: &[u8]) -> Result<WrapperManifest, String> {
 /// The wrapper manifest of the folder `folder`: `None` when it is not a wrapper (no manifest, or a
 /// gpufx one), else the manifest or why it is invalid.
 pub fn read_wrapper(folder: &Path) -> Option<Result<WrapperManifest, String>> {
-    if !folder.is_dir() {
-        return None;
+    match classify_folder(folder) {
+        ManifestKind::Wrapper(manifest) => Some(manifest),
+        ManifestKind::BareGpufx | ManifestKind::Other => None,
     }
-    let file = std::fs::File::open(folder.join("manifest.json")).ok()?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(file, MAX_WRAPPER_MANIFEST_BYTES + 1), &mut bytes).ok()?;
-    if !is_wrapper_manifest(&bytes) {
-        return None;
-    }
-    if bytes.len() as u64 > MAX_WRAPPER_MANIFEST_BYTES {
-        return Some(Err("the manifest is too large".to_owned()));
-    }
-    Some(parse_wrapper_manifest(&bytes))
 }
 
 /// The path gpufx opens for the package at `path`: the inner zip of a wrapper folder, else `path`
@@ -121,12 +153,20 @@ mod tests {
 
     #[test]
     fn a_wrapper_is_told_from_a_gpufx_manifest() {
-        assert!(is_wrapper_manifest(GOOD.as_bytes()));
-        assert!(is_wrapper_manifest(br#"{"format":2,"type":"gpufx"}"#), "an invalid wrapper is still one");
-        assert!(!is_wrapper_manifest(br#"{"id":"a","used_for":["gpufx"]}"#));
-        assert!(!is_wrapper_manifest(br#"{"type":"gpufx"}"#), "no format");
-        assert!(!is_wrapper_manifest(br#"{"format":1,"type":"sticker"}"#));
-        assert!(!is_wrapper_manifest(b"nope"));
+        assert!(matches!(classify_manifest(GOOD.as_bytes()), ManifestKind::Wrapper(Ok(_))));
+        assert!(matches!(classify_manifest(br#"{"format":2,"type":"gpufx"}"#), ManifestKind::Wrapper(Err(_))), "an invalid wrapper is still one");
+        assert_eq!(classify_manifest(br#"{"id":"a","used_for":["gpufx"]}"#), ManifestKind::BareGpufx);
+        assert_eq!(classify_manifest(br#"{"type":"gpufx"}"#), ManifestKind::Other, "no format");
+        assert_eq!(classify_manifest(br#"{"format":1,"type":"sticker"}"#), ManifestKind::Other);
+        assert_eq!(classify_manifest(b"nope"), ManifestKind::Other);
+        assert_eq!(classify_manifest(b"[1]"), ManifestKind::Other);
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_change_what_a_manifest_is() {
+        let bom = |text: &str| [b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat();
+        assert!(matches!(classify_manifest(&bom(GOOD)), ManifestKind::Wrapper(Ok(_))));
+        assert_eq!(classify_manifest(&bom(r#"{"id":"a","used_for":["gpufx"]}"#)), ManifestKind::BareGpufx);
     }
 
     #[test]

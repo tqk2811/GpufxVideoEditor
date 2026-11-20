@@ -73,7 +73,10 @@ fn package_id(path: &Path) -> Option<String> {
         }
         read_limited(entry)?
     };
-    let manifest: Value = serde_json::from_slice(&bytes).ok()?;
+    if crate::gpufx_wrapper::classify_manifest(&bytes) != crate::gpufx_wrapper::ManifestKind::BareGpufx {
+        return None;
+    }
+    let manifest: Value = serde_json::from_slice(crate::gpufx_wrapper::strip_bom(&bytes)).ok()?;
     manifest.get("id")?.as_str().map(str::to_ascii_lowercase)
 }
 

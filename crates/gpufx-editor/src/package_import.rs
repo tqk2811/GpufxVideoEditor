@@ -238,9 +238,9 @@ enum Declared {
 /// What the manifest declares. A `type` the editor cannot use is an error here, so that it is
 /// reported before anything is installed.
 fn declared_package(manifest: &[u8]) -> Result<Declared, ImportProblem> {
-    let value: Value = serde_json::from_slice(manifest).map_err(|e| ImportProblem::BadManifest(e.to_string()))?;
+    let value: Value = serde_json::from_slice(d3d12_backend::strip_bom(manifest)).map_err(|e| ImportProblem::BadManifest(e.to_string()))?;
     let Some(object) = value.as_object() else { return Err(ImportProblem::BadManifest("it is not a JSON object".to_owned())) };
-    if d3d12_backend::is_wrapper_manifest(manifest) {
+    if matches!(d3d12_backend::classify_manifest(manifest), d3d12_backend::ManifestKind::Wrapper(_)) {
         return Ok(Declared::Wrapper);
     }
     match object.get("type") {
@@ -371,10 +371,12 @@ pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<I
     let id = id.to_ascii_lowercase();
     let file_name = format!("{id}.zip");
     let target = user_root.join("packages").join("gpufx").join(USER_GROUP).join(&file_name);
-    let replaced = target.exists();
+    // A wrapper of the same id is the same package, replaced once the zip is in place.
+    let same_id = crate::gpufx_wrapper_install::same_id_user_packages(user_root, &id, &target);
+    let replaced = target.exists() || !same_id.is_empty();
     if replaced {
         // An installed zip that cannot be read does not stop its replacement.
-        let installed = read_bounded(&target, MAX_SHADER_ARCHIVE_BYTES).ok().and_then(|existing| read_zip_package_info(&existing).ok());
+        let installed = read_bounded(&target, MAX_SHADER_ARCHIVE_BYTES).ok().and_then(|existing| read_zip_package_info(&existing).ok()).or_else(|| same_id.iter().find_map(|path| d3d12_backend::read_package_info(path).ok()));
         if let Some(existing_kind) = installed.as_ref().and_then(classify) {
             if existing_kind != kind {
                 return Err(ImportProblem::KindChanged { existing: existing_kind, new: kind });
@@ -385,6 +387,9 @@ pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<I
         }
     }
     write_replacing(&target, &bytes).map_err(|e| ImportProblem::WriteFailed(e.to_string()))?;
+    for path in &same_id {
+        let _ = crate::gpufx_wrapper_install::remove_package(path);
+    }
     Ok(ImportOutcome::Installed(InstalledPackage { package: format!("packages/gpufx/{USER_GROUP}/{file_name}"), name: info.name, kind, replaced }))
 }
 

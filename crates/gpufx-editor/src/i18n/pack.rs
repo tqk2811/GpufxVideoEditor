@@ -54,12 +54,6 @@ struct PackFile {
     items: HashMap<String, TextSet>,
 }
 
-/// Whether `folder` is a gpufx package without the editor's wrapper: its manifest has `used_for`.
-fn is_bare_gpufx_folder(folder: &Path) -> bool {
-    let Ok(bytes) = std::fs::read(folder.join("manifest.json")) else { return false };
-    serde_json::from_slice::<Value>(&bytes).ok().is_some_and(|manifest| manifest.get("used_for").is_some())
-}
-
 /// Every language file of one pack, by code.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PackTranslations {
@@ -153,7 +147,7 @@ impl PackTranslations {
     /// the editor's wrapper folder around it (see [`d3d12_backend::gpufx_wrapper`]): the `i18n/` of
     /// a bare gpufx package, a folder or a `.zip`, is never read.
     pub fn read_package(path: &Path) -> Self {
-        if !path.is_dir() || is_bare_gpufx_folder(path) {
+        if !path.is_dir() || d3d12_backend::classify_folder(path) == d3d12_backend::ManifestKind::BareGpufx {
             return Self::default();
         }
         Self::read_folder(path)
@@ -373,12 +367,13 @@ mod tests {
     fn a_gpufx_package_is_translated_by_its_wrapper_and_never_by_its_own_language_files() {
         let dir = std::env::temp_dir().join(format!("gpufx-pack-i18n-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        for folder in ["wrapper", "bare", "sticker"] {
+        for folder in ["wrapper", "bare", "bare-bom", "sticker"] {
             std::fs::create_dir_all(dir.join(folder).join("i18n")).unwrap();
             std::fs::write(dir.join(folder).join("i18n/vi.json"), VI).unwrap();
         }
         std::fs::write(dir.join("wrapper/manifest.json"), r#"{"format":1,"type":"gpufx","id":"a","version":"1","package":"a.zip"}"#).unwrap();
         std::fs::write(dir.join("bare/manifest.json"), r#"{"id":"a","used_for":["gpufx"]}"#).unwrap();
+        std::fs::write(dir.join("bare-bom/manifest.json"), "\u{feff}{\"id\":\"a\",\"used_for\":[\"gpufx\"]}").unwrap();
         std::fs::write(dir.join("sticker/manifest.json"), r#"{"type":"sticker","id":"s"}"#).unwrap();
         let zip_path = dir.join("pack.zip");
         let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
@@ -388,11 +383,12 @@ mod tests {
         std::io::Write::write_all(&mut zip, VI.as_bytes()).unwrap();
         zip.finish().unwrap();
         let read = |name: &str| PackTranslations::read_package(&dir.join(name));
-        let (wrapper, bare, sticker, zipped) = (read("wrapper"), read("bare"), read("sticker"), read("pack.zip"));
+        let (wrapper, bare, bare_bom, sticker, zipped) = (read("wrapper"), read("bare"), read("bare-bom"), read("sticker"), read("pack.zip"));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(wrapper.pack().name("vi", ""), "Mờ hộp");
         assert_eq!(sticker, wrapper, "another pack type reads its own folder");
         assert!(bare.is_empty(), "the i18n of a bare gpufx folder is not read");
+        assert!(bare_bom.is_empty(), "nor when its manifest starts with a UTF-8 BOM");
         assert!(zipped.is_empty(), "the i18n inside a gpufx zip is not read");
     }
 
