@@ -585,11 +585,15 @@ fn sound_row(ui: &mut egui::Ui, state: &EditorState, sound: &LibrarySound) -> So
     }
 }
 
-/// The name of a sound, what it is filed under, and the source a clip would store, in language
-/// `code` where its pack brings it.
+/// The name of a sound, its description when its pack brings one, what it is filed under, and the
+/// source a clip would store, in language `code` where its pack brings it.
 fn sound_tooltip(sound: &LibrarySound, code: &str) -> String {
     let tags = tags_line(sound.i18n.category(code, &sound.category), sound.i18n.tags(code, &sound.tags));
-    format!("{}\n{tags}\n{}", sound.display_name(code), sound.source)
+    let description = match sound.i18n.description(code, "").trim() {
+        "" => String::new(),
+        text => format!("\n{text}"),
+    };
+    format!("{}{description}\n{tags}\n{}", sound.display_name(code), sound.source)
 }
 
 /// What an empty grid says: a filter that matches nothing is not an empty library.
@@ -1030,6 +1034,14 @@ mod tests {
         let sound = LibrarySound { i18n: translations.item("a"), source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned()], category: "impact".to_owned(), looped: false };
         assert_eq!(sound_tooltip(&sound, "vi"), "Bùm\nimpact [va chạm]\nasset:sfx/p/a.flac", "the category has no translation, so it stays English");
         assert_eq!(sound_tooltip(&sound, "en"), "Boom\nimpact [hit]\nasset:sfx/p/a.flac");
+    }
+
+    #[test]
+    fn a_sound_tooltip_shows_the_description_its_pack_brings() {
+        let translations = crate::i18n::pack::PackTranslations::from_files([("vi".to_owned(), r#"{"items": {"a": {"description": "Nhạc vui tươi"}}}"#.to_owned())]);
+        let sound = LibrarySound { i18n: translations.item("a"), source: "asset:music/p/a.mp3".to_owned(), name: "Happy".to_owned(), duration: None, tags: vec!["fun".to_owned()], category: "bgm".to_owned(), looped: false };
+        assert_eq!(sound_tooltip(&sound, "vi"), "Happy\nNhạc vui tươi\nbgm [fun]\nasset:music/p/a.mp3");
+        assert_eq!(sound_tooltip(&sound, "en"), "Happy\nbgm [fun]\nasset:music/p/a.mp3", "no description in English");
     }
 
     #[test]
