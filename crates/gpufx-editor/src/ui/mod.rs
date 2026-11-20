@@ -36,6 +36,8 @@ pub enum UiRequest {
     OpenProject,
     SaveProject,
     SaveProjectAs,
+    /// Save as, also copying the packs the project uses beside the file.
+    SaveProjectWithPacks,
     Export,
     CancelExport,
     ToggleFullscreen,
@@ -64,8 +66,6 @@ pub enum UiRequest {
     OpenPackFolder { index: usize },
     /// Installs the packs the open project needs from the copy saved beside it.
     RestorePacks,
-    /// Whether a save also copies the packs the project uses beside it.
-    SetSaveWithPacks(bool),
 }
 
 pub fn show(root: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>, preview: Option<PreviewTexture>) {

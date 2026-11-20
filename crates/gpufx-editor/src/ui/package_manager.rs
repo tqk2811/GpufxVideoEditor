@@ -47,7 +47,7 @@ pub fn show(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiR
     // requests then too (see `handle`).
     let busy = state.is_exporting();
     let mut open = state.ui.packages.open;
-    egui::Window::new(language.t(Message::PackManagerTitle)).id(egui::Id::unique("package-manager")).open(&mut open).default_size(DEFAULT_SIZE).collapsible(false).show(ctx, |ui| {
+    egui::Window::new(language.t(Message::PackManagerTitle)).id(egui::Id::unique("package-manager")).open(&mut open).default_size(DEFAULT_SIZE).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).collapsible(false).show(ctx, |ui| {
         let ui_state = &mut state.ui.packages;
         restore_banner(ui, language, ui_state, busy, requests);
         ui.horizontal_wrapped(|ui| {

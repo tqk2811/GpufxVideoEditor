@@ -17,7 +17,6 @@ const THEME_KEY: &str = "theme";
 const AGENT_ACCESS_KEY: &str = "agent_access";
 const AUTOSAVE_KEY: &str = "autosave_seconds";
 const PROXY_KEY: &str = "proxy_preview";
-const SAVE_WITH_PACKS_KEY: &str = "save_with_packs";
 
 /// `%APPDATA%\gpufx-editor\settings.json`, when the variable is set.
 pub fn settings_file() -> Option<PathBuf> {
@@ -216,20 +215,6 @@ pub fn startup_proxy_mode() -> ProxyMode {
 pub fn save_proxy_mode(mode: ProxyMode) -> Result<(), String> {
     let file = settings_file().ok_or("APPDATA is not set")?;
     write_setting(&file, PROXY_KEY, json!(mode.code()))
-}
-
-/// Whether a save also copies the packs the project uses beside it. Off unless chosen.
-fn saved_save_with_packs(file: &Path) -> bool {
-    read_settings(file).get(SAVE_WITH_PACKS_KEY).and_then(Value::as_bool).unwrap_or(false)
-}
-
-pub fn startup_save_with_packs() -> bool {
-    settings_file().is_some_and(|file| saved_save_with_packs(&file))
-}
-
-pub fn save_save_with_packs(enabled: bool) -> Result<(), String> {
-    let file = settings_file().ok_or("APPDATA is not set")?;
-    write_setting(&file, SAVE_WITH_PACKS_KEY, json!(enabled))
 }
 
 #[cfg(test)]

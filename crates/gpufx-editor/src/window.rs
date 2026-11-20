@@ -215,7 +215,6 @@ impl Session {
         state.ui.panel_sizes = crate::settings::startup_panel_sizes();
         state.ui.theme = crate::settings::startup_theme();
         state.ui.autosave_seconds = crate::settings::startup_autosave_seconds();
-        state.ui.save_with_packs = crate::settings::startup_save_with_packs();
         #[cfg(debug_assertions)]
         let smoke = {
             let mut smoke = Smoke::default();
@@ -960,14 +959,15 @@ impl Session {
         true
     }
 
-    fn save_project(&mut self, file: PathBuf) {
+    /// A project saved with its packs keeps them up to date on every later save to that file.
+    fn save_project(&mut self, file: PathBuf, with_packs: bool) {
         if !self.state.project_file().is_some_and(|current| d3d12_backend::same_file(current, &file)) && held_elsewhere(&file) {
             self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
             return;
         }
         match save_project_file(self.state.project(), &file) {
             Ok(()) => {
-                if self.state.ui.save_with_packs {
+                if with_packs || crate::package_manager::backup_folder(&file).join("packages").is_dir() {
                     let paths = project_paths(Some(&file), &self.package_roots);
                     if let Err(message) = crate::package_manager::backup_used_packs(self.state.project(), &paths, &file) {
                         self.state.report_error(Message::PackBackupFailed(message));
@@ -1007,7 +1007,7 @@ impl Session {
             FileDialog::PickFont { .. } => base().add_filter(language.t(Message::FilterFont), &["ttf", "otf", "ttc"]),
             FileDialog::PickTexture { .. } => base().add_filter(language.t(Message::FilterPicture), &["png", "jpg", "jpeg"]),
             FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
-            FileDialog::SaveProject => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
+            FileDialog::SaveProject { .. } => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
             FileDialog::ImportSubtitles => base().add_filter(language.t(Message::FilterSubtitles), &["srt"]).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ExportSubtitles { .. } => base().add_filter(language.t(Message::FilterSubtitles), &["srt"]).set_file_name("subtitles.srt"),
@@ -1015,7 +1015,7 @@ impl Session {
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
                 FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::PickTexture { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::ImportMatteModel { .. } | FileDialog::ImportTrackingModel | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
-                FileDialog::SaveProject | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
+                FileDialog::SaveProject { .. } | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
         });
@@ -1121,7 +1121,7 @@ impl Session {
                 self.text_style_library = Some(spawn_text_style_scan(self.package_roots.clone(), self.window.clone()));
                 self.refresh_pack_list_if_open();
             }
-            Action::SaveTo(path) => self.save_project(path),
+            Action::SaveTo(path, with_packs) => self.save_project(path, with_packs),
             Action::StartExport(path) => self.start_export(path, None),
             Action::ProjectReplaced => {
                 self.playback = None;
@@ -1431,6 +1431,7 @@ impl Session {
             UiRequest::OpenProject => self.begin_task(Request::OpenProject),
             UiRequest::SaveProject => self.begin_task(Request::SaveProject),
             UiRequest::SaveProjectAs => self.begin_task(Request::SaveProjectAs),
+            UiRequest::SaveProjectWithPacks => self.begin_task(Request::SaveProjectWithPacks),
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
             UiRequest::ImportPackage => self.begin_task(Request::ImportPackage),
@@ -1481,12 +1482,6 @@ impl Session {
             }
             UiRequest::OpenPackFolder { index } => self.open_pack_folder(index),
             UiRequest::RestorePacks => self.restore_packs(),
-            UiRequest::SetSaveWithPacks(enabled) => {
-                self.state.ui.save_with_packs = enabled;
-                if let Err(message) = crate::settings::save_save_with_packs(enabled) {
-                    self.state.report_error(Message::PackSaveWithPacksFailed(message));
-                }
-            }
             // winit restores the placement it saved on entry, maximised or not, on leaving.
             UiRequest::ToggleFullscreen => {
                 let leaving = self.presenter.window().fullscreen().is_some();

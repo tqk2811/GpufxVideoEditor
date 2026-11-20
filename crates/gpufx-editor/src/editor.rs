@@ -395,8 +395,6 @@ pub struct UiState {
     pub proxy_retryable: usize,
     /// The package manager window.
     pub packages: crate::ui::package_manager::PackageManagerUi,
-    /// Whether a save also copies the packs the project uses into `<project>.packages`.
-    pub save_with_packs: bool,
     /// The video clip whose preview takes a box drawn for a new motion track, with its source
     /// file; read it through [`EditorState::track_pick`], which drops a stale one.
     pub tracking_pick: Option<(ClipKey, String)>,

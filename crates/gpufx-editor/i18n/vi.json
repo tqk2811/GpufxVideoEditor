@@ -70,7 +70,7 @@
   "projectInUse": "{path} đang được mở ở tiến trình khác",
   "agentAccessFailed": "Không mở được kết nối cho agent: {detail}",
   "menuPackageManager": "Quản lý gói...",
-  "menuSaveWithPacks": "Lưu kèm bản sao các gói project dùng",
+  "menuSaveWithPacks": "Lưu kèm gói...",
   "packManagerTitle": "Quản lý gói",
   "packColumnName": "Tên",
   "packColumnVersion": "Phiên bản",

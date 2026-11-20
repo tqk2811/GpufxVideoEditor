@@ -70,7 +70,7 @@
   "projectInUse": "{path} is open in another process",
   "agentAccessFailed": "Could not open the agent connection: {detail}",
   "menuPackageManager": "Package manager...",
-  "menuSaveWithPacks": "Save copies of the packs used with the project",
+  "menuSaveWithPacks": "Save with packs...",
   "packManagerTitle": "Package manager",
   "packColumnName": "Name",
   "packColumnVersion": "Version",

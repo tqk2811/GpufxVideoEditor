@@ -18,7 +18,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     ui.allocate_ui_with_layout(rect.size(), Layout::left_to_right(Align::Center), |ui| {
         ui.add_space(10.0);
         let (language, agent_access) = (state.language(), state.agent_access);
-        file_menu(ui, language, state.ui.theme, agent_access, state.ui.autosave_seconds, state.ui.save_with_packs, state.is_exporting(), requests);
+        file_menu(ui, language, state.ui.theme, agent_access, state.ui.autosave_seconds, state.is_exporting(), requests);
         proxy_menu(ui, language, state.ui.proxy_mode, state.ui.proxy_pending, state.ui.proxy_retryable, requests);
         if state.agent_connected {
             ui.colored_label(theme::accent(), language.t(Message::AgentConnected));
@@ -65,19 +65,14 @@ fn project_name(ui: &egui::Ui, state: &EditorState, rect: Rect, free: Rect) {
 }
 
 /// During an export only the agent access stays usable, so the user can revoke it at any time.
-fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeChoice, agent_access: bool, autosave_seconds: u64, save_with_packs: bool, exporting: bool, requests: &mut Vec<UiRequest>) {
+fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeChoice, agent_access: bool, autosave_seconds: u64, exporting: bool, requests: &mut Vec<UiRequest>) {
     ui.menu_button(language.t(Message::MenuFile), |ui| {
         ui.add_enabled_ui(!exporting, |ui| {
-            for (label, request) in [(Message::MenuNewProject, UiRequest::NewProject), (Message::MenuOpen, UiRequest::OpenProject), (Message::MenuSave, UiRequest::SaveProject), (Message::MenuSaveAs, UiRequest::SaveProjectAs)] {
+            for (label, request) in [(Message::MenuNewProject, UiRequest::NewProject), (Message::MenuOpen, UiRequest::OpenProject), (Message::MenuSave, UiRequest::SaveProject), (Message::MenuSaveAs, UiRequest::SaveProjectAs), (Message::MenuSaveWithPacks, UiRequest::SaveProjectWithPacks)] {
                 if ui.button(language.t(label)).clicked() {
                     requests.push(request);
                     ui.close();
                 }
-            }
-            let mut with_packs = save_with_packs;
-            if ui.checkbox(&mut with_packs, language.t(Message::MenuSaveWithPacks)).clicked() {
-                requests.push(UiRequest::SetSaveWithPacks(with_packs));
-                ui.close();
             }
             ui.separator();
             if ui.button(language.t(Message::MenuPackageManager)).clicked() {
