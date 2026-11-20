@@ -1,12 +1,16 @@
 # Fills target\debug\packages so a debug build of the editor starts with every package:
-# - packages\gpufx\<group>\<package>.zip: every effect and transition package of FFmpegGpuFilter and
-#   GpufxVideoEditor-Assets, packed by `gpufx pack` like a release (scripts\pack-packages.ps1 of FFmpegGpuFilter
-#   for its own packages, the gpufx CLI it builds for the rest).
+# - packages\gpufx\<group>\<name>\: every effect and transition package of FFmpegGpuFilter, GpufxVideoEditor-Assets
+#   and the CapCut repository, as the editor's wrapper pack unpacked one level: manifest.json, i18n\<code>.json
+#   and <name>.zip (the inner package, packed by `gpufx pack` like a release). The inner zips are staged in
+#   package-downloads\inner\gpufx (scripts\pack-packages.ps1 of FFmpegGpuFilter for its own packages, the gpufx
+#   CLI it builds for the rest), `py scripts\pack.py --wrappers` of GpufxVideoEditor-Assets wraps them using its
+#   gpufx\<group>\<name>\ sources, and each wrapper zip is extracted. An inner package with no wrapper source is
+#   listed and not installed.
 # - packages\gpufx_ai_<filter>\<model>.zip: the AI models of FFmpegGpuFilter, fetched and converted by its
 #   pack-packages.ps1 -Models (needs network; they are not in git).
-# - packages\gpufx\capcut\<package>.zip: the packages of a shallow clone of FFmpegGpuFilter-packages-capcut.
+# - the packages of a shallow clone of FFmpegGpuFilter-packages-capcut go through the same staging, group capcut.
 # The effect packages are zips, not links to the checkouts: editing a shader or manifest there needs a rerun of
-# this script (cargo is needed to build the gpufx CLI).
+# this script (cargo is needed to build the gpufx CLI, py for the wrappers).
 # - packages\sfx, music, sticker, clip-animation, font: the packs of the GpufxVideoEditor-Assets releases, unpacked
 #   the way the editor installs them, with the translations (i18n\) of the GpufxVideoEditor-Assets checkout,
 #   which may be newer than the releases.
@@ -14,11 +18,13 @@
 #   checkout next to this repository (or -CapcutPrivate) when there is one.
 # The editor uses the packages next to its executable before those of the checkout, so once this folder
 # exists it must hold everything. Run it again after cargo clean, or with -Force to fetch the packs again.
+# -SkipModels keeps the gpufx_ai_* zips already in packages instead of fetching the models again.
 [CmdletBinding()]
 param(
     [string]$Target = 'debug',
     [string]$CapcutPrivate = '',
-    [switch]$Force
+    [switch]$Force,
+    [switch]$SkipModels
 )
 
 $ErrorActionPreference = 'Stop'
@@ -59,13 +65,35 @@ function Clear-Packages([string]$Path) {
 $gpufxDir = Join-Path $packagesDir 'gpufx'
 New-Item -ItemType Directory -Force -Path $gpufxDir | Out-Null
 Clear-Packages $gpufxDir
-foreach ($old in Get-ChildItem -LiteralPath $packagesDir -Force -Directory -Filter 'gpufx_ai_*') {
-    if ($old.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { Remove-Junction $old.FullName }
-    else { Remove-Item -LiteralPath $old.FullName -Recurse -Force }
+$existingModels = @(Get-ChildItem -LiteralPath $packagesDir -Force -Directory -Filter 'gpufx_ai_*')
+if ($SkipModels -and $existingModels.Count -eq 0) { throw '-SkipModels: there is no gpufx_ai_* folder in packages to keep' }
+if (-not $SkipModels) {
+    foreach ($old in $existingModels) {
+        if ($old.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { Remove-Junction $old.FullName }
+        else { Remove-Item -LiteralPath $old.FullName -Recurse -Force }
+    }
 }
 
+# The inner packages are staged here, laid out <innerRoot>\gpufx\<group>\<name>.zip (+ gpufx_ai_* with the models).
+$download = Join-Path $outDir 'package-downloads'
+if ($Force -and (Test-Path -LiteralPath $download)) {
+    Remove-Item -LiteralPath $download -Recurse -Force
+}
+New-Item -ItemType Directory -Force -Path $download | Out-Null
+$innerRoot = Join-Path $download 'inner'
+$wrapperRoot = Join-Path $download 'wrappers'
+foreach ($stale in @($innerRoot, $wrapperRoot)) {
+    if (Test-Path -LiteralPath $stale) { Remove-Item -LiteralPath $stale -Recurse -Force }
+}
+$innerGpufx = Join-Path $innerRoot 'gpufx'
+New-Item -ItemType Directory -Force -Path $innerGpufx | Out-Null
+
 # FFmpegGpuFilter: its own script packs packages\gpufx -> gpufx\<group>\<name>.zip and the models -> gpufx_ai_*.
-& (Join-Path $repoRoot 'external\FFmpegGpuFilter\scripts\pack-packages.ps1') -Out $gpufxDir -Models
+if ($SkipModels) {
+    & (Join-Path $repoRoot 'external\FFmpegGpuFilter\scripts\pack-packages.ps1') -Out $innerGpufx
+} else {
+    & (Join-Path $repoRoot 'external\FFmpegGpuFilter\scripts\pack-packages.ps1') -Out $innerGpufx -Models
+}
 if (-not $?) { throw 'pack-packages.ps1 of FFmpegGpuFilter failed' }
 $gpufxCli = Join-Path $repoRoot 'external\FFmpegGpuFilter\target\release\gpufx.exe'
 if (-not (Test-Path -LiteralPath $gpufxCli)) { throw "$gpufxCli missing after pack-packages.ps1" }
@@ -88,15 +116,9 @@ function Pack-Folders([string]$Source, [string]$Out) {
 
 $assetsGpufx = Join-Path $repoRoot 'external\GpufxVideoEditor-Assets\packages\gpufx'
 if (Test-Path -LiteralPath $assetsGpufx -PathType Container) {
-    $count = Pack-Folders $assetsGpufx $gpufxDir
-    Write-Host "packed $count packages of GpufxVideoEditor-Assets -> $gpufxDir"
+    $count = Pack-Folders $assetsGpufx $innerGpufx
+    Write-Host "packed $count packages of GpufxVideoEditor-Assets -> $innerGpufx"
 }
-
-$download = Join-Path $outDir 'package-downloads'
-if ($Force -and (Test-Path -LiteralPath $download)) {
-    Remove-Item -LiteralPath $download -Recurse -Force
-}
-New-Item -ItemType Directory -Force -Path $download | Out-Null
 
 # The CapCut recreations live in repositories of their own that are never submodules here. A debug build
 # still gets them, packed from a shallow clone of each, so every package can be tried locally.
@@ -112,7 +134,7 @@ foreach ($capcut in $capcutRepos) {
         & git -C $clone reset -q --hard FETCH_HEAD
         if ($LASTEXITCODE -ne 0) { throw "updating the clone of $($capcut.Repo) failed ($LASTEXITCODE)" }
     }
-    $groupDir = Join-Path $gpufxDir $capcut.Group
+    $groupDir = Join-Path $innerGpufx $capcut.Group
     New-Item -ItemType Directory -Force -Path $groupDir | Out-Null
     # The packages sit in src\ of the repository; an older clone kept them at its root.
     $source = Join-Path $clone 'src'
@@ -120,6 +142,38 @@ foreach ($capcut in $capcutRepos) {
     $count = Pack-Folders $source $groupDir
     Write-Host "packed $count packages of $($capcut.Repo) -> $groupDir"
 }
+# Wraps every inner package with the sources of GpufxVideoEditor-Assets (gpufx\<group>\<name>\) and unpacks each
+# wrapper zip one level: packages\gpufx\<group>\<name>\{manifest.json, i18n\<code>.json, <name>.zip}.
+$packScript = Join-Path $repoRoot 'external\GpufxVideoEditor-Assets\scripts\pack.py'
+& py $packScript --wrappers $innerGpufx -o $wrapperRoot
+if ($LASTEXITCODE -ne 0) { throw "pack.py --wrappers failed ($LASTEXITCODE)" }
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$wrapperGpufx = Join-Path $wrapperRoot 'gpufx'
+$wrapped = @{}
+foreach ($wrapperZip in Get-ChildItem -LiteralPath $wrapperGpufx -Recurse -File -Filter '*.zip') {
+    $rel = $wrapperZip.FullName.Substring($wrapperGpufx.Length + 1)
+    $wrapped[$rel.ToLowerInvariant()] = $true
+    $packDir = Join-Path $gpufxDir ($rel -replace '\.zip$', '')
+    if (Test-Path -LiteralPath $packDir) { Remove-Item -LiteralPath $packDir -Recurse -Force }
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($wrapperZip.FullName, $packDir)
+}
+Write-Host "unpacked $($wrapped.Count) wrapper packs -> $gpufxDir"
+$unwrapped = @()
+foreach ($innerZip in Get-ChildItem -LiteralPath $innerGpufx -Recurse -File -Filter '*.zip') {
+    $rel = $innerZip.FullName.Substring($innerGpufx.Length + 1)
+    if (-not $wrapped.ContainsKey($rel.ToLowerInvariant())) { $unwrapped += $rel }
+}
+if ($unwrapped.Count -gt 0) {
+    Write-Warning "$($unwrapped.Count) inner packages have no wrapper source in GpufxVideoEditor-Assets\gpufx and are not installed:"
+    foreach ($rel in $unwrapped) { Write-Warning "  $rel" }
+}
+# The models go next to gpufx, as in a release.
+if (-not $SkipModels) {
+    foreach ($models in Get-ChildItem -LiteralPath $innerRoot -Directory -Filter 'gpufx_ai_*') {
+        Move-Item -LiteralPath $models.FullName -Destination (Join-Path $packagesDir $models.Name)
+    }
+}
+
 foreach ($release in $releases) {
     $folder = Join-Path $download $release
     if (-not (Test-Path -LiteralPath $folder)) {
@@ -128,8 +182,9 @@ foreach ($release in $releases) {
     }
 }
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
 foreach ($zip in Get-ChildItem -LiteralPath $download -Recurse -Filter '*.zip') {
+    # The staged inner and wrapper zips were handled above.
+    if ($zip.FullName.StartsWith($innerRoot + '\') -or $zip.FullName.StartsWith($wrapperRoot + '\')) { continue }
     # audio-packs.zip only bundles the pack zips of the same release for a single download.
     if ($zip.Name -eq 'audio-packs.zip') { continue }
     $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
