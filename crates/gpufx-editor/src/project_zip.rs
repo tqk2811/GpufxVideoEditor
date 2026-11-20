@@ -31,18 +31,12 @@ const STORED_EXTENSIONS: &[&str] = &[
     "mp4", "mov", "mkv", "webm", "m4v", "avi", "wmv", "flv", "mpg", "mpeg", "ts", "mts", "m2ts", "3gp", "mp3", "aac", "m4a", "ogg", "opus", "wma", "flac", "jpg", "jpeg", "png", "webp", "gif", "heic", "avif", "zip", "woff", "woff2", "7z", "rar", "gz",
 ];
 
-/// Whether `path` names a packed project: `*.zip.gpufxproj` or `*.zip`, or another `*.gpufxproj`
-/// starting with the zip magic `PK`.
+/// Whether the file at `path` is a packed project. Told by its content, never by the `.zip.` or
+/// `.json.` of its name: a file starting with a zip local header (or an empty zip's end record) is
+/// packed, anything else is a JSON project.
 pub fn is_packed(path: &Path) -> bool {
-    let name = lower_name(path);
-    if name.ends_with(ARCHIVE_EXTENSION) || name.ends_with(".zip") {
-        return true;
-    }
-    if name.ends_with(PROJECT_EXTENSION) || !name.ends_with(FILTER_EXTENSION) {
-        return false;
-    }
-    let mut magic = [0u8; 2];
-    fs::File::open(path).and_then(|mut file| file.read_exact(&mut magic)).is_ok() && &magic == b"PK"
+    let mut magic = [0u8; 4];
+    fs::File::open(path).and_then(|mut file| file.read_exact(&mut magic)).is_ok() && (&magic == b"PK\x03\x04" || &magic == b"PK\x05\x06")
 }
 
 fn lower_name(path: &Path) -> String {
@@ -319,10 +313,27 @@ mod tests {
         write(&dir.join("film (2)/x"), b"x");
         assert_eq!(extraction_folder(&packed), dir.join("film (3)"));
         assert_eq!(extraction_folder(&dir.join("clip.zip")), dir.join("clip"));
-        assert!(is_packed(&packed) && is_packed(&dir.join("a.ZIP")) && !is_packed(&dir.join("a.json.gpufxproj")));
-        write(&dir.join("sniffed.gpufxproj"), b"PK");
-        write(&dir.join("text.gpufxproj"), b"{}");
-        assert!(is_packed(&dir.join("sniffed.gpufxproj")) && !is_packed(&dir.join("text.gpufxproj")));
+    }
+
+    #[test]
+    fn a_project_is_packed_or_not_by_its_content_never_by_its_name() {
+        let dir = scratch("sniff");
+        let project = dir.join("made").join("film.json.gpufxproj");
+        write(&project, br#"{"a":1}"#);
+        let packed = write_packed(&project).unwrap();
+        // A zip project named .json.gpufxproj opens as a zip.
+        let zip_named_json = dir.join("zipped.json.gpufxproj");
+        fs::copy(&packed, &zip_named_json).unwrap();
+        assert!(is_packed(&zip_named_json));
+        assert_eq!(fs::read(extract_packed(&zip_named_json).unwrap()).unwrap(), br#"{"a":1}"#);
+        // A JSON project named .zip.gpufxproj, or .zip, opens as JSON.
+        for name in ["text.zip.gpufxproj", "text.zip", "text.gpufxproj"] {
+            write(&dir.join(name), b"{}");
+            assert!(!is_packed(&dir.join(name)), "{name}");
+        }
+        write(&dir.join("pk.gpufxproj"), b"PK not a zip");
+        assert!(!is_packed(&dir.join("pk.gpufxproj")), "the full local header is needed");
+        assert!(!is_packed(&dir.join("missing.zip.gpufxproj")));
     }
 
     #[test]
