@@ -170,20 +170,46 @@ pub enum TableRow<'a> {
 
 /// The rows of `shown` (packs of one tab, in the list's order): packs gathered by collection, the
 /// packs of a collection listed only while it is open. Every collection is open while `filtering`.
+/// Only packs in use make a collection: a shadowed copy is listed right after the pack that hides
+/// it, so the two copies of one pack never look like a collection of two.
 pub fn table_rows<'a>(shown: &[&'a InstalledPack], open: &HashSet<String>, tab: PackTab, filtering: bool, code: &str) -> Vec<TableRow<'a>> {
-    let groups = crate::i18n::pack::group_by_collection(shown.iter().map(|pack| (&pack.collection, *pack)), code);
+    let groups = crate::i18n::pack::group_by_collection(shown.iter().filter(|pack| !pack.shadowed).map(|pack| (&pack.collection, *pack)), code);
+    let shadowed: Vec<&'a InstalledPack> = shown.iter().copied().filter(|pack| pack.shadowed).collect();
+    let mut placed = vec![false; shadowed.len()];
+    let mut with_copies = |rows: &mut Vec<TableRow<'a>>, pack: &'a InstalledPack, nested: bool| {
+        rows.push(TableRow::Pack { pack, nested });
+        for (copy, done) in shadowed.iter().zip(placed.iter_mut()) {
+            if copy.key == pack.key {
+                *done = true;
+                rows.push(TableRow::Pack { pack: copy, nested });
+            }
+        }
+    };
     let mut rows = Vec::new();
     for (collection, packs) in groups {
         if let [pack] = packs.as_slice() {
-            rows.push(TableRow::Pack { pack, nested: false });
+            with_copies(&mut rows, pack, false);
             continue;
         }
         let is_open = filtering || open.contains(&collection_key(tab, &collection.id));
-        let nested: Vec<TableRow<'a>> = if is_open { packs.iter().map(|pack| TableRow::Pack { pack, nested: true }).collect() } else { Vec::new() };
-        rows.push(TableRow::Collection { collection, packs, open: is_open });
-        rows.extend(nested);
+        rows.push(TableRow::Collection { collection, packs: packs.clone(), open: is_open });
+        if is_open {
+            for pack in packs {
+                with_copies(&mut rows, pack, true);
+            }
+        }
     }
+    // A shadowed copy whose pack in use is filtered out still shows, on its own.
+    let orphans: Vec<&'a InstalledPack> = shadowed.iter().zip(&placed).filter(|(_, done)| !**done).map(|(pack, _)| *pack).collect();
+    rows.extend(orphans.into_iter().map(|pack| TableRow::Pack { pack, nested: false }));
     rows
+}
+
+/// The packs a collection header acts on: those listed under it, in the tab and matching the
+/// filter of `ui_state`, not shadowed; the ones in the collection of pack `index` of the list.
+pub fn collection_members(ui_state: &PackageManagerUi, index: usize) -> Vec<&InstalledPack> {
+    let Some(pack) = ui_state.packs.get(index) else { return Vec::new() };
+    filter_packs(&ui_state.packs, pack.tab, &ui_state.filter).into_iter().filter(|other| !other.shadowed && other.collection.id == pack.collection.id).collect()
 }
 
 /// What [`PackageManagerUi::open_collections`] holds for collection `id` of `tab`.
@@ -341,6 +367,50 @@ fn pack_row(ui: &mut egui::Ui, language: Language, packs: &[InstalledPack], pack
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pack(key: &str, collection: &str, source: PackSource, shadowed: bool) -> InstalledPack {
+        InstalledPack {
+            tab: PackTab::Sticker,
+            key: key.to_owned(),
+            id: key.to_owned(),
+            name: key.to_owned(),
+            version: String::new(),
+            source,
+            path: std::path::PathBuf::from(key),
+            items: 1,
+            bytes: Some(10),
+            enabled: true,
+            hidden: false,
+            problem: None,
+            shadowed,
+            i18n: Default::default(),
+            collection: PackCollection { id: collection.to_owned(), name: collection.to_owned(), i18n: Default::default() },
+        }
+    }
+
+    #[test]
+    fn a_shadowed_copy_is_not_a_second_pack_of_its_collection() {
+        // No `collection` in the manifest: the pack's own id is its collection, for both copies.
+        let packs = [pack("a", "a", PackSource::User, false), pack("a", "a", PackSource::Shipped, true)];
+        let shown: Vec<&InstalledPack> = packs.iter().collect();
+        let rows = table_rows(&shown, &HashSet::new(), PackTab::Sticker, false, "en");
+        assert_eq!(rows, [TableRow::Pack { pack: &packs[0], nested: false }, TableRow::Pack { pack: &packs[1], nested: false }]);
+    }
+
+    #[test]
+    fn a_header_acts_on_the_packs_it_lists() {
+        let mut ui_state = PackageManagerUi::default();
+        ui_state.packs = vec![pack("fun-a", "fun", PackSource::User, false), pack("fun-b", "fun", PackSource::User, false), pack("fun-a", "fun", PackSource::Shipped, true), pack("other", "o", PackSource::User, false)];
+        let keys = |ui_state: &PackageManagerUi| collection_members(ui_state, 0).iter().map(|pack| pack.key.clone()).collect::<Vec<_>>();
+        assert_eq!(keys(&ui_state), ["fun-a", "fun-b"], "the shadowed copy is not listed under the header");
+        ui_state.filter = "fun-b".to_owned();
+        assert_eq!(keys(&ui_state), ["fun-b"], "nor a pack the filter hides");
+        ui_state.filter.clear();
+        let shown = filter_packs(&ui_state.packs, PackTab::Sticker, "");
+        let rows = table_rows(&shown, &HashSet::new(), PackTab::Sticker, false, "en");
+        let TableRow::Collection { packs, .. } = &rows[0] else { panic!("{rows:?}") };
+        assert_eq!(packs.len(), collection_members(&ui_state, 0).len(), "the header count is what it acts on");
+    }
 
     #[test]
     fn sizes_read_in_the_unit_that_fits() {

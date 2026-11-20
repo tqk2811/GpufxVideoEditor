@@ -1378,13 +1378,14 @@ impl Session {
         self.refresh_pack_list();
     }
 
-    /// Pack `index` of the list, or with `collection` every pack of its tab in its collection.
+    /// Pack `index` of the list, or with `collection` the packs listed under its collection's header
+    /// (matching the filter, not shadowed), the ones the header counts.
     fn listed_packs(&self, index: usize, collection: bool) -> Vec<InstalledPack> {
         let Some(pack) = self.listed_pack(index) else { return Vec::new() };
         if !collection {
             return vec![pack];
         }
-        self.state.ui.packages.packs.iter().filter(|other| other.tab == pack.tab && other.collection.id == pack.collection.id).cloned().collect()
+        crate::ui::package_manager::collection_members(&self.state.ui.packages, index).into_iter().cloned().collect()
     }
 
     fn set_pack_enabled(&mut self, packs: &[InstalledPack], enabled: bool) {
