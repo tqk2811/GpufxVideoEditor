@@ -62,9 +62,10 @@ function Clear-Packages([string]$Path) {
     }
 }
 
+# packages\gpufx is built in a staging folder and swapped in only once every step succeeded, so a failure keeps
+# the previous one instead of leaving it empty (tests needing effects would then skip themselves).
 $gpufxDir = Join-Path $packagesDir 'gpufx'
-New-Item -ItemType Directory -Force -Path $gpufxDir | Out-Null
-Clear-Packages $gpufxDir
+New-Item -ItemType Directory -Force -Path $packagesDir | Out-Null
 $existingModels = @(Get-ChildItem -LiteralPath $packagesDir -Force -Directory -Filter 'gpufx_ai_*')
 if ($SkipModels -and $existingModels.Count -eq 0) { throw '-SkipModels: there is no gpufx_ai_* folder in packages to keep' }
 if (-not $SkipModels) {
@@ -87,6 +88,9 @@ foreach ($stale in @($innerRoot, $wrapperRoot)) {
 }
 $innerGpufx = Join-Path $innerRoot 'gpufx'
 New-Item -ItemType Directory -Force -Path $innerGpufx | Out-Null
+$gpufxStaging = Join-Path $download 'gpufx-staging'
+if (Test-Path -LiteralPath $gpufxStaging) { Remove-Item -LiteralPath $gpufxStaging -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $gpufxStaging | Out-Null
 
 # FFmpegGpuFilter: its own script packs packages\gpufx -> gpufx\<group>\<name>.zip and the models -> gpufx_ai_*.
 if ($SkipModels) {
@@ -153,10 +157,17 @@ $wrapped = @{}
 foreach ($wrapperZip in Get-ChildItem -LiteralPath $wrapperGpufx -Recurse -File -Filter '*.zip') {
     $rel = $wrapperZip.FullName.Substring($wrapperGpufx.Length + 1)
     $wrapped[$rel.ToLowerInvariant()] = $true
-    $packDir = Join-Path $gpufxDir ($rel -replace '\.zip$', '')
+    $packDir = Join-Path $gpufxStaging ($rel -replace '\.zip$', '')
     if (Test-Path -LiteralPath $packDir) { Remove-Item -LiteralPath $packDir -Recurse -Force }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($wrapperZip.FullName, $packDir)
 }
+if ($wrapped.Count -eq 0) { throw "pack.py --wrappers produced no wrapper pack" }
+# Every effect package is ready: swap the new tree in, then drop the old one.
+$gpufxOld = Join-Path $download 'gpufx-old'
+if (Test-Path -LiteralPath $gpufxOld) { Clear-Packages $gpufxOld; Remove-Item -LiteralPath $gpufxOld -Recurse -Force }
+if (Test-Path -LiteralPath $gpufxDir) { Move-Item -LiteralPath $gpufxDir -Destination $gpufxOld }
+Move-Item -LiteralPath $gpufxStaging -Destination $gpufxDir
+if (Test-Path -LiteralPath $gpufxOld) { Clear-Packages $gpufxOld; Remove-Item -LiteralPath $gpufxOld -Recurse -Force }
 Write-Host "unpacked $($wrapped.Count) wrapper packs -> $gpufxDir"
 $unwrapped = @()
 foreach ($innerZip in Get-ChildItem -LiteralPath $innerGpufx -Recurse -File -Filter '*.zip') {
