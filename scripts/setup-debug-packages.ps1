@@ -154,10 +154,11 @@ if ($LASTEXITCODE -ne 0) { throw "pack.py --wrappers failed ($LASTEXITCODE)" }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $wrapperGpufx = Join-Path $wrapperRoot 'gpufx'
 $wrapped = @{}
-foreach ($wrapperZip in Get-ChildItem -LiteralPath $wrapperGpufx -Recurse -File -Filter '*.zip') {
+foreach ($wrapperZip in Get-ChildItem -LiteralPath $wrapperGpufx -Recurse -File -Filter '*.zip.gpufxpack') {
     $rel = $wrapperZip.FullName.Substring($wrapperGpufx.Length + 1)
-    $wrapped[$rel.ToLowerInvariant()] = $true
-    $packDir = Join-Path $gpufxStaging ($rel -replace '\.zip$', '')
+    $rel = $rel -replace '\.zip\.gpufxpack$', ''
+    $wrapped["$rel.zip".ToLowerInvariant()] = $true
+    $packDir = Join-Path $gpufxStaging $rel
     if (Test-Path -LiteralPath $packDir) { Remove-Item -LiteralPath $packDir -Recurse -Force }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($wrapperZip.FullName, $packDir)
 }
