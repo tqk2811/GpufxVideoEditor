@@ -437,6 +437,27 @@ mod tests {
     }
 
     #[test]
+    fn what_a_file_is_comes_from_its_content_not_its_extension() {
+        let dir = scratch("sniff");
+        let root = dir.join("root");
+        let wrapper = as_zip(&dir, &files("t.iris", true, None));
+        let renamed = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+        let wrapper_bytes = fs::read(&wrapper).unwrap();
+        let installed_as_wrapper = |outcome: Result<ImportOutcome, ImportProblem>| matches!(outcome, Ok(ImportOutcome::Installed(InstalledPackage { ref package, .. })) if package == "packages/gpufx/user/iris");
+        assert!(installed_as_wrapper(crate::package_import::install_package(&renamed("iris.zip.gpufxpack", &wrapper_bytes), &root, true)));
+        assert!(installed_as_wrapper(crate::package_import::install_package(&renamed("named.json.zip", &wrapper_bytes), &root, true)), "a wrapper named .zip is still a wrapper");
+        assert!(matches!(crate::package_import::install_package(&renamed("text.zip.gpufxpack", b"{\"format\":1}"), &root, true), Err(ImportProblem::NotAZip(_))));
+        assert!(matches!(crate::package_import::install_package(&renamed("text.zip", b"PK not a zip"), &root, true), Err(ImportProblem::NotAZip(_))));
+        assert_eq!(crate::package_import::install_package(&renamed("bare.zip.gpufxpack", &inner("t.bare")), &root, true), Err(ImportProblem::NotAWrapper), "a .gpufxpack must be a wrapper");
+        assert_eq!(installed(&dir), vec!["iris"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn one_id_is_one_package_whatever_its_file_name_or_form() {
         let dir = scratch("same-id");
         let root = dir.join("root");

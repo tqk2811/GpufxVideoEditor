@@ -1022,7 +1022,7 @@ impl Session {
         let picker = match dialog {
             FileDialog::PickClip { .. } | FileDialog::ImportMedia { audio_only: false } => base().add_filter(language.t(Message::FilterMedia), &MEDIA_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportMedia { audio_only: true } => base().add_filter(language.t(Message::FilterAudio), &AUDIO_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
-            FileDialog::ImportPackage => base().add_filter(language.t(Message::FilterPackage), &["zip"]),
+            FileDialog::ImportPackage => base().add_filter(language.t(Message::FilterPackage), &["gpufxpack", "zip"]),
             FileDialog::ImportPackageFolder => base(),
             FileDialog::ImportMatteModel { .. } => base().add_filter(language.t(Message::FilterMatteModel), &["zip"]),
             FileDialog::ImportTrackingModel => base().add_filter(language.t(Message::FilterTrackingModel), &["zip"]),

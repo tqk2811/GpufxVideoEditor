@@ -332,12 +332,35 @@ fn write_replacing(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Installs what the user picked: a wrapper folder, or a zip (see [`install_zip`]).
+///
+/// What a file is comes from its content, never from its extension: it must start with a zip
+/// header, and its root manifest says which kind of pack it is, so a wrapper named `.zip` still
+/// installs as a wrapper. Only a [`WRAPPER_EXTENSION`] file must be a wrapper.
 pub fn install_package(source: &Path, user_root: &Path, overwrite: bool) -> Result<ImportOutcome, ImportProblem> {
     if source.is_dir() {
-        crate::gpufx_wrapper_install::install_wrapper_folder(source, user_root, overwrite)
-    } else {
-        install_zip(source, user_root, overwrite)
+        return crate::gpufx_wrapper_install::install_wrapper_folder(source, user_root, overwrite);
     }
+    if !starts_like_a_zip(source) {
+        return Err(ImportProblem::NotAZip("the file does not start with a zip header".to_owned()));
+    }
+    let wrapper_named = source.file_name().is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().ends_with(WRAPPER_EXTENSION));
+    if wrapper_named {
+        let file = File::open(source).map_err(|e| ImportProblem::Unreadable(e.to_string()))?;
+        if inspect(BufReader::new(file), ARCHIVE_LIMITS)? != Declared::Wrapper {
+            return Err(ImportProblem::NotAWrapper);
+        }
+    }
+    install_zip(source, user_root, overwrite)
+}
+
+/// The extension of the editor's wrapper pack around a gpufx package (see
+/// [`d3d12_backend::gpufx_wrapper`]): `<name>.zip.gpufxpack`.
+pub const WRAPPER_EXTENSION: &str = ".gpufxpack";
+
+/// Whether the file at `path` starts with a zip local header, or is an empty zip.
+pub fn starts_like_a_zip(path: &Path) -> bool {
+    let mut magic = [0u8; 4];
+    File::open(path).and_then(|mut file| file.read_exact(&mut magic)).is_ok() && (&magic == b"PK\x03\x04" || &magic == b"PK\x05\x06")
 }
 
 /// Checks the zip at `source` and installs it under `user_root`. The checks and the install use the

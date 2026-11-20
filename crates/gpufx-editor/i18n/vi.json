@@ -634,7 +634,7 @@
   "importProblem.ratioTooHigh": "\"{entry}\" phình hơn {limit}:1 khi giải nén.",
   "importProblem.noUserFolder": "chưa đặt LOCALAPPDATA nên không có chỗ để cài.",
   "importProblem.writeFailed": "ghi gói thất bại ({detail}).",
-  "importProblem.notAWrapper": "thư mục không phải gói bọc hiệu ứng (manifest.json cần \"format\" và \"type\": \"gpufx\").",
+  "importProblem.notAWrapper": "đây không phải gói bọc hiệu ứng, thư mục hay .gpufxpack (manifest.json cần \"format\" và \"type\": \"gpufx\").",
   "importProblem.wrapperStrayFile": "gói bọc chỉ được chứa manifest.json, i18n/<mã>.json và zip của gói, không được có \"{entry}\".",
   "importProblem.wrapperMissingPackage": "gói bọc thiếu \"{entry}\", gói mà manifest của nó nêu.",
   "importProblem.wrapperIdMismatch": "gói bọc nêu gói \"{wrapper}\" nhưng zip bên trong là \"{inner}\".",

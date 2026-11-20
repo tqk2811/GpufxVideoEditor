@@ -655,7 +655,7 @@
   "importProblem.ratioTooHigh": "\"{entry}\" grows by more than {limit}:1 when unpacked.",
   "importProblem.noUserFolder": "LOCALAPPDATA is not set, so there is nowhere to install it.",
   "importProblem.writeFailed": "writing it failed ({detail}).",
-  "importProblem.notAWrapper": "the folder is not an effect package wrapper (its manifest.json needs \"format\" and \"type\": \"gpufx\").",
+  "importProblem.notAWrapper": "it is not an effect package wrapper, folder or .gpufxpack (its manifest.json needs \"format\" and \"type\": \"gpufx\").",
   "importProblem.wrapperStrayFile": "the wrapper may hold only manifest.json, i18n/<code>.json and its package zip, not \"{entry}\".",
   "importProblem.wrapperMissingPackage": "the wrapper has no \"{entry}\", the package its manifest names.",
   "importProblem.wrapperIdMismatch": "the wrapper names the package \"{wrapper}\" but its zip holds \"{inner}\".",
