@@ -30,7 +30,8 @@ pub fn classify(info: &PackageInfo) -> Option<PackageKind> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PackageEntry {
-    /// The name stored in a project: the path relative to the package root.
+    /// The name stored in a project: the path relative to the package root, of the wrapper folder
+    /// for a wrapped package (see [`d3d12_backend::gpufx_wrapper`]).
     pub package: String,
     pub name: String,
     pub description: String,
@@ -38,7 +39,9 @@ pub struct PackageEntry {
     pub params: Vec<ParamInfo>,
     /// Kept out of the pickers and the agent's list; a project that uses it still renders it.
     pub hidden: bool,
-    /// The name, description and tags in the languages the package brings (`i18n/<code>.json`).
+    /// The English search tags of the editor's wrapper around the package; none for a bare package.
+    pub tags: Vec<String>,
+    /// The name, description and tags in the languages the wrapper brings (`i18n/<code>.json`).
     pub i18n: Localized,
     /// The labels and descriptions of the parameters in those languages.
     pub param_i18n: ParamTranslations,
@@ -130,7 +133,8 @@ pub fn scan(roots: &[PathBuf], read: impl Fn(&Path) -> Result<PackageInfo, Strin
                 Ok(info) => {
                     let Some(kind) = classify(&info) else { continue };
                     let translations = PackTranslations::read_package(&path);
-                    let entry = PackageEntry { i18n: translations.pack(), param_i18n: translations.params(), package, name: info.name, description: info.description, kind, params: info.params, hidden: info.hidden };
+                    let tags = d3d12_backend::read_wrapper(&path).and_then(Result::ok).map(|wrapper| wrapper.tags).unwrap_or_default();
+                    let entry = PackageEntry { i18n: translations.pack(), param_i18n: translations.params(), tags, package, name: info.name, description: info.description, kind, params: info.params, hidden: info.hidden };
                     match kind {
                         PackageKind::Effect => catalog.effects.push(entry),
                         PackageKind::Transition => catalog.transitions.push(entry),
@@ -174,7 +178,7 @@ pub fn list_installed(root: &Path, read: impl Fn(&Path) -> Result<PackageInfo, S
 /// English or in any language the package brings, best first (see [`crate::search`]). A hidden
 /// entry is never listed.
 pub fn filter_entries<'a>(entries: &'a [PackageEntry], filter: &str) -> Vec<&'a PackageEntry> {
-    crate::search::rank(entries.iter().filter(|entry| !entry.hidden), filter, |entry| entry.i18n.search(crate::search::SearchFields::new(&entry.name).tags([package_group(&entry.package)]).other([entry.package.as_str(), entry.description.as_str()])))
+    crate::search::rank(entries.iter().filter(|entry| !entry.hidden), filter, |entry| entry.i18n.search(crate::search::SearchFields::new(&entry.name).tags(std::iter::once(package_group(&entry.package)).chain(entry.tags.iter().map(String::as_str))).other([entry.package.as_str(), entry.description.as_str()])))
 }
 
 /// The last part of a package name, for showing it, without the `.zip` of a zipped package.
@@ -295,8 +299,8 @@ mod tests {
     #[test]
     fn the_filter_matches_every_word_in_name_or_package() {
         let entries = vec![
-            PackageEntry { i18n: Default::default(), param_i18n: Default::default(), package: "packages/gpufx/capcut/snow".into(), name: "Snow Fall".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false },
-            PackageEntry { i18n: Default::default(), param_i18n: Default::default(), package: "packages/gpufx/ffmpeg/blur".into(), name: "Box Blur".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false },
+            PackageEntry { tags: Vec::new(), i18n: Default::default(), param_i18n: Default::default(), package: "packages/gpufx/capcut/snow".into(), name: "Snow Fall".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false },
+            PackageEntry { tags: Vec::new(), i18n: Default::default(), param_i18n: Default::default(), package: "packages/gpufx/ffmpeg/blur".into(), name: "Box Blur".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false },
         ];
         assert_eq!(filter_entries(&entries, "").len(), 2);
         assert_eq!(filter_entries(&entries, "BLUR")[0].name, "Box Blur");
@@ -324,7 +328,7 @@ mod tests {
     }
 
     fn picker_catalog() -> Catalog {
-        let entry = |package: &str, name: &str, kind| PackageEntry { i18n: Default::default(), param_i18n: Default::default(), package: package.into(), name: name.into(), description: String::new(), kind, params: Vec::new(), hidden: false };
+        let entry = |package: &str, name: &str, kind| PackageEntry { tags: Vec::new(), i18n: Default::default(), param_i18n: Default::default(), package: package.into(), name: name.into(), description: String::new(), kind, params: Vec::new(), hidden: false };
         Catalog {
             loaded: true,
             effects: vec![entry("packages/gpufx/a/blur", "Blur", PackageKind::Effect)],
@@ -356,7 +360,7 @@ mod tests {
 
     #[test]
     fn a_shared_name_shows_the_group_and_a_unique_one_does_not() {
-        let entry = |package: &str, name: &str| PackageEntry { i18n: Default::default(), param_i18n: Default::default(), package: package.into(), name: name.into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
+        let entry = |package: &str, name: &str| PackageEntry { tags: Vec::new(), i18n: Default::default(), param_i18n: Default::default(), package: package.into(), name: name.into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
         let entries = vec![entry("packages/gpufx/capcut/blur", "Blur"), entry("packages/gpufx/ffmpeg/deep/blur", "blur"), entry("packages/gpufx/capcut/snow", "Snow")];
         let duplicates = duplicated_names(&entries);
         assert_eq!(list_label(&entries[0], &duplicates, "en"), "Blur (capcut)");
@@ -367,8 +371,8 @@ mod tests {
     #[test]
     fn a_package_shows_and_is_found_by_its_translation() {
         let translations = PackTranslations::from_files([("vi".to_owned(), r#"{"name": "Tuyết rơi", "tags": ["mùa đông"], "params": {"amount": {"label": "Lượng"}}}"#.to_owned())]);
-        let snow = PackageEntry { i18n: translations.pack(), param_i18n: translations.params(), package: "packages/gpufx/capcut/snow".into(), name: "Snow Fall".into(), description: "Falling snow".into(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
-        let blur = PackageEntry { i18n: Default::default(), param_i18n: Default::default(), package: "packages/gpufx/ffmpeg/blur".into(), name: "Box Blur".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
+        let snow = PackageEntry { tags: Vec::new(), i18n: translations.pack(), param_i18n: translations.params(), package: "packages/gpufx/capcut/snow".into(), name: "Snow Fall".into(), description: "Falling snow".into(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
+        let blur = PackageEntry { tags: Vec::new(), i18n: Default::default(), param_i18n: Default::default(), package: "packages/gpufx/ffmpeg/blur".into(), name: "Box Blur".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
         let entries = vec![blur, snow];
         let duplicates = duplicated_names(&entries);
         assert_eq!(list_label(&entries[1], &duplicates, "vi"), "Tuyết rơi");
@@ -383,6 +387,7 @@ mod tests {
     }
 
     #[test]
+    /// The fixture is a wrapper folder: its manifest, `i18n/vi.json` and the inner gpufx zip.
     fn the_shipped_translations_of_a_package_are_read() {
         let roots = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/i18n-packs")];
         let catalog = scan(&roots, d3d12_backend::read_package_info);
@@ -390,6 +395,8 @@ mod tests {
         assert_eq!(entry.display_name("vi"), "Tách alpha");
         assert_eq!(entry.display_name("en"), entry.name);
         assert_eq!(entry.param_i18n.label("vi", "invert"), Some("Đảo ngược"));
+        assert_eq!(entry.package, "packages/gpufx/ffmpeg/alpha-extract", "a project stores the wrapper folder");
+        assert_eq!(entry.tags, ["matte".to_owned()]);
     }
 
     #[test]
@@ -428,7 +435,7 @@ mod tests {
 
     #[test]
     fn a_hidden_entry_stays_in_the_catalog_but_is_never_offered() {
-        let entry = |package: &str, hidden| PackageEntry { i18n: Default::default(), param_i18n: Default::default(), package: package.into(), name: "Grow".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden };
+        let entry = |package: &str, hidden| PackageEntry { tags: Vec::new(), i18n: Default::default(), param_i18n: Default::default(), package: package.into(), name: "Grow".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden };
         let entries = vec![entry("packages/gpufx/a/grow", true), entry("packages/gpufx/a/grow-2", false)];
         let offered = filter_entries(&entries, "");
         assert_eq!(offered.len(), 1);

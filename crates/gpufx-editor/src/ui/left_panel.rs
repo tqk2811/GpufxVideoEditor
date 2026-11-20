@@ -1079,7 +1079,7 @@ mod tests {
     }
 
     fn entry(package: &str, name: &str, description: &str) -> PackageEntry {
-        PackageEntry { i18n: Default::default(), param_i18n: Default::default(), package: package.to_owned(), name: name.to_owned(), description: description.to_owned(), kind: PackageKind::Effect, params: Vec::new(), hidden: false }
+        PackageEntry { tags: Vec::new(), i18n: Default::default(), param_i18n: Default::default(), package: package.to_owned(), name: name.to_owned(), description: description.to_owned(), kind: PackageKind::Effect, params: Vec::new(), hidden: false }
     }
 
     #[test]

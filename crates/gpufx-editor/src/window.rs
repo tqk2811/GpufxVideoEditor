@@ -36,7 +36,7 @@ use crate::presenter::Presenter;
 use crate::preview::backend::{D3d12Producer, PreviewImage, PreviewRequest};
 use crate::preview::plan::{frame_index, is_current, PlaybackFrames, PlaybackRun, RequestId, RequestTracker};
 use crate::preview::worker::{Outcome, PreviewWorker};
-use crate::package_import::{install_zip, ImportProblem};
+use crate::package_import::{install_package, ImportProblem};
 use crate::project_file::{load_project_file, package_roots, parse_project, project_paths, save_project_file, user_package_root};
 use crate::proxy::{proxy_folder, ChildProxyMaker, ProxyManager, ProxyMode};
 use crate::recovery::{current_process, ClaimError, unix_now, Autosave, RecoveryStore, SystemProbe};
@@ -1023,6 +1023,7 @@ impl Session {
             FileDialog::PickClip { .. } | FileDialog::ImportMedia { audio_only: false } => base().add_filter(language.t(Message::FilterMedia), &MEDIA_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportMedia { audio_only: true } => base().add_filter(language.t(Message::FilterAudio), &AUDIO_EXTENSIONS).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ImportPackage => base().add_filter(language.t(Message::FilterPackage), &["zip"]),
+            FileDialog::ImportPackageFolder => base(),
             FileDialog::ImportMatteModel { .. } => base().add_filter(language.t(Message::FilterMatteModel), &["zip"]),
             FileDialog::ImportTrackingModel => base().add_filter(language.t(Message::FilterTrackingModel), &["zip"]),
             FileDialog::PickFont { .. } => base().add_filter(language.t(Message::FilterFont), &["ttf", "otf", "ttc"]),
@@ -1036,6 +1037,7 @@ impl Session {
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
                 FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::PickTexture { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::ImportMatteModel { .. } | FileDialog::ImportTrackingModel | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
+                FileDialog::ImportPackageFolder => picker.pick_folder(),
                 FileDialog::SaveProject(_) | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
@@ -1113,7 +1115,7 @@ impl Session {
                     self.state.reopen_playback();
                 }
                 self.spawn_task("package-import", TaskId::Load(load), move || {
-                    let result = user_package_root().ok_or(ImportProblem::NoUserFolder).and_then(|root| install_zip(&path, &root, overwrite));
+                    let result = user_package_root().ok_or(ImportProblem::NoUserFolder).and_then(|root| install_package(&path, &root, overwrite));
                     Arrival::PackageImported { load, path, result }
                 });
             }
@@ -1483,6 +1485,7 @@ impl Session {
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
             UiRequest::ImportPackage => self.begin_task(Request::ImportPackage),
+            UiRequest::ImportPackageFolder => self.begin_task(Request::ImportPackageFolder),
             UiRequest::ImportSubtitles => self.begin_task(Request::ImportSubtitles),
             UiRequest::SetLanguage(language) => self.set_language(language),
             UiRequest::SetTheme(choice) => self.set_theme(choice),

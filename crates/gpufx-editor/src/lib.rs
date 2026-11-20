@@ -21,6 +21,7 @@ pub mod media;
 pub mod matting_models;
 pub mod model_download;
 pub mod package_import;
+pub mod gpufx_wrapper_install;
 pub mod package_manager;
 pub mod packages;
 pub mod params;

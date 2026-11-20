@@ -31,6 +31,8 @@ pub enum UiRequest {
     PickClipFile { track: usize },
     ImportMedia { audio_only: bool },
     ImportPackage,
+    /// A wrapper folder of an effect package, through a folder picker.
+    ImportPackageFolder,
     ImportSubtitles,
     NewProject,
     OpenProject,

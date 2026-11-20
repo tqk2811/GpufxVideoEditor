@@ -1675,7 +1675,7 @@ mod tests {
             ("vi".to_owned(), r#"{"name": "Tuyết rơi", "params": {"amount": {"label": "Lượng"}}}"#.to_owned()),
             ("fr".to_owned(), r#"{"params": {"amount": {"description": "Quantité"}}}"#.to_owned()),
         ]);
-        let entry = PackageEntry { i18n: translations.pack(), param_i18n: translations.params(), package: "packages/gpufx/a/snow".into(), name: "Snow".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
+        let entry = PackageEntry { tags: Vec::new(), i18n: translations.pack(), param_i18n: translations.params(), package: "packages/gpufx/a/snow".into(), name: "Snow".into(), description: String::new(), kind: PackageKind::Effect, params: Vec::new(), hidden: false };
         let pending = json!({"effects": [entry_json(&&entry)]});
         assert_eq!(pending["effects"][0][PENDING_TRANSLATIONS]["fr"], json!({"language": "fr", "params": {"amount": {"description": "Quantité"}}}), "a language with only parameters is kept");
         let vietnamese = localized_list(Some(pending.clone()), "vi");

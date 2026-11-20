@@ -63,6 +63,11 @@ pub fn show(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiR
                 requests.push(UiRequest::ImportPackage);
             }
             install.on_disabled_hover_text(language.t(Message::PackBusyExporting));
+            let folder = ui.add_enabled(!busy, egui::Button::new(language.t(Message::PackInstallFolder)));
+            if folder.clicked() {
+                requests.push(UiRequest::ImportPackageFolder);
+            }
+            folder.on_disabled_hover_text(language.t(Message::PackBusyExporting));
             if ui.add_enabled(!ui_state.reading, egui::Button::new(language.t(Message::PackRefresh))).clicked() {
                 requests.push(UiRequest::RefreshPacks);
             }

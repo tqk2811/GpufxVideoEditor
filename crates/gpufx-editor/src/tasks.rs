@@ -41,6 +41,8 @@ pub enum FileDialog {
     PickTexture { clip: ClipKey, slot: crate::text_clip::PaintSlot, revision: u64 },
     ImportMedia { audio_only: bool },
     ImportPackage,
+    /// A wrapper folder of an effect package (see [`crate::gpufx_wrapper_install`]).
+    ImportPackageFolder,
     OpenProject,
     /// Where to save the project. Holds the choices the dialog starts with, and on arrival the
     /// ones the user left ticked.
@@ -98,6 +100,7 @@ pub enum Request {
     PickClip { track: usize },
     ImportMedia { audio_only: bool },
     ImportPackage,
+    ImportPackageFolder,
     Export,
     /// A font file for the text clip, through the file dialog.
     PickFont { clip: ClipKey },
@@ -308,6 +311,7 @@ impl Tasks {
             Request::PickClip { track } => self.start_dialog(FileDialog::PickClip { track }),
             Request::ImportMedia { audio_only } => self.start_dialog(FileDialog::ImportMedia { audio_only }),
             Request::ImportPackage => self.start_dialog(FileDialog::ImportPackage),
+            Request::ImportPackageFolder => self.start_dialog(FileDialog::ImportPackageFolder),
             Request::Export => self.start_dialog(FileDialog::Export),
             Request::PickFont { clip } => self.start_dialog(FileDialog::PickFont { clip, revision: state.revision() }),
             Request::PickTexture { clip, slot } => self.start_dialog(FileDialog::PickTexture { clip, slot, revision: state.revision() }),
@@ -417,11 +421,11 @@ impl Tasks {
                         state.set_text_texture_file(clip, slot, path.to_string_lossy().into_owned());
                         Action::Nothing
                     }
-                    FileDialog::ImportPackage if state.is_exporting() => {
+                    FileDialog::ImportPackage | FileDialog::ImportPackageFolder if state.is_exporting() => {
                         state.report_refused(Message::ExportRunning);
                         Action::Nothing
                     }
-                    FileDialog::ImportPackage => {
+                    FileDialog::ImportPackage | FileDialog::ImportPackageFolder => {
                         let load = self.start_load(state, &path, None);
                         Action::ImportPackage { load, path, overwrite: false }
                     }
@@ -655,6 +659,16 @@ mod tests {
         assert_eq!(tasks.begin(state, Request::ImportPackage), Action::ShowFileDialog(FileDialog::ImportPackage));
         match tasks.on_arrival(state, picked(FileDialog::ImportPackage, "pack.zip")) {
             Action::ImportPackage { load, overwrite: false, .. } => load,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_picked_wrapper_folder_is_installed_as_a_picked_zip_is() {
+        let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
+        assert_eq!(tasks.begin(&mut state, Request::ImportPackageFolder), Action::ShowFileDialog(FileDialog::ImportPackageFolder));
+        match tasks.on_arrival(&mut state, picked(FileDialog::ImportPackageFolder, "iris")) {
+            Action::ImportPackage { path, overwrite: false, .. } => assert_eq!(path, PathBuf::from("iris")),
             other => panic!("{other:?}"),
         }
     }

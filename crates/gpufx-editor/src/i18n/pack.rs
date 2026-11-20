@@ -1,4 +1,5 @@
-//! The translations a package brings: `i18n/<code>.json` at the root of its folder or zip.
+//! The translations a package brings: `i18n/<code>.json` at the root of its folder. For a gpufx
+//! effect package, that folder is the editor's wrapper around it, never the gpufx package itself.
 //!
 //! ```json
 //! {"name": "...", "description": "...", "tags": ["..."],
@@ -16,7 +17,6 @@
 //! A pack's `i18n/en.json` is ignored: the manifest is its English text.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -52,6 +52,12 @@ struct PackFile {
     pack: TextSet,
     params: HashMap<String, ParamText>,
     items: HashMap<String, TextSet>,
+}
+
+/// Whether `folder` is a gpufx package without the editor's wrapper: its manifest has `used_for`.
+fn is_bare_gpufx_folder(folder: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(folder.join("manifest.json")) else { return false };
+    serde_json::from_slice::<Value>(&bytes).ok().is_some_and(|manifest| manifest.get("used_for").is_some())
 }
 
 /// Every language file of one pack, by code.
@@ -143,29 +149,14 @@ impl PackTranslations {
         Self::from_files(files)
     }
 
-    /// The files of `i18n/` inside the zip at `path`.
-    pub fn read_zip(path: &Path) -> Self {
-        let Ok(file) = std::fs::File::open(path) else { return Self::default() };
-        let Ok(mut zip) = zip::ZipArchive::new(std::io::BufReader::new(file)) else { return Self::default() };
-        let names: Vec<(String, String)> = zip.file_names().filter_map(Result::ok).filter_map(|name| language_file_code(&name).map(str::to_owned).map(|code| (name.into_owned(), code))).take(MAX_FILES).collect();
-        let mut files = Vec::new();
-        for (name, code) in names {
-            let Ok(entry) = zip.by_name(&name) else { continue };
-            let mut text = String::new();
-            if entry.take(MAX_FILE_BYTES + 1).read_to_string(&mut text).is_ok() && text.len() as u64 <= MAX_FILE_BYTES {
-                files.push((code, text));
-            }
-        }
-        Self::from_files(files)
-    }
-
-    /// The files of a package at `path`: a folder or a `.zip`.
+    /// The files of the pack at `path`. A gpufx effect package brings its translations only through
+    /// the editor's wrapper folder around it (see [`d3d12_backend::gpufx_wrapper`]): the `i18n/` of
+    /// a bare gpufx package, a folder or a `.zip`, is never read.
     pub fn read_package(path: &Path) -> Self {
-        if path.is_dir() {
-            Self::read_folder(path)
-        } else {
-            Self::read_zip(path)
+        if !path.is_dir() || is_bare_gpufx_folder(path) {
+            return Self::default();
         }
+        Self::read_folder(path)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -379,23 +370,30 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_and_a_zip_are_read_alike() {
+    fn a_gpufx_package_is_translated_by_its_wrapper_and_never_by_its_own_language_files() {
         let dir = std::env::temp_dir().join(format!("gpufx-pack-i18n-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("folder/i18n")).unwrap();
-        std::fs::write(dir.join("folder/i18n/vi.json"), VI).unwrap();
+        for folder in ["wrapper", "bare", "sticker"] {
+            std::fs::create_dir_all(dir.join(folder).join("i18n")).unwrap();
+            std::fs::write(dir.join(folder).join("i18n/vi.json"), VI).unwrap();
+        }
+        std::fs::write(dir.join("wrapper/manifest.json"), r#"{"format":1,"type":"gpufx","id":"a","version":"1","package":"a.zip"}"#).unwrap();
+        std::fs::write(dir.join("bare/manifest.json"), r#"{"id":"a","used_for":["gpufx"]}"#).unwrap();
+        std::fs::write(dir.join("sticker/manifest.json"), r#"{"type":"sticker","id":"s"}"#).unwrap();
         let zip_path = dir.join("pack.zip");
         let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
         zip.start_file("manifest.json", zip::write::SimpleFileOptions::default()).unwrap();
-        std::io::Write::write_all(&mut zip, b"{}").unwrap();
+        std::io::Write::write_all(&mut zip, br#"{"id":"a","used_for":["gpufx"]}"#).unwrap();
         zip.start_file("i18n/vi.json", zip::write::SimpleFileOptions::default()).unwrap();
         std::io::Write::write_all(&mut zip, VI.as_bytes()).unwrap();
         zip.finish().unwrap();
-        let folder = PackTranslations::read_package(&dir.join("folder"));
-        let zipped = PackTranslations::read_package(&zip_path);
+        let read = |name: &str| PackTranslations::read_package(&dir.join(name));
+        let (wrapper, bare, sticker, zipped) = (read("wrapper"), read("bare"), read("sticker"), read("pack.zip"));
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(folder.pack().name("vi", ""), "Mờ hộp");
-        assert_eq!(folder, zipped);
+        assert_eq!(wrapper.pack().name("vi", ""), "Mờ hộp");
+        assert_eq!(sticker, wrapper, "another pack type reads its own folder");
+        assert!(bare.is_empty(), "the i18n of a bare gpufx folder is not read");
+        assert!(zipped.is_empty(), "the i18n inside a gpufx zip is not read");
     }
 
     #[test]

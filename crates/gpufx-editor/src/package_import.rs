@@ -1,6 +1,9 @@
-//! Installing a package from an external `.zip` the user picked. No window here.
+//! Installing a package from an external `.zip` (or wrapper folder) the user picked. No window here.
 //!
-//! A zip has `manifest.json` at its root. A gpufx shader package has no `type` in it, since its
+//! A zip has `manifest.json` at its root. The editor's wrapper around a gpufx effect package
+//! (`"format"` and `"type":"gpufx"`) goes to [`crate::gpufx_wrapper_install`], which unpacks it one
+//! level to `<user root>/packages/gpufx/user/<name>/`; so does a wrapper folder. A bare gpufx shader
+//! package has no `type` in it, since its
 //! manifest refuses unknown fields; it becomes an effect or a transition from its inputs, and is
 //! kept whole at `<user root>/packages/gpufx/user/<manifest id>.zip`, read by `Package::open`. The
 //! other packages name their `type`: `sfx` and `music` go to [`crate::asset_install`], which uses
@@ -116,6 +119,14 @@ pub enum ImportProblem {
     SizeMismatch { entry: String },
     /// A file grew by more than the limit when unpacked, as a zip bomb does.
     RatioTooHigh { entry: String, limit: u64 },
+    /// A folder was picked whose manifest is not the editor's wrapper of a gpufx package.
+    NotAWrapper,
+    /// A wrapper holds a file other than its manifest, `i18n/<code>.json` and its inner zip.
+    WrapperStrayFile(String),
+    /// A wrapper lacks the inner zip its manifest names.
+    WrapperMissingPackage(String),
+    /// The inner package's id is not the one the wrapper names.
+    WrapperIdMismatch { wrapper: String, inner: String },
 }
 
 /// What installing a zip came to.
@@ -220,6 +231,8 @@ enum Declared {
     TextStyle,
     SubtitleStyle,
     Font,
+    /// The editor's wrapper around a gpufx package.
+    Wrapper,
 }
 
 /// What the manifest declares. A `type` the editor cannot use is an error here, so that it is
@@ -227,6 +240,9 @@ enum Declared {
 fn declared_package(manifest: &[u8]) -> Result<Declared, ImportProblem> {
     let value: Value = serde_json::from_slice(manifest).map_err(|e| ImportProblem::BadManifest(e.to_string()))?;
     let Some(object) = value.as_object() else { return Err(ImportProblem::BadManifest("it is not a JSON object".to_owned())) };
+    if d3d12_backend::is_wrapper_manifest(manifest) {
+        return Ok(Declared::Wrapper);
+    }
     match object.get("type") {
         None => Ok(Declared::Shader(object.get("id").and_then(Value::as_str).map(str::to_owned))),
         Some(Value::String(kind)) if AudioPackKind::from_name(kind).is_some() => Ok(Declared::Audio(AudioPackKind::from_name(kind).unwrap_or(AudioPackKind::Sfx))),
@@ -315,6 +331,15 @@ fn write_replacing(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
+/// Installs what the user picked: a wrapper folder, or a zip (see [`install_zip`]).
+pub fn install_package(source: &Path, user_root: &Path, overwrite: bool) -> Result<ImportOutcome, ImportProblem> {
+    if source.is_dir() {
+        crate::gpufx_wrapper_install::install_wrapper_folder(source, user_root, overwrite)
+    } else {
+        install_zip(source, user_root, overwrite)
+    }
+}
+
 /// Checks the zip at `source` and installs it under `user_root`. The checks and the install use the
 /// same bytes, so a file changed meanwhile cannot get past them.
 pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<ImportOutcome, ImportProblem> {
@@ -331,6 +356,7 @@ pub fn install_zip(source: &Path, user_root: &Path, overwrite: bool) -> Result<I
         Declared::TextStyle => return install_text_style_pack(source, user_root, overwrite),
         Declared::SubtitleStyle => return install_subtitle_style_pack(source, user_root, overwrite),
         Declared::Font => return install_font_pack(source, user_root, overwrite),
+        Declared::Wrapper => return crate::gpufx_wrapper_install::install_wrapper_zip(&read_bounded(source, crate::gpufx_wrapper_install::MAX_WRAPPER_ARCHIVE_BYTES)?, user_root, overwrite),
         Declared::Shader(_) => {}
     }
     let bytes = read_bounded(source, MAX_SHADER_ARCHIVE_BYTES)?;
@@ -536,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shader_zip_keeps_its_language_files_and_the_catalog_reads_them() {
+    fn a_bare_shader_zip_keeps_its_language_files_but_the_catalog_never_reads_them() {
         let dir = scratch("i18n");
         let root = dir.join("root");
         let vi = r#"{"name": "Hiệu ứng của tôi", "params": {"amount": {"label": "Lượng"}}}"#;
@@ -544,8 +570,8 @@ mod tests {
         install_zip(&written(&dir, &zip), &root, false).unwrap();
         let catalog = crate::packages::scan(std::slice::from_ref(&root), d3d12_backend::read_package_info);
         let entry = catalog.effects.iter().find(|entry| entry.package == "packages/gpufx/user/t.demo.zip").expect("installed");
-        assert_eq!((entry.display_name("vi"), entry.display_name("en")), ("Hiệu ứng của tôi", "My Effect"));
-        assert_eq!(entry.param_i18n.label("vi", "amount"), Some("Lượng"));
+        assert_eq!((entry.display_name("vi"), entry.display_name("en")), ("My Effect", "My Effect"), "only a wrapper translates a gpufx package");
+        assert_eq!(entry.param_i18n.label("vi", "amount"), None);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -286,6 +286,7 @@ pub enum Message {
     /// Why packs cannot be installed, removed or turned on or off now.
     PackBusyExporting,
     PackInstallZip,
+    PackInstallFolder,
     PackRemove,
     PackOpenFolder,
     PackRefresh,
@@ -895,6 +896,7 @@ impl Message {
         Message::PackReadOnly => Text::key("packReadOnly"),
         Message::PackBusyExporting => Text::key("packBusyExporting"),
         Message::PackInstallZip => Text::key("packInstallZip"),
+        Message::PackInstallFolder => Text::key("packInstallFolder"),
         Message::PackRemove => Text::key("packRemove"),
         Message::PackOpenFolder => Text::key("packOpenFolder"),
         Message::PackRefresh => Text::key("packRefresh"),
@@ -1516,6 +1518,10 @@ fn import_problem(problem: &ImportProblem) -> Text {
         ImportProblem::RatioTooHigh { entry, limit } => Text::key("importProblem.ratioTooHigh").arg("entry", entry).arg("limit", limit),
         ImportProblem::NoUserFolder => Text::key("importProblem.noUserFolder"),
         ImportProblem::WriteFailed(detail) => Text::key("importProblem.writeFailed").arg("detail", detail),
+        ImportProblem::NotAWrapper => Text::key("importProblem.notAWrapper"),
+        ImportProblem::WrapperStrayFile(entry) => Text::key("importProblem.wrapperStrayFile").arg("entry", entry),
+        ImportProblem::WrapperMissingPackage(entry) => Text::key("importProblem.wrapperMissingPackage").arg("entry", entry),
+        ImportProblem::WrapperIdMismatch { wrapper, inner } => Text::key("importProblem.wrapperIdMismatch").arg("wrapper", wrapper).arg("inner", inner),
     }
 }
 
@@ -1663,6 +1669,7 @@ mod tests {
         Message::PackReadOnly,
         Message::PackBusyExporting,
         Message::PackInstallZip,
+        Message::PackInstallFolder,
         Message::PackRemove,
         Message::PackOpenFolder,
         Message::PackRefresh,
@@ -2155,6 +2162,10 @@ mod tests {
             ImportProblem::WriteFailed(s()),
             ImportProblem::SizeMismatch { entry: s() },
             ImportProblem::RatioTooHigh { entry: s(), limit: 200 },
+            ImportProblem::NotAWrapper,
+            ImportProblem::WrapperStrayFile(s()),
+            ImportProblem::WrapperMissingPackage(s()),
+            ImportProblem::WrapperIdMismatch { wrapper: s(), inner: s() },
         ];
         problems.extend(entry_problems.into_iter().map(|problem| ImportProblem::Entry { entry: s(), problem }));
         all.extend(problems.into_iter().map(Message::PackageImportRefused));
