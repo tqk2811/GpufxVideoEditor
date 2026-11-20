@@ -127,6 +127,18 @@ Giai đoạn 0 là cửa quyết định, không đạt thì dừng hoặc đổ
 - Gói effect/transition gpufx: bản dịch CHỈ nằm trong gói bọc của editor (thư mục `<name>/` chứa `manifest.json` dạng `{"format":1,"type":"gpufx",...,"tags":[...]}`, `i18n/` và gói gpufx `<name>.zip` giữ nguyên); `i18n/` bên trong gói gpufx không bao giờ được đọc, gói gpufx trần nạp được nhưng không có bản dịch. `tags` của manifest bọc là tag tìm kiếm tiếng Anh. Chi tiết ở mục "Gói bọc hiệu ứng gpufx" của `spec-package-manager-vi.md`.
 - Chưa có lớp ghi đè bản dịch gói của user (`%LOCALAPPDATA%\gpufx-editor\i18n\packs`): chỉ đọc file của chính gói.
 
+### Gói một item và bộ sưu tập (collection)
+
+Đã làm (2026-11-20). Mọi gói nội dung (nhạc, sfx, sticker, animation clip, kiểu chữ, kiểu phụ đề) chỉ chứa **đúng một item**; khoảng 700 gói.
+
+- Manifest: `id` = `<id gói cũ>-<id item>`, `items` có một item (id item giữ nguyên). Hai trường tuỳ chọn mới ở gốc: `collection` (id gói cũ, tức id bộ) và `collection_name` (tên bộ tiếng Anh). Các trình đọc manifest chặt (`deny_unknown_fields`) chấp nhận thêm `collection`, `collection_name`, `description`, `category`, `tags` ở gốc mọi loại gói.
+- `i18n/<mã>.json` của gói có thể có `collection_name` (tên bộ đã dịch) và `category` ở gốc.
+- Gói không có `collection` là một bộ của riêng nó, mang id và tên của gói.
+- Code: `PackCollection` và `group_by_collection` trong `crates/gpufx-editor/src/i18n/pack.rs`; mỗi gói của thư viện (`LibraryPack`, `StickerPack`, `ClipAnimationPack`, `TextStylePack`) và `InstalledPack` của trình quản lý gói có trường `collection`.
+- Hiển thị: danh sách âm thanh gom theo bộ (header là tên bộ đã dịch + số item, sắp theo tên bộ), combo animation chia nhóm theo bộ, tooltip/combo kiểu chữ hiện tên bộ. Tìm kiếm vẫn theo item.
+- Trình quản lý gói: dòng gom theo bộ, bộ có từ hai gói trở lên là một dòng gập/mở được (mặc định gập, mở hết khi đang lọc), bật/tắt cả bộ (ghi từng khoá gói vào `disabled.json` trong một lần ghi), gỡ cả bộ (chỉ các gói user cài). Bảng chỉ vẽ các dòng đang thấy (`show_rows`); dung lượng đo ở luồng nền sau khi danh sách đã hiện (hiện `…` khi chưa đo xong). Thao tác trên header bộ áp cho mọi gói của bộ trong tab, kể cả gói bị bộ lọc ẩn.
+- `scripts/setup-debug-packages.ps1`: danh sách tag release ở đầu script (tạm: `audio-v0.2.0`, `stickers-v0.2.0`, `animations-v0.2.0`, `text-styles-v0.1.0`), chỉ tải `*-packs.zip` rồi giải nén hai tầng (gói tổng → zip từng gói → thư mục gói). Các thư mục loại nội dung bị xoá sạch trước khi cài lại, nên gói kiểu cũ (một gói một bộ, vd `music\capcut-music`) không hiện trùng. Gói CapCut private: một thư mục mỗi item, chép nguyên.
+
 ### User thêm một ngôn ngữ
 
 1. Chép `en.json` (trong thư mục `i18n` cạnh exe, hoặc trong repo) vào `%LOCALAPPDATA%\gpufx-editor\i18n\`, đổi tên theo mã ngôn ngữ, ví dụ `fr.json`.
