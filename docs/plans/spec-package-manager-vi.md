@@ -5,10 +5,22 @@ Ghi lại thiết kế cửa sổ quản lý gói và các quyết định đi k
 ## Liệt kê
 
 - Mỗi type giữ module cài riêng (`*_install.rs`, `packages.rs` cho gói shader). Mỗi module có `list_installed(root)` đọc manifest bằng parser và bộ kiểm tra sẵn có của nó; `package_manager::list_installed` chỉ gom lại. User đã chốt không gom các module cài thành một module chung.
-- Khoá của gói là đường dẫn dưới `packages/`, chữ thường: `sticker/my-pack`, `gpufx/ffmpeg/box-blur`, `gpufx/user/io.example.iris.zip`.
+- Khoá của gói là đường dẫn dưới `packages/`, chữ thường: `sticker/my-pack`, `gpufx/ffmpeg/box-blur`, `gpufx/user/iris` (thư mục bọc), `gpufx/user/io.example.iris.zip` (gói gpufx trần).
 - Nguồn: gốc user (`%LOCALAPPDATA%\gpufx-editor`) là "Đã cài", mọi gốc khác là "Kèm app" và chỉ đọc. Bản debug có `target\debug\packages` thì đó là gốc kèm app, gốc user vẫn cài/gỡ được.
 - Gói hỏng (manifest không đọc được, sai id thư mục, gói shader cần số input không dùng được) vẫn hiện, tên đỏ kèm lý do, và gỡ được nếu ở gốc user.
 - Hai gốc có cùng khoá: gói ở gốc tìm trước được dùng, gói sau hiện ghi chú "không dùng".
+
+## Gói bọc hiệu ứng gpufx
+
+Gói hiệu ứng gpufx (manifest có `used_for` chứa `gpufx`, xem `external/FFmpegGpuFilter/crates/gpufx-core/src/manifest.rs`) không chứa gì riêng của editor. Editor bọc mỗi gói trong một gói bọc (code: `crates/d3d12-backend/src/gpufx_wrapper.rs`, cài ở `crates/gpufx-editor/src/gpufx_wrapper_install.rs`):
+
+- Phát hành dạng `<name>.zip` chứa đúng ba thứ: `manifest.json` của editor, `i18n/<mã>.json` (cùng dạng bản dịch gói), và gói gpufx `<name>.zip` giữ nguyên.
+- `manifest.json`: `{"format":1,"type":"gpufx","id":"<id gói trong>","version":"...","package":"<name>.zip","tags":[...]}`. Trường lạ là lỗi. Tên và mô tả lấy từ manifest gói trong; `tags` là tag tìm kiếm tiếng Anh.
+- Cài và kèm app ở dạng giải nén MỘT tầng: thư mục `packages/gpufx/<nhóm>/<name>/` (kèm app, chỉ đọc) hoặc `packages/gpufx/user/<name>/` (user cài) chứa `manifest.json`, `i18n/`, `<name>.zip`. Zip trong vẫn là zip, `Package::open` mở thẳng nó, không có zip lồng zip lúc chạy.
+- Project lưu tên thư mục bọc (`packages/gpufx/<nhóm>/<name>`); `ProjectPaths::package_path` trả về zip bên trong, `package_path_even_disabled` trả về thư mục bọc (dùng cho khoá bật/tắt và lưu kèm gói).
+- Bản dịch CHỈ lấy từ `i18n/` của gói bọc, không bao giờ đọc `i18n/` bên trong gói gpufx.
+- Cài: từ zip bọc hoặc từ thư mục bọc (nút "Cài từ thư mục..."), cả hai cùng kiểm: manifest chặt, có đúng file `package` nêu, id gói trong trùng id gói bọc (không phân biệt hoa thường), ngoài `manifest.json`, `i18n/<mã>.json` và zip trong thì không có file nào khác, cùng các kiểm tra đường dẫn an toàn như zip thường. Ghi qua thư mục tạm rồi đổi tên vào chỗ.
+- Gói gpufx trần (thư mục có manifest gpufx, hoặc `.zip` gpufx) vẫn nạp được, không có bản dịch, để test và thư mục dev vẫn chạy; nhập zip gpufx trần giữ cách cũ (`packages/gpufx/user/<id>.zip`). Không lẫn được: manifest có `format` và `"type":"gpufx"` là gói bọc, có `used_for` là gói trần.
 
 ## Bật/tắt
 

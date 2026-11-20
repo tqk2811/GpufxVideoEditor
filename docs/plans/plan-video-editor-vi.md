@@ -110,7 +110,7 @@ Giai đoạn 0 là cửa quyết định, không đạt thì dừng hoặc đổ
 
 ### Bản dịch của gói
 
-Đã làm (2026-11-20). Gói (effect, transition, gói animation clip, kiểu chữ, kiểu phụ đề, sticker, sfx, nhạc) có thể kèm `i18n/<mã>.json` ở gốc thư mục gói hoặc trong zip:
+Đã làm (2026-11-20). Gói (effect, transition, gói animation clip, kiểu chữ, kiểu phụ đề, sticker, sfx, nhạc) có thể kèm `i18n/<mã>.json` ở gốc thư mục gói (gói gpufx: thư mục gói bọc):
 
 ```json
 {"name": "...", "description": "...", "tags": ["..."],
@@ -119,11 +119,12 @@ Giai đoạn 0 là cửa quyết định, không đạt thì dừng hoặc đổ
 ```
 
 - Mọi trường đều tuỳ chọn. Id item là `id` của item trong manifest (gói animation: cũng là tên file `items/<id>.json`); gói effect chỉ có `params`, khoá theo tên tham số trong manifest. Ví dụ dữ liệu: nhánh `i18n/vi-effects`, `i18n/vi-gl-transitions` của repo packages và `i18n/vi` của GpufxVideoEditor-Assets.
-- Code: `crates/gpufx-editor/src/i18n/pack.rs` (`PackTranslations` đọc thư mục hoặc zip, `Localized` cho gói/item, `ParamTranslations` cho tham số). Mỗi lần quét gói đọc luôn bản dịch; file hỏng, quá 1 MiB hoặc tên không phải mã ngôn ngữ thì bỏ qua, gói vẫn nạp. Mã ngôn ngữ không phân biệt hoa thường (`VI.json` = `vi.json`, `pt-BR` = `pt-br`). `i18n/en.json` của gói bị bỏ qua: tiếng Anh là chính manifest, để editor và MCP hiện cùng một chữ.
+- Code: `crates/gpufx-editor/src/i18n/pack.rs` (`PackTranslations` đọc thư mục gói, `Localized` cho gói/item, `ParamTranslations` cho tham số). Mỗi lần quét gói đọc luôn bản dịch; file hỏng, quá 1 MiB hoặc tên không phải mã ngôn ngữ thì bỏ qua, gói vẫn nạp. Mã ngôn ngữ không phân biệt hoa thường (`VI.json` = `vi.json`, `pt-BR` = `pt-br`). `i18n/en.json` của gói bị bỏ qua: tiếng Anh là chính manifest, để editor và MCP hiện cùng một chữ.
 - Hiển thị: danh sách effect/transition, ô sticker, danh sách âm thanh, combo animation và kiểu chữ, nhãn và tooltip tham số trong inspector, trình quản lý gói đều dùng ngôn ngữ đang chọn, thiếu trường nào thì trường đó hiện tiếng Anh của manifest. Bộ lọc nhóm sticker vẫn theo nhóm tiếng Anh (nhóm là khoá lọc chung của nhiều gói).
 - Tìm kiếm (`crates/gpufx-editor/src/search.rs`): khớp bản gốc và bản dịch của **mọi** ngôn ngữ gói mang theo, không chỉ ngôn ngữ đang chọn. Tên dịch được tính như tên (cùng hạng điểm, kể cả thưởng trùng hẳn hoặc bắt đầu bằng `filter`), tag và nhóm dịch tính như tag, mô tả dịch tính như trường khác. Lý do: người dùng gõ tiếng Việt hay tiếng Anh đều ra cùng thứ hạng, bất kể giao diện đang ở ngôn ngữ nào.
 - MCP: các tool danh sách giữ id và trường tiếng Anh, thêm object `translation` theo ngôn ngữ của editor (xem `spec-mcp-server-vi.md`).
-- Cài gói từ zip giữ thư mục `i18n/` (các trình cài chấp nhận `i18n/<mã>.json`, không chấp nhận JSON khác). Gói shader giữ nguyên zip, bản dịch đọc thẳng trong zip.
+- Cài gói từ zip giữ thư mục `i18n/` (các trình cài chấp nhận `i18n/<mã>.json`, không chấp nhận JSON khác).
+- Gói effect/transition gpufx: bản dịch CHỈ nằm trong gói bọc của editor (thư mục `<name>/` chứa `manifest.json` dạng `{"format":1,"type":"gpufx",...,"tags":[...]}`, `i18n/` và gói gpufx `<name>.zip` giữ nguyên); `i18n/` bên trong gói gpufx không bao giờ được đọc, gói gpufx trần nạp được nhưng không có bản dịch. `tags` của manifest bọc là tag tìm kiếm tiếng Anh. Chi tiết ở mục "Gói bọc hiệu ứng gpufx" của `spec-package-manager-vi.md`.
 - Chưa có lớp ghi đè bản dịch gói của user (`%LOCALAPPDATA%\gpufx-editor\i18n\packs`): chỉ đọc file của chính gói.
 
 ### User thêm một ngôn ngữ
