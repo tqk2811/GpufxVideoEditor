@@ -705,3 +705,11 @@ RNNoise trong `crates/engine/src/denoise.rs` (`DenoiseCache::run`) khởi độn
 ### [Thấp] Âm thanh clip phát ngược preroll 200 ms cho mọi nguồn
 
 `read_fresh` (`crates/d3d12-backend/src/audio.rs`, quanh dòng 287) seek và preroll 200 ms cho mọi chunk lùi của mọi nguồn, khoảng 1,6 lần giải mã. Preroll chỉ cần để bộ lấy mẫu lại ổn định, nên có thể giới hạn cho nguồn không phải 48 kHz (nguồn 48 kHz không qua resampler). Liên quan mục "Âm thanh clip phát ngược seek một lần mỗi chunk" ở trên. Ghi ngày 2026-11-17.
+
+### [Thấp] Ô lọc của trình quản lý gói chưa tìm theo tags của gói bọc
+
+Gói bọc gpufx có `tags` tiếng Anh trong `manifest.json` (`crates/d3d12-backend/src/gpufx_wrapper.rs`) và bản dịch trong `i18n/`; danh sách effect/transition đã tìm theo chúng, nhưng ô lọc của cửa sổ Quản lý gói (`crates/gpufx-editor/src/ui/package_manager.rs`) thì chưa. Ghi ngày 2026-11-20.
+
+### [Thấp] Cài gói bọc đọc cả gói vào RAM hai lần
+
+`crates/gpufx-editor/src/gpufx_wrapper_install.rs` đọc toàn bộ zip bọc vào bộ nhớ rồi dựng thêm bản đọc của zip bên trong để kiểm, gói lớn (tới giới hạn vài trăm MiB) tốn RAM gấp đôi. Nên kiểm và giải nén theo stream thẳng vào thư mục staging. Ghi ngày 2026-11-20.
