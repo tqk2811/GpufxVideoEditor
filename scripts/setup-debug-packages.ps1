@@ -3,12 +3,16 @@
 # - packages\gpufx_ai_*: junctions to the AI packages of FFmpegGpuFilter.
 # - packages\gpufx\capcut: junctions into a shallow clone of FFmpegGpuFilter-packages-capcut.
 # - packages\sfx, music, sticker, clip-animation, font: the packs of the GpufxVideoEditor-Assets releases, unpacked
-#   the way the editor installs them.
+#   the way the editor installs them, with the translations (i18n\) of the GpufxVideoEditor-Assets checkout,
+#   which may be newer than the releases.
+# - the private CapCut music, sticker and text style packs, copied from a GpufxVideoEditor-Assets-capcut-private
+#   checkout next to this repository (or -CapcutPrivate) when there is one.
 # The editor uses the packages next to its executable before those of the checkout, so once this folder
 # exists it must hold everything. Run it again after cargo clean, or with -Force to fetch the packs again.
 [CmdletBinding()]
 param(
     [string]$Target = 'debug',
+    [string]$CapcutPrivate = '',
     [switch]$Force
 )
 
@@ -69,6 +73,12 @@ foreach ($capcut in $capcutRepos) {
     if (-not (Test-Path -LiteralPath $clone)) {
         & git -c core.longpaths=true clone -q --depth 1 "https://github.com/$($capcut.Repo).git" $clone
         if ($LASTEXITCODE -ne 0) { throw "cloning $($capcut.Repo) failed ($LASTEXITCODE)" }
+    } else {
+        # The clone is only read, so it simply follows the repository.
+        & git -C $clone fetch -q --depth 1 origin HEAD
+        if ($LASTEXITCODE -ne 0) { throw "fetching $($capcut.Repo) failed ($LASTEXITCODE)" }
+        & git -C $clone reset -q --hard FETCH_HEAD
+        if ($LASTEXITCODE -ne 0) { throw "updating the clone of $($capcut.Repo) failed ($LASTEXITCODE)" }
     }
     $groupDir = Join-Path $packagesDir "gpufx\$($capcut.Group)"
     $existing = Get-Item -LiteralPath $groupDir -Force -ErrorAction SilentlyContinue
@@ -120,6 +130,58 @@ foreach ($zip in Get-ChildItem -LiteralPath $download -Recurse -Filter '*.zip') 
     }
     [System.IO.Compression.ZipFile]::ExtractToDirectory($zip.FullName, $packDir)
     Write-Host "unpacked $($zip.Name) -> $packDir"
+}
+
+# The translations of the assets checkout, by pack id: a folder with a manifest.json or pack.json is named by
+# its id, one holding only i18n\ (audio, stickers) by the folder name.
+$assetsRoot = Join-Path $repoRoot 'external\GpufxVideoEditor-Assets'
+$translations = @{}
+foreach ($kind in @('audio', 'stickers', 'animations', 'text-styles')) {
+    $kindDir = Join-Path $assetsRoot $kind
+    if (-not (Test-Path -LiteralPath $kindDir)) { continue }
+    foreach ($pack in Get-ChildItem -LiteralPath $kindDir -Directory) {
+        $i18n = Join-Path $pack.FullName 'i18n'
+        if (-not (Test-Path -LiteralPath $i18n)) { continue }
+        $id = $pack.Name
+        foreach ($name in @('manifest.json', 'pack.json')) {
+            $file = Join-Path $pack.FullName $name
+            if (Test-Path -LiteralPath $file) { $id = (Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json).id; break }
+        }
+        $translations[$id.ToLowerInvariant()] = $i18n
+    }
+}
+foreach ($typeFolder in @('sfx', 'music', 'sticker', 'clip-animation', 'text-style')) {
+    $typeDir = Join-Path $packagesDir $typeFolder
+    if (-not (Test-Path -LiteralPath $typeDir)) { continue }
+    foreach ($packDir in Get-ChildItem -LiteralPath $typeDir -Directory) {
+        $i18n = $translations[$packDir.Name.ToLowerInvariant()]
+        if ($null -eq $i18n) { continue }
+        $target = Join-Path $packDir.FullName 'i18n'
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+        Copy-Item -LiteralPath $i18n -Destination $target -Recurse
+        Write-Host "translations of $($packDir.Name) <- $i18n"
+    }
+}
+
+# The private CapCut packs: folders of a checkout, copied as they are.
+if ($CapcutPrivate -eq '') { $CapcutPrivate = Join-Path (Split-Path -Parent $repoRoot) 'GpufxVideoEditor-Assets-capcut-private' }
+if (Test-Path -LiteralPath $CapcutPrivate -PathType Container) {
+    foreach ($kind in @(@{ Source = 'music'; Type = 'music' }, @{ Source = 'sticker'; Type = 'sticker' }, @{ Source = 'text-style'; Type = 'text-style' })) {
+        $kindDir = Join-Path $CapcutPrivate $kind.Source
+        if (-not (Test-Path -LiteralPath $kindDir)) { continue }
+        foreach ($pack in Get-ChildItem -LiteralPath $kindDir -Directory) {
+            $manifest = Join-Path $pack.FullName 'manifest.json'
+            if (-not (Test-Path -LiteralPath $manifest)) { continue }
+            $id = (Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json).id.ToLowerInvariant()
+            $packDir = Join-Path $packagesDir "$($kind.Type)\$id"
+            if (Test-Path -LiteralPath $packDir) { Remove-Item -LiteralPath $packDir -Recurse -Force }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packDir) | Out-Null
+            Copy-Item -LiteralPath $pack.FullName -Destination $packDir -Recurse
+            Write-Host "copied $($pack.FullName) -> $packDir"
+        }
+    }
+} else {
+    Write-Host "no CapCut private checkout at $CapcutPrivate, skipped"
 }
 
 Write-Host "packages ready in $packagesDir"
