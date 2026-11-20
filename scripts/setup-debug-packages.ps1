@@ -12,7 +12,7 @@
 # The effect packages are zips, not links to the checkouts: editing a shader or manifest there needs a rerun of
 # this script (cargo is needed to build the gpufx CLI, py for the wrappers).
 # - packages\sfx, music, sticker, clip-animation, text-style, subtitle-style: the packs of the
-#   GpufxVideoEditor-Assets releases ($releases below), one item per pack. Only the aggregate of each release
+#   GpufxVideoEditor-Assets and GpufxVideoEditor-Assets-capcut releases ($releases below), one item per pack. Only the aggregate of each release
 #   (*-packs.zip, a stored zip of the per-item pack zips) is downloaded and unpacked two levels: aggregate ->
 #   pack zips -> pack folders, the way the editor installs them, with the translations (i18n\) of the
 #   GpufxVideoEditor-Assets checkout for a pack whose id it has, which may be newer than the releases. A tag
@@ -35,13 +35,13 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$assetsRepo = 'tqk2811/GpufxVideoEditor-Assets'
-# The GpufxVideoEditor-Assets releases to install, one tag per line (provisional tags until they are published).
+# The releases to install, one repository and tag per line; each holds only an aggregate *-packs.zip.
 $releases = @(
-    'audio-v0.2.0'
-    'stickers-v0.2.0'
-    'animations-v0.2.0'
-    'text-styles-v0.1.0'
+    @{ Repo = 'tqk2811/GpufxVideoEditor-Assets'; Tag = 'audio-v0.2.0' }
+    @{ Repo = 'tqk2811/GpufxVideoEditor-Assets'; Tag = 'stickers-v0.2.0' }
+    @{ Repo = 'tqk2811/GpufxVideoEditor-Assets'; Tag = 'animations-v0.2.0' }
+    @{ Repo = 'tqk2811/GpufxVideoEditor-Assets'; Tag = 'text-styles-v0.1.0' }
+    @{ Repo = 'tqk2811/GpufxVideoEditor-Assets-capcut'; Tag = 'v0.2.0' }
 )
 # The type folders the releases and the CapCut private packs fill; emptied before they are filled again.
 $contentTypes = @('sfx', 'music', 'sticker', 'clip-animation', 'text-style', 'subtitle-style')
@@ -202,17 +202,18 @@ if (-not $SkipModels) {
 # The tags are provisional until they are published: a tag with no release is skipped with a warning.
 $available = @()
 foreach ($release in $releases) {
-    $folder = Join-Path $download $release
+    # Two repositories may use the same tag, so the folder is named after both.
+    $folder = Join-Path $download (($release.Repo -replace '^.*/', '') + '-' + $release.Tag)
     if (-not (Test-Path -LiteralPath $folder) -or @(Get-ChildItem -LiteralPath $folder -File -Filter '*-packs.zip').Count -eq 0) {
-        & gh release view $release -R $assetsRepo --json tagName 2>$null | Out-Null
+        & gh release view $release.Tag -R $release.Repo --json tagName 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "release $release of $assetsRepo not found, skipped"
+            Write-Warning "release $($release.Tag) of $($release.Repo) not found, skipped"
             continue
         }
-        & gh release download $release -R $assetsRepo -D $folder -p '*-packs.zip' --clobber
-        if ($LASTEXITCODE -ne 0) { throw "downloading release $release failed ($LASTEXITCODE)" }
+        & gh release download $release.Tag -R $release.Repo -D $folder -p '*-packs.zip' --clobber
+        if ($LASTEXITCODE -ne 0) { throw "downloading release $($release.Tag) of $($release.Repo) failed ($LASTEXITCODE)" }
     }
-    $available += $release
+    $available += $folder
 }
 
 # The release packs are unpacked here first, laid out <type>\<id>, and moved into packages once all are.
@@ -241,8 +242,7 @@ function Install-PackZip([string]$ZipPath) {
     [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $packDir)
 }
 
-foreach ($release in $available) {
-    $folder = Join-Path $download $release
+foreach ($folder in $available) {
     foreach ($aggregate in Get-ChildItem -LiteralPath $folder -File -Filter '*-packs.zip') {
         # First level: the aggregate holds the per-item pack zips, flat.
         $unpacked = Join-Path $folder ('unpacked\' + $aggregate.BaseName)
