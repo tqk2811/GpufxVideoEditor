@@ -36,8 +36,6 @@ pub enum UiRequest {
     OpenProject,
     SaveProject,
     SaveProjectAs,
-    /// Save as, also copying the packs the project uses beside the file.
-    SaveProjectWithPacks,
     Export,
     CancelExport,
     ToggleFullscreen,

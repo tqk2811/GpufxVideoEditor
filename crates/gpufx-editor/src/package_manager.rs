@@ -346,7 +346,7 @@ fn is_pack(path: &Path) -> bool {
 
 /// `<folder>/<project stem>.bundle`: the copies of the packs and the media a project uses.
 pub fn backup_folder(project_file: &Path) -> PathBuf {
-    let stem = project_file.file_stem().map_or_else(|| "project".into(), |stem| stem.to_string_lossy().into_owned());
+    let stem = crate::project_zip::project_stem(project_file);
     project_file.with_file_name(format!("{stem}{BACKUP_SUFFIX}"))
 }
 

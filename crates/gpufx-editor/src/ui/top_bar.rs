@@ -68,7 +68,7 @@ fn project_name(ui: &egui::Ui, state: &EditorState, rect: Rect, free: Rect) {
 fn file_menu(ui: &mut egui::Ui, language: Language, theme_choice: theme::ThemeChoice, agent_access: bool, autosave_seconds: u64, exporting: bool, requests: &mut Vec<UiRequest>) {
     ui.menu_button(language.t(Message::MenuFile), |ui| {
         ui.add_enabled_ui(!exporting, |ui| {
-            for (label, request) in [(Message::MenuNewProject, UiRequest::NewProject), (Message::MenuOpen, UiRequest::OpenProject), (Message::MenuSave, UiRequest::SaveProject), (Message::MenuSaveAs, UiRequest::SaveProjectAs), (Message::MenuSaveWithPacks, UiRequest::SaveProjectWithPacks)] {
+            for (label, request) in [(Message::MenuNewProject, UiRequest::NewProject), (Message::MenuOpen, UiRequest::OpenProject), (Message::MenuSave, UiRequest::SaveProject), (Message::MenuSaveAs, UiRequest::SaveProjectAs)] {
                 if ui.button(language.t(label)).clicked() {
                     requests.push(request);
                     ui.close();

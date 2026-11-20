@@ -14,6 +14,22 @@ use crate::i18n::Message;
 use crate::media::MediaItem;
 use crate::package_import::{ImportOutcome, ImportProblem};
 
+/// The check buttons of the Save dialog.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SaveChoice {
+    /// Copy the packs and media the project uses into `<stem>.bundle` beside it.
+    pub bundle: bool,
+    /// Also write `<stem>.zip.gpufxproj` with the project and its bundle; implies [`Self::bundle`].
+    pub zip: bool,
+}
+
+impl SaveChoice {
+    /// Whether the bundle is written: asked for, or needed by the zip.
+    pub fn bundles(self) -> bool {
+        self.bundle || self.zip
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileDialog {
     PickClip { track: usize },
@@ -26,8 +42,9 @@ pub enum FileDialog {
     ImportMedia { audio_only: bool },
     ImportPackage,
     OpenProject,
-    /// Where to save the project; `with_packs` also copies the packs it uses beside it.
-    SaveProject { with_packs: bool },
+    /// Where to save the project. Holds the choices the dialog starts with, and on arrival the
+    /// ones the user left ticked.
+    SaveProject(SaveChoice),
     Export,
     /// An SRT file to import as a subtitle track.
     ImportSubtitles,
@@ -78,8 +95,6 @@ pub enum Request {
     NewProject,
     OpenProject,
     SaveProjectAs,
-    /// Save as, also copying the packs the project uses beside the file.
-    SaveProjectWithPacks,
     PickClip { track: usize },
     ImportMedia { audio_only: bool },
     ImportPackage,
@@ -165,8 +180,8 @@ pub enum Action {
     ClipAnimationPackInstalled,
     /// A text or subtitle style pack was installed: the library must be read again.
     TextStylePackInstalled,
-    /// Save to the file; the flag also copies the packs the project uses beside it.
-    SaveTo(PathBuf, bool),
+    /// Save to the file, with what the Save dialog chose (or nothing extra for a plain save).
+    SaveTo(PathBuf, SaveChoice),
     StartExport(PathBuf),
     /// The project was replaced, so playback of the old one must go.
     ProjectReplaced,
@@ -268,7 +283,7 @@ impl Tasks {
             return Action::Nothing;
         }
         if let (Request::SaveProject, Some(file)) = (request, state.project_file()) {
-            return Action::SaveTo(file.to_path_buf(), false);
+            return Action::SaveTo(file.to_path_buf(), SaveChoice::default());
         }
         if self.modal.is_some() {
             state.report_info(Message::DialogOpen);
@@ -289,8 +304,7 @@ impl Tasks {
                 self.open_base = Some(state.revision());
                 self.start_dialog(FileDialog::OpenProject)
             }
-            Request::SaveProject | Request::SaveProjectAs => self.start_dialog(FileDialog::SaveProject { with_packs: false }),
-            Request::SaveProjectWithPacks => self.start_dialog(FileDialog::SaveProject { with_packs: true }),
+            Request::SaveProject | Request::SaveProjectAs => self.start_dialog(FileDialog::SaveProject(SaveChoice::default())),
             Request::PickClip { track } => self.start_dialog(FileDialog::PickClip { track }),
             Request::ImportMedia { audio_only } => self.start_dialog(FileDialog::ImportMedia { audio_only }),
             Request::ImportPackage => self.start_dialog(FileDialog::ImportPackage),
@@ -424,8 +438,8 @@ impl Tasks {
                         let load = self.start_load(state, &path, base);
                         Action::ReadProject { load, file: path }
                     }
-                    FileDialog::SaveProject { .. } if state.refuse_while_live() => Action::Nothing,
-                    FileDialog::SaveProject { with_packs } => Action::SaveTo(path, with_packs),
+                    FileDialog::SaveProject(_) if state.refuse_while_live() => Action::Nothing,
+                    FileDialog::SaveProject(choice) => Action::SaveTo(path, choice),
                     FileDialog::Export if state.is_exporting() => {
                         state.report_refused(Message::ExportAlreadyRunning);
                         Action::Nothing
@@ -897,9 +911,12 @@ mod tests {
     #[test]
     fn saving_goes_to_the_file_or_the_dialog() {
         let (mut tasks, mut state) = (Tasks::default(), with_tracks());
-        assert_eq!(tasks.begin(&mut state, Request::SaveProject), Action::SaveTo(PathBuf::from("p.json"), false));
+        assert_eq!(tasks.begin(&mut state, Request::SaveProject), Action::SaveTo(PathBuf::from("p.json"), SaveChoice::default()));
         let (mut tasks, mut state) = (Tasks::default(), EditorState::default());
-        assert_eq!(tasks.begin(&mut state, Request::SaveProject), Action::ShowFileDialog(FileDialog::SaveProject { with_packs: false }));
+        assert_eq!(tasks.begin(&mut state, Request::SaveProject), Action::ShowFileDialog(FileDialog::SaveProject(SaveChoice::default())));
+        let choice = SaveChoice { bundle: false, zip: true };
+        assert!(choice.bundles(), "a zip needs the bundle");
+        assert_eq!(tasks.on_arrival(&mut state, picked(FileDialog::SaveProject(choice), "q.json.gpufxproj")), Action::SaveTo(PathBuf::from("q.json.gpufxproj"), choice));
     }
 
     #[test]

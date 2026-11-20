@@ -41,7 +41,7 @@ use crate::project_file::{load_project_file, package_roots, parse_project, proje
 use crate::proxy::{proxy_folder, ChildProxyMaker, ProxyManager, ProxyMode};
 use crate::recovery::{current_process, ClaimError, unix_now, Autosave, RecoveryStore, SystemProbe};
 use crate::project_lock::held_elsewhere;
-use crate::tasks::{run_guarded, Action, Arrival, FileDialog, Prompt, Request, TaskId, Tasks};
+use crate::tasks::{run_guarded, Action, Arrival, FileDialog, Prompt, Request, SaveChoice, TaskId, Tasks};
 use crate::ui::{self, UiRequest};
 
 /// How often the playhead moves while playing.
@@ -962,12 +962,12 @@ impl Session {
     /// A project saved with its packs (a bundle beside it, see [`crate::project_bundle`]) keeps its
     /// packs and media there up to date on every later save to that file.
     /// The copying runs on this thread for now; see the backlog.
-    fn save_project(&mut self, file: PathBuf, with_packs: bool) {
+    fn save_project(&mut self, file: PathBuf, choice: SaveChoice) {
         if !self.state.project_file().is_some_and(|current| d3d12_backend::same_file(current, &file)) && held_elsewhere(&file) {
             self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
             return;
         }
-        let bundling = with_packs || crate::package_manager::backup_folder(&file).is_dir();
+        let bundling = choice.bundles() || crate::package_manager::backup_folder(&file).is_dir();
         let mut problems = Vec::new();
         if bundling {
             let report = crate::project_bundle::bundle_media(self.state.project(), &file);
@@ -985,10 +985,16 @@ impl Session {
                         problems.push(message);
                     }
                 }
-                self.state.mark_saved(file);
                 if !problems.is_empty() {
                     self.state.report_error(Message::BundleFailed(problems.join("; ")));
                 }
+                // Packed after the bundle, so the archive holds what the project now points at.
+                if choice.zip {
+                    if let Err(message) = crate::project_zip::write_packed(&file) {
+                        self.state.report_error(Message::ZipFailed(message));
+                    }
+                }
+                self.state.mark_saved(file);
             }
             Err(message) => self.state.report_error(Message::SaveFailed(message)),
         }
@@ -1021,8 +1027,8 @@ impl Session {
             FileDialog::ImportTrackingModel => base().add_filter(language.t(Message::FilterTrackingModel), &["zip"]),
             FileDialog::PickFont { .. } => base().add_filter(language.t(Message::FilterFont), &["ttf", "otf", "ttc"]),
             FileDialog::PickTexture { .. } => base().add_filter(language.t(Message::FilterPicture), &["png", "jpg", "jpeg"]),
-            FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &["json"]),
-            FileDialog::SaveProject { .. } => base().add_filter(language.t(Message::FilterProject), &["json"]).set_file_name("project.json"),
+            FileDialog::OpenProject => base().add_filter(language.t(Message::FilterProject), &[crate::project_zip::FILTER_EXTENSION, "json", "zip"]),
+            FileDialog::SaveProject(_) => return self.show_save_dialog(),
             FileDialog::Export => base().add_filter("MP4", &["mp4"]).set_file_name("export.mp4"),
             FileDialog::ImportSubtitles => base().add_filter(language.t(Message::FilterSubtitles), &["srt"]).add_filter(language.t(Message::FilterAllFiles), &["*"]),
             FileDialog::ExportSubtitles { .. } => base().add_filter(language.t(Message::FilterSubtitles), &["srt"]).set_file_name("subtitles.srt"),
@@ -1030,9 +1036,33 @@ impl Session {
         self.spawn_task("file-dialog", TaskId::Modal, move || {
             let path = match dialog {
                 FileDialog::PickClip { .. } | FileDialog::PickFont { .. } | FileDialog::PickTexture { .. } | FileDialog::ImportMedia { .. } | FileDialog::ImportPackage | FileDialog::ImportMatteModel { .. } | FileDialog::ImportTrackingModel | FileDialog::OpenProject | FileDialog::ImportSubtitles => picker.pick_file(),
-                FileDialog::SaveProject { .. } | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
+                FileDialog::SaveProject(_) | FileDialog::Export | FileDialog::ExportSubtitles { .. } => picker.save_file(),
             };
             Arrival::FilePicked { dialog, path }
+        });
+    }
+
+    /// The Save dialog of the project, with its check buttons (see [`crate::save_dialog`]). The
+    /// bundle starts ticked when the open project already has one.
+    fn show_save_dialog(&mut self) {
+        use crate::project_zip::{project_stem, with_project_extension, PROJECT_EXTENSION};
+        let language = self.state.language();
+        let current = self.state.project_file();
+        let initial = SaveChoice { bundle: current.is_some_and(|file| crate::package_manager::backup_folder(file).is_dir()), zip: false };
+        let stem = current.map_or_else(|| "project".to_owned(), project_stem);
+        let spec = crate::save_dialog::SaveDialogSpec {
+            parent: parent_hwnd(&self.window),
+            filter_name: language.t(Message::FilterProject),
+            filter_extension: PROJECT_EXTENSION.trim_start_matches('.').to_owned(),
+            default_name: format!("{stem}{PROJECT_EXTENSION}"),
+            bundle_label: language.t(Message::SaveOptionBundle),
+            zip_label: language.t(Message::SaveOptionZip),
+            initial,
+        };
+        self.spawn_task("file-dialog", TaskId::Modal, move || match crate::save_dialog::show(&spec) {
+            Ok(Some((path, choice))) => Arrival::FilePicked { dialog: FileDialog::SaveProject(choice), path: Some(with_project_extension(path)) },
+            Ok(None) => Arrival::FilePicked { dialog: FileDialog::SaveProject(initial), path: None },
+            Err(message) => Arrival::TaskFailed { task: TaskId::Modal, message },
         });
     }
 
@@ -1067,7 +1097,11 @@ impl Session {
                 let own = self.state.project_file().is_some_and(|current| d3d12_backend::same_file(current, &file));
                 let in_use = self.state.language().t(Message::ProjectInUse(file.display().to_string()));
                 self.spawn_task("project-read", TaskId::Load(load), move || {
-                    let result = if !own && held_elsewhere(&file) { Err(in_use) } else { load_project_file(&file, &roots) };
+                    let result = if !own && held_elsewhere(&file) { Err(in_use) } else { read_project_or_packed(&file, &roots) };
+                    let (file, result) = match result {
+                        Ok((file, project)) => (file, Ok(project)),
+                        Err(message) => (file, Err(message)),
+                    };
                     Arrival::ProjectRead { load, file, result }
                 });
             }
@@ -1136,7 +1170,7 @@ impl Session {
                 self.text_style_library = Some(spawn_text_style_scan(self.package_roots.clone(), self.window.clone()));
                 self.refresh_pack_list_if_open();
             }
-            Action::SaveTo(path, with_packs) => self.save_project(path, with_packs),
+            Action::SaveTo(path, choice) => self.save_project(path, choice),
             Action::StartExport(path) => self.start_export(path, None),
             Action::ProjectReplaced => {
                 self.playback = None;
@@ -1446,7 +1480,6 @@ impl Session {
             UiRequest::OpenProject => self.begin_task(Request::OpenProject),
             UiRequest::SaveProject => self.begin_task(Request::SaveProject),
             UiRequest::SaveProjectAs => self.begin_task(Request::SaveProjectAs),
-            UiRequest::SaveProjectWithPacks => self.begin_task(Request::SaveProjectWithPacks),
             UiRequest::PickClipFile { track } => self.begin_task(Request::PickClip { track }),
             UiRequest::ImportMedia { audio_only } => self.begin_task(Request::ImportMedia { audio_only }),
             UiRequest::ImportPackage => self.begin_task(Request::ImportPackage),
@@ -1568,6 +1601,23 @@ impl AgentHost for Session {
 }
 
 /// Reads the package manifests away from the UI thread: some packages hold large textures.
+/// Reads the project in `file`, first extracting it when it is a packed project (see
+/// [`crate::project_zip`]): the project file read, and the project.
+fn read_project_or_packed(file: &Path, roots: &[PathBuf]) -> Result<(PathBuf, engine::Project), String> {
+    let file = if crate::project_zip::is_packed(file) { crate::project_zip::extract_packed(file)? } else { file.to_path_buf() };
+    let project = load_project_file(&file, roots)?;
+    Ok((file, project))
+}
+
+/// The `HWND` of `window` as a number a thread can carry, 0 when it has none.
+fn parent_hwnd(window: &Window) -> isize {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().map(|handle| handle.as_raw()) {
+        Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get(),
+        _ => 0,
+    }
+}
+
 fn spawn_catalog_scan(roots: Vec<PathBuf>, window: Arc<Window>) -> Receiver<Catalog> {
     let (sender, receiver) = channel();
     let scanner = std::thread::Builder::new().name("packages".to_owned()).spawn(move || {

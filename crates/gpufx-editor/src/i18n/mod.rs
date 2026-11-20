@@ -265,7 +265,10 @@ pub enum Message {
     // The package manager.
     MenuPackageManager,
     /// The File menu option that copies the packs a project uses next to it on every save.
-    MenuSaveWithPacks,
+    /// The check button of the Save dialog bundling the packs and media beside the project.
+    SaveOptionBundle,
+    /// The check button of the Save dialog also writing the packed project.
+    SaveOptionZip,
     PackManagerTitle,
     PackTabName(crate::package_manager::PackTab),
     PackColumnName,
@@ -299,6 +302,8 @@ pub enum Message {
     PackOpenFolderFailed(String),
     PackSaveWithPacksFailed(String),
     BundleFailed(String),
+    /// The project was saved but its packed copy could not be written.
+    ZipFailed(String),
     /// The open project uses packs that are not installed but are in the copy beside it.
     PackRestoreOffer(usize),
     PackRestoreInstall,
@@ -874,7 +879,8 @@ impl Message {
         Message::ProjectInUse(path) => Text::key("projectInUse").arg("path", path),
         Message::AgentAccessFailed(detail) => Text::key("agentAccessFailed").arg("detail", detail),
         Message::MenuPackageManager => Text::key("menuPackageManager"),
-        Message::MenuSaveWithPacks => Text::key("menuSaveWithPacks"),
+        Message::SaveOptionBundle => Text::key("saveOptionBundle"),
+        Message::SaveOptionZip => Text::key("saveOptionZip"),
         Message::PackManagerTitle => Text::key("packManagerTitle"),
         Message::PackColumnName => Text::key("packColumnName"),
         Message::PackColumnVersion => Text::key("packColumnVersion"),
@@ -901,6 +907,7 @@ impl Message {
         Message::PackOpenFolderFailed(detail) => Text::key("packOpenFolderFailed").arg("detail", detail),
         Message::PackSaveWithPacksFailed(detail) => Text::key("packSaveWithPacksFailed").arg("detail", detail),
         Message::BundleFailed(detail) => Text::key("bundleFailed").arg("detail", detail),
+        Message::ZipFailed(detail) => Text::key("zipFailed").arg("detail", detail),
         Message::PackRestoreInstall => Text::key("packRestoreInstall"),
         Message::PackRestoreDismiss => Text::key("packRestoreDismiss"),
         Message::PackRestoreFailed(detail) => Text::key("packRestoreFailed").arg("detail", detail),
@@ -1639,7 +1646,8 @@ mod tests {
         Message::AutosaveSettingFailed(s()),
         Message::AutosaveFailed(s()),
         Message::MenuPackageManager,
-        Message::MenuSaveWithPacks,
+        Message::SaveOptionBundle,
+        Message::SaveOptionZip,
         Message::PackManagerTitle,
         Message::PackTabName(crate::package_manager::PackTab::Effect),
         Message::PackColumnName,
@@ -1670,6 +1678,7 @@ mod tests {
         Message::PackOpenFolderFailed(s()),
         Message::PackSaveWithPacksFailed(s()),
         Message::BundleFailed(s()),
+        Message::ZipFailed(s()),
         Message::PackRestoreOffer(2),
         Message::PackRestoreInstall,
         Message::PackRestoreDismiss,
