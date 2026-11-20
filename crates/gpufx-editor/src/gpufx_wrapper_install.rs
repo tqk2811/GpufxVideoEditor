@@ -44,7 +44,7 @@ fn check(files: &Files) -> Result<(WrapperManifest, d3d12_backend::PackageInfo, 
     let inner = file(&manifest.package).ok_or_else(|| ImportProblem::WrapperMissingPackage(manifest.package.clone()))?;
     let mut zip = ZipArchive::new(Cursor::new(inner.as_slice())).map_err(|e| ImportProblem::BadPackage(e.to_string()))?;
     validate_entries(&entries_of(&mut zip, SHADER_LIMITS)?, SHADER_LIMITS)?;
-    let inner_manifest: Value = serde_json::from_slice(&read_manifest(&mut zip)?).map_err(|e| ImportProblem::BadPackage(e.to_string()))?;
+    let inner_manifest: Value = serde_json::from_slice(strip_bom(&read_manifest(&mut zip)?)).map_err(|e| ImportProblem::BadPackage(e.to_string()))?;
     let inner_id = inner_manifest.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
     let info = read_zip_package_info(inner).map_err(ImportProblem::BadPackage)?;
     if !inner_id.eq_ignore_ascii_case(&manifest.id) {
