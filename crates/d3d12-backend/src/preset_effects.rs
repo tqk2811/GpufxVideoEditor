@@ -57,8 +57,12 @@ fn read_limited(reader: impl Read) -> Option<Vec<u8>> {
 }
 
 /// The `id` of the manifest of the package at `path`, a folder or a zip, read without the rest.
-/// A manifest above [`MAX_MANIFEST_BYTES`] is not read.
+/// A manifest above [`MAX_MANIFEST_BYTES`] is not read. A wrapper folder gives the id its manifest
+/// names, which is the inner package's.
 fn package_id(path: &Path) -> Option<String> {
+    if let Some(wrapper) = crate::gpufx_wrapper::read_wrapper(path) {
+        return wrapper.ok().map(|manifest| manifest.id.to_ascii_lowercase());
+    }
     let bytes = if path.is_dir() {
         read_limited(std::fs::File::open(path.join("manifest.json")).ok()?)?
     } else {

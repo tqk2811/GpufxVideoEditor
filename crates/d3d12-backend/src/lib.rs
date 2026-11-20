@@ -24,6 +24,7 @@ mod encoder;
 mod export;
 mod ffi;
 mod gpu;
+pub mod gpufx_wrapper;
 mod matte;
 mod pack_presets;
 mod packages;
@@ -45,6 +46,7 @@ pub use effect_preview_protocol::{InvalidJob, PreviewBlame, PreviewEvent, Previe
 pub use encoder::{auto_select, encoder_available, encoder_exists, needs_gpl, probe_encoder, EncoderChoice, Mp4Encoder, VideoCodec};
 pub use export::{overwritten_input, reserve_temporary, same_file, ExportControl, ExportError, ExportJob, ExportReport};
 pub use gpu::Gpu;
+pub use gpufx_wrapper::{effect_package_path, is_wrapper_manifest, parse_wrapper_manifest, read_wrapper, WrapperManifest, WRAPPER_FORMAT, WRAPPER_TYPE};
 pub use matte::{check_matting_package, find_matting_model, matte_radii, model_folders, model_in, user_models_dir, MatteCache, MATTE_CACHE_BYTES, MATTING_FOLDER, MATTING_MODELS_ENV};
 pub use clip_animation_pack::{assemble_clip_animation_pack, check_clip_animation_fields, check_clip_animation_manifest_file, is_clip_animation_type, parse_clip_animation_item, parse_clip_animation_manifest, read_clip_animation_pack, scan_clip_animation_folders, split_clip_animation_pack, write_clip_animation_pack, ClipAnimationManifest, ClipAnimationManifestFile, CLIP_ANIMATION_ITEMS_FOLDER, ClipAnimationManifestItem, ClipAnimationScan, ItemEffect, ManifestProblem, PackLicense, PackReadProblem, CLIP_ANIMATION_FOLDER, CLIP_KINDS, DEFAULT_PROGRESS_PARAM, MAX_DEFAULT_DURATION, MAX_MANIFEST_ITEMS as MAX_CLIP_ANIMATION_ITEMS};
 pub use pack_presets::read_pack_presets;

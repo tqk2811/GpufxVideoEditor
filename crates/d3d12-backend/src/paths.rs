@@ -447,14 +447,20 @@ impl ProjectPaths {
         is_asset_source(source).then(|| self.asset_path(source).err()).flatten()
     }
 
-    /// The path of `package`, or `None` when it is not found or the user turned it off.
+    /// The path gpufx opens for `package`, or `None` when it is not found, the user turned it off, or
+    /// it is a wrapper that cannot be used. For a wrapper folder (see [`crate::gpufx_wrapper`]) it is
+    /// the inner zip; a project stores the name of the folder.
     pub fn package_path(&self, package: &str) -> Option<PathBuf> {
         let found = self.package_path_even_disabled(package)?;
-        (!self.is_disabled(&found)).then_some(found)
+        if self.is_disabled(&found) {
+            return None;
+        }
+        crate::gpufx_wrapper::effect_package_path(&found).ok()
     }
 
-    /// The path of `package` as [`Self::package_path`] finds it, turned off or not: for telling a
-    /// package that is missing from one the user turned off.
+    /// Where `package` is installed as [`Self::package_path`] finds it, turned off or not, and for a
+    /// wrapper the folder rather than its inner zip: for telling a package that is missing from one
+    /// the user turned off, and for its key.
     pub fn package_path_even_disabled(&self, package: &str) -> Option<PathBuf> {
         if !self.project_packages && !self.inside_roots(package) {
             return None;

@@ -82,9 +82,11 @@ pub fn expression_error(text: &str, vars: &[String]) -> Option<String> {
     Expr::parse(text, vars).err().map(|e| e.to_string())
 }
 
-/// Opens the package at `path` as the renderer would, which also checks its files.
+/// Opens the package at `path` as the renderer would, which also checks its files. A wrapper
+/// folder opens its inner zip (see [`crate::gpufx_wrapper`]).
 pub fn read_package_info(path: &Path) -> Result<PackageInfo, String> {
-    Package::open(path).map(|package| package_info(&package)).map_err(|e| e.to_string())
+    let path = crate::gpufx_wrapper::effect_package_path(path)?;
+    Package::open(&path).map(|package| package_info(&package)).map_err(|e| e.to_string())
 }
 
 /// [`read_package_info`] for the bytes of a zip that is not on disk under its final name.
