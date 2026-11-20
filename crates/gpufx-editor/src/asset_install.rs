@@ -84,6 +84,19 @@ pub struct AudioManifest {
     pub version: String,
     pub license: AudioLicense,
     pub items: Vec<AudioManifestItem>,
+    /// The set the pack was cut from (each content pack holds one item), its English name, and
+    /// what the scripts copy from the set; only `collection` and `collection_name` are read, by
+    /// the libraries (see `PackCollection` in the editor).
+    #[serde(default)]
+    pub collection: Option<String>,
+    #[serde(default)]
+    pub collection_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -900,7 +913,7 @@ mod tests {
     #[test]
     fn a_manifest_with_more_sounds_than_the_cap_is_refused() {
         let item = |index: usize| AudioManifestItem { id: format!("s{index}"), file: "audio/a.flac".to_owned(), name: "S".to_owned(), duration: 1.0, tags: Vec::new(), category: "c".to_owned(), looped: false, description: String::new() };
-        let manifest = |count: usize| AudioManifest { format: 1, kind: "sfx".to_owned(), id: "p".to_owned(), name: "P".to_owned(), version: "1".to_owned(), license: AudioLicense { spdx: "MIT".to_owned(), files: vec!["L.txt".to_owned()] }, items: (0..count).map(item).collect() };
+        let manifest = |count: usize| AudioManifest { format: 1, kind: "sfx".to_owned(), id: "p".to_owned(), name: "P".to_owned(), version: "1".to_owned(), license: AudioLicense { spdx: "MIT".to_owned(), files: vec!["L.txt".to_owned()] }, items: (0..count).map(item).collect(), collection: None, collection_name: None, description: None, category: None, tags: Vec::new() };
         assert_eq!(check_manifest_fields(&manifest(MAX_MANIFEST_ITEMS)), Ok(AudioPackKind::Sfx));
         let refused = check_manifest_fields(&manifest(MAX_MANIFEST_ITEMS + 1));
         assert!(matches!(&refused, Err(ImportProblem::BadManifest(message)) if message.contains("16384")), "{refused:?}");

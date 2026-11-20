@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use d3d12_backend::{animation_timing, asset_source, still_dimensions, AnimationTiming, ProjectPaths};
 use engine::Time;
 
-use crate::i18n::pack::{Localized, PackTranslations};
+use crate::i18n::pack::{Localized, PackCollection, PackTranslations};
 use crate::audio_library::LibraryProblem;
 use crate::editor::DEFAULT_IMAGE_DURATION;
 use crate::media::{MediaItem, MediaKind};
@@ -77,6 +77,8 @@ pub struct StickerPack {
     pub stickers: Vec<LibrarySticker>,
     /// The pack's name, description and tags in the languages it brings.
     pub i18n: Localized,
+    /// The collection the lists show it under.
+    pub collection: PackCollection,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -153,7 +155,8 @@ fn read_pack(root: &Path, folder: &Path, library: &mut StickerLibrary) -> Option
         let animation = animation_timing(&path).ok().flatten();
         stickers.push(LibrarySticker { i18n: translations.item(&item.id), source, name: item.name, tags: item.tags, category: item.category, size, animation });
     }
-    Some(StickerPack { i18n: translations.pack(), id: manifest.id.to_ascii_lowercase(), name: manifest.name, stickers })
+    let collection = PackCollection::from_manifest(&bytes, &manifest.id, &manifest.name, &translations);
+    Some(StickerPack { i18n: translations.pack(), collection, id: manifest.id.to_ascii_lowercase(), name: manifest.name, stickers })
 }
 
 /// Reads the packs under every root. A pack in an earlier root hides one of the same id in a later
@@ -185,12 +188,14 @@ pub fn scan_sticker_packs(roots: &[PathBuf]) -> StickerLibrary {
 mod tests {
     use super::*;
 
+    const COLLECTION_FIELDS: &str = r#""version":"1.0.0","collection":"Fun","collection_name":"Fun Set","description":"d","category":"c","tags":["x"]"#;
+
     fn sticker(name: &str, tags: &[&str], category: &str) -> LibrarySticker {
         LibrarySticker { i18n: Default::default(), source: format!("asset:sticker/p/{name}.png"), name: name.to_owned(), tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), size: None, animation: None }
     }
 
     fn library() -> StickerLibrary {
-        StickerLibrary { packs: vec![StickerPack { i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker("Smile", &["face", "happy"], "people"), sticker("Dog", &["pet"], "animals"), sticker("Sad", &["face"], "people")] }], problems: Vec::new(), loaded: true }
+        StickerLibrary { packs: vec![StickerPack { collection: Default::default(), i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker("Smile", &["face", "happy"], "people"), sticker("Dog", &["pet"], "animals"), sticker("Sad", &["face"], "people")] }], problems: Vec::new(), loaded: true }
     }
 
     #[test]
@@ -254,6 +259,25 @@ mod tests {
         assert_eq!(library.packs[0].stickers[0].source, "asset:sticker/shared/images/a.png");
         assert_eq!(library.problems.len(), 2, "{:?}", library.problems);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_item_packs_of_one_collection_load_and_group_together() {
+        let dir = scratch("collection");
+        write_pack(&dir, "fun-a", "A", &["images/a.png", "images/b.png"]);
+        write_pack(&dir, "fun-b", "B", &["images/a.png", "images/b.png"]);
+        for folder in [dir.join("packages/sticker/fun-a"), dir.join("packages/sticker/fun-b")] {
+            let manifest = folder.join("manifest.json");
+            let text = std::fs::read_to_string(&manifest).unwrap().replacen(r#""version":"1.0.0""#, COLLECTION_FIELDS, 1);
+            std::fs::write(manifest, text).unwrap();
+            std::fs::create_dir_all(folder.join("i18n")).unwrap();
+            std::fs::write(folder.join("i18n/vi.json"), r#"{"collection_name": "Bộ vui", "category": "k"}"#).unwrap();
+        }
+        let library = scan_sticker_packs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(library.problems.is_empty(), "{:?}", library.problems);
+        assert_eq!(library.packs.len(), 2);
+        assert!(library.packs.iter().all(|pack| pack.collection.id == "fun" && pack.collection.display_name("vi") == "Bộ vui" && pack.collection.name == "Fun Set"));
     }
 
     #[test]

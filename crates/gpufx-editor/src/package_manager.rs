@@ -24,7 +24,7 @@ use engine::{FontRef, Project};
 use crate::asset_install::{lock_installs, rename_with_retries, AudioPackKind, ListedPack};
 use crate::clip_animation_install::CLIP_ANIMATION_TYPE;
 use crate::font_install::FONT_TYPE;
-use crate::i18n::pack::{Localized, PackTranslations};
+use crate::i18n::pack::{Localized, PackCollection, PackTranslations};
 use crate::packages::{classify, PackageKind};
 use crate::sticker_install::STICKER_TYPE;
 use crate::subtitle_style_install::SUBTITLE_STYLE_TYPE;
@@ -100,8 +100,8 @@ pub struct InstalledPack {
     pub path: PathBuf,
     /// How many items it offers: sounds, stickers, styles, fonts; a shader package is one.
     pub items: usize,
-    /// Its size on disk.
-    pub bytes: u64,
+    /// Its size on disk; `None` until it is measured (see [`pack_sizes`]), after the list is shown.
+    pub bytes: Option<u64>,
     pub enabled: bool,
     /// A shader package kept out of the pickers, used by other packs.
     pub hidden: bool,
@@ -111,6 +111,8 @@ pub struct InstalledPack {
     pub shadowed: bool,
     /// The pack's name, description and tags in the languages it brings (`i18n/<code>.json`).
     pub i18n: Localized,
+    /// The collection the package manager groups it under (see [`PackCollection`]).
+    pub collection: PackCollection,
 }
 
 impl InstalledPack {
@@ -141,7 +143,6 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
         for shader in crate::packages::list_installed(root, &read) {
             let key = pack_key_of(root, &shader.path).unwrap_or_else(|| pack_key(&shader.package));
             let id = shader.package.strip_prefix("packages/gpufx/").unwrap_or(&shader.package).to_owned();
-            let bytes = disk_size(&shader.path);
             let pack = match shader.read {
                 Ok(info) => {
                     let (tab, problem) = match classify(&info) {
@@ -149,9 +150,9 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
                         Some(PackageKind::Effect) => (PackTab::Effect, None),
                         None => (PackTab::Effect, Some(format!("it takes {} inputs, which no clip can give it", info.inputs))),
                     };
-                    InstalledPack { tab, key, id, name: info.name, version: info.version, source, path: shader.path, items: 1, bytes, enabled: true, hidden: info.hidden, problem, shadowed: false, i18n: Localized::default() }
+                    InstalledPack { tab, key, id, name: info.name, version: info.version, source, path: shader.path, items: 1, bytes: None, enabled: true, hidden: info.hidden, problem, shadowed: false, i18n: Localized::default(), collection: PackCollection::default() }
                 }
-                Err(message) => InstalledPack { tab: PackTab::Effect, name: id.clone(), key, id, version: String::new(), source, path: shader.path, items: 0, bytes, enabled: true, hidden: false, problem: Some(message), shadowed: false, i18n: Localized::default() },
+                Err(message) => InstalledPack { tab: PackTab::Effect, name: id.clone(), key, id, version: String::new(), source, path: shader.path, items: 0, bytes: None, enabled: true, hidden: false, problem: Some(message), shadowed: false, i18n: Localized::default(), collection: PackCollection::default() },
             };
             found.push(pack);
         }
@@ -167,21 +168,27 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
         for (tab, type_folder, listed) in folder_types {
             for pack in listed {
                 let key = pack_key(&format!("{type_folder}/{}", pack.id));
-                let bytes = disk_size(&pack.folder);
                 found.push(match pack.read {
-                    Ok(summary) => InstalledPack { tab, key, id: pack.id, name: summary.name, version: summary.version, source, path: pack.folder, items: summary.items, bytes, enabled: true, hidden: false, problem: None, shadowed: false, i18n: Localized::default() },
-                    Err(message) => InstalledPack { tab, key, name: pack.id.clone(), id: pack.id, version: String::new(), source, path: pack.folder, items: 0, bytes, enabled: true, hidden: false, problem: Some(message), shadowed: false, i18n: Localized::default() },
+                    Ok(summary) => InstalledPack { tab, key, id: pack.id, name: summary.name, version: summary.version, source, path: pack.folder, items: summary.items, bytes: None, enabled: true, hidden: false, problem: None, shadowed: false, i18n: Localized::default(), collection: PackCollection::default() },
+                    Err(message) => InstalledPack { tab, key, name: pack.id.clone(), id: pack.id, version: String::new(), source, path: pack.folder, items: 0, bytes: None, enabled: true, hidden: false, problem: Some(message), shadowed: false, i18n: Localized::default(), collection: PackCollection::default() },
                 });
             }
         }
         for mut pack in found {
-            pack.i18n = PackTranslations::read_package(&pack.path).pack();
+            let translations = PackTranslations::read_package(&pack.path);
+            pack.i18n = translations.pack();
+            // A content pack holds one item; its manifest names the set it was cut from.
+            pack.collection = if pack.path.is_dir() && !is_shader_key(&pack.key) {
+                PackCollection::read_folder(&pack.path, &pack.id, &pack.name, &translations)
+            } else {
+                PackCollection { id: pack.id.to_ascii_lowercase(), name: pack.name.clone(), i18n: pack.i18n.clone() }
+            };
             pack.enabled = !disabled.contains(&pack.key);
             pack.shadowed = !seen.insert(pack.key.clone());
             packs.push(pack);
         }
     }
-    packs.sort_by(|a, b| (a.tab, a.name.to_lowercase(), a.shadowed).cmp(&(b.tab, b.name.to_lowercase(), b.shadowed)));
+    packs.sort_by_cached_key(|pack| (pack.tab, pack.collection.name.to_lowercase(), pack.collection.id.clone(), pack.name.to_lowercase(), pack.shadowed));
     packs
 }
 
@@ -190,6 +197,11 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
 pub fn filter_packs<'a>(packs: &'a [InstalledPack], tab: PackTab, filter: &str) -> Vec<&'a InstalledPack> {
     let query = crate::search::Query::new(filter);
     packs.iter().filter(|pack| pack.tab == tab).filter(|pack| query.score(&pack.i18n.search(crate::search::SearchFields::new(&pack.name).other([pack.id.as_str(), pack.version.as_str()]))).is_some()).collect()
+}
+
+/// The sizes of `paths` on disk, in their order. Slow for many packs: run it off the UI thread.
+pub fn pack_sizes(paths: &[PathBuf]) -> Vec<u64> {
+    paths.iter().map(|path| disk_size(path)).collect()
 }
 
 /// The size of a file, or of everything in a folder; links are not followed.
@@ -225,10 +237,18 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Turns the pack of `key` on or off for the editor, the agent and an export, in the user's
 /// [`DISABLED_PACKS_FILE`]. A pack turned off in a shipped root's file stays off.
 pub fn set_enabled(user_root: &Path, key: &str, enabled: bool) -> Result<(), String> {
+    set_enabled_many(user_root, &[key], enabled)
+}
+
+/// [`set_enabled`] for every key of `wanted` (a whole collection), with one write of the file.
+pub fn set_enabled_many(user_root: &Path, wanted: &[&str], enabled: bool) -> Result<(), String> {
     let file = disabled_file(user_root);
     let mut keys: BTreeSet<String> = fs::read(&file).ok().and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok()).unwrap_or_default().iter().map(|key| pack_key(key)).collect();
-    let key = pack_key(key);
-    let changed = if enabled { keys.remove(&key) } else { keys.insert(key) };
+    let mut changed = false;
+    for key in wanted {
+        let key = pack_key(key);
+        changed |= if enabled { keys.remove(&key) } else { keys.insert(key) };
+    }
     if !changed {
         return Ok(());
     }
@@ -551,7 +571,7 @@ mod tests {
         assert!(find("gpufx/user/broken", PackSource::User).problem.is_some());
         let mine = find("sticker/mine", PackSource::User);
         assert_eq!((mine.tab, mine.name.as_str(), mine.version.as_str(), mine.items), (PackTab::Sticker, "My Stickers", "1.2.0", 2));
-        assert!(mine.bytes > 0 && mine.removable() && mine.enabled && mine.problem.is_none());
+        assert!(disk_size(&mine.path) > 0 && mine.bytes.is_none() && mine.removable() && mine.enabled && mine.problem.is_none());
         assert!(!find("sticker/shared", PackSource::Shipped).shadowed);
         assert!(find("sticker/shared", PackSource::User).shadowed, "the shipped one is used");
         assert!(!find("sticker/shared", PackSource::Shipped).removable());

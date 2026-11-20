@@ -271,8 +271,8 @@ fn style_tile(ui: &mut egui::Ui, state: &EditorState, pack: &TextStylePack, styl
     let stroke = style.style.outline.map_or(Stroke::NONE, |outline| Stroke::new(1.5, rgba(outline.color)));
     let code = state.language().code();
     let hover = match style.display_category(code) {
-        Some(category) => format!("{} · {} ({category})", style.display_name(code), pack.display_name(code)),
-        None => format!("{} · {}", style.display_name(code), pack.display_name(code)),
+        Some(category) => format!("{} · {} ({category})", style.display_name(code), pack.collection.display_name(code)),
+        None => format!("{} · {}", style.display_name(code), pack.collection.display_name(code)),
     };
     if let Some(cover) = &style.cover {
         let side = Vec2::splat(COVER_TILE_SIDE);
@@ -473,6 +473,8 @@ fn audio_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
     // Borrowed from the state, not copied: a pack may list thousands of sounds, drawn every frame.
     let session: Vec<&MediaItem> = state.library.visible(MediaKind::Audio, &search);
     let found = state.audio_library.matching(&search);
+    // One sound per pack: the packs cut from one set show together, under the set's name.
+    let found = crate::i18n::pack::group_by_collection(found.into_iter().map(|(pack, sounds)| (&pack.collection, sounds)), language.code());
     if session.is_empty() && found.is_empty() {
         let message = if state.audio_library.loaded { language.t(if search.trim().is_empty() { Message::AudioLibraryEmpty } else { Message::NoSearchMatch }) } else { language.t(Message::ReadingAudioPacks) };
         ui.add(egui::Label::new(egui::RichText::new(message).color(theme::text_dim())).wrap());
@@ -490,9 +492,10 @@ fn audio_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRe
         if !found.is_empty() {
             ui.label(egui::RichText::new(language.t(Message::InstalledPacks)).strong());
         }
-        for (pack, sounds) in &found {
-            egui::CollapsingHeader::new(format!("{} ({})", pack.display_name(language.code()), sounds.len())).id_salt(("audio-pack", pack.kind.name(), &pack.id)).default_open(true).show(ui, |ui| {
-                if let Some(done) = sound_rows(ui, state, sounds) {
+        for (collection, groups) in &found {
+            let sounds: Vec<&LibrarySound> = groups.iter().flatten().copied().collect();
+            egui::CollapsingHeader::new(format!("{} ({})", collection.display_name(language.code()), sounds.len())).id_salt(("audio-collection", &collection.id)).default_open(true).show(ui, |ui| {
+                if let Some(done) = sound_rows(ui, state, &sounds) {
                     acted = Some(done);
                 }
             });

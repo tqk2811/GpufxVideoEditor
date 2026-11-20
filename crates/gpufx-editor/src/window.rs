@@ -166,6 +166,8 @@ struct Session {
     text_style_library: Option<Receiver<TextStyleLibrary>>,
     /// The installed packs for the package manager, once their read has finished.
     pack_list: Option<Receiver<Vec<InstalledPack>>>,
+    /// The sizes of the packs of the list last read, measured after it (by path).
+    pack_sizes: Option<Receiver<Vec<(PathBuf, u64)>>>,
     tasks: Tasks,
     arrivals: Receiver<Arrival>,
     arrival_sender: Sender<Arrival>,
@@ -300,6 +302,7 @@ impl Session {
             clip_animation_library: Some(clip_animation_library),
             text_style_library: Some(text_style_library),
             pack_list: None,
+            pack_sizes: None,
             tasks: Tasks::default(),
             arrivals,
             arrival_sender,
@@ -1301,13 +1304,25 @@ impl Session {
     fn refresh_pack_list(&mut self) {
         self.state.ui.packages.reading = true;
         let (sender, receiver) = channel();
+        let (size_sender, size_receiver) = channel();
         let (roots, window) = (self.package_roots.clone(), self.window.clone());
+        // The list shows first; the sizes, which walk every file of hundreds of packs, follow.
         let reader = std::thread::Builder::new().name("pack-list".to_owned()).spawn(move || {
-            let _ = sender.send(crate::package_manager::list_installed(&roots, user_package_root().as_deref()));
+            let packs = crate::package_manager::list_installed(&roots, user_package_root().as_deref());
+            let paths: Vec<PathBuf> = packs.iter().map(|pack| pack.path.clone()).collect();
+            if sender.send(packs).is_err() {
+                return;
+            }
+            window.request_redraw();
+            let sizes = crate::package_manager::pack_sizes(&paths);
+            let _ = size_sender.send(paths.into_iter().zip(sizes).collect());
             window.request_redraw();
         });
         match reader {
-            Ok(_) => self.pack_list = Some(receiver),
+            Ok(_) => {
+                self.pack_list = Some(receiver);
+                self.pack_sizes = Some(size_receiver);
+            }
             Err(e) => {
                 self.state.ui.packages.reading = false;
                 eprintln!("gpufx-editor: the pack list could not start: {e}");
@@ -1327,6 +1342,15 @@ impl Session {
             packages.packs = packs;
             packages.reading = false;
             self.pack_list = None;
+        }
+        if self.pack_list.is_none() {
+            if let Some(Ok(sizes)) = self.pack_sizes.as_ref().map(Receiver::try_recv) {
+                let sizes: std::collections::HashMap<PathBuf, u64> = sizes.into_iter().collect();
+                for pack in &mut self.state.ui.packages.packs {
+                    pack.bytes = sizes.get(&pack.path).copied().or(pack.bytes);
+                }
+                self.pack_sizes = None;
+            }
         }
     }
 
@@ -1354,40 +1378,68 @@ impl Session {
         self.refresh_pack_list();
     }
 
-    fn set_pack_enabled(&mut self, index: usize, enabled: bool) {
-        let Some(pack) = self.listed_pack(index) else { return };
+    /// Pack `index` of the list, or with `collection` every pack of its tab in its collection.
+    fn listed_packs(&self, index: usize, collection: bool) -> Vec<InstalledPack> {
+        let Some(pack) = self.listed_pack(index) else { return Vec::new() };
+        if !collection {
+            return vec![pack];
+        }
+        self.state.ui.packages.packs.iter().filter(|other| other.tab == pack.tab && other.collection.id == pack.collection.id).cloned().collect()
+    }
+
+    fn set_pack_enabled(&mut self, packs: &[InstalledPack], enabled: bool) {
+        if packs.is_empty() {
+            return;
+        }
         let Some(user_root) = user_package_root() else { return self.state.report_error(Message::NoUserPackageFolder) };
-        match crate::package_manager::set_enabled(&user_root, &pack.key, enabled) {
+        let keys: Vec<&str> = packs.iter().map(|pack| pack.key.as_str()).collect();
+        match crate::package_manager::set_enabled_many(&user_root, &keys, enabled) {
             Ok(()) => self.packs_changed(),
             Err(message) => self.state.report_error(Message::PackToggleFailed(message)),
         }
     }
 
     /// Finds where the open project uses the pack, for the package manager to show before it goes.
-    fn ask_pack_removal(&mut self, index: usize) {
-        let Some(pack) = self.listed_pack(index) else { return };
-        let uses = crate::package_manager::uses_of(self.state.project(), &self.paths, &pack.key);
-        self.state.ui.packages.confirm_remove = Some((pack.key, pack.path, uses));
+    fn ask_pack_removal(&mut self, packs: Vec<InstalledPack>) {
+        if packs.is_empty() {
+            return;
+        }
+        let mut uses: Vec<_> = packs.iter().flat_map(|pack| crate::package_manager::uses_of(self.state.project(), &self.paths, &pack.key)).collect();
+        uses.sort();
+        uses.dedup();
+        self.state.ui.packages.confirm_remove = Some((packs.into_iter().map(|pack| (pack.key, pack.path)).collect(), uses));
     }
 
-    fn remove_pack(&mut self, key: &str, path: &Path) {
+    /// Removes the packs of `targets` (keys and paths), then reads every library once.
+    fn remove_packs(&mut self, targets: &[(String, PathBuf)]) {
         let packages = &self.state.ui.packages;
-        let Some(pack) = (!packages.reading).then(|| crate::package_manager::find_pack(&packages.packs, key, path).cloned()).flatten() else { return };
+        let packs: Vec<InstalledPack> = if packages.reading { Vec::new() } else { targets.iter().filter_map(|(key, path)| crate::package_manager::find_pack(&packages.packs, key, path).cloned()).collect() };
+        if packs.is_empty() {
+            return;
+        }
         let Some(user_root) = user_package_root() else { return self.state.report_error(Message::NoUserPackageFolder) };
         // A sound being played, or a running playback, holds files of the pack open.
         self.audio_preview.stop();
         self.playback = None;
         self.state.reopen_playback();
-        match crate::package_manager::uninstall(&self.package_roots, &user_root, &pack) {
-            Ok(()) => {
-                self.state.report_info(Message::PackRemoved(pack.name.clone()));
-                if crate::package_manager::is_shader_key(&pack.key) {
-                    self.state.previews.get_mut().forget(&format!("packages/{}", pack.key));
+        let mut removed = Vec::new();
+        for pack in &packs {
+            match crate::package_manager::uninstall(&self.package_roots, &user_root, pack) {
+                Ok(()) => {
+                    if crate::package_manager::is_shader_key(&pack.key) {
+                        self.state.previews.get_mut().forget(&format!("packages/{}", pack.key));
+                    }
+                    removed.push(pack);
                 }
-                self.packs_changed();
+                Err(message) => self.state.report_error(Message::PackRemoveFailed(message)),
             }
-            Err(message) => self.state.report_error(Message::PackRemoveFailed(message)),
         }
+        match removed.as_slice() {
+            [] => return,
+            [pack] => self.state.report_info(Message::PackRemoved(pack.name.clone())),
+            [pack, ..] => self.state.report_info(Message::PackRemoved(format!("{} ({})", pack.collection.name, removed.len()))),
+        }
+        self.packs_changed();
     }
 
     fn open_pack_folder(&mut self, index: usize) {
@@ -1524,11 +1576,14 @@ impl Session {
                 self.refresh_pack_list();
             }
             UiRequest::RefreshPacks => self.refresh_pack_list(),
-            UiRequest::SetPackEnabled { index, enabled } => self.set_pack_enabled(index, enabled),
-            UiRequest::RemovePack { index } => self.ask_pack_removal(index),
+            UiRequest::SetPackEnabled { index, enabled, collection } => self.set_pack_enabled(&self.listed_packs(index, collection), enabled),
+            UiRequest::RemovePack { index, collection } => {
+                let packs: Vec<InstalledPack> = self.listed_packs(index, collection).into_iter().filter(|pack| !collection || pack.removable()).collect();
+                self.ask_pack_removal(packs);
+            }
             UiRequest::RemovePackConfirmed => {
-                if let Some((key, path, _)) = self.state.ui.packages.confirm_remove.take() {
-                    self.remove_pack(&key, &path);
+                if let Some((targets, _)) = self.state.ui.packages.confirm_remove.take() {
+                    self.remove_packs(&targets);
                 }
             }
             UiRequest::OpenPackFolder { index } => self.open_pack_folder(index),

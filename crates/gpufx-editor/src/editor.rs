@@ -5105,7 +5105,7 @@ mod tests {
         let mut state = EditorState::default();
         let source = "asset:sticker/p/images/a.png";
         let sticker = crate::sticker_library::LibrarySticker { i18n: Default::default(), source: source.to_owned(), name: "A".to_owned(), tags: Vec::new(), category: "c".to_owned(), size: Some(size), animation: None };
-        state.sticker_library = crate::sticker_library::StickerLibrary { packs: vec![crate::sticker_library::StickerPack { i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker.clone()] }], problems: Vec::new(), loaded: true };
+        state.sticker_library = crate::sticker_library::StickerLibrary { packs: vec![crate::sticker_library::StickerPack { collection: Default::default(), i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker.clone()] }], problems: Vec::new(), loaded: true };
         state.add_media_at_playhead(&sticker.media_item());
         let output = state.project().output.clone();
         let clip = state.project().tracks.iter().find(|track| track.kind == TrackKind::Sticker).unwrap().clips[0].clone();
@@ -5185,7 +5185,7 @@ second line")), "Title…");
         };
         let subtitle = LibraryTextStyle { i18n: Default::default(), reference: "s/low".to_owned(), name: "Low".to_owned(), kind: StyleKind::Subtitle, animation: None, layout: Some(SubtitleLayout { anchor_y: 0.85, max_width: 0.9, max_lines: 2 }), ..bold.clone() };
         crate::text_style_library::TextStyleLibrary {
-            packs: vec![TextStylePack { i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), kind: StyleKind::Text, styles: vec![bold] }, TextStylePack { i18n: Default::default(), id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![subtitle] }],
+            packs: vec![TextStylePack { collection: Default::default(), i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), kind: StyleKind::Text, styles: vec![bold] }, TextStylePack { collection: Default::default(), i18n: Default::default(), id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![subtitle] }],
             problems: Vec::new(),
             loaded: true,
         }

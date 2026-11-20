@@ -42,6 +42,19 @@ pub struct StickerManifest {
     pub version: String,
     pub license: AudioLicense,
     pub items: Vec<StickerManifestItem>,
+    /// The set the pack was cut from (each content pack holds one item), its English name, and
+    /// what the scripts copy from the set; only `collection` and `collection_name` are read, by
+    /// the libraries (see `PackCollection` in the editor).
+    #[serde(default)]
+    pub collection: Option<String>,
+    #[serde(default)]
+    pub collection_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

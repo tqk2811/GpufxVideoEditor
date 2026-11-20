@@ -293,6 +293,8 @@ pub enum Message {
     PackFilter,
     PackNone,
     PackRemoveQuestion(String),
+    /// Asks to remove the `count` packs of collection `name` the user installed.
+    PackRemoveCollectionQuestion { name: String, count: usize },
     /// How many places of the open project use the pack about to be removed.
     PackUsedBy(usize),
     PackUseClip { track: usize, clip: usize },
@@ -903,6 +905,7 @@ impl Message {
         Message::PackFilter => Text::key("packFilter"),
         Message::PackNone => Text::key("packNone"),
         Message::PackRemoveQuestion(name) => Text::key("packRemoveQuestion").arg("name", name),
+        Message::PackRemoveCollectionQuestion { name, count } => Text::key("packRemoveCollectionQuestion").arg("name", name).count("count", *count as i64),
         Message::PackRemoved(name) => Text::key("packRemoved").arg("name", name),
         Message::PackRemoveFailed(detail) => Text::key("packRemoveFailed").arg("detail", detail),
         Message::PackToggleFailed(detail) => Text::key("packToggleFailed").arg("detail", detail),
@@ -1676,6 +1679,7 @@ mod tests {
         Message::PackFilter,
         Message::PackNone,
         Message::PackRemoveQuestion(s()),
+        Message::PackRemoveCollectionQuestion { name: s(), count: 2 },
         Message::PackUsedBy(2),
         Message::PackUseClip { track: 2, clip: 2 },
         Message::PackUseTransition { track: 2, after_clip: 2 },

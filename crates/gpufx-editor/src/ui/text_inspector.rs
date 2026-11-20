@@ -122,7 +122,7 @@ fn subtitle_section(ui: &mut egui::Ui, id: egui::Id, state: &EditorState, track:
         egui::ComboBox::from_id_salt(id.with("subtitle-style")).selected_text(shown).width(ui.available_width()).height(FONT_LIST_HEIGHT).show_ui(ui, |ui| {
             for (pack, style) in library.styles(Some(StyleKind::Subtitle)) {
                 let selected = current.as_deref() == Some(style.reference.as_str());
-                if ui.selectable_label(selected, format!("{} \u{b7} {}", style.display_name(language.code()), pack.display_name(language.code()))).clicked() {
+                if ui.selectable_label(selected, format!("{} \u{b7} {}", style.display_name(language.code()), pack.collection.display_name(language.code()))).clicked() {
                     action = Some(SubtitleAction::TrackStyle(style.reference.clone()));
                 }
             }
@@ -153,7 +153,7 @@ fn style_combo(ui: &mut egui::Ui, id: egui::Id, state: &EditorState, language: L
                 }
                 ui.colored_label(theme::text_dim(), language.t(title));
                 for (pack, style) in library.styles(Some(kind)) {
-                    if ui.selectable_label(false, format!("{} \u{b7} {}", style.display_name(language.code()), pack.display_name(language.code()))).clicked() {
+                    if ui.selectable_label(false, format!("{} \u{b7} {}", style.display_name(language.code()), pack.collection.display_name(language.code()))).clicked() {
                         chosen = Some(style.reference.clone());
                     }
                 }

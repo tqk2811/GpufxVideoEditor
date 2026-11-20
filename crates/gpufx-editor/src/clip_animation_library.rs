@@ -6,7 +6,7 @@
 //! gpufx effect; the scan finds its package (see [`d3d12_backend::resolve_item_effects`]) and a
 //! missing one is listed among the problems while the item keeps its curve.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ use d3d12_backend::{resolve_item_effects, scan_clip_animation_folders, ClipAnima
 use engine::{AnimationCurve, AnimationGroup, Clip, PackPreset, PackPresets, PerUnit, PresetEffect, Time};
 
 use crate::audio_library::LibraryProblem;
-use crate::i18n::pack::{Localized, PackTranslations};
+use crate::i18n::pack::{Localized, PackCollection, PackTranslations};
 use crate::timecode::from_seconds;
 
 /// The kind of clip an animation can be offered for.
@@ -102,6 +102,8 @@ pub struct ClipAnimationPack {
     pub animations: Vec<LibraryAnimation>,
     /// The pack's name, description and tags in the languages it brings.
     pub i18n: Localized,
+    /// The collection the lists show it under.
+    pub collection: PackCollection,
 }
 
 impl ClipAnimationPack {
@@ -142,7 +144,7 @@ pub fn pack_reference(pack: &str, item: &str) -> String {
     format!("{}{}{item}", pack.to_ascii_lowercase(), engine::PACK_PRESET_SEPARATOR)
 }
 
-fn library_pack(manifest: ClipAnimationManifest, translations: &PackTranslations, effects: &mut HashMap<String, PresetEffect>) -> ClipAnimationPack {
+fn library_pack(manifest: ClipAnimationManifest, folder: &Path, translations: &PackTranslations, effects: &mut HashMap<String, PresetEffect>) -> ClipAnimationPack {
     let id = manifest.id.to_ascii_lowercase();
     let animations = manifest
         .items
@@ -169,7 +171,8 @@ fn library_pack(manifest: ClipAnimationManifest, translations: &PackTranslations
             })
         })
         .collect();
-    ClipAnimationPack { i18n: translations.pack(), id, name: manifest.name, animations }
+    let collection = PackCollection::read_folder(folder, &id, &manifest.name, translations);
+    ClipAnimationPack { i18n: translations.pack(), collection, id, name: manifest.name, animations }
 }
 
 /// Reads the packs under every root with the reader an export uses
@@ -181,7 +184,7 @@ pub fn scan_clip_animation_packs(roots: &[PathBuf]) -> ClipAnimationLibrary {
     let effects = resolve_item_effects(roots, &scan.packs);
     let mut ready = effects.ready;
     let problems = scan.problems.into_iter().chain(effects.problems).map(|problem| LibraryProblem { pack: problem.pack, message: problem.message }).collect();
-    let mut packs: Vec<ClipAnimationPack> = scan.packs.into_iter().zip(&scan.folders).map(|(manifest, folder)| library_pack(manifest, &PackTranslations::read_folder(folder), &mut ready)).collect();
+    let mut packs: Vec<ClipAnimationPack> = scan.packs.into_iter().zip(&scan.folders).map(|(manifest, folder)| library_pack(manifest, folder, &PackTranslations::read_folder(folder), &mut ready)).collect();
     packs.sort_by_key(|pack| pack.name.to_lowercase());
     ClipAnimationLibrary { packs, problems, loaded: true }
 }
@@ -189,6 +192,8 @@ pub fn scan_clip_animation_packs(roots: &[PathBuf]) -> ClipAnimationLibrary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const COLLECTION_FIELDS: &str = r#""version":"1.0.0","collection":"Fun","collection_name":"Fun Set","description":"d","category":"c","tags":["x"]"#;
     use std::path::Path;
 
     fn scratch(name: &str) -> PathBuf {
@@ -225,6 +230,25 @@ mod tests {
         assert_eq!((rise.reference.as_str(), rise.group, rise.default_duration), ("shared/rise", AnimationGroup::Enter, from_seconds(0.5)));
         assert_eq!(library.problems.len(), 1, "{:?}", library.problems);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_item_packs_of_one_collection_load_and_group_together() {
+        let dir = scratch("collection");
+        write_pack(&dir, "fun-a", "A");
+        write_pack(&dir, "fun-b", "B");
+        for folder in [dir.join("packages/clip-animation/fun-a"), dir.join("packages/clip-animation/fun-b")] {
+            let manifest = folder.join("manifest.json");
+            let text = std::fs::read_to_string(&manifest).unwrap().replacen(r#""version":"1.0.0""#, COLLECTION_FIELDS, 1);
+            std::fs::write(manifest, text).unwrap();
+            std::fs::create_dir_all(folder.join("i18n")).unwrap();
+            std::fs::write(folder.join("i18n/vi.json"), r#"{"collection_name": "Bộ vui", "category": "k"}"#).unwrap();
+        }
+        let library = scan_clip_animation_packs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(library.problems.is_empty(), "{:?}", library.problems);
+        assert_eq!(library.packs.len(), 2);
+        assert!(library.packs.iter().all(|pack| pack.collection.id == "fun" && pack.collection.display_name("vi") == "Bộ vui"));
     }
 
     #[test]

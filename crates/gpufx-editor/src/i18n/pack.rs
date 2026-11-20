@@ -14,6 +14,9 @@
 //! name and by any translation of it. A file that cannot be read is skipped: a translation never
 //! stops a pack from loading.
 //!
+//! A content pack may also carry `"collection_name": "..."`, the translated name of the collection
+//! its manifest names (see [`PackCollection`]).
+//!
 //! A pack's `i18n/en.json` is ignored: the manifest is its English text.
 
 use std::collections::HashMap;
@@ -50,6 +53,8 @@ pub struct ParamText {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PackFile {
     pack: TextSet,
+    /// The translated `collection_name` of the manifest.
+    collection_name: Option<String>,
     params: HashMap<String, ParamText>,
     items: HashMap<String, TextSet>,
 }
@@ -98,7 +103,7 @@ fn parse_file(text: &str) -> Option<PackFile> {
         .map(|params| params.iter().map(|(name, value)| (name.clone(), ParamText { label: text_of(value.get("label")), description: text_of(value.get("description")) })).collect())
         .unwrap_or_default();
     let items = root.get("items").and_then(Value::as_object).map(|items| items.iter().map(|(id, value)| (id.clone(), text_set(value))).collect()).unwrap_or_default();
-    Some(PackFile { pack: text_set(&value), params, items })
+    Some(PackFile { pack: text_set(&value), collection_name: text_of(value.get("collection_name")), params, items })
 }
 
 /// The language code a path inside a pack names, when it is `i18n/<code>.json`.
@@ -165,6 +170,11 @@ impl PackTranslations {
     /// The pack's own texts.
     pub fn pack(&self) -> Localized {
         Localized { texts: self.files.iter().filter(|(_, file)| file.pack != TextSet::default()).map(|(code, file)| (code.clone(), file.pack.clone())).collect() }
+    }
+
+    /// The translated `collection_name`, as the names of a [`Localized`].
+    pub fn collection(&self) -> Localized {
+        Localized { texts: self.files.iter().filter_map(|(code, file)| file.collection_name.clone().map(|name| (code.clone(), TextSet { name: Some(name), ..TextSet::default() }))).collect() }
     }
 
     /// The texts of item `id`; an id differing only in case is used when there is no exact one.
@@ -296,6 +306,63 @@ impl ParamTranslations {
     }
 }
 
+/// The collection a content pack belongs to. Each music, sound, sticker, clip animation, text
+/// style and subtitle style pack holds one item; the manifest's optional `collection` (an id) and
+/// `collection_name` gather the packs cut from one set back together for the lists. A pack without
+/// `collection` is a collection of its own, under its id and name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackCollection {
+    /// Lower-cased.
+    pub id: String,
+    pub name: String,
+    /// The translated names, from `collection_name` in the pack's language files, or the pack's
+    /// own names when it has no collection.
+    pub i18n: Localized,
+}
+
+impl PackCollection {
+    /// The collection of the pack whose manifest is `manifest`, of id `pack_id` and name
+    /// `pack_name`. A manifest that is not JSON, or has no usable `collection`, gives the pack's own.
+    pub fn from_manifest(manifest: &[u8], pack_id: &str, pack_name: &str, translations: &PackTranslations) -> Self {
+        let value: Option<Value> = std::str::from_utf8(manifest).ok().and_then(|text| serde_json::from_str(text.trim_start_matches('\u{feff}')).ok());
+        match value.as_ref().and_then(|value| text_of(value.get("collection"))) {
+            Some(id) => {
+                let name = value.as_ref().and_then(|value| text_of(value.get("collection_name"))).unwrap_or_else(|| id.clone());
+                Self { id: id.to_ascii_lowercase(), name, i18n: translations.collection() }
+            }
+            None => Self { id: pack_id.to_ascii_lowercase(), name: pack_name.to_owned(), i18n: translations.pack() },
+        }
+    }
+
+    /// [`Self::from_manifest`] with the `manifest.json` of `folder`.
+    pub fn read_folder(folder: &Path, pack_id: &str, pack_name: &str, translations: &PackTranslations) -> Self {
+        Self::from_manifest(&std::fs::read(folder.join("manifest.json")).unwrap_or_default(), pack_id, pack_name, translations)
+    }
+
+    /// The name in language `code`, else the manifest's.
+    pub fn display_name(&self, code: &str) -> &str {
+        self.i18n.name(code, &self.name)
+    }
+}
+
+/// `entries` gathered by collection, collections sorted by their name in language `code` (then by
+/// id), entries in the order given.
+pub fn group_by_collection<'a, T>(entries: impl IntoIterator<Item = (&'a PackCollection, T)>, code: &str) -> Vec<(&'a PackCollection, Vec<T>)> {
+    let mut groups: Vec<(&'a PackCollection, Vec<T>)> = Vec::new();
+    let mut index: HashMap<&'a str, usize> = HashMap::new();
+    for (collection, entry) in entries {
+        match index.get(collection.id.as_str()) {
+            Some(&at) => groups[at].1.push(entry),
+            None => {
+                index.insert(collection.id.as_str(), groups.len());
+                groups.push((collection, vec![entry]));
+            }
+        }
+    }
+    groups.sort_by_cached_key(|(collection, _)| (collection.display_name(code).to_lowercase(), collection.id.clone()));
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,5 +468,26 @@ mod tests {
         assert!(crate::search::Query::new("bật").score(&fields).is_some());
         assert!(crate::search::Query::new("pop").score(&fields).is_some());
         assert!(crate::search::Query::new("mờ").score(&fields).is_none());
+    }
+
+    #[test]
+    fn a_pack_joins_the_collection_its_manifest_names_or_is_its_own() {
+        let translations = PackTranslations::from_files([("vi".to_owned(), r#"{"name": "Một", "collection_name": "Bộ vui"}"#.to_owned())]);
+        let joined = PackCollection::from_manifest(br#"{"id":"fun-a","name":"A","collection":"Fun","collection_name":"Fun Set"}"#, "fun-a", "A", &translations);
+        assert_eq!((joined.id.as_str(), joined.name.as_str(), joined.display_name("vi")), ("fun", "Fun Set", "Bộ vui"));
+        let unnamed = PackCollection::from_manifest(br#"{"collection":"fun"}"#, "fun-b", "B", &PackTranslations::default());
+        assert_eq!((unnamed.id.as_str(), unnamed.name.as_str()), ("fun", "fun"));
+        let alone = PackCollection::from_manifest(br#"{"id":"Solo"}"#, "Solo", "Solo Pack", &translations);
+        assert_eq!((alone.id.as_str(), alone.name.as_str(), alone.display_name("vi")), ("solo", "Solo Pack", "Một"));
+    }
+
+    #[test]
+    fn packs_are_grouped_by_collection_sorted_by_its_translated_name() {
+        let zeta = PackCollection { id: "z".to_owned(), name: "Zeta".to_owned(), i18n: PackTranslations::from_files([("vi".to_owned(), r#"{"collection_name": "Anh"}"#.to_owned())]).collection() };
+        let beta = PackCollection { id: "b".to_owned(), name: "Beta".to_owned(), i18n: Localized::default() };
+        let groups = group_by_collection([(&zeta, 1), (&beta, 2), (&zeta, 3)], "en");
+        assert_eq!(groups.iter().map(|(c, items)| (c.id.as_str(), items.clone())).collect::<Vec<_>>(), vec![("b", vec![2]), ("z", vec![1, 3])]);
+        let groups = group_by_collection([(&zeta, 1), (&beta, 2)], "vi");
+        assert_eq!(groups[0].0.id, "z", "the Vietnamese name sorts first");
     }
 }

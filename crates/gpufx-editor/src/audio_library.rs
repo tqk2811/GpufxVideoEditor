@@ -7,7 +7,7 @@ use d3d12_backend::{asset_source, ProjectPaths};
 use engine::{Time, TICKS_PER_SECOND};
 
 use crate::asset_install::{check_manifest_fields, parse_audio_manifest, AudioPackKind};
-use crate::i18n::pack::{Localized, PackTranslations};
+use crate::i18n::pack::{Localized, PackCollection, PackTranslations};
 use crate::media::{MediaItem, MediaKind};
 
 const PACK_TYPES: [AudioPackKind; 2] = [AudioPackKind::Sfx, AudioPackKind::Music];
@@ -56,6 +56,8 @@ pub struct LibraryPack {
     pub sounds: Vec<LibrarySound>,
     /// The pack's name, description and tags in the languages it brings.
     pub i18n: Localized,
+    /// The collection the lists show it under.
+    pub collection: PackCollection,
 }
 
 impl LibraryPack {
@@ -99,13 +101,14 @@ fn seconds_to_time(seconds: f64) -> Option<Time> {
 fn read_pack(root: &Path, kind: AudioPackKind, folder: &Path, library: &mut AudioLibrary) -> Option<LibraryPack> {
     let label = folder.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let mut problem = |message: String| library.problems.push(LibraryProblem { pack: label.clone(), message });
-    let manifest = match std::fs::read(folder.join("manifest.json")).map_err(|e| e.to_string()).and_then(|bytes| parse_audio_manifest(&bytes).map_err(|e| format!("{e:?}"))) {
+    let manifest = match std::fs::read(folder.join("manifest.json")).map_err(|e| e.to_string()).and_then(|bytes| parse_audio_manifest(&bytes).map(|manifest| (manifest, bytes)).map_err(|e| format!("{e:?}"))) {
         Ok(manifest) => manifest,
         Err(message) => {
             problem(message);
             return None;
         }
     };
+    let (manifest, bytes) = manifest;
     if check_manifest_fields(&manifest).ok() != Some(kind) || manifest.id.to_ascii_lowercase() != label.to_ascii_lowercase() {
         problem(format!("its manifest does not match the folder ({} {})", manifest.kind, manifest.id));
         return None;
@@ -122,7 +125,8 @@ fn read_pack(root: &Path, kind: AudioPackKind, folder: &Path, library: &mut Audi
         }
         sounds.push(LibrarySound { i18n: translations.item(&item.id), source, name: item.name, duration: seconds_to_time(item.duration), tags: item.tags, category: item.category, looped: item.looped, description: item.description });
     }
-    Some(LibraryPack { i18n: translations.pack(), kind, id: manifest.id.to_ascii_lowercase(), name: manifest.name, version: manifest.version, sounds })
+    let collection = PackCollection::from_manifest(&bytes, &manifest.id, &manifest.name, &translations);
+    Some(LibraryPack { i18n: translations.pack(), collection, kind, id: manifest.id.to_ascii_lowercase(), name: manifest.name, version: manifest.version, sounds })
 }
 
 /// Reads the packs under every root. A pack in an earlier root hides one of the same id in a later
@@ -155,12 +159,14 @@ pub fn scan_audio_packs(roots: &[PathBuf]) -> AudioLibrary {
 mod tests {
     use super::*;
 
+    const COLLECTION_FIELDS: &str = r#""version":"1.0.0","collection":"Fun","collection_name":"Fun Set","description":"d","category":"c","tags":["x"]"#;
+
     fn sound(name: &str, tags: &[&str], category: &str) -> LibrarySound {
         LibrarySound { i18n: Default::default(), source: format!("asset:sfx/p/{name}.flac"), name: name.to_owned(), duration: None, tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), looped: false, description: String::new() }
     }
 
     fn pack(name: &str, sounds: Vec<LibrarySound>) -> LibraryPack {
-        LibraryPack { i18n: Default::default(), kind: AudioPackKind::Sfx, id: name.to_lowercase(), name: name.to_owned(), version: "1.0.0".to_owned(), sounds }
+        LibraryPack { collection: Default::default(), i18n: Default::default(), kind: AudioPackKind::Sfx, id: name.to_lowercase(), name: name.to_owned(), version: "1.0.0".to_owned(), sounds }
     }
 
     fn library() -> AudioLibrary {
@@ -225,6 +231,28 @@ mod tests {
         assert!(shipped_pack.sounds[0].looped);
         assert_eq!(library.problems.len(), 3, "{:?}", library.problems);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_item_packs_of_one_collection_load_and_group_together() {
+        let dir = scratch("collection");
+        write_pack(&dir, "sfx", "fun-a", "A", &["audio/a.flac", "audio/b.flac"]);
+        write_pack(&dir, "sfx", "fun-b", "B", &["audio/a.flac", "audio/b.flac"]);
+        write_pack(&dir, "sfx", "solo", "Solo", &["audio/a.flac", "audio/b.flac"]);
+        for folder in [dir.join("packages/sfx/fun-a"), dir.join("packages/sfx/fun-b")] {
+            let manifest = folder.join("manifest.json");
+            let text = std::fs::read_to_string(&manifest).unwrap().replacen(r#""version":"1.0.0""#, COLLECTION_FIELDS, 1);
+            std::fs::write(manifest, text).unwrap();
+            std::fs::create_dir_all(folder.join("i18n")).unwrap();
+            std::fs::write(folder.join("i18n/vi.json"), r#"{"collection_name": "Bộ vui", "category": "k"}"#).unwrap();
+        }
+        let library = scan_audio_packs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(library.problems.is_empty(), "{:?}", library.problems);
+        let groups = crate::i18n::pack::group_by_collection(library.packs.iter().map(|pack| (&pack.collection, pack.id.as_str())), "vi");
+        let shown: Vec<(&str, &str, Vec<&str>)> = groups.iter().map(|(c, ids)| (c.id.as_str(), c.display_name("vi"), ids.clone())).collect();
+        assert_eq!(shown, vec![("fun", "Bộ vui", vec!["fun-a", "fun-b"]), ("solo", "Solo", vec!["solo"])]);
+        assert_eq!(library.packs[0].collection.name, "Fun Set");
     }
 
     #[test]

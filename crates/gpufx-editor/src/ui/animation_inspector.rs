@@ -74,17 +74,17 @@ fn animation_row(ui: &mut egui::Ui, id: egui::Id, animation: &mut ClipAnimation,
                     chosen = Some(Choice::BuiltIn(preset));
                 }
             }
-            let mut last_pack = None;
             let code = language.code();
-            for (pack, preset) in library.offered(group, kind) {
-                if last_pack != Some(pack.id.as_str()) {
-                    ui.separator();
-                    ui.colored_label(theme::text_dim(), pack.display_name(code));
-                    last_pack = Some(pack.id.as_str());
-                }
-                let selected = current.as_ref().is_some_and(|value| value.preset == preset.reference);
-                if ui.selectable_label(selected, preset.display_name(code)).clicked() {
-                    chosen = Some(Choice::Pack(preset.reference.clone(), preset.default_duration));
+            // One animation per pack: the packs of one set show together, under the set's name.
+            let offered = crate::i18n::pack::group_by_collection(library.offered(group, kind).into_iter().map(|(pack, preset)| (&pack.collection, preset)), code);
+            for (collection, presets) in offered {
+                ui.separator();
+                ui.colored_label(theme::text_dim(), collection.display_name(code));
+                for preset in presets {
+                    let selected = current.as_ref().is_some_and(|value| value.preset == preset.reference);
+                    if ui.selectable_label(selected, preset.display_name(code)).clicked() {
+                        chosen = Some(Choice::Pack(preset.reference.clone(), preset.default_duration));
+                    }
                 }
             }
         });
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn a_pack_preset_is_named_with_its_pack_or_marked_missing() {
         let rise = crate::clip_animation_library::LibraryAnimation { i18n: Default::default(), per_unit: None, reference: "p/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default(), effect_package: None, effect: None };
-        let library = ClipAnimationLibrary { packs: vec![crate::clip_animation_library::ClipAnimationPack { i18n: Default::default(), id: "p".to_owned(), name: "Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
+        let library = ClipAnimationLibrary { packs: vec![crate::clip_animation_library::ClipAnimationPack { collection: Default::default(), i18n: Default::default(), id: "p".to_owned(), name: "Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
         assert_eq!(shown_name("p/rise", AnimationGroup::Enter, &library, Language::ENGLISH), "Pack: Rise");
         assert_eq!(shown_name("q/gone", AnimationGroup::Enter, &library, Language::ENGLISH), "q/gone (pack not installed)");
         assert_eq!(shown_name("fade", AnimationGroup::Enter, &library, Language::ENGLISH), Language::ENGLISH.t(Message::AnimationPreset("fade")));

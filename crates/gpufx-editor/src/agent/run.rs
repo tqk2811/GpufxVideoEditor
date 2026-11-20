@@ -247,7 +247,7 @@ fn installed_packs(package_roots: &[PathBuf], kind: Option<&str>) -> Value {
                 "version": pack.version,
                 "source": match pack.source { PackSource::Shipped => "shipped", PackSource::User => "user" },
                 "items": pack.items,
-                "bytes": pack.bytes,
+                "bytes": crate::package_manager::disk_size(&pack.path),
                 "enabled": pack.enabled,
                 "hidden": pack.hidden,
                 "shadowed": pack.shadowed,
@@ -1695,9 +1695,9 @@ mod tests {
         use crate::sticker_library::{LibrarySticker, StickerPack};
         let mut host = FakeHost::new("live");
         let sound = |name: &str| LibrarySound { i18n: Default::default(), source: format!("asset:music/m/{name}.mp3"), name: name.to_owned(), duration: None, tags: vec!["happy".to_owned()], category: String::new(), looped: false, description: String::new() };
-        host.state.audio_library.packs.push(LibraryPack { i18n: Default::default(), kind: AudioPackKind::Music, id: "m".to_owned(), name: "M".to_owned(), version: "1".to_owned(), sounds: vec![sound("Kids Fun"), sound("Calm")] });
+        host.state.audio_library.packs.push(LibraryPack { collection: Default::default(), i18n: Default::default(), kind: AudioPackKind::Music, id: "m".to_owned(), name: "M".to_owned(), version: "1".to_owned(), sounds: vec![sound("Kids Fun"), sound("Calm")] });
         host.state.audio_library.loaded = true;
-        host.state.sticker_library.packs.push(StickerPack { i18n: Default::default(), id: "s".to_owned(), name: "S".to_owned(), stickers: vec![LibrarySticker { i18n: Default::default(), source: "asset:sticker/s/star.png".to_owned(), name: "Star".to_owned(), tags: vec!["happy".to_owned()], category: String::new(), size: Some((64, 64)), animation: None }] });
+        host.state.sticker_library.packs.push(StickerPack { collection: Default::default(), i18n: Default::default(), id: "s".to_owned(), name: "S".to_owned(), stickers: vec![LibrarySticker { i18n: Default::default(), source: "asset:sticker/s/star.png".to_owned(), name: "Star".to_owned(), tags: vec!["happy".to_owned()], category: String::new(), size: Some((64, 64)), animation: None }] });
         host.state.sticker_library.loaded = true;
         let sources = |result: AgentResult| result.expect("list")["items"].as_array().unwrap().iter().map(|item| item["source"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         assert_eq!(sources(host.run(AgentRequest::AssetList { kind: None, filter: Some("happy".to_owned()), limit: None })).len(), 3);
@@ -1719,7 +1719,7 @@ mod tests {
         assert_eq!(vietnamese[0]["translation"], json!({"language": "vi", "name": "Ngôi sao", "tags": ["vui"]}));
         host.state.set_language(Language::ENGLISH);
         // Without a filter the packs come in name order, as in the editor, not in load order.
-        host.state.audio_library.packs.push(LibraryPack { i18n: Default::default(), kind: AudioPackKind::Music, id: "a".to_owned(), name: "A".to_owned(), version: "1".to_owned(), sounds: vec![LibrarySound { i18n: Default::default(), source: "asset:music/a/x.mp3".to_owned(), ..sound("x") }] });
+        host.state.audio_library.packs.push(LibraryPack { collection: Default::default(), i18n: Default::default(), kind: AudioPackKind::Music, id: "a".to_owned(), name: "A".to_owned(), version: "1".to_owned(), sounds: vec![LibrarySound { i18n: Default::default(), source: "asset:music/a/x.mp3".to_owned(), ..sound("x") }] });
         assert_eq!(sources(host.run(AgentRequest::AssetList { kind: Some("music".to_owned()), filter: None, limit: None }))[0], "asset:music/a/x.mp3");
         assert_eq!(code(host.run(AgentRequest::AssetList { kind: Some("video".to_owned()), filter: None, limit: None })), "invalid_params");
     }

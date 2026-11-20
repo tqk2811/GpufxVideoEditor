@@ -56,11 +56,13 @@ pub enum UiRequest {
     OpenPackageManager,
     /// Reads the installed packs again for the package manager.
     RefreshPacks,
-    /// Turns pack `index` of the package manager's list on or off.
-    SetPackEnabled { index: usize, enabled: bool },
-    /// Asks to remove pack `index`: the window finds where the open project uses it first.
-    RemovePack { index: usize },
-    /// Removes the pack `PackageManagerUi::confirm_remove` names (by key and path, found again in
+    /// Turns pack `index` of the package manager's list on or off, or, with `collection`, every
+    /// pack of its tab in its collection.
+    SetPackEnabled { index: usize, enabled: bool, collection: bool },
+    /// Asks to remove pack `index`, or with `collection` every pack of its collection the user
+    /// installed: the window finds where the open project uses them first.
+    RemovePack { index: usize, collection: bool },
+    /// Removes the packs `PackageManagerUi::confirm_remove` names (by key and path, found again in
     /// the list read last: the list may have been read anew since the removal was asked).
     RemovePackConfirmed,
     OpenPackFolder { index: usize },

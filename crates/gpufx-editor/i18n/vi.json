@@ -93,6 +93,7 @@
   "packFilter": "Lọc",
   "packNone": "Không có gói nào",
   "packRemoveQuestion": "Gỡ {name}?",
+  "packRemoveCollectionQuestion.other": "Gỡ {count} gói của {name} mà bạn đã cài?",
   "packRemoved": "Đã gỡ {name}",
   "packRemoveFailed": "Không gỡ được gói: {detail}",
   "packToggleFailed": "Không bật/tắt được gói: {detail}",

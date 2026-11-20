@@ -13,7 +13,7 @@ use engine::{AnimationRef, ClipAnimation, ClipPlacement, FontRef, TextContent, T
 use crate::audio_library::LibraryProblem;
 use crate::clip_animation_library::pack_reference;
 use crate::font_library::LibraryFont;
-use crate::i18n::pack::{Localized, PackTranslations};
+use crate::i18n::pack::{Localized, PackCollection, PackTranslations};
 use crate::package_import::ImportProblem;
 use crate::subtitle_style_install::{check_subtitle_style_fields, parse_subtitle_style_manifest, SubtitleKaraoke, SubtitleLayout, SUBTITLE_STYLE_TYPE};
 use crate::text_clip::default_text;
@@ -147,6 +147,8 @@ pub struct TextStylePack {
     pub styles: Vec<LibraryTextStyle>,
     /// The pack's name, description and tags in the languages it brings.
     pub i18n: Localized,
+    /// The collection the lists show it under.
+    pub collection: PackCollection,
 }
 
 impl TextStylePack {
@@ -210,7 +212,8 @@ fn read_pack(folder: &Path, label: &str, kind: StyleKind) -> Result<TextStylePac
     if !id.eq_ignore_ascii_case(label) {
         return Err(format!("its manifest does not match the folder ({id})"));
     }
-    Ok(TextStylePack { i18n: translations.pack(), id: id.to_ascii_lowercase(), name, kind, styles })
+    let collection = PackCollection::from_manifest(&bytes, &id, &name, &translations);
+    Ok(TextStylePack { i18n: translations.pack(), collection, id: id.to_ascii_lowercase(), name, kind, styles })
 }
 
 /// Reads the text and subtitle style packs under every root. A pack is accepted whole or reported,
@@ -261,12 +264,14 @@ pub(crate) fn subtitle_library_for_test(font_hint: &[&str]) -> TextStyleLibrary 
         karaoke: None,
         cover: None,
     };
-    TextStyleLibrary { packs: vec![TextStylePack { i18n: Default::default(), id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![style] }], problems: Vec::new(), loaded: true }
+    TextStyleLibrary { packs: vec![TextStylePack { collection: Default::default(), i18n: Default::default(), id: "s".to_owned(), name: "S".to_owned(), kind: StyleKind::Subtitle, styles: vec![style] }], problems: Vec::new(), loaded: true }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const COLLECTION_FIELDS: &str = r#""version":"1.0.0","collection":"Fun","collection_name":"Fun Set","description":"d","category":"c","tags":["x"]"#;
     use engine::{AnimationGroup, TextAlign};
 
     fn scratch(name: &str) -> PathBuf {
@@ -290,6 +295,25 @@ mod tests {
         write(dir, "text-style", "avs-text", &text_pack("Avs-Text", "Text Styles"));
         write(dir, "subtitle-style", "avs-subs", &crate::subtitle_style_install::tests::manifest_json());
         scan_text_style_packs(&[dir.to_path_buf()])
+    }
+
+    #[test]
+    fn one_item_packs_of_one_collection_load_and_group_together() {
+        let dir = scratch("collection");
+        write(&dir, "text-style", "fun-a", &text_pack("Fun-A", "A"));
+        write(&dir, "subtitle-style", "avs-subs", &crate::subtitle_style_install::tests::manifest_json());
+        for folder in [dir.join("packages/text-style/fun-a"), dir.join("packages/subtitle-style/avs-subs")] {
+            let manifest = folder.join("manifest.json");
+            let text = std::fs::read_to_string(&manifest).unwrap().replacen(r#""version":"1.0.0""#, COLLECTION_FIELDS, 1);
+            std::fs::write(manifest, text).unwrap();
+            std::fs::create_dir_all(folder.join("i18n")).unwrap();
+            std::fs::write(folder.join("i18n/vi.json"), r#"{"collection_name": "Bộ vui", "category": "k"}"#).unwrap();
+        }
+        let library = scan_text_style_packs(&[dir.clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(library.problems.is_empty(), "{:?}", library.problems);
+        assert_eq!(library.packs.len(), 2);
+        assert!(library.packs.iter().all(|pack| pack.collection.id == "fun" && pack.collection.display_name("vi") == "Bộ vui"));
     }
 
     #[test]

@@ -479,7 +479,7 @@ mod tests {
         use crate::clip_animation_library::{ClipAnimationLibrary, ClipAnimationPack, LibraryAnimation};
         let translations = crate::i18n::pack::PackTranslations::from_files([("vi".to_owned(), r#"{"name": "Gói chuyển động", "items": {"rise": {"name": "Nâng lên"}}}"#.to_owned())]);
         let rise = LibraryAnimation { i18n: translations.item("rise"), per_unit: None, reference: "p/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default(), effect_package: None, effect: None };
-        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { i18n: translations.pack(), id: "p".to_owned(), name: "Moves".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
+        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { collection: Default::default(), i18n: translations.pack(), id: "p".to_owned(), name: "Moves".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
 
         let found = animation_list(&library, "nang len", None, "vi");
         let presets = found["presets"].as_array().unwrap();
@@ -498,7 +498,7 @@ mod tests {
         use crate::clip_animation_library::{AnimatedClipKind, ClipAnimationLibrary, ClipAnimationPack, LibraryAnimation};
         let curve = engine::AnimationCurve::default().with(engine::CurveProperty::Opacity, vec![engine::CurveKey { t: 0.0, value: 0.0, ease: engine::Ease::Linear }, engine::CurveKey { t: 1.0, value: 1.0, ease: engine::Ease::Linear }]);
         let rise = LibraryAnimation { i18n: Default::default(), per_unit: None, reference: "agent-pack/rise".to_owned(), name: "Rise".to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(45_000), applies_to: Some(vec![AnimatedClipKind::Text]), curve, effect_package: None, effect: None };
-        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { i18n: Default::default(), id: "agent-pack".to_owned(), name: "Agent Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
+        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { collection: Default::default(), i18n: Default::default(), id: "agent-pack".to_owned(), name: "Agent Pack".to_owned(), animations: vec![rise] }], problems: Vec::new(), loaded: true };
 
         let list = animation_list(&library, "", None, "en");
         let presets = list["presets"].as_array().unwrap();
@@ -532,7 +532,7 @@ mod tests {
         let animation = |id: &str, effect_package: Option<&str>, effect: Option<engine::PresetEffect>| LibraryAnimation { i18n: Default::default(), per_unit: None, reference: format!("p/{id}"), name: id.to_owned(), group: AnimationGroup::Enter, default_duration: engine::Time::from_ticks(1), applies_to: None, curve: engine::AnimationCurve::default(), effect_package: effect_package.map(str::to_owned), effect };
         let ready = engine::PresetEffect { package: "packages/gpufx/x/wipe".to_owned(), progress: "progress".to_owned(), params: serde_json::Map::new() };
         let animations = vec![animation("plain", None, None), animation("ready", Some("io.x.wipe"), Some(ready)), animation("missing", Some("io.x.gone"), None)];
-        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), animations }], problems: Vec::new(), loaded: true };
+        let library = ClipAnimationLibrary { packs: vec![ClipAnimationPack { collection: Default::default(), i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), animations }], problems: Vec::new(), loaded: true };
         let list = animation_list(&library, "", None, "en");
         let effect = |id: &str| list["presets"].as_array().unwrap().iter().find(|preset| preset["id"] == format!("p/{id}")).unwrap()["effect"].clone();
         assert_eq!(effect("plain"), Value::Null);

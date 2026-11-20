@@ -1,8 +1,11 @@
 //! The package manager: a window that stays open beside the editor, with a tab for each kind of
 //! pack. It only draws and asks; the window session does the work (see [`UiRequest`]).
 
+use std::collections::HashSet;
+
 use super::{theme, UiRequest};
 use crate::editor::EditorState;
+use crate::i18n::pack::PackCollection;
 use crate::i18n::{Language, Message};
 use crate::package_manager::{filter_packs, find_pack, InstalledPack, PackSource, PackTab, UseSite};
 
@@ -18,9 +21,12 @@ pub struct PackageManagerUi {
     pub packs: Vec<InstalledPack>,
     /// Whether a read of the packs is running.
     pub reading: bool,
-    /// The pack (its key and path, which outlive a new read of `packs`) the user asked to remove,
-    /// with where the open project uses it, until the removal is confirmed or cancelled.
-    pub confirm_remove: Option<(String, std::path::PathBuf, Vec<UseSite>)>,
+    /// The packs (their keys and paths, which outlive a new read of `packs`) the user asked to
+    /// remove, one or a whole collection, with where the open project uses them, until the removal
+    /// is confirmed or cancelled.
+    pub confirm_remove: Option<(Vec<(String, std::path::PathBuf)>, Vec<UseSite>)>,
+    /// The collections shown open, by tab code and collection id; the others start closed.
+    pub open_collections: HashSet<String>,
     /// The packs the open project needs that the copy beside it can install.
     pub restore_offer: Vec<String>,
 }
@@ -76,8 +82,8 @@ pub fn show(ctx: &egui::Context, state: &mut EditorState, requests: &mut Vec<UiR
             }
             ui.add(egui::TextEdit::singleline(&mut ui_state.filter).hint_text(language.t(Message::PackFilter)).desired_width(f32::INFINITY));
         });
-        if let Some((key, path, uses)) = ui_state.confirm_remove.clone() {
-            confirm_removal(ui, language, ui_state, (&key, &path), &uses, busy, requests);
+        if let Some((targets, uses)) = ui_state.confirm_remove.clone() {
+            confirm_removal(ui, language, ui_state, &targets, &uses, busy, requests);
         }
         if busy {
             ui.colored_label(theme::refused(), language.t(Message::PackBusyExporting));
@@ -110,13 +116,18 @@ fn restore_banner(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageM
     ui.separator();
 }
 
-fn confirm_removal(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageManagerUi, (key, path): (&str, &std::path::Path), uses: &[UseSite], busy: bool, requests: &mut Vec<UiRequest>) {
-    let Some(pack) = find_pack(&ui_state.packs, key, path) else {
-        ui_state.confirm_remove = None;
-        return;
+fn confirm_removal(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageManagerUi, targets: &[(String, std::path::PathBuf)], uses: &[UseSite], busy: bool, requests: &mut Vec<UiRequest>) {
+    let found: Vec<&InstalledPack> = targets.iter().filter_map(|(key, path)| find_pack(&ui_state.packs, key, path)).collect();
+    let question = match found.as_slice() {
+        [] => {
+            ui_state.confirm_remove = None;
+            return;
+        }
+        [pack] if targets.len() == 1 => Message::PackRemoveQuestion(pack.display_name(language.code()).to_owned()),
+        [pack, ..] => Message::PackRemoveCollectionQuestion { name: pack.collection.display_name(language.code()).to_owned(), count: found.len() },
     };
     ui.separator();
-    ui.strong(language.t(Message::PackRemoveQuestion(pack.display_name(language.code()).to_owned())));
+    ui.strong(language.t(question));
     if !uses.is_empty() {
         ui.colored_label(theme::refused(), language.t(Message::PackUsedBy(uses.len())));
         egui::ScrollArea::vertical().id_salt("pack-uses").max_height(90.0).show(ui, |ui| {
@@ -141,73 +152,188 @@ fn confirm_removal(ui: &mut egui::Ui, language: Language, ui_state: &mut Package
     });
 }
 
-fn pack_table(ui: &mut egui::Ui, language: Language, ui_state: &PackageManagerUi, busy: bool, requests: &mut Vec<UiRequest>) {
+/// The height of a row of the pack table: every row is one line, so only the rows in view are drawn.
+const ROW_HEIGHT: f32 = 24.0;
+/// The widths of the columns after the name: enabled, version, source, items, size, actions.
+const COLUMN_WIDTHS: [f32; 6] = [24.0, 80.0, 90.0, 50.0, 70.0, 170.0];
+/// The narrowest the name column gets; the table scrolls sideways below that.
+const MIN_NAME_WIDTH: f32 = 180.0;
+
+/// One line of the pack table.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableRow<'a> {
+    /// A collection of more than one pack, with its packs; open or not.
+    Collection { collection: &'a PackCollection, packs: Vec<&'a InstalledPack>, open: bool },
+    /// A pack: alone in its collection, or inside an open one.
+    Pack { pack: &'a InstalledPack, nested: bool },
+}
+
+/// The rows of `shown` (packs of one tab, in the list's order): packs gathered by collection, the
+/// packs of a collection listed only while it is open. Every collection is open while `filtering`.
+pub fn table_rows<'a>(shown: &[&'a InstalledPack], open: &HashSet<String>, tab: PackTab, filtering: bool, code: &str) -> Vec<TableRow<'a>> {
+    let groups = crate::i18n::pack::group_by_collection(shown.iter().map(|pack| (&pack.collection, *pack)), code);
+    let mut rows = Vec::new();
+    for (collection, packs) in groups {
+        if let [pack] = packs.as_slice() {
+            rows.push(TableRow::Pack { pack, nested: false });
+            continue;
+        }
+        let is_open = filtering || open.contains(&collection_key(tab, &collection.id));
+        let nested: Vec<TableRow<'a>> = if is_open { packs.iter().map(|pack| TableRow::Pack { pack, nested: true }).collect() } else { Vec::new() };
+        rows.push(TableRow::Collection { collection, packs, open: is_open });
+        rows.extend(nested);
+    }
+    rows
+}
+
+/// What [`PackageManagerUi::open_collections`] holds for collection `id` of `tab`.
+pub fn collection_key(tab: PackTab, id: &str) -> String {
+    format!("{}/{id}", tab.code())
+}
+
+/// Where pack `pack` is in the list, for a request.
+fn index_of(packs: &[InstalledPack], pack: &InstalledPack) -> usize {
+    packs.iter().position(|candidate| std::ptr::eq(candidate, pack)).unwrap_or(usize::MAX)
+}
+
+/// A cell `width` wide of the row being drawn.
+fn cell<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(egui::vec2(width, ROW_HEIGHT), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_width(width);
+        ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+        add(ui)
+    })
+    .inner
+}
+
+fn source_label(language: Language, source: PackSource) -> String {
+    language.t(match source {
+        PackSource::Shipped => Message::PackSourceShipped,
+        PackSource::User => Message::PackSourceUser,
+    })
+}
+
+/// The size of `packs` together, or an ellipsis while one of them is not measured yet.
+fn sizes_label<'a>(packs: impl IntoIterator<Item = &'a InstalledPack>) -> String {
+    packs.into_iter().map(|pack| pack.bytes).sum::<Option<u64>>().map_or_else(|| "\u{2026}".to_owned(), size_label)
+}
+
+fn pack_table(ui: &mut egui::Ui, language: Language, ui_state: &mut PackageManagerUi, busy: bool, requests: &mut Vec<UiRequest>) {
     let shown = filter_packs(&ui_state.packs, ui_state.tab, &ui_state.filter);
     if shown.is_empty() {
         ui.colored_label(theme::text_dim(), language.t(Message::PackNone));
         return;
     }
-    egui::ScrollArea::both().id_salt("pack-table").auto_shrink([false, false]).show(ui, |ui| {
-        egui::Grid::new("pack-grid").striped(true).num_columns(7).spacing([12.0, 4.0]).show(ui, |ui| {
-            for heading in [Message::PackColumnEnabled, Message::PackColumnName, Message::PackColumnVersion, Message::PackColumnSource, Message::PackColumnItems, Message::PackColumnSize] {
-                ui.strong(language.t(heading));
-            }
-            ui.label("");
-            ui.end_row();
-            for pack in shown {
-                let index = ui_state.packs.iter().position(|candidate| std::ptr::eq(candidate, pack)).unwrap_or(usize::MAX);
-                let mut enabled = pack.enabled;
-                let toggle = ui.add_enabled(!busy, egui::Checkbox::without_text(&mut enabled));
-                if toggle.changed() {
-                    requests.push(UiRequest::SetPackEnabled { index, enabled });
-                }
-                toggle.on_disabled_hover_text(language.t(Message::PackBusyExporting));
-                name_cell(ui, language, pack);
-                ui.label(&pack.version);
-                ui.label(language.t(match pack.source {
-                    PackSource::Shipped => Message::PackSourceShipped,
-                    PackSource::User => Message::PackSourceUser,
-                }));
-                ui.label(pack.items.to_string());
-                ui.label(size_label(pack.bytes));
-                ui.horizontal(|ui| {
-                    if ui.button(language.t(Message::PackOpenFolder)).clicked() {
-                        requests.push(UiRequest::OpenPackFolder { index });
-                    }
-                    let remove = ui.add_enabled(pack.removable() && !busy, egui::Button::new(language.t(Message::PackRemove)));
-                    if remove.clicked() {
-                        requests.push(UiRequest::RemovePack { index });
-                    }
-                    if !pack.removable() {
-                        remove.on_disabled_hover_text(language.t(Message::PackReadOnly));
-                    } else if busy {
-                        remove.on_disabled_hover_text(language.t(Message::PackBusyExporting));
-                    }
-                });
-                ui.end_row();
-            }
-        });
+    let code = language.code();
+    let rows = table_rows(&shown, &ui_state.open_collections, ui_state.tab, !ui_state.filter.trim().is_empty(), code);
+    let fixed: f32 = COLUMN_WIDTHS.iter().sum::<f32>() + ui.spacing().item_spacing.x * 7.0;
+    let name_width = (ui.available_width() - fixed).max(MIN_NAME_WIDTH);
+    let [w_enabled, w_version, w_source, w_items, w_size, w_actions] = COLUMN_WIDTHS;
+    ui.horizontal(|ui| {
+        cell(ui, w_enabled, |ui| ui.strong(language.t(Message::PackColumnEnabled)));
+        cell(ui, name_width, |ui| ui.strong(language.t(Message::PackColumnName)));
+        cell(ui, w_version, |ui| ui.strong(language.t(Message::PackColumnVersion)));
+        cell(ui, w_source, |ui| ui.strong(language.t(Message::PackColumnSource)));
+        cell(ui, w_items, |ui| ui.strong(language.t(Message::PackColumnItems)));
+        cell(ui, w_size, |ui| ui.strong(language.t(Message::PackColumnSize)));
     });
+    let mut toggled = None;
+    let tab = ui_state.tab;
+    let packs = &ui_state.packs;
+    egui::ScrollArea::both().id_salt("pack-table").auto_shrink([false, false]).show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
+        for row in &rows[range] {
+            ui.horizontal(|ui| match row {
+                TableRow::Collection { collection, packs: members, open } => {
+                    let index = index_of(packs, members[0]);
+                    let mut enabled = members.iter().all(|pack| pack.enabled);
+                    let toggle = cell(ui, w_enabled, |ui| ui.add_enabled(!busy, egui::Checkbox::without_text(&mut enabled)));
+                    if toggle.changed() {
+                        requests.push(UiRequest::SetPackEnabled { index, enabled, collection: true });
+                    }
+                    toggle.on_disabled_hover_text(language.t(Message::PackBusyExporting));
+                    cell(ui, name_width, |ui| {
+                        let arrow = if *open { "\u{25be}" } else { "\u{25b8}" };
+                        let label = egui::RichText::new(format!("{arrow} {} ({})", collection.display_name(code), members.len())).strong();
+                        if ui.add(egui::Label::new(label).sense(egui::Sense::click())).clicked() {
+                            toggled = Some(collection_key(tab, &collection.id));
+                        }
+                    });
+                    cell(ui, w_version, |_| ());
+                    let first = members[0].source;
+                    cell(ui, w_source, |ui| members.iter().all(|pack| pack.source == first).then(|| ui.label(source_label(language, first))));
+                    cell(ui, w_items, |ui| ui.label(members.iter().map(|pack| pack.items).sum::<usize>().to_string()));
+                    cell(ui, w_size, |ui| ui.label(sizes_label(members.iter().copied())));
+                    cell(ui, w_actions, |ui| {
+                        let none = !members.iter().any(|pack| pack.removable());
+                        let remove = ui.add_enabled(!none && !busy, egui::Button::new(language.t(Message::PackRemove)));
+                        if remove.clicked() {
+                            requests.push(UiRequest::RemovePack { index, collection: true });
+                        }
+                        if none {
+                            remove.on_disabled_hover_text(language.t(Message::PackReadOnly));
+                        } else if busy {
+                            remove.on_disabled_hover_text(language.t(Message::PackBusyExporting));
+                        }
+                    });
+                }
+                TableRow::Pack { pack, nested } => pack_row(ui, language, packs, pack, *nested, name_width, busy, requests),
+            });
+        }
+    });
+    if let Some(key) = toggled {
+        if !ui_state.open_collections.remove(&key) {
+            ui_state.open_collections.insert(key);
+        }
+    }
 }
 
-/// The name, its labels, and in red why a broken pack cannot be used.
-fn name_cell(ui: &mut egui::Ui, language: Language, pack: &InstalledPack) {
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            let shown = pack.display_name(language.code());
-            let name = if pack.problem.is_some() { egui::RichText::new(shown).color(theme::refused()) } else { egui::RichText::new(shown) };
-            let description = pack.i18n.get(language.code()).and_then(|texts| texts.description.as_deref());
-            let hover = description.map_or_else(|| pack.path.display().to_string(), |description| format!("{description}\n{}", pack.path.display()));
-            ui.label(name).on_hover_text(hover);
-            if pack.hidden {
-                ui.label(egui::RichText::new(language.t(Message::PackInternal)).small().color(theme::text_dim()));
-            }
-        });
+/// One pack's line: the name, its labels; why a broken pack cannot be used shows on hover.
+#[allow(clippy::too_many_arguments)]
+fn pack_row(ui: &mut egui::Ui, language: Language, packs: &[InstalledPack], pack: &InstalledPack, nested: bool, name_width: f32, busy: bool, requests: &mut Vec<UiRequest>) {
+    let [w_enabled, w_version, w_source, w_items, w_size, w_actions] = COLUMN_WIDTHS;
+    let index = index_of(packs, pack);
+    let mut enabled = pack.enabled;
+    let toggle = cell(ui, w_enabled, |ui| ui.add_enabled(!busy, egui::Checkbox::without_text(&mut enabled)));
+    if toggle.changed() {
+        requests.push(UiRequest::SetPackEnabled { index, enabled, collection: false });
+    }
+    toggle.on_disabled_hover_text(language.t(Message::PackBusyExporting));
+    cell(ui, name_width, |ui| {
+        if nested {
+            ui.add_space(16.0);
+        }
+        let code = language.code();
+        let shown = pack.display_name(code);
+        let name = if pack.problem.is_some() { egui::RichText::new(shown).color(theme::refused()) } else { egui::RichText::new(shown) };
+        let description = pack.i18n.get(code).and_then(|texts| texts.description.as_deref());
+        let mut hover = description.map_or_else(|| pack.path.display().to_string(), |description| format!("{description}\n{}", pack.path.display()));
         if let Some(problem) = &pack.problem {
-            ui.label(egui::RichText::new(problem).small().color(theme::refused()));
+            hover = format!("{problem}\n{hover}");
+        }
+        ui.label(name).on_hover_text(hover);
+        if pack.hidden {
+            ui.label(egui::RichText::new(language.t(Message::PackInternal)).small().color(theme::text_dim()));
         }
         if pack.shadowed {
             ui.label(egui::RichText::new(language.t(Message::PackShadowed)).small().color(theme::text_dim()));
+        }
+    });
+    cell(ui, w_version, |ui| ui.label(&pack.version));
+    cell(ui, w_source, |ui| ui.label(source_label(language, pack.source)));
+    cell(ui, w_items, |ui| ui.label(pack.items.to_string()));
+    cell(ui, w_size, |ui| ui.label(sizes_label([pack])));
+    cell(ui, w_actions, |ui| {
+        if ui.button(language.t(Message::PackOpenFolder)).clicked() {
+            requests.push(UiRequest::OpenPackFolder { index });
+        }
+        let remove = ui.add_enabled(pack.removable() && !busy, egui::Button::new(language.t(Message::PackRemove)));
+        if remove.clicked() {
+            requests.push(UiRequest::RemovePack { index, collection: false });
+        }
+        if !pack.removable() {
+            remove.on_disabled_hover_text(language.t(Message::PackReadOnly));
+        } else if busy {
+            remove.on_disabled_hover_text(language.t(Message::PackBusyExporting));
         }
     });
 }

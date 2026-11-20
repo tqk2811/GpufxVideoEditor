@@ -93,6 +93,8 @@
   "packFilter": "Filter",
   "packNone": "No packs here",
   "packRemoveQuestion": "Remove {name}?",
+  "packRemoveCollectionQuestion.one": "Remove the {count} pack of {name} you installed?",
+  "packRemoveCollectionQuestion.other": "Remove the {count} packs of {name} you installed?",
   "packRemoved": "Removed {name}",
   "packRemoveFailed": "The pack could not be removed: {detail}",
   "packToggleFailed": "The pack could not be turned on or off: {detail}",
