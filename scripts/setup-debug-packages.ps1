@@ -1,7 +1,12 @@
 # Fills target\debug\packages so a debug build of the editor starts with every package:
-# - packages\gpufx: junctions to the effect and transition groups of FFmpegGpuFilter and GpufxVideoEditor-Assets.
-# - packages\gpufx_ai_*: junctions to the AI packages of FFmpegGpuFilter.
-# - packages\gpufx\capcut: junctions into a shallow clone of FFmpegGpuFilter-packages-capcut.
+# - packages\gpufx\<group>\<package>.zip: every effect and transition package of FFmpegGpuFilter and
+#   GpufxVideoEditor-Assets, packed by `gpufx pack` like a release (scripts\pack-packages.ps1 of FFmpegGpuFilter
+#   for its own packages, the gpufx CLI it builds for the rest).
+# - packages\gpufx_ai_<filter>\<model>.zip: the AI models of FFmpegGpuFilter, fetched and converted by its
+#   pack-packages.ps1 -Models (needs network; they are not in git).
+# - packages\gpufx\capcut\<package>.zip: the packages of a shallow clone of FFmpegGpuFilter-packages-capcut.
+# The effect packages are zips, not links to the checkouts: editing a shader or manifest there needs a rerun of
+# this script (cargo is needed to build the gpufx CLI).
 # - packages\sfx, music, sticker, clip-animation, font: the packs of the GpufxVideoEditor-Assets releases, unpacked
 #   the way the editor installs them, with the translations (i18n\) of the GpufxVideoEditor-Assets checkout,
 #   which may be newer than the releases.
@@ -26,12 +31,8 @@ $capcutRepos = @(
 )
 $outDir = Join-Path $repoRoot "target\$Target"
 $packagesDir = Join-Path $outDir 'packages'
-$shaderSources = @(
-    (Join-Path $repoRoot 'external\FFmpegGpuFilter\packages'),
-    (Join-Path $repoRoot 'external\GpufxVideoEditor-Assets\packages')
-)
 
-if (-not (Test-Path -LiteralPath (Join-Path $shaderSources[0] 'gpufx') -PathType Container)) {
+if (-not (Test-Path -LiteralPath (Join-Path $repoRoot 'external\FFmpegGpuFilter\packages\gpufx') -PathType Container)) {
     throw 'external\FFmpegGpuFilter\packages is empty: run scripts\setup-poc.ps1 first'
 }
 
@@ -42,22 +43,53 @@ function Remove-Junction([string]$Path) {
     }
 }
 
-function New-Junction([string]$Path, [string]$To) {
-    Remove-Junction $Path
-    New-Item -ItemType Junction -Path $Path -Target $To | Out-Null
+# Clears what an earlier run left in $Path: junctions are unlinked (the target stays), real folders deleted.
+function Clear-Packages([string]$Path) {
+    foreach ($item in Get-ChildItem -LiteralPath $Path -Force) {
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            Remove-Junction $item.FullName
+        } elseif ($item.PSIsContainer) {
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force
+        } else {
+            Remove-Item -LiteralPath $item.FullName -Force
+        }
+    }
 }
 
-New-Item -ItemType Directory -Force -Path (Join-Path $packagesDir 'gpufx') | Out-Null
+$gpufxDir = Join-Path $packagesDir 'gpufx'
+New-Item -ItemType Directory -Force -Path $gpufxDir | Out-Null
+Clear-Packages $gpufxDir
+foreach ($old in Get-ChildItem -LiteralPath $packagesDir -Force -Directory -Filter 'gpufx_ai_*') {
+    if ($old.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { Remove-Junction $old.FullName }
+    else { Remove-Item -LiteralPath $old.FullName -Recurse -Force }
+}
 
-foreach ($source in $shaderSources) {
-    $gpufx = Join-Path $source 'gpufx'
-    if (-not (Test-Path -LiteralPath $gpufx -PathType Container)) { continue }
-    foreach ($group in Get-ChildItem -LiteralPath $gpufx -Directory) {
-        New-Junction (Join-Path $packagesDir "gpufx\$($group.Name)") $group.FullName
+# FFmpegGpuFilter: its own script packs packages\gpufx -> gpufx\<group>\<name>.zip and the models -> gpufx_ai_*.
+& (Join-Path $repoRoot 'external\FFmpegGpuFilter\scripts\pack-packages.ps1') -Out $gpufxDir -Models
+if (-not $?) { throw 'pack-packages.ps1 of FFmpegGpuFilter failed' }
+$gpufxCli = Join-Path $repoRoot 'external\FFmpegGpuFilter\target\release\gpufx.exe'
+if (-not (Test-Path -LiteralPath $gpufxCli)) { throw "$gpufxCli missing after pack-packages.ps1" }
+
+# Packs every folder with a manifest.json under $Source into $Out\<relative path>.zip.
+function Pack-Folders([string]$Source, [string]$Out) {
+    $count = 0
+    foreach ($manifestFile in Get-ChildItem -LiteralPath $Source -Recurse -File -Filter 'manifest.json') {
+        $dir = $manifestFile.Directory.FullName
+        $rel = $dir.Substring($Source.TrimEnd('').Length + 1)
+        $zip = Join-Path $Out "$rel.zip"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $zip) | Out-Null
+        # Out-Null: the CLI's "wrote ..." line would otherwise become part of the returned count.
+        & $gpufxCli pack $dir $zip | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "packing $dir failed ($LASTEXITCODE)" }
+        $count++
     }
-    foreach ($ai in Get-ChildItem -LiteralPath $source -Directory -Filter 'gpufx_*') {
-        New-Junction (Join-Path $packagesDir $ai.Name) $ai.FullName
-    }
+    return $count
+}
+
+$assetsGpufx = Join-Path $repoRoot 'external\GpufxVideoEditor-Assets\packages\gpufx'
+if (Test-Path -LiteralPath $assetsGpufx -PathType Container) {
+    $count = Pack-Folders $assetsGpufx $gpufxDir
+    Write-Host "packed $count packages of GpufxVideoEditor-Assets -> $gpufxDir"
 }
 
 $download = Join-Path $outDir 'package-downloads'
@@ -67,7 +99,7 @@ if ($Force -and (Test-Path -LiteralPath $download)) {
 New-Item -ItemType Directory -Force -Path $download | Out-Null
 
 # The CapCut recreations live in repositories of their own that are never submodules here. A debug build
-# still gets them, from a shallow clone of each, so every package can be tried locally.
+# still gets them, packed from a shallow clone of each, so every package can be tried locally.
 foreach ($capcut in $capcutRepos) {
     $clone = Join-Path $download ($capcut.Repo -replace '^.*/', '')
     if (-not (Test-Path -LiteralPath $clone)) {
@@ -80,25 +112,13 @@ foreach ($capcut in $capcutRepos) {
         & git -C $clone reset -q --hard FETCH_HEAD
         if ($LASTEXITCODE -ne 0) { throw "updating the clone of $($capcut.Repo) failed ($LASTEXITCODE)" }
     }
-    $groupDir = Join-Path $packagesDir "gpufx\$($capcut.Group)"
-    $existing = Get-Item -LiteralPath $groupDir -Force -ErrorAction SilentlyContinue
-    if ($null -ne $existing -and ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-        # A junction left from when the group was a folder of FFmpegGpuFilter-packages, maybe dangling.
-        Remove-Junction $groupDir
-    } elseif ($null -ne $existing) {
-        foreach ($old in Get-ChildItem -LiteralPath $groupDir -Directory) { Remove-Junction $old.FullName }
-    }
+    $groupDir = Join-Path $gpufxDir $capcut.Group
     New-Item -ItemType Directory -Force -Path $groupDir | Out-Null
-    $count = 0
     # The packages sit in src\ of the repository; an older clone kept them at its root.
     $source = Join-Path $clone 'src'
     if (-not (Test-Path -LiteralPath $source)) { $source = $clone }
-    foreach ($package in Get-ChildItem -LiteralPath $source -Directory) {
-        if (-not (Test-Path -LiteralPath (Join-Path $package.FullName 'manifest.json'))) { continue }
-        New-Junction (Join-Path $groupDir $package.Name) $package.FullName
-        $count++
-    }
-    Write-Host "linked $count packages of $($capcut.Repo) -> $groupDir"
+    $count = Pack-Folders $source $groupDir
+    Write-Host "packed $count packages of $($capcut.Repo) -> $groupDir"
 }
 foreach ($release in $releases) {
     $folder = Join-Path $download $release
