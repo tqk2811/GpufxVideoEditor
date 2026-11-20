@@ -11,10 +11,13 @@
 # - the packages of a shallow clone of FFmpegGpuFilter-packages-capcut go through the same staging, group capcut.
 # The effect packages are zips, not links to the checkouts: editing a shader or manifest there needs a rerun of
 # this script (cargo is needed to build the gpufx CLI, py for the wrappers).
-# - packages\sfx, music, sticker, clip-animation, font: the packs of the GpufxVideoEditor-Assets releases, unpacked
-#   the way the editor installs them, with the translations (i18n\) of the GpufxVideoEditor-Assets checkout,
-#   which may be newer than the releases.
-# - the private CapCut music, sticker and text style packs, copied from a GpufxVideoEditor-Assets-capcut-private
+# - packages\sfx, music, sticker, clip-animation, text-style, subtitle-style: the packs of the
+#   GpufxVideoEditor-Assets releases ($releases below), one item per pack. Only the aggregate of each release
+#   (*-packs.zip, a stored zip of the per-item pack zips) is downloaded and unpacked two levels: aggregate ->
+#   pack zips -> pack folders, the way the editor installs them, with the translations (i18n\) of the
+#   GpufxVideoEditor-Assets checkout for a pack whose id it has, which may be newer than the releases. These
+#   type folders are emptied first, so packs of an older layout (one pack per set) do not show twice.
+# - the private CapCut packs (one folder per item), copied from a GpufxVideoEditor-Assets-capcut-private
 #   checkout next to this repository (or -CapcutPrivate) when there is one.
 # The editor uses the packages next to its executable before those of the checkout, so once this folder
 # exists it must hold everything. Run it again after cargo clean, or with -Force to fetch the packs again.
@@ -31,7 +34,15 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $assetsRepo = 'tqk2811/GpufxVideoEditor-Assets'
-$releases = @('audio-v0.1.0', 'stickers-v0.1.0', 'animations-v0.1.0')
+# The GpufxVideoEditor-Assets releases to install, one tag per line (provisional tags until they are published).
+$releases = @(
+    'audio-v0.2.0'
+    'stickers-v0.2.0'
+    'animations-v0.2.0'
+    'text-styles-v0.1.0'
+)
+# The type folders the releases and the CapCut private packs fill; emptied before they are filled again.
+$contentTypes = @('sfx', 'music', 'sticker', 'clip-animation', 'text-style', 'subtitle-style')
 $capcutRepos = @(
     @{ Repo = 'tqk2811/FFmpegGpuFilter-packages-capcut'; Group = 'capcut' }
 )
@@ -188,35 +199,52 @@ if (-not $SkipModels) {
 
 foreach ($release in $releases) {
     $folder = Join-Path $download $release
-    if (-not (Test-Path -LiteralPath $folder)) {
-        & gh release download $release -R $assetsRepo -D $folder -p '*.zip'
+    if (-not (Test-Path -LiteralPath $folder) -or @(Get-ChildItem -LiteralPath $folder -File -Filter '*-packs.zip').Count -eq 0) {
+        & gh release download $release -R $assetsRepo -D $folder -p '*-packs.zip' --clobber
         if ($LASTEXITCODE -ne 0) { throw "downloading release $release failed ($LASTEXITCODE)" }
     }
 }
 
-foreach ($zip in Get-ChildItem -LiteralPath $download -Recurse -Filter '*.zip') {
-    # The staged inner and wrapper zips were handled above.
-    if ($zip.FullName.StartsWith($innerRoot + '\') -or $zip.FullName.StartsWith($wrapperRoot + '\')) { continue }
-    # audio-packs.zip only bundles the pack zips of the same release for a single download.
-    if ($zip.Name -eq 'audio-packs.zip') { continue }
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+# Unpacks one pack zip (manifest.json at its root) into packages\<type>\<id lower-cased>.
+function Install-PackZip([string]$ZipPath) {
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
     try {
         $entry = $archive.GetEntry('manifest.json')
-        if ($null -eq $entry) { throw "$($zip.Name) has no manifest.json" }
+        if ($null -eq $entry) { throw "$ZipPath has no manifest.json" }
         $reader = New-Object System.IO.StreamReader($entry.Open())
         try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
     } finally {
         $archive.Dispose()
     }
-    if ($manifest.type -notin @('sfx', 'music', 'sticker', 'clip-animation', 'text-animation', 'font')) { throw "$($zip.Name) has an unknown type '$($manifest.type)'" }
+    if ($manifest.type -notin @('sfx', 'music', 'sticker', 'clip-animation', 'text-animation', 'text-style', 'subtitle-style', 'font')) { throw "$ZipPath has an unknown type '$($manifest.type)'" }
     # text-animation is the older name of clip-animation; the editor installs both to clip-animation.
     $typeFolder = if ($manifest.type -eq 'text-animation') { 'clip-animation' } else { $manifest.type }
     $packDir = Join-Path $packagesDir "$typeFolder\$($manifest.id.ToLowerInvariant())"
     if (Test-Path -LiteralPath $packDir) {
         Remove-Item -LiteralPath $packDir -Recurse -Force
     }
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($zip.FullName, $packDir)
-    Write-Host "unpacked $($zip.Name) -> $packDir"
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $packDir)
+}
+
+foreach ($typeFolder in $contentTypes) {
+    $typeDir = Join-Path $packagesDir $typeFolder
+    if (Test-Path -LiteralPath $typeDir) { Clear-Packages $typeDir }
+}
+foreach ($release in $releases) {
+    $folder = Join-Path $download $release
+    foreach ($aggregate in Get-ChildItem -LiteralPath $folder -File -Filter '*-packs.zip') {
+        # First level: the aggregate holds the per-item pack zips, flat.
+        $unpacked = Join-Path $folder ('unpacked\' + $aggregate.BaseName)
+        if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($aggregate.FullName, $unpacked)
+        # Second level: each pack zip becomes a pack folder.
+        $count = 0
+        foreach ($zip in Get-ChildItem -LiteralPath $unpacked -Recurse -File -Filter '*.zip') {
+            Install-PackZip $zip.FullName
+            $count++
+        }
+        Write-Host "unpacked $count packs of $($aggregate.Name) -> $packagesDir"
+    }
 }
 
 # The translations of the assets checkout, by pack id: a folder with a manifest.json or pack.json is named by
@@ -237,7 +265,7 @@ foreach ($kind in @('audio', 'stickers', 'animations', 'text-styles')) {
         $translations[$id.ToLowerInvariant()] = $i18n
     }
 }
-foreach ($typeFolder in @('sfx', 'music', 'sticker', 'clip-animation', 'text-style')) {
+foreach ($typeFolder in $contentTypes) {
     $typeDir = Join-Path $packagesDir $typeFolder
     if (-not (Test-Path -LiteralPath $typeDir)) { continue }
     foreach ($packDir in Get-ChildItem -LiteralPath $typeDir -Directory) {
@@ -246,26 +274,28 @@ foreach ($typeFolder in @('sfx', 'music', 'sticker', 'clip-animation', 'text-sty
         $target = Join-Path $packDir.FullName 'i18n'
         if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
         Copy-Item -LiteralPath $i18n -Destination $target -Recurse
-        Write-Host "translations of $($packDir.Name) <- $i18n"
-    }
+        }
 }
 
-# The private CapCut packs: folders of a checkout, copied as they are.
+# The private CapCut packs: one folder per item (its manifest names the collection), copied as they are. Their
+# type folders were emptied above, so no pack of the older one-pack-per-set layout is left beside them.
 if ($CapcutPrivate -eq '') { $CapcutPrivate = Join-Path (Split-Path -Parent $repoRoot) 'GpufxVideoEditor-Assets-capcut-private' }
 if (Test-Path -LiteralPath $CapcutPrivate -PathType Container) {
-    foreach ($kind in @(@{ Source = 'music'; Type = 'music' }, @{ Source = 'sticker'; Type = 'sticker' }, @{ Source = 'text-style'; Type = 'text-style' })) {
-        $kindDir = Join-Path $CapcutPrivate $kind.Source
+    foreach ($kind in $contentTypes) {
+        $kindDir = Join-Path $CapcutPrivate $kind
         if (-not (Test-Path -LiteralPath $kindDir)) { continue }
+        $copied = 0
         foreach ($pack in Get-ChildItem -LiteralPath $kindDir -Directory) {
             $manifest = Join-Path $pack.FullName 'manifest.json'
             if (-not (Test-Path -LiteralPath $manifest)) { continue }
             $id = (Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json).id.ToLowerInvariant()
-            $packDir = Join-Path $packagesDir "$($kind.Type)\$id"
+            $packDir = Join-Path $packagesDir "$kind\$id"
             if (Test-Path -LiteralPath $packDir) { Remove-Item -LiteralPath $packDir -Recurse -Force }
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $packDir) | Out-Null
             Copy-Item -LiteralPath $pack.FullName -Destination $packDir -Recurse
-            Write-Host "copied $($pack.FullName) -> $packDir"
+            $copied++
         }
+        Write-Host "copied $copied CapCut private $kind packs -> $(Join-Path $packagesDir $kind)"
     }
 } else {
     Write-Host "no CapCut private checkout at $CapcutPrivate, skipped"
