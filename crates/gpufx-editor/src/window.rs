@@ -959,21 +959,36 @@ impl Session {
         true
     }
 
-    /// A project saved with its packs keeps them up to date on every later save to that file.
+    /// A project saved with its packs (a bundle beside it, see [`crate::project_bundle`]) keeps its
+    /// packs and media there up to date on every later save to that file.
+    /// The copying runs on this thread for now; see the backlog.
     fn save_project(&mut self, file: PathBuf, with_packs: bool) {
         if !self.state.project_file().is_some_and(|current| d3d12_backend::same_file(current, &file)) && held_elsewhere(&file) {
             self.state.report_refused(Message::ProjectInUse(file.display().to_string()));
             return;
         }
+        let bundling = with_packs || crate::package_manager::backup_folder(&file).is_dir();
+        let mut problems = Vec::new();
+        if bundling {
+            let report = crate::project_bundle::bundle_media(self.state.project(), &file);
+            self.state.relocate_files(&report.relocated);
+            problems.extend(report.failed);
+            if !report.missing.is_empty() {
+                problems.push(format!("missing: {}", report.missing.join(", ")));
+            }
+        }
         match save_project_file(self.state.project(), &file) {
             Ok(()) => {
-                if with_packs || crate::package_manager::backup_folder(&file).join("packages").is_dir() {
+                if bundling {
                     let paths = project_paths(Some(&file), &self.package_roots);
                     if let Err(message) = crate::package_manager::backup_used_packs(self.state.project(), &paths, &file) {
-                        self.state.report_error(Message::PackBackupFailed(message));
+                        problems.push(message);
                     }
                 }
                 self.state.mark_saved(file);
+                if !problems.is_empty() {
+                    self.state.report_error(Message::BundleFailed(problems.join("; ")));
+                }
             }
             Err(message) => self.state.report_error(Message::SaveFailed(message)),
         }

@@ -87,7 +87,7 @@ fn is_relative_source(source: &str) -> bool {
 }
 
 /// The paths of the texture files the text of `clip` paints with, each as often as a layer names it.
-fn texture_files(clip: &mut engine::Clip) -> Vec<&mut String> {
+pub(crate) fn texture_files(clip: &mut engine::Clip) -> Vec<&mut String> {
     let Some(text) = clip.text.as_mut() else { return Vec::new() };
     text.paints_mut()
         .into_iter()
@@ -121,6 +121,13 @@ pub fn with_relative_sources(project: &Project, file: &Path) -> Project {
             clip.source = relative;
         }
     }
+    for motion in &mut stored.motion_tracks {
+        if !is_asset_source(&motion.media_path) {
+            if let Some(relative) = relative_under(folder, Path::new(&motion.media_path)) {
+                motion.media_path = relative;
+            }
+        }
+    }
     stored
 }
 
@@ -143,6 +150,12 @@ pub fn with_absolute_sources(mut project: Project, file: &Path) -> Project {
         if !is_asset_source(&clip.source) && !clip.is_text() && !clip.is_censor() && is_relative_source(&clip.source) {
             let joined = folder.join(&clip.source);
             clip.source = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
+        }
+    }
+    for motion in &mut project.motion_tracks {
+        if !is_asset_source(&motion.media_path) && !motion.media_path.is_empty() && is_relative_source(&motion.media_path) {
+            let joined = folder.join(&motion.media_path);
+            motion.media_path = std::path::absolute(&joined).unwrap_or(joined).to_string_lossy().into_owned();
         }
     }
     project

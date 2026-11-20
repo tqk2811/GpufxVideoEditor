@@ -10,7 +10,7 @@
 //! A pack is known by its key, its path under `packages/` (see [`d3d12_backend::pack_key`]):
 //! `sticker/my-pack`, `gpufx/ffmpeg/box-blur`, `gpufx/user/io.example.iris.zip`.
 //!
-//! The copy saved with a project lives in `<folder>/<project stem>.packages/packages/<key>`, laid
+//! The copy saved with a project lives in `<folder>/<project stem>.bundle/packages/<key>` (see [`crate::project_bundle`]), laid
 //! out as a package root, so restoring a pack is copying it to the same key under the user's root.
 
 use std::collections::BTreeSet;
@@ -35,7 +35,7 @@ const REMOVING_FOLDER: &str = ".remove-tmp";
 /// The folder under `packages` that a restored pack is copied to before it is renamed into place.
 const RESTORING_FOLDER: &str = ".restore-tmp";
 /// What is added to the stem of a project file to name the folder of its pack copies.
-pub const BACKUP_SUFFIX: &str = ".packages";
+pub const BACKUP_SUFFIX: &str = ".bundle";
 /// The folder of shader packages under `packages`.
 const GPUFX_FOLDER: &str = "gpufx";
 
@@ -206,7 +206,7 @@ pub fn disabled_file(user_root: &Path) -> PathBuf {
     user_root.join("packages").join(DISABLED_PACKS_FILE)
 }
 
-fn next_unique() -> String {
+pub(crate) fn next_unique() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     format!("{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
 }
@@ -344,10 +344,23 @@ fn is_pack(path: &Path) -> bool {
     path.join("manifest.json").is_file() || (path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
 }
 
-/// `<folder>/<project stem>.packages`: the copies of the packs a project uses.
+/// `<folder>/<project stem>.bundle`: the copies of the packs and the media a project uses.
 pub fn backup_folder(project_file: &Path) -> PathBuf {
     let stem = project_file.file_stem().map_or_else(|| "project".into(), |stem| stem.to_string_lossy().into_owned());
     project_file.with_file_name(format!("{stem}{BACKUP_SUFFIX}"))
+}
+
+/// Hard links the file `from` at `to`, which must not exist, when both are on one volume; else
+/// copies it, keeping its modified time so a later save sees the copy as up to date.
+pub(crate) fn link_or_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    if fs::hard_link(from, to).is_ok() {
+        return Ok(());
+    }
+    fs::copy(from, to)?;
+    if let Ok(modified) = fs::metadata(from).and_then(|meta| meta.modified()) {
+        let _ = fs::OpenOptions::new().write(true).open(to).and_then(|file| file.set_modified(modified));
+    }
+    Ok(())
 }
 
 /// Copies `from`, a file or a folder, to `to`; links are skipped.
@@ -366,7 +379,7 @@ fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::copy(from, to).map(|_| ())
+        link_or_copy(from, to)
     } else {
         Ok(())
     }
@@ -617,7 +630,7 @@ mod tests {
         let project = project_using("packages/gpufx/g/blur");
         let paths = ProjectPaths::new(&project_file, vec![shipped.clone(), user.clone()]);
         assert_eq!(backup_used_packs(&project, &paths, &project_file).unwrap(), 2);
-        let backup = dir.join("work").join("film.packages").join("packages");
+        let backup = dir.join("work").join("film.bundle").join("packages");
         assert!(backup.join("sticker/mine/manifest.json").is_file());
         assert!(backup.join("gpufx/g/blur/manifest.json").is_file());
         assert_eq!(backup_used_packs(&project, &paths, &project_file).unwrap(), 2, "a second save replaces the copies");

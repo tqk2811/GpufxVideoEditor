@@ -29,7 +29,7 @@ Ghi lại thiết kế cửa sổ quản lý gói và các quyết định đi k
 ## Lưu kèm bản sao gói
 
 - Tuỳ chọn ở menu File, lưu trong settings của máy (`save_with_packs`), mặc định tắt.
-- Bật thì mỗi lần lưu project chép các gói project dùng vào `<thư mục project>/<tên project>.packages/packages/<khoá>`, tức thư mục đó có dạng một gốc gói. Chép vào thư mục tạm rồi đổi tên, thay bản cũ chỉ khi bản mới đã chép xong. Lỗi chép không làm hỏng việc lưu project, chỉ báo lỗi.
+- Bật (lệnh "Lưu kèm gói…", hoặc mọi lần lưu khi đã có thư mục `<tên project>.bundle` cạnh project) thì mỗi lần lưu project chép các gói project dùng vào `<thư mục project>/<tên project>.bundle/packages/<khoá>`, tức thư mục `packages` có dạng một gốc gói. Mọi tệp project đọc (video, âm thanh, ảnh, font, texture chữ, media của motion track) cũng được đưa vào `<tên project>.bundle/media/{video,audio,images,fonts,subtitles,other}/`, giữ tên gốc (trùng tên với tệp khác thì thêm ` (2)`, ` (3)`…), cùng ổ thì tạo hard link, khác ổ thì chép giữ thời gian sửa; bản đã khớp kích thước và thời gian sửa thì bỏ qua. Sau đó project trỏ vào các bản trong bundle (lưu dạng tương đối). Tệp thiếu được báo, không chặn việc lưu. Mã ở `crates/gpufx-editor/src/project_bundle.rs`. Chép vào thư mục tạm rồi đổi tên, thay bản cũ chỉ khi bản mới đã chép xong. Lỗi chép không làm hỏng việc lưu project, chỉ báo lỗi.
 - Khi đường dẫn project đổi (mở, lưu thành), editor tìm các gói project dùng mà không gốc nào có (kể cả gói đang tắt) nhưng bản sao có; nếu có thì mở cửa sổ quản lý gói với dòng đề nghị "Cài từ bản sao". Cài là chép từ bản sao vào cùng khoá dưới gốc user, giữ nguyên gói user đã có.
 - Khoá lấy từ project được kiểm từng phần (không `..`, không ổ đĩa, tên hợp lệ trên Windows) trước khi ghép đường dẫn.
 

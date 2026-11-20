@@ -27,6 +27,7 @@ pub mod params;
 pub mod playback;
 pub mod presenter;
 pub mod preview;
+pub mod project_bundle;
 pub mod project_file;
 pub mod project_lock;
 pub mod proxy;

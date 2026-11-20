@@ -1,5 +1,9 @@
 # Backlog
 
+### [Vừa] Lưu kèm gói chép media ngay trên luồng UI
+
+`save_project` (`crates/gpufx-editor/src/window.rs`) gọi `project_bundle::bundle_media` và `package_manager::backup_used_packs` đồng bộ trên luồng UI. Cùng ổ thì chỉ tạo hard link nên nhanh, nhưng khác ổ (hoặc ổ không hỗ trợ hard link) thì chép media lớn làm treo giao diện tới khi chép xong. Nên chuyển sang tác vụ nền có tiến độ, rồi mới đổi đường dẫn trong project và ghi JSON. Ghi ngày 2026-11-20.
+
 ### [Cao] Gói phát hành editor phải kèm `dxcompiler.dll` và giấy phép của nó
 
 Shader nn của xoá nền chỉ biên dịch được bằng DXC; thiếu `dxcompiler.dll` thì clip hiện chưa xoá nền (`D3d12Compositor::matte_problems`). `scripts/setup-poc.ps1` tải DLL và 3 file `LICENSE-dxcompiler-*.txt` vào `third_party/ffmpeg/bin`, `crates/d3d12-backend/build.rs` chép DLL cạnh exe; khi có script đóng gói phát hành thì phải kèm DLL và cả 3 file giấy phép. Model nằm ở release `models-matting-v0.1.0` của `tqk2811/FFmpegGpuFilter`; dựng lại zip thì cập nhật `sha256_zip` trong `source.json` của gói và upload lại. Ghi ngày 2026-11-17.

@@ -96,7 +96,7 @@
   "packToggleFailed": "Không bật/tắt được gói: {detail}",
   "packOpenFolderFailed": "Không mở được thư mục: {detail}",
   "packSaveWithPacksFailed": "Không lưu được tuỳ chọn: {detail}",
-  "packBackupFailed": "Đã lưu project nhưng không chép được các gói: {detail}",
+  "bundleFailed": "Đã lưu project nhưng bộ gói kèm chưa đủ: {detail}",
   "packRestoreInstall": "Cài từ bản sao",
   "packRestoreDismiss": "Để sau",
   "packRestoreFailed": "Không cài được các gói: {detail}",

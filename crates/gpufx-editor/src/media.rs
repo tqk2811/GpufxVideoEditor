@@ -99,6 +99,16 @@ impl MediaLibrary {
         }
     }
 
+    /// Points the items of files that moved (old path to new path) at their new place.
+    pub fn relocate(&mut self, relocated: &std::collections::BTreeMap<String, String>) {
+        for item in &mut self.items {
+            if let Some((_, to)) = relocated.iter().find(|(from, _)| same_source(from, &item.source)) {
+                item.source = to.clone();
+                item.name = clip_label(to).to_owned();
+            }
+        }
+    }
+
     /// Adds every source the clips of `project` use and the library does not have yet.
     pub fn adopt_project_media(&mut self, project: &Project) {
         for track in &project.tracks {

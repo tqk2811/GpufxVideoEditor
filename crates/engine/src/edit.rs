@@ -1725,6 +1725,14 @@ impl EditHistory {
         }
     }
 
+    /// Applies `change` to the current project and to every undo and redo step alike, as no step
+    /// of its own: for a change that must hold whatever is undone, such as files that moved.
+    pub fn rewrite_all(&mut self, mut change: impl FnMut(&mut Project)) {
+        change(&mut self.current);
+        self.undo.iter_mut().for_each(&mut change);
+        self.redo.iter_mut().for_each(&mut change);
+    }
+
     /// The project after the edits applied so far.
     pub fn current(&self) -> &Project {
         &self.current

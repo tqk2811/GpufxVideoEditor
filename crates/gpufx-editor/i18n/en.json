@@ -96,7 +96,7 @@
   "packToggleFailed": "The pack could not be turned on or off: {detail}",
   "packOpenFolderFailed": "The folder could not be opened: {detail}",
   "packSaveWithPacksFailed": "The setting could not be saved: {detail}",
-  "packBackupFailed": "The project was saved, but its packs could not be copied: {detail}",
+  "bundleFailed": "The project was saved, but its bundle is not complete: {detail}",
   "packRestoreInstall": "Install from the copy",
   "packRestoreDismiss": "Not now",
   "packRestoreFailed": "The packs could not be installed: {detail}",

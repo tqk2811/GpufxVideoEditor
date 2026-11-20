@@ -717,6 +717,26 @@ impl EditorState {
         self.saved_revision = self.revision;
     }
 
+    /// Points every path of the project, in every undo step too, at the files that moved there (old
+    /// path to new path), as no edit of its own. A new revision rebuilds preview and audio from the
+    /// new paths; whether the project counts as saved is left as it was.
+    pub fn relocate_files(&mut self, relocated: &std::collections::BTreeMap<String, String>) {
+        if relocated.is_empty() {
+            return;
+        }
+        let clean = !self.is_dirty();
+        self.history.rewrite_all(|project| crate::project_bundle::relocate(project, relocated));
+        if let Some(live) = self.live.as_mut() {
+            crate::project_bundle::relocate(&mut live.shown, relocated);
+        }
+        self.library.relocate(relocated);
+        self.revision += 1;
+        self.audio_revision = self.revision;
+        if clean {
+            self.saved_revision = self.revision;
+        }
+    }
+
     /// Says that `installed` is there and shows it in its own list, selected.
     pub fn show_installed_package(&mut self, installed: &InstalledPackage) {
         let transition = installed.kind == PackageKind::Transition;
