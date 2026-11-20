@@ -104,6 +104,9 @@ pub struct AudioManifestItem {
     pub category: String,
     #[serde(rename = "loop")]
     pub looped: bool,
+    /// What the sound is like and what it suits, in English; may be left out.
+    #[serde(default)]
+    pub description: String,
 }
 
 /// The extension of `name`, lower-cased.
@@ -550,6 +553,14 @@ mod tests {
         format!(r#"{{"format":1,"type":"{kind}","id":"{id}","name":"SFX: Impact","version":"1.0.0","license":{{"spdx":"MIT","files":["LICENSE.txt","NOTICE.txt"]}},"items":[{{"id":"boom","file":"audio/boom.flac","name":"Boom","duration":1.2,"tags":["hit"],"category":"impact","loop":false}}]}}"#)
     }
 
+    #[test]
+    fn a_sound_may_have_a_description() {
+        let plain = parse_audio_manifest(manifest_json("avs-sfx-impact", "sfx").as_bytes()).unwrap();
+        assert_eq!(plain.items[0].description, "");
+        let described = manifest_json("avs-sfx-impact", "sfx").replace(r#""loop":false"#, r#""loop":false,"description":"A deep hit""#);
+        assert_eq!(parse_audio_manifest(described.as_bytes()).unwrap().items[0].description, "A deep hit");
+    }
+
     fn pack_zip(manifest: &str, audio: &[u8]) -> Vec<u8> {
         zip_of(&[("manifest.json", manifest.as_bytes()), ("LICENSE.txt", b"license"), ("NOTICE.txt", b"notice"), ("audio/boom.flac", audio)])
     }
@@ -888,7 +899,7 @@ mod tests {
 
     #[test]
     fn a_manifest_with_more_sounds_than_the_cap_is_refused() {
-        let item = |index: usize| AudioManifestItem { id: format!("s{index}"), file: "audio/a.flac".to_owned(), name: "S".to_owned(), duration: 1.0, tags: Vec::new(), category: "c".to_owned(), looped: false };
+        let item = |index: usize| AudioManifestItem { id: format!("s{index}"), file: "audio/a.flac".to_owned(), name: "S".to_owned(), duration: 1.0, tags: Vec::new(), category: "c".to_owned(), looped: false, description: String::new() };
         let manifest = |count: usize| AudioManifest { format: 1, kind: "sfx".to_owned(), id: "p".to_owned(), name: "P".to_owned(), version: "1".to_owned(), license: AudioLicense { spdx: "MIT".to_owned(), files: vec!["L.txt".to_owned()] }, items: (0..count).map(item).collect() };
         assert_eq!(check_manifest_fields(&manifest(MAX_MANIFEST_ITEMS)), Ok(AudioPackKind::Sfx));
         let refused = check_manifest_fields(&manifest(MAX_MANIFEST_ITEMS + 1));

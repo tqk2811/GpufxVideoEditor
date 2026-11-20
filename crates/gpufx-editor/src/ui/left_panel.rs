@@ -589,7 +589,7 @@ fn sound_row(ui: &mut egui::Ui, state: &EditorState, sound: &LibrarySound) -> So
 /// source a clip would store, in language `code` where its pack brings it.
 fn sound_tooltip(sound: &LibrarySound, code: &str) -> String {
     let tags = tags_line(sound.i18n.category(code, &sound.category), sound.i18n.tags(code, &sound.tags));
-    let description = match sound.i18n.description(code, "").trim() {
+    let description = match sound.i18n.description(code, &sound.description).trim() {
         "" => String::new(),
         text => format!("\n{text}"),
     };
@@ -981,7 +981,7 @@ mod tests {
     fn sound_row_actions(frames: Vec<Vec<egui::Event>>) -> Vec<SoundAction> {
         let ctx = egui::Context::default();
         let state = EditorState::default();
-        let sound = crate::audio_library::LibrarySound { i18n: Default::default(), source: "asset:music/p/a.mp3".to_owned(), name: "A".to_owned(), duration: None, tags: Vec::new(), category: String::new(), looped: false };
+        let sound = crate::audio_library::LibrarySound { i18n: Default::default(), source: "asset:music/p/a.mp3".to_owned(), name: "A".to_owned(), duration: None, tags: Vec::new(), category: String::new(), looped: false, description: String::new() };
         let mut actions = Vec::new();
         for (index, events) in std::iter::once(Vec::new()).chain(frames).enumerate() {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(300.0, 200.0))), events, time: Some(index as f64 * 0.05), ..Default::default() };
@@ -1023,7 +1023,7 @@ mod tests {
 
     #[test]
     fn a_sound_tooltip_names_its_tags_and_source() {
-        let sound = LibrarySound { i18n: Default::default(), source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned(), "low".to_owned()], category: "impact".to_owned(), looped: false };
+        let sound = LibrarySound { i18n: Default::default(), source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned(), "low".to_owned()], category: "impact".to_owned(), looped: false, description: String::new() };
         let text = sound_tooltip(&sound, "en");
         assert!(text.contains("Boom") && text.contains("hit, low") && text.contains("impact") && text.ends_with("asset:sfx/p/a.flac"), "{text}");
     }
@@ -1031,7 +1031,7 @@ mod tests {
     #[test]
     fn a_sound_tooltip_is_in_the_language_of_the_editor_field_by_field() {
         let translations = crate::i18n::pack::PackTranslations::from_files([("vi".to_owned(), r#"{"items": {"a": {"name": "Bùm", "tags": ["va chạm"]}}}"#.to_owned())]);
-        let sound = LibrarySound { i18n: translations.item("a"), source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned()], category: "impact".to_owned(), looped: false };
+        let sound = LibrarySound { i18n: translations.item("a"), source: "asset:sfx/p/a.flac".to_owned(), name: "Boom".to_owned(), duration: None, tags: vec!["hit".to_owned()], category: "impact".to_owned(), looped: false, description: String::new() };
         assert_eq!(sound_tooltip(&sound, "vi"), "Bùm\nimpact [va chạm]\nasset:sfx/p/a.flac", "the category has no translation, so it stays English");
         assert_eq!(sound_tooltip(&sound, "en"), "Boom\nimpact [hit]\nasset:sfx/p/a.flac");
     }
@@ -1039,9 +1039,13 @@ mod tests {
     #[test]
     fn a_sound_tooltip_shows_the_description_its_pack_brings() {
         let translations = crate::i18n::pack::PackTranslations::from_files([("vi".to_owned(), r#"{"items": {"a": {"description": "Nhạc vui tươi"}}}"#.to_owned())]);
-        let sound = LibrarySound { i18n: translations.item("a"), source: "asset:music/p/a.mp3".to_owned(), name: "Happy".to_owned(), duration: None, tags: vec!["fun".to_owned()], category: "bgm".to_owned(), looped: false };
+        let sound = LibrarySound { i18n: translations.item("a"), source: "asset:music/p/a.mp3".to_owned(), name: "Happy".to_owned(), duration: None, tags: vec!["fun".to_owned()], category: "bgm".to_owned(), looped: false, description: String::new() };
         assert_eq!(sound_tooltip(&sound, "vi"), "Happy\nNhạc vui tươi\nbgm [fun]\nasset:music/p/a.mp3");
         assert_eq!(sound_tooltip(&sound, "en"), "Happy\nbgm [fun]\nasset:music/p/a.mp3", "no description in English");
+        let sound = LibrarySound { description: "Bright and cheerful".to_owned(), ..sound };
+        assert_eq!(sound_tooltip(&sound, "en"), "Happy\nBright and cheerful\nbgm [fun]\nasset:music/p/a.mp3", "the manifest's English");
+        assert_eq!(sound_tooltip(&sound, "vi"), "Happy\nNhạc vui tươi\nbgm [fun]\nasset:music/p/a.mp3", "the translation wins");
+        assert_eq!(sound_tooltip(&sound, "fr"), "Happy\nBright and cheerful\nbgm [fun]\nasset:music/p/a.mp3", "English when the pack has no such language");
     }
 
     #[test]

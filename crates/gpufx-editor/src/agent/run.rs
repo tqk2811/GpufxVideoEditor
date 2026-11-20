@@ -1077,7 +1077,11 @@ fn asset_list(state: &EditorState, kind: Option<&str>, filter: &str, limit: Opti
     packs.sort_by_key(|pack| pack.name.to_lowercase());
     for pack in packs {
         for sound in &pack.sounds {
-            let item = with_translation(json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped}), &sound.i18n, code);
+            let mut item = json!({"type": pack.kind.name(), "source": sound.source, "name": sound.name, "category": sound.category, "tags": sound.tags, "duration": sound.duration, "loop": sound.looped});
+            if !sound.description.is_empty() {
+                item["description"] = json!(sound.description);
+            }
+            let item = with_translation(item, &sound.i18n, code);
             found.push((item, pack.i18n.search(sound.search_fields().other([pack.name.as_str(), pack.id.as_str()]))));
         }
     }
@@ -1690,7 +1694,7 @@ mod tests {
         use crate::audio_library::{LibraryPack, LibrarySound};
         use crate::sticker_library::{LibrarySticker, StickerPack};
         let mut host = FakeHost::new("live");
-        let sound = |name: &str| LibrarySound { i18n: Default::default(), source: format!("asset:music/m/{name}.mp3"), name: name.to_owned(), duration: None, tags: vec!["happy".to_owned()], category: String::new(), looped: false };
+        let sound = |name: &str| LibrarySound { i18n: Default::default(), source: format!("asset:music/m/{name}.mp3"), name: name.to_owned(), duration: None, tags: vec!["happy".to_owned()], category: String::new(), looped: false, description: String::new() };
         host.state.audio_library.packs.push(LibraryPack { i18n: Default::default(), kind: AudioPackKind::Music, id: "m".to_owned(), name: "M".to_owned(), version: "1".to_owned(), sounds: vec![sound("Kids Fun"), sound("Calm")] });
         host.state.audio_library.loaded = true;
         host.state.sticker_library.packs.push(StickerPack { i18n: Default::default(), id: "s".to_owned(), name: "S".to_owned(), stickers: vec![LibrarySticker { i18n: Default::default(), source: "asset:sticker/s/star.png".to_owned(), name: "Star".to_owned(), tags: vec!["happy".to_owned()], category: String::new(), size: Some((64, 64)), animation: None }] });

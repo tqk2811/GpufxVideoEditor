@@ -23,6 +23,8 @@ pub struct LibrarySound {
     pub tags: Vec<String>,
     pub category: String,
     pub looped: bool,
+    /// What the manifest says the sound is like, in English; empty when it says nothing.
+    pub description: String,
     /// The name, category and tags in the languages its pack brings.
     pub i18n: Localized,
 }
@@ -118,7 +120,7 @@ fn read_pack(root: &Path, kind: AudioPackKind, folder: &Path, library: &mut Audi
             problem(error.to_string());
             continue;
         }
-        sounds.push(LibrarySound { i18n: translations.item(&item.id), source, name: item.name, duration: seconds_to_time(item.duration), tags: item.tags, category: item.category, looped: item.looped });
+        sounds.push(LibrarySound { i18n: translations.item(&item.id), source, name: item.name, duration: seconds_to_time(item.duration), tags: item.tags, category: item.category, looped: item.looped, description: item.description });
     }
     Some(LibraryPack { i18n: translations.pack(), kind, id: manifest.id.to_ascii_lowercase(), name: manifest.name, version: manifest.version, sounds })
 }
@@ -154,7 +156,7 @@ mod tests {
     use super::*;
 
     fn sound(name: &str, tags: &[&str], category: &str) -> LibrarySound {
-        LibrarySound { i18n: Default::default(), source: format!("asset:sfx/p/{name}.flac"), name: name.to_owned(), duration: None, tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), looped: false }
+        LibrarySound { i18n: Default::default(), source: format!("asset:sfx/p/{name}.flac"), name: name.to_owned(), duration: None, tags: tags.iter().map(|tag| (*tag).to_owned()).collect(), category: category.to_owned(), looped: false, description: String::new() }
     }
 
     fn pack(name: &str, sounds: Vec<LibrarySound>) -> LibraryPack {

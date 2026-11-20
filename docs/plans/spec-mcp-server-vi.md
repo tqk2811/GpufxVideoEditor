@@ -56,7 +56,7 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `effect_add`, `effect_remove`, `transition_add`, `transition_remove` | Hiệu ứng và transition |
 | `text_add`, `text_set` | Thêm và sửa clip chữ, xem mục `Chữ` |
 | `font_list`, `clip_animation_list` | Danh sách font và danh sách preset animation (id, nhóm `in`/`out`/`loop`, thời lượng mặc định), lọc theo `filter` (font: family, tên, gói; preset: id, tên, nhóm, gói) |
-| `asset_list` | Danh sách nhạc, sfx và sticker của các gói đã cài, lọc theo `type` (`music`/`sfx`/`sticker`) và `filter` (tên, nhóm, tag, tên gói); mỗi mục có `source` dạng `asset:` để đưa vào `clip_add` |
+| `asset_list` | Danh sách nhạc, sfx và sticker của các gói đã cài, lọc theo `type` (`music`/`sfx`/`sticker`) và `filter` (tên, nhóm, tag, tên gói); mỗi mục có `source` dạng `asset:` để đưa vào `clip_add`; nhạc và sfx có `description` tiếng Anh khi manifest có |
 | `text_style_list` | Danh sách kiểu chữ và kiểu phụ đề của các gói `text-style`/`subtitle-style` đã cài, lọc theo `type` (`text`/`subtitle`) và `filter` (tên, nhóm, id, gói, chữ xem trước) |
 | `subtitle_import_srt`, `subtitle_set_style`, `subtitle_export_srt` | Nhập SRT thành track phụ đề, đổi kiểu phụ đề của track, xuất track ra SRT, xem mục `Phụ đề` |
 | `clip_animation_set` | Đặt animation `in`, `out`, `loop` cho một clip có hình (video, ảnh, sticker, chữ) |
