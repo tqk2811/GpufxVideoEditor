@@ -312,13 +312,18 @@ fn empty_sticker_message(loaded: bool, unfiltered: bool) -> Message {
 /// The combo box of the categories; "all" clears the filter.
 fn category_filter(ui: &mut egui::Ui, state: &mut EditorState) {
     let language = state.language();
-    let categories: Vec<String> = state.sticker_library.categories().into_iter().map(str::to_owned).collect();
+    let code = language.code();
+    let library = &state.sticker_library;
+    let categories: Vec<(String, String)> = library.categories().into_iter().map(|category| (category.to_owned(), library.category_name(code, category).to_owned())).collect();
     let all = language.t(Message::AllCategories);
-    let shown = state.ui.sticker_category.clone().unwrap_or_else(|| all.clone());
+    let shown = match &state.ui.sticker_category {
+        Some(category) => library.category_name(code, category).to_owned(),
+        None => all.clone(),
+    };
     egui::ComboBox::from_id_salt("sticker-category").selected_text(shown).width(ui.available_width()).show_ui(ui, |ui| {
         ui.selectable_value(&mut state.ui.sticker_category, None, all);
-        for category in categories {
-            ui.selectable_value(&mut state.ui.sticker_category, Some(category.clone()), category);
+        for (category, name) in categories {
+            ui.selectable_value(&mut state.ui.sticker_category, Some(category), name);
         }
     });
 }

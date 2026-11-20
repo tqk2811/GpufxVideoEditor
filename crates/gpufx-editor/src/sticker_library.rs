@@ -99,6 +99,12 @@ impl StickerLibrary {
         self.packs.iter().flat_map(|pack| &pack.stickers).map(|sticker| sticker.category.as_str()).filter(|category| !category.is_empty()).collect::<BTreeSet<_>>().into_iter().collect()
     }
 
+    /// `category` in language `code`: the first sticker of that category whose pack translates it,
+    /// else `category` itself.
+    pub fn category_name<'a>(&'a self, code: &str, category: &'a str) -> &'a str {
+        self.packs.iter().flat_map(|pack| &pack.stickers).filter(|sticker| sticker.category == category).map(|sticker| sticker.i18n.category(code, category)).find(|name| *name != category).unwrap_or(category)
+    }
+
     /// The stickers in `category` (any when `None`) that match `search` by name, tag or category, best
     /// first (see [`crate::search`]).
     pub fn matching(&self, search: &str, category: Option<&str>) -> Vec<&LibrarySticker> {
@@ -185,6 +191,16 @@ mod tests {
 
     fn library() -> StickerLibrary {
         StickerLibrary { packs: vec![StickerPack { i18n: Default::default(), id: "p".to_owned(), name: "P".to_owned(), stickers: vec![sticker("Smile", &["face", "happy"], "people"), sticker("Dog", &["pet"], "animals"), sticker("Sad", &["face"], "people")] }], problems: Vec::new(), loaded: true }
+    }
+
+    #[test]
+    fn a_category_shows_the_first_translation_a_sticker_of_it_brings() {
+        let translations = crate::i18n::pack::PackTranslations::from_files([("vi".to_owned(), r#"{"items":{"b":{"category":"Con người"}}}"#.to_owned())]);
+        let mut library = library();
+        library.packs[0].stickers[2].i18n = translations.item("b");
+        assert_eq!(library.category_name("vi", "people"), "Con người");
+        assert_eq!(library.category_name("vi", "animals"), "animals", "untranslated");
+        assert_eq!(library.category_name("fr", "people"), "people", "another language");
     }
 
     #[test]
