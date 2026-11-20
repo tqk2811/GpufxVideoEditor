@@ -330,7 +330,8 @@ impl PackCollection {
                 let name = value.as_ref().and_then(|value| text_of(value.get("collection_name"))).unwrap_or_else(|| id.clone());
                 Self { id: id.to_ascii_lowercase(), name, i18n: translations.collection() }
             }
-            None => Self { id: pack_id.to_ascii_lowercase(), name: pack_name.to_owned(), i18n: translations.pack() },
+            // The ':' never occurs in a pack id, so a pack alone never joins a collection named like it.
+            None => Self { id: format!("pack:{}", pack_id.to_ascii_lowercase()), name: pack_name.to_owned(), i18n: translations.pack() },
         }
     }
 
@@ -478,7 +479,15 @@ mod tests {
         let unnamed = PackCollection::from_manifest(br#"{"collection":"fun"}"#, "fun-b", "B", &PackTranslations::default());
         assert_eq!((unnamed.id.as_str(), unnamed.name.as_str()), ("fun", "fun"));
         let alone = PackCollection::from_manifest(br#"{"id":"Solo"}"#, "Solo", "Solo Pack", &translations);
-        assert_eq!((alone.id.as_str(), alone.name.as_str(), alone.display_name("vi")), ("solo", "Solo Pack", "Một"));
+        assert_eq!((alone.id.as_str(), alone.name.as_str(), alone.display_name("vi")), ("pack:solo", "Solo Pack", "Một"));
+    }
+
+    #[test]
+    fn a_pack_named_like_another_packs_collection_stays_alone() {
+        let member = PackCollection::from_manifest(br#"{"collection":"fun"}"#, "fun-a", "A", &PackTranslations::default());
+        let alone = PackCollection::from_manifest(br#"{"id":"fun"}"#, "fun", "Fun", &PackTranslations::default());
+        let groups = group_by_collection([(&member, 1), (&alone, 2)], "en");
+        assert_eq!(groups.len(), 2);
     }
 
     #[test]

@@ -251,7 +251,7 @@ mod tests {
         assert!(library.problems.is_empty(), "{:?}", library.problems);
         let groups = crate::i18n::pack::group_by_collection(library.packs.iter().map(|pack| (&pack.collection, pack.id.as_str())), "vi");
         let shown: Vec<(&str, &str, Vec<&str>)> = groups.iter().map(|(c, ids)| (c.id.as_str(), c.display_name("vi"), ids.clone())).collect();
-        assert_eq!(shown, vec![("fun", "Bộ vui", vec!["fun-a", "fun-b"]), ("solo", "Solo", vec!["solo"])]);
+        assert_eq!(shown, vec![("fun", "Bộ vui", vec!["fun-a", "fun-b"]), ("pack:solo", "Solo", vec!["solo"])]);
         assert_eq!(library.packs[0].collection.name, "Fun Set");
     }
 
