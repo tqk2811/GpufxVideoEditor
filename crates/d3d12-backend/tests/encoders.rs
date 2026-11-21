@@ -100,3 +100,18 @@ fn an_encoder_this_ffmpeg_lacks_is_not_available() {
     assert!(!encoder_available("no_such_encoder"));
     assert!(Mp4Encoder::create(&out_path("missing"), &output(), &EncoderChoice::Named("no_such_encoder".into())).is_err());
 }
+
+#[test]
+fn create_mp4_writes_an_mp4_under_a_name_ending_in_tmp() {
+    let output = output();
+    let path = out_path("named").with_file_name("named.mp4.1-1.tmp");
+    // Without an H.264 encoder there is nothing to check.
+    let Ok(mut encoder) = Mp4Encoder::create_mp4(&path, &output, &EncoderChoice::Auto(VideoCodec::H264)) else { return };
+    for index in 0..4 {
+        encoder.write_frame(index, &frame(index, &output)).unwrap_or_else(|e| panic!("frame {index}: {}", e.0));
+    }
+    encoder.finish().unwrap();
+    drop(encoder);
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[4..8], b"ftyp", "an MP4 starts with its ftyp box");
+}

@@ -38,7 +38,7 @@
 //! Dropping a [`PreviewSession`] ends the helper and can block for several seconds, so it must not
 //! happen on the UI thread.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -127,6 +127,9 @@ pub struct SessionConfig {
     pub control_timeout: Duration,
     /// Written into `.failed` and `.attempt` records.
     pub version: String,
+    /// How long a key stays given up. `None` is for the whole session, which suits an editor
+    /// window; a long-lived server sets a time so a key is tried again once it is over.
+    pub given_up_for: Option<Duration>,
 }
 
 impl SessionConfig {
@@ -140,6 +143,7 @@ impl SessionConfig {
             control_package: None,
             control_timeout: Duration::from_secs(5),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            given_up_for: None,
         }
     }
 
@@ -240,7 +244,8 @@ pub struct PreviewSession {
     cooldown_streak: u32,
     stopped: Option<String>,
     transient: HashMap<KeyId, u32>,
-    given_up: HashSet<KeyId>,
+    /// Keys this session stopped trying, with when it did.
+    given_up: HashMap<KeyId, Instant>,
     next_id: u64,
     stop: Arc<AtomicBool>,
 }
@@ -260,7 +265,7 @@ impl PreviewSession {
             cooldown_streak: 0,
             stopped: None,
             transient: HashMap::new(),
-            given_up: HashSet::new(),
+            given_up: HashMap::new(),
             next_id: 0,
             stop: Arc::new(AtomicBool::new(false)),
         }
@@ -286,6 +291,23 @@ impl PreviewSession {
         &self.store
     }
 
+    /// Sets how long a loop may take, for the jobs sent from now on.
+    pub fn set_loop_timeout(&mut self, timeout: Duration) {
+        self.config.loop_timeout = timeout;
+    }
+
+    /// Whether `key_id` is given up now. A key given up longer ago than
+    /// [`SessionConfig::given_up_for`] starts again with no failures counted.
+    fn is_given_up(&mut self, key_id: &KeyId) -> bool {
+        let Some(since) = self.given_up.get(key_id) else { return false };
+        if self.config.given_up_for.is_some_and(|length| since.elapsed() >= length) {
+            self.given_up.remove(key_id);
+            self.transient.remove(key_id);
+            return false;
+        }
+        true
+    }
+
     pub fn render(&mut self, request: &PreviewRequest) -> RenderOutcome {
         if let Some(reason) = &self.stopped {
             return RenderOutcome::Stopped(reason.clone());
@@ -297,7 +319,7 @@ impl PreviewSession {
             return outcome;
         }
         let key_id: KeyId = (request.package_prefix.clone(), request.key.clone());
-        if self.given_up.contains(&key_id) {
+        if self.is_given_up(&key_id) {
             return RenderOutcome::GivenUp("this session stopped trying this preview".into());
         }
         let Some(package) = request.package_dir.to_str() else {
@@ -647,7 +669,7 @@ impl PreviewSession {
         let count = self.transient.entry(key_id.clone()).or_insert(0);
         *count += 1;
         if *count >= MAX_TRANSIENT {
-            self.given_up.insert(key_id.clone());
+            self.given_up.insert(key_id.clone(), Instant::now());
             return RenderOutcome::GivenUp(format!("failed {MAX_TRANSIENT} times without a verdict on the package; the last time: {reason}"));
         }
         RenderOutcome::Failed { reason, recorded: false }
@@ -956,6 +978,7 @@ mod tests {
             control_package: None,
             control_timeout: Duration::from_millis(100),
             version: VERSION.into(),
+            given_up_for: None,
         }
     }
 
@@ -1473,6 +1496,20 @@ mod tests {
         }
         assert!(matches!(session.render(&request(KEY)), RenderOutcome::GivenUp(_)));
         assert_eq!(session.render(&request(OTHER_KEY)), RenderOutcome::Published { is_static: false });
+    }
+
+    #[test]
+    fn a_given_up_key_is_tried_again_once_its_time_is_over() {
+        let plans = (0..3).map(|_| plan(&[Behavior::Fail(PreviewBlame::Device)])).chain([plan(&[Behavior::Done])]).collect();
+        let (mut session, _log, _store) = start_session("given-up-retry", plans);
+        session.config.given_up_for = Some(Duration::from_millis(200));
+        for _ in 0..3 {
+            session.render(&request(KEY));
+        }
+        assert!(matches!(session.render(&request(KEY)), RenderOutcome::GivenUp(_)), "given up at first");
+        thread::sleep(Duration::from_millis(250));
+        assert_eq!(session.render(&request(KEY)), RenderOutcome::Published { is_static: false }, "tried again later");
+        assert!(session.transient.is_empty());
     }
 
     #[test]

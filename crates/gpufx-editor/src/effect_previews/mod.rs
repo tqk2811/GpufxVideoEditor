@@ -12,7 +12,7 @@ pub mod key;
 pub mod play;
 pub mod worker;
 
-pub use disk::{PreviewImage, PreviewStore, SweepReport, DISK_LIMIT};
+pub use disk::{PreviewImage, PreviewStore, SweepReport, DISK_LIMIT, TMP_EXTENSION};
 pub use key::{package_digest, package_prefix, preview_key, PreviewSpec, PREVIEW_RENDER_VERSION};
 pub use worker::{PreviewItem, Renderer, Resolved, LOOP_COLUMNS};
 

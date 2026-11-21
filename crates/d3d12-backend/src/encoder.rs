@@ -321,6 +321,16 @@ impl Mp4Encoder {
 
     /// [`Self::create`] with a keyframe every `keyframe_interval` frames instead of every two seconds.
     pub fn create_with_keyframes(path: &Path, output: &Output, choice: &EncoderChoice, keyframe_interval: Option<u32>) -> Result<Self, String> {
+        Self::create_in(path, output, choice, keyframe_interval, false)
+    }
+
+    /// [`Self::create`] that writes an MP4 whatever the extension of `path`, such as a temporary
+    /// name ending in `.tmp`.
+    pub fn create_mp4(path: &Path, output: &Output, choice: &EncoderChoice) -> Result<Self, String> {
+        Self::create_in(path, output, choice, None, true)
+    }
+
+    fn create_in(path: &Path, output: &Output, choice: &EncoderChoice, keyframe_interval: Option<u32>, force_mp4: bool) -> Result<Self, String> {
         if output.width % 2 != 0 || output.height % 2 != 0 {
             return Err(format!("output size {}x{} must be even for 4:2:0 video", output.width, output.height));
         }
@@ -335,7 +345,7 @@ impl Mp4Encoder {
                 problems.push(format!("{name}: it needs a width and height that are multiples of 8, not {}x{}", output.width, output.height));
                 continue;
             }
-            match Self::open_encoder(path, output, name, keyframe_interval) {
+            match Self::open_encoder(path, output, name, keyframe_interval, force_mp4) {
                 Ok(encoder) => return Ok(encoder),
                 Err(reason) => problems.push(format!("{name}: {reason}")),
             }
@@ -349,7 +359,7 @@ impl Mp4Encoder {
         Err(format!("no {codec} encoder could be opened ({})", problems.join("; ")))
     }
 
-    fn open_encoder(path: &Path, output: &Output, name: &str, keyframe_interval: Option<u32>) -> Result<Self, String> {
+    fn open_encoder(path: &Path, output: &Output, name: &str, keyframe_interval: Option<u32>, force_mp4: bool) -> Result<Self, String> {
         let path_text = path.to_str().ok_or("the output path is not valid UTF-8")?;
         let c_path = CString::new(path_text).map_err(|_| "the output path contains NUL")?;
         let c_name = CString::new(name).map_err(|_| "the encoder name contains NUL")?;
@@ -367,17 +377,19 @@ impl Mp4Encoder {
             audio: None,
         };
         // SAFETY: on error, Drop releases what was created so far.
-        unsafe { encoder.initialize(&c_path, &c_name, output, keyframe_interval)? };
+        unsafe { encoder.initialize(&c_path, &c_name, output, keyframe_interval, force_mp4)? };
         Ok(encoder)
     }
 
-    unsafe fn initialize(&mut self, path: &CStr, name: &CStr, output: &Output, keyframe_interval: Option<u32>) -> Result<(), String> {
+    unsafe fn initialize(&mut self, path: &CStr, name: &CStr, output: &Output, keyframe_interval: Option<u32>, force_mp4: bool) -> Result<(), String> {
         let codec = ffi::avcodec_find_encoder_by_name(name.as_ptr());
         if codec.is_null() {
             return Err(missing_encoder_reason(&name.to_string_lossy(), cfg!(feature = "ffmpeg-gpl")));
         }
         self.pixel_format = pixel_format_for(codec)?;
-        check(ffi::avformat_alloc_output_context2(&mut self.format_context, ptr::null(), ptr::null(), path.as_ptr()), "avformat_alloc_output_context2")?;
+        // The muxer is named when the extension cannot pick it.
+        let format_name: *const std::os::raw::c_char = if force_mp4 { c"mp4".as_ptr() } else { ptr::null() };
+        check(ffi::avformat_alloc_output_context2(&mut self.format_context, ptr::null(), format_name, path.as_ptr()), "avformat_alloc_output_context2")?;
         self.codec_context = ffi::avcodec_alloc_context3(codec);
         if self.codec_context.is_null() {
             return Err("avcodec_alloc_context3 failed".to_owned());

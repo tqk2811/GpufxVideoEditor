@@ -91,21 +91,31 @@ Hai tool giúp agent chọn transition hoặc sticker mà không phải thêm v�
 
 `transition_preview` nhận `id` (gói transition như `packages_list` ghi), `format` = `frames` (mặc định) hoặc `video`, `frames` (2 đến 24, mặc định 6) và `size` (cạnh dài: 144 mặc định, 360 hoặc 720). Id không có trong các package root, hoặc là effect chứ không phải transition, trả `invalid_params`.
 
-| `size` | Khung | Cache |
+Tên file trong cache là `<tiền tố>-<key>.<đuôi>`. Tiền tố là 8 ký tự hex đầu của SHA-256 tên gói; với cỡ khác 144 thì băm chuỗi `<id>@<rộng>x<cao>`, nên kích thước nằm ở tiền tố chứ không nằm trong key. Key là hash của nội dung gói, ảnh nguồn và spec của dải.
+
+| `size` | Khung | Dải nằm ở |
 |---|---|---|
-| 144 | 144x144 | Chung với ô xem trước của bảng chọn effect (`%LOCALAPPDATA%\gpufx-editor\effect-previews\v1`) |
-| 360 | 640x360 (16:9) | Cùng thư mục, mục riêng: tên gói trong key có thêm kích thước, nên ghi mục này không xoá file của bảng chọn |
+| 144 | 144x144 | Chung với ô xem trước của bảng chọn effect (`%LOCALAPPDATA%\gpufx-editor\effect-previews\v1`), đọc và ghi đúng mục của bảng chọn |
+| 360 | 640x360 (16:9) | Cache riêng của server MCP (`%LOCALAPPDATA%\gpufx-editor\mcp-previews\v1`), tiền tố riêng theo kích thước |
 | 720 | 1280x720 (16:9) | Như trên |
 
-- `frames`: N ảnh PNG (nội dung image của MCP) lấy đều trên dải 24 khung, từ progress 0 đến 1 tính cả hai đầu, kèm JSON `frames: [{frame, progress}]`, `width`, `height`, `static`, `cached`.
-- `video`: dải 24 khung mã hoá thành MP4 H.264 20 fps bằng encoder của export, đặt cạnh dải trong cache với tên `<gói>-<key>.mp4`, ghi qua file tạm rồi đổi tên, có rồi thì dùng lại. Trả `path` tuyệt đối, `uri` (`file:///`), `mime_type`, `width`, `height`, `fps`, `frames`, `duration_ms`, `reused`, kèm một nội dung `resource_link` của MCP (mimeType `video/mp4`).
-- Chưa có trong cache thì dựng ngay bằng helper `gpufx-render --effect-previews` qua một `PreviewSession` riêng của server MCP (cùng luật timeout, lỗi, mất device như bảng chọn; timeout của một dải cỡ lớn là 180 giây), ghi vào cache rồi mới trả lời. Server dùng session riêng chứ không chung worker của bảng chọn, vì worker đó nằm trong tiến trình cửa sổ và chế độ file không có cửa sổ; hai bên chỉ chung file trên đĩa, mỗi file ghi nguyên tử, nên dựng trùng một key chỉ tốn công chứ không hỏng. Gói đã có `.failed` trả `preview_failed` kèm lý do; helper đang nghỉ sau nhiều lần lỗi trả `preview_unavailable`.
+- `frames`: N ảnh PNG (nội dung image của MCP) lấy đều trên số khung thật của dải (thường 24), từ progress 0 đến 1 tính cả hai đầu, kèm JSON `frames: [{frame, progress}]`, `width`, `height`, `static`, `cached`. Dải tĩnh (một khung) cho đúng một ảnh, progress 0.
+- `video`: dải mã hoá thành MP4 H.264 20 fps bằng encoder của export (dải tĩnh lặp khung đó 24 lần), mọi cỡ kể cả 144 đều đặt trong cache MCP với tên `<tiền tố>-<key>.mp4`, kèm file ghi chú `<tiền tố>-<key>.mp4.json` (`frames`, `static`). MP4 và ghi chú đã có thì trả lại ngay, không đọc dải. File được ghi vào tên tạm `<tên>.mp4.<pid>-<n>.tmp` (muxer MP4 chỉ định rõ, không đoán theo đuôi) rồi đổi tên. Trả `path` tuyệt đối, `uri` (`file:///C:/...`, đường UNC thành `file://server/share/...`), `mime_type`, `width`, `height`, `fps`, `frames`, `duration_ms`, `reused`, kèm một nội dung `resource_link` của MCP (mimeType `video/mp4`).
+- Chưa có trong cache thì dựng ngay bằng helper `gpufx-render --effect-previews` qua `PreviewSession` riêng của server MCP (cùng luật lỗi, mất device như bảng chọn), ghi vào cache rồi mới trả lời. Có hai session, tạo khi cần: một ghi vào cache của bảng chọn cho cỡ 144, một ghi vào cache MCP cho cỡ 360 và 720. Timeout của một dải: 144 bằng của bảng chọn (60 giây), 360 gấp đôi, 720 gấp ba. Server dùng session riêng chứ không chung worker của bảng chọn, vì worker đó nằm trong tiến trình cửa sổ và chế độ file không có cửa sổ; hai bên chỉ chung file trên đĩa, mỗi file ghi nguyên tử, nên dựng trùng một key chỉ tốn công chứ không hỏng.
+- Việc dựng chạy đồng bộ trên luồng session: server MCP trả lời từng lệnh một, nên lệnh sau phải chờ, tối đa bằng timeout của cỡ đó. Chưa tách sang luồng riêng vì vòng đọc stdio của server xử lý tuần tự.
+- Gói đã có `.failed` trả `preview_failed` kèm lý do. Key lỗi tạm nhiều lần bị bỏ qua (`preview_failed`), nhưng chỉ trong 10 phút, sau đó được thử lại. Helper đang nghỉ sau nhiều lần lỗi trả `preview_unavailable`.
 - Job của helper có thêm `width` và `height` tuỳ chọn (vắng là 144x144, nên dòng job của bảng chọn không đổi). Ảnh nguồn vuông 144 được phóng phủ kín khung rồi cắt giữa, không bị kéo méo.
 
 `asset_preview` nhận `source` (nguồn `asset:sticker/...` từ `asset_list`), `format`, `frames` như trên và `size` (cạnh dài tối đa, 1 đến 720, mặc định 360, không bao giờ phóng to quá cỡ gốc). Nguồn không phải sticker trả `invalid_params`.
 
 - Sticker tĩnh: một ảnh PNG, kèm `width`, `height`, `native_width`, `native_height`. `format: video` với sticker tĩnh trả `invalid_params`.
-- Sticker động (GIF, WebP): N ảnh lấy đều trên một vòng lặp, từ đầu vòng, bỏ điểm cuối vì trùng điểm đầu, kèm `frames: [{time_ms, frame}]` và `duration_ms`. `format: video` cho một vòng lặp thành MP4 30 fps, cạnh chẵn, lưu ở `%LOCALAPPDATA%\gpufx-editor\asset-previews\v1\<hash nội dung>-<rộng>x<cao>.mp4`, ghi nguyên tử và dùng lại như trên.
+- Sticker động (GIF, WebP): N ảnh lấy đều trên một vòng lặp, từ đầu vòng, bỏ điểm cuối vì trùng điểm đầu, kèm `frames: [{time_ms, frame}]` và `duration_ms`. Khung có độ trễ 0 đến 10 ms được tính là 100 ms như trình duyệt, nên thời điểm 0 luôn là khung đầu và GIF toàn độ trễ 0 vẫn chuyển động.
+- Mỗi khung được thu về cỡ yêu cầu ngay khi giải mã, nên chỉ một khung cỡ gốc nằm trong bộ nhớ. Các khung đã thu nhỏ vượt 256 MiB hoặc 2000 khung trước khi hết vòng lặp thì trả `animation_too_large` (xin cỡ nhỏ hơn).
+- `format: video` cho một vòng lặp thành MP4 30 fps, cạnh chẵn, cạnh ngắn ít nhất 32 px (cạnh ngắn nhỏ hơn thì nâng lên 32 nếu sticker gốc đủ lớn; sticker có cạnh dưới 32 px trả `invalid_params`), không lớn hơn cỡ gốc. Vòng lặp dài hơn 60 giây trả `animation_too_long`. File lưu ở cache MCP, tên `asset-<hash nội dung>-<rộng>x<cao>.mp4`, ghi nguyên tử và dùng lại như trên; đã có thì không giải mã khung nào.
+
+Cache MCP (`mcp-previews\v1`) có giới hạn riêng 512 MiB, tách khỏi 1 GiB của cache bảng chọn. Server quét nó lúc session bắt đầu và sau mỗi lần ghi: xoá file tạm `.tmp` cũ hơn 1 giờ, rồi xoá file cũ nhất (theo mtime) tới khi dưới giới hạn.
+
+Mã lỗi của hai tool: `invalid_params`, `package_unreadable`, `preview_unavailable`, `preview_failed`, `encode_failed`, `source_not_found`, `unreadable_source`, `animation_too_large`, `animation_too_long`.
 
 ### `clip_set_speed` và `speed` của `clip_add`
 

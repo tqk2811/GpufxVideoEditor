@@ -30,7 +30,8 @@ const STILL_SUFFIX: &str = "still.png";
 const LOOP_SUFFIX: &str = "loop.png";
 const ATTEMPT_SUFFIX: &str = "attempt";
 const FAILED_SUFFIX: &str = "failed";
-const TMP_EXTENSION: &str = "tmp";
+/// The extension of a file being written, which a sweep removes once it is stale.
+pub const TMP_EXTENSION: &str = "tmp";
 
 /// A decoded preview: RGBA8 pixels, row by row.
 #[derive(Debug, Clone, PartialEq, Eq)]
