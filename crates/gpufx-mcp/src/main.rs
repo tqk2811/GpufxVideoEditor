@@ -12,7 +12,7 @@ use std::sync::Arc;
 use gpufx_editor::agent::{AgentError, AgentRequest, AgentResult};
 use gpufx_mcp::session::{EditorSession, FileSession, LiveSession};
 use gpufx_mcp::tools::{all_tools, ToolDef};
-use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig};
+use rmcp::model::{CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult, PaginatedRequestParams, Resource, ServerCapabilities, ServerConfig};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, ServiceExt};
 use serde_json::Value;
@@ -32,14 +32,32 @@ fn run_session(mut session: Box<dyn EditorSession>, jobs: mpsc::Receiver<Job>) {
     }
 }
 
-/// The answer of a tool: the JSON, with a captured image as an image block next to it.
+/// The answer of a tool: the JSON, with a captured image (`png`) or several (`pngs`) as image
+/// blocks next to it, and a file (`resource_link`: `uri`, `name`, `mime_type`) as a resource link.
 fn tool_output(result: AgentResult) -> CallToolResult {
     match result {
         Ok(mut value) => {
-            let png = value.as_object_mut().and_then(|object| object.remove("png"));
+            let (png, pngs, link) = match value.as_object_mut() {
+                Some(object) => (object.remove("png"), object.remove("pngs"), object.remove("resource_link")),
+                None => (None, None, None),
+            };
             let mut content = vec![ContentBlock::text(value.to_string())];
             if let Some(Value::String(data)) = png {
                 content.push(ContentBlock::image(data, "image/png"));
+            }
+            if let Some(Value::Array(images)) = pngs {
+                content.extend(images.into_iter().filter_map(|image| match image {
+                    Value::String(data) => Some(ContentBlock::image(data, "image/png")),
+                    _ => None,
+                }));
+            }
+            if let Some(link) = link {
+                let text = |field: &str| link.get(field).and_then(Value::as_str).map(str::to_owned);
+                if let (Some(uri), Some(name)) = (text("uri"), text("name")) {
+                    let mut resource = Resource::new(uri, name);
+                    resource.mime_type = text("mime_type");
+                    content.push(ContentBlock::resource_link(resource));
+                }
             }
             CallToolResult::success(content)
         }

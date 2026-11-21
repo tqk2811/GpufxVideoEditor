@@ -41,7 +41,7 @@ mod thumbnail;
 pub use audio::{AudioFileDecoder, AudioFiles};
 pub use compositor::{D3d12Compositor, SharedImage, SourceDecoder, SourceFrame};
 pub use decoder::{is_cancelled, DecodedFrame, PublishClock, ReverseDecoder, SequentialDecoder};
-pub use effect_preview::{preview_image_files, PreviewError, PreviewLoop, PreviewRenderer, PREVIEW_FPS, PREVIEW_FRAMES, PREVIEW_SIZE};
+pub use effect_preview::{cover_rgba, preview_image_files, PreviewError, PreviewLoop, PreviewRenderer, MAX_PREVIEW_SIDE, PREVIEW_FPS, PREVIEW_FRAMES, PREVIEW_SIZE};
 pub use effect_preview_protocol::{InvalidJob, PreviewBlame, PreviewEvent, PreviewJob, PreviewJobKind, PREVIEW_PROTOCOL};
 pub use encoder::{auto_select, encoder_available, encoder_exists, needs_gpl, probe_encoder, EncoderChoice, Mp4Encoder, VideoCodec};
 pub use export::{overwritten_input, reserve_temporary, same_file, ExportControl, ExportError, ExportJob, ExportReport};
@@ -55,5 +55,5 @@ pub use packages::{expression_error, read_package_info, read_zip_package_info, P
 pub use paths::{asset_source, check_path_part, pack_key, pack_key_of, read_disabled_packs, DISABLED_PACKS_FILE, is_asset_source, is_safe_id, is_safe_pack_file, parse_asset_source, AssetProblem, AssetRef, PathPartProblem, ProjectPaths, ProxyFile, ProxyTiming, ASSET_AUDIO_EXTENSIONS, ASSET_FONT_EXTENSIONS, ASSET_IMAGE_EXTENSIONS, ASSET_PREFIX, ASSET_TEXTURE_EXTENSIONS, ASSET_TYPES, FONT_ASSET_TYPE, MAX_ASSET_ID_LENGTH, SUBTITLE_STYLE_ASSET_TYPE, TEXT_STYLE_ASSET_TYPE};
 pub use probe::{frame_ticks_floor, probe_media, probe_video_format, MediaProbe, VideoFormat};
 pub use progress::{ProgressEvent, CANCEL_LINE, MAX_EVENT_LINE, PROGRESS_PROTOCOL};
-pub use still::{animation_thumbnail, animation_timing, read_still, AnimatedPicture, ThumbnailLimits, still_dimensions, still_thumbnail, AnimationTiming, StillPicture, MAX_STILL_SIDE};
+pub use still::{animation_thumbnail, animation_timing, read_animation, read_still, AnimatedPicture, ThumbnailLimits, still_dimensions, still_thumbnail, AnimationTiming, StillPicture, MAX_STILL_SIDE};
 pub use thumbnail::{FrameSampler, ThumbnailError, ThumbnailImage};

@@ -10,6 +10,7 @@ use d3d12_backend::{D3d12Compositor, EncoderChoice, ExportJob, Gpu, ProjectPaths
 use engine::render::{Compositor, FrameRenderer, RenderError};
 use engine::{frame_count, Project};
 use gpufx_editor::agent::gateway::{self, pipe_name};
+use gpufx_editor::agent::previews::PreviewService;
 use gpufx_editor::agent::{check_export, execute, prepare, AgentError, AgentHost, AgentRequest, AgentResult, Step};
 use gpufx_editor::clip_animation_library::scan_clip_animation_packs;
 use gpufx_editor::text_style_library::scan_text_style_packs;
@@ -25,11 +26,22 @@ pub trait EditorSession {
     fn call(&mut self, request: AgentRequest) -> AgentResult;
 }
 
+/// Answers a preview request in this process, whatever the mode, or gives the request back. A
+/// preview never goes to the window, so its UI thread is never held up by a render.
+fn answer_preview(previews: &mut PreviewService, request: AgentRequest) -> Result<AgentResult, AgentRequest> {
+    match request {
+        AgentRequest::TransitionPreview { id, format, frames, size } => Ok(previews.transition(&id, format, frames, size)),
+        AgentRequest::AssetPreview { source, format, frames, size } => Ok(previews.asset(&source, format, frames, size)),
+        other => Err(other),
+    }
+}
+
 /// A project held in this process, with no window. Runs the requests on an [`EditorState`] of its
 /// own, so a project built here equals one built in the window.
 pub struct FileSession {
     host: FileHost,
     roots: Vec<PathBuf>,
+    previews: PreviewService,
 }
 
 struct FileHost {
@@ -160,7 +172,7 @@ impl FileSession {
         state.font_paths = ProjectPaths::roots_only(std::path::Path::new(gpufx_editor::editor::FONT_PATHS_FILE), roots.clone());
         state.audio_library = scan_audio_packs(&roots);
         state.sticker_library = scan_sticker_packs(&roots);
-        Self { host: FileHost { state, roots: roots.clone(), gpu: None, rig: None, export: None }, roots }
+        Self { host: FileHost { state, roots: roots.clone(), gpu: None, rig: None, export: None }, previews: PreviewService::new(roots.clone()), roots }
     }
 }
 
@@ -173,6 +185,10 @@ impl Default for FileSession {
 impl EditorSession for FileSession {
     fn call(&mut self, request: AgentRequest) -> AgentResult {
         self.host.poll_export();
+        let request = match answer_preview(&mut self.previews, request) {
+            Ok(result) => return result,
+            Err(request) => request,
+        };
         match execute(&mut self.host, prepare(request, &self.roots)) {
             Step::Done(result) => result,
             Step::Frame(frame) => frame.finish(),
@@ -185,6 +201,7 @@ impl EditorSession for FileSession {
 pub struct LiveSession {
     name: String,
     connection: Option<BufReader<File>>,
+    previews: PreviewService,
 }
 
 /// `ERROR_PIPE_BUSY`: the pipe has one instance and a client holds it.
@@ -208,7 +225,7 @@ impl LiveSession {
     }
 
     pub fn on_pipe(name: String) -> Self {
-        Self { name, connection: None }
+        Self { name, connection: None, previews: PreviewService::new(package_roots()) }
     }
 
     fn exchange(&mut self, line: &[u8]) -> std::io::Result<AgentResult> {
@@ -228,6 +245,10 @@ impl LiveSession {
 
 impl EditorSession for LiveSession {
     fn call(&mut self, request: AgentRequest) -> AgentResult {
+        let request = match answer_preview(&mut self.previews, request) {
+            Ok(result) => return result,
+            Err(request) => request,
+        };
         let mut line = serde_json::to_vec(&request).map_err(|e| AgentError::new("internal", e.to_string()))?;
         line.push(b'\n');
         match self.exchange(&line) {

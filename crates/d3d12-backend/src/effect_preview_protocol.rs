@@ -26,6 +26,12 @@ pub struct PreviewJob {
     pub package: String,
     /// The file to write, as `Path::to_str` gave it.
     pub out: String,
+    /// The width of each frame; `PREVIEW_SIZE` when absent. Sent only with `height`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// The height of each frame; `PREVIEW_SIZE` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 /// A line that is not a job. `id` is there when the line had a readable one, so the parent can tell which
@@ -128,9 +134,12 @@ mod tests {
 
     #[test]
     fn a_job_round_trips_and_an_invalid_one_keeps_its_id() {
-        let job = PreviewJob { id: 7, kind: PreviewJobKind::Loop, package: "p".into(), out: "o.tmp".into() };
+        let job = PreviewJob { id: 7, kind: PreviewJobKind::Loop, package: "p".into(), out: "o.tmp".into(), width: None, height: None };
         assert_eq!(job.to_line(), r#"{"id":7,"kind":"loop","package":"p","out":"o.tmp"}"#);
-        assert_eq!(PreviewJob::parse(&job.to_line()), Ok(job));
+        assert_eq!(PreviewJob::parse(&job.to_line()), Ok(job.clone()));
+        let sized = PreviewJob { width: Some(640), height: Some(360), ..job };
+        assert_eq!(sized.to_line(), r#"{"id":7,"kind":"loop","package":"p","out":"o.tmp","width":640,"height":360}"#);
+        assert_eq!(PreviewJob::parse(&sized.to_line()), Ok(sized));
         let unknown = PreviewJob::parse(r#"{"id":4,"kind":"zoom","package":"p","out":"o"}"#).expect_err("unknown kind");
         assert_eq!(unknown.id, Some(4));
         assert!(unknown.message.contains("zoom"));

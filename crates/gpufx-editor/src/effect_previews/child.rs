@@ -309,7 +309,9 @@ impl PreviewSession {
         let Some(out) = temporary.to_str() else {
             return RenderOutcome::NotPreviewable(format!("the preview folder is not valid UTF-8: {}", self.store.root.display()));
         };
-        let job = PreviewJob { id, kind: request.kind, package: package.to_string(), out: out.to_string() };
+        // The picker's size is left out, so its lines stay those of a helper that knows no size.
+        let sized = (request.spec.width, request.spec.height) != (d3d12_backend::PREVIEW_SIZE, d3d12_backend::PREVIEW_SIZE);
+        let job = PreviewJob { id, kind: request.kind, package: package.to_string(), out: out.to_string(), width: sized.then_some(request.spec.width), height: sized.then_some(request.spec.height) };
         let line = job.to_line();
         if line.len() > MAX_EVENT_LINE {
             return RenderOutcome::NotPreviewable(format!("the job line is {} bytes, more than the {MAX_EVENT_LINE} the helper reads", line.len()));
@@ -593,7 +595,7 @@ impl PreviewSession {
             Err(_) => return Control::Inconclusive,
         }
         self.next_id += 1;
-        let job = PreviewJob { id: self.next_id, kind: PreviewJobKind::Still, package, out };
+        let job = PreviewJob { id: self.next_id, kind: PreviewJobKind::Still, package, out, width: None, height: None };
         let line = job.to_line();
         if line.len() > MAX_EVENT_LINE {
             return Control::Inconclusive;

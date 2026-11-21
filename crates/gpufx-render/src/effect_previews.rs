@@ -4,7 +4,7 @@
 //! types of `d3d12_backend::{PreviewJob, PreviewEvent}`, and none is longer than `MAX_EVENT_LINE`:
 //!
 //! ```text
-//! in : {"id":1,"kind":"still"|"loop","package":"<package dir>","out":"<file path>"}
+//! in : {"id":1,"kind":"still"|"loop","package":"<package dir>","out":"<file path>"[,"width":640,"height":360]}
 //! out: {"event":"ready","protocol":1,"device":"<description>"}    once the renderer exists
 //!      {"event":"done","id":1,"static":false}                     a job went well
 //!      {"event":"failed","id":1,"blame":"device"|"package"|"output","message":"..."}
@@ -25,30 +25,33 @@
 //!
 //! A still is a `PREVIEW_SIZE` square PNG. A loop is one PNG holding its frames stacked top to bottom, each
 //! `PREVIEW_SIZE` tall (the strip `PreviewStore` expects: as wide as a still, a whole number of stills tall);
-//! a static loop is a strip of one frame, and `static` is true.
+//! a static loop is a strip of one frame, and `static` is true. A job with `width` and `height` renders frames of
+//! that size instead (each side 1 to `MAX_PREVIEW_SIDE`), the built-in pictures scaled to cover it; a job with
+//! only one of them, or a size out of range, fails with `blame: output`.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
-use d3d12_backend::{PreviewBlame, PreviewError, PreviewEvent, PreviewJob, PreviewJobKind, PreviewLoop, PreviewRenderer, MAX_EVENT_LINE, PREVIEW_PROTOCOL, PREVIEW_SIZE};
+use d3d12_backend::{PreviewBlame, PreviewError, PreviewEvent, PreviewJob, PreviewJobKind, PreviewLoop, PreviewRenderer, MAX_EVENT_LINE, MAX_PREVIEW_SIDE, PREVIEW_PROTOCOL, PREVIEW_SIZE};
 
 /// What the protocol needs from a renderer, so it can be tested without a GPU.
 pub trait Renderer {
     fn description(&self) -> String;
-    fn still(&mut self, package: &Path) -> Result<Vec<u8>, PreviewError>;
-    fn animation(&mut self, package: &Path) -> Result<PreviewLoop, PreviewError>;
+    /// Frames of `size` (width, height).
+    fn still(&mut self, package: &Path, size: (u32, u32)) -> Result<Vec<u8>, PreviewError>;
+    fn animation(&mut self, package: &Path, size: (u32, u32)) -> Result<PreviewLoop, PreviewError>;
 }
 
 impl Renderer for PreviewRenderer {
     fn description(&self) -> String {
         self.device_description().unwrap_or_default()
     }
-    fn still(&mut self, package: &Path) -> Result<Vec<u8>, PreviewError> {
-        self.render_still(package)
+    fn still(&mut self, package: &Path, size: (u32, u32)) -> Result<Vec<u8>, PreviewError> {
+        self.render_still_sized(package, size.0, size.1)
     }
-    fn animation(&mut self, package: &Path) -> Result<PreviewLoop, PreviewError> {
-        self.render_loop(package)
+    fn animation(&mut self, package: &Path, size: (u32, u32)) -> Result<PreviewLoop, PreviewError> {
+        self.render_loop_sized(package, size.0, size.1)
     }
 }
 
@@ -74,14 +77,19 @@ fn render_job(renderer: &mut impl Renderer, job: &PreviewJob) -> Result<bool, (P
     // Encoding and writing are not the package's fault, nor the device's.
     let output = |message: String| (PreviewBlame::Output, message);
     let package = Path::new(&job.package);
+    let (width, height) = match (job.width, job.height) {
+        (None, None) => (PREVIEW_SIZE, PREVIEW_SIZE),
+        (Some(width), Some(height)) if (1..=MAX_PREVIEW_SIDE).contains(&width) && (1..=MAX_PREVIEW_SIDE).contains(&height) => (width, height),
+        (width, height) => return Err(output(format!("a preview of {width:?} x {height:?} is not allowed: give both sides, each 1 to {MAX_PREVIEW_SIDE}"))),
+    };
     let (rgba, frames, is_static) = match job.kind {
-        PreviewJobKind::Still => (renderer.still(package).map_err(from_preview)?, 1u32, false),
+        PreviewJobKind::Still => (renderer.still(package, (width, height)).map_err(from_preview)?, 1u32, false),
         PreviewJobKind::Loop => {
-            let preview = renderer.animation(package).map_err(from_preview)?;
+            let preview = renderer.animation(package, (width, height)).map_err(from_preview)?;
             (preview.frames.concat(), preview.frames.len() as u32, preview.is_static)
         }
     };
-    let png = encode_png(PREVIEW_SIZE, PREVIEW_SIZE * frames, &rgba).map_err(|e| output(format!("encoding the preview failed: {e}")))?;
+    let png = encode_png(width, height * frames, &rgba).map_err(|e| output(format!("encoding the preview failed: {e}")))?;
     if let Err(e) = std::fs::write(&job.out, png) {
         // A write that failed halfway leaves part of a file; do not let the parent mistake it for a preview.
         let _ = std::fs::remove_file(&job.out);
@@ -234,26 +242,26 @@ mod tests {
         calls: Vec<(PreviewJobKind, PathBuf)>,
     }
 
-    fn frame(value: u8) -> Vec<u8> {
-        vec![value; (PREVIEW_SIZE * PREVIEW_SIZE * 4) as usize]
+    fn frame(value: u8, size: (u32, u32)) -> Vec<u8> {
+        vec![value; (size.0 * size.1 * 4) as usize]
     }
 
     impl Renderer for Fake {
         fn description(&self) -> String {
             "Fake GPU".to_owned()
         }
-        fn still(&mut self, package: &Path) -> Result<Vec<u8>, PreviewError> {
+        fn still(&mut self, package: &Path, size: (u32, u32)) -> Result<Vec<u8>, PreviewError> {
             self.calls.push((PreviewJobKind::Still, package.to_owned()));
             fail_by_name(package)?;
-            Ok(frame(7))
+            Ok(frame(7, size))
         }
-        fn animation(&mut self, package: &Path) -> Result<PreviewLoop, PreviewError> {
+        fn animation(&mut self, package: &Path, size: (u32, u32)) -> Result<PreviewLoop, PreviewError> {
             self.calls.push((PreviewJobKind::Loop, package.to_owned()));
             fail_by_name(package)?;
             if package.ends_with("static") {
-                return Ok(PreviewLoop { frames: vec![frame(1)], is_static: true });
+                return Ok(PreviewLoop { frames: vec![frame(1, size)], is_static: true });
             }
-            Ok(PreviewLoop { frames: vec![frame(1), frame(2), frame(3)], is_static: false })
+            Ok(PreviewLoop { frames: vec![frame(1, size), frame(2, size), frame(3, size)], is_static: false })
         }
     }
 
@@ -334,6 +342,25 @@ mod tests {
         let data = pixels(&out);
         let frame_bytes = (PREVIEW_SIZE * PREVIEW_SIZE * 4) as usize;
         assert_eq!([data[0], data[frame_bytes], data[2 * frame_bytes]], [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_sized_job_renders_at_its_size_and_a_half_size_is_refused() {
+        let dir = scratch("sized");
+        let out = dir.join("a.png");
+        let line = json!({"id": 3, "kind": "loop", "package": "pkg/spin", "out": out.to_string_lossy(), "width": 640, "height": 360}).to_string();
+        let (events, _) = run(&format!("{line}
+"));
+        assert_eq!(events[1], json!({"event": "done", "id": 3, "static": false}));
+        assert_eq!(png_size(&out), (640, 360 * 3));
+        for (width, height) in [(Some(640), None), (Some(0), Some(10)), (Some(MAX_PREVIEW_SIDE + 1), Some(10))] {
+            let line = json!({"id": 4, "kind": "still", "package": "pkg/x", "out": dir.join("b.png").to_string_lossy(), "width": width, "height": height}).to_string();
+            let (events, fake) = run(&format!("{line}
+"));
+            assert_eq!(events[1]["event"], "failed", "{width:?} {height:?}");
+            assert_eq!(events[1]["blame"], "output");
+            assert!(fake.calls.is_empty());
+        }
     }
 
     #[test]

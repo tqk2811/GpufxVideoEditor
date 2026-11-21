@@ -70,6 +70,7 @@ Thời gian luôn là số nguyên tick 1/90000 giây, giống project JSON.
 | `keyframe_set`, `keyframe_remove` | Keyframe cho x, y, width, opacity, rotation và tham số float của effect, thời điểm tính bằng tick từ đầu clip |
 | `undo`, `redo` | Hoàn tác, mỗi tool sửa là một bước; `track_set_locked` không phải một bước, giống nút khoá |
 | `frame_capture` | Chụp khung đã ghép |
+| `transition_preview`, `asset_preview` | Xem trước một transition hoặc một sticker trước khi dùng, bằng ảnh PNG hoặc file MP4, xem mục dưới |
 | `export_start`, `export_status`, `export_cancel` | Xuất nền |
 
 Các tool danh sách `packages_list`, `font_list`, `clip_animation_list`, `asset_list`, `text_style_list` cùng nhận `filter` và `limit` tuỳ chọn, dùng chung một hàm so khớp (`crates/gpufx-editor/src/search.rs`). `filter` tách thành từ; mỗi từ phải là chuỗi con của ít nhất một trường, không phân biệt hoa thường và dấu tiếng Việt (`đ` coi như `d`). Kết quả xếp theo điểm: tên trùng hẳn `filter`, rồi tên bắt đầu bằng `filter`, rồi từ khớp đầu một từ của tên, khớp giữa tên, khớp nhóm/tag, cuối cùng khớp trường khác (id, gói, mô tả); cùng điểm thì giữ thứ tự gốc. `filter` rỗng hoặc vắng thì trả hết theo thứ tự gốc. `limit` (số nguyên dương, `0` bị từ chối `invalid_params`) giữ `limit` mục đầu sau khi xếp, với `packages_list` là mỗi danh sách effect và transition; vắng thì không giới hạn. Ô tìm kiếm của editor (effect, nhạc, sticker) dùng cùng hàm này.
@@ -83,6 +84,28 @@ Nhận đúng một trong hai tham số `time` (tick) hoặc `frame` (index), v�
 Trả về ảnh PNG dạng nội dung image của MCP, cùng frame index, thời điểm thực của khung và revision. Khung đã gồm hiệu ứng và transition. `time` được đổi sang frame index bằng đúng công thức preview dùng. Ảnh được thu nhỏ khi quá `max_width`, mặc định 1280 để không làm phình ngữ cảnh agent.
 
 Chế độ file dựng khung qua `FrameRenderer` trên device riêng. Chế độ live chạy việc chụp trên luồng preview, xen giữa các khung (`PreviewWorker::run_on_thread`), không thay yêu cầu preview đang chờ, không báo khung đang dựng là hết cần. Chụp dùng decoder riêng và cờ abort tắt, nên không di chuyển đầu phát, không thay khung đang hiển thị và không bị yêu cầu preview mới làm hỏng. Trong lúc xuất, chụp trả `busy` ở cả hai chế độ.
+
+### `transition_preview` và `asset_preview`
+
+Hai tool giúp agent chọn transition hoặc sticker mà không phải thêm vào timeline rồi chụp. Server MCP tự trả lời cả hai ngay trong tiến trình của nó, ở cả hai chế độ: yêu cầu không đi qua named pipe, nên luồng UI của cửa sổ không bao giờ phải dựng (`crates/gpufx-editor/src/agent/previews.rs`, gọi từ `FileSession` và `LiveSession`).
+
+`transition_preview` nhận `id` (gói transition như `packages_list` ghi), `format` = `frames` (mặc định) hoặc `video`, `frames` (2 đến 24, mặc định 6) và `size` (cạnh dài: 144 mặc định, 360 hoặc 720). Id không có trong các package root, hoặc là effect chứ không phải transition, trả `invalid_params`.
+
+| `size` | Khung | Cache |
+|---|---|---|
+| 144 | 144x144 | Chung với ô xem trước của bảng chọn effect (`%LOCALAPPDATA%\gpufx-editor\effect-previews\v1`) |
+| 360 | 640x360 (16:9) | Cùng thư mục, mục riêng: tên gói trong key có thêm kích thước, nên ghi mục này không xoá file của bảng chọn |
+| 720 | 1280x720 (16:9) | Như trên |
+
+- `frames`: N ảnh PNG (nội dung image của MCP) lấy đều trên dải 24 khung, từ progress 0 đến 1 tính cả hai đầu, kèm JSON `frames: [{frame, progress}]`, `width`, `height`, `static`, `cached`.
+- `video`: dải 24 khung mã hoá thành MP4 H.264 20 fps bằng encoder của export, đặt cạnh dải trong cache với tên `<gói>-<key>.mp4`, ghi qua file tạm rồi đổi tên, có rồi thì dùng lại. Trả `path` tuyệt đối, `uri` (`file:///`), `mime_type`, `width`, `height`, `fps`, `frames`, `duration_ms`, `reused`, kèm một nội dung `resource_link` của MCP (mimeType `video/mp4`).
+- Chưa có trong cache thì dựng ngay bằng helper `gpufx-render --effect-previews` qua một `PreviewSession` riêng của server MCP (cùng luật timeout, lỗi, mất device như bảng chọn; timeout của một dải cỡ lớn là 180 giây), ghi vào cache rồi mới trả lời. Server dùng session riêng chứ không chung worker của bảng chọn, vì worker đó nằm trong tiến trình cửa sổ và chế độ file không có cửa sổ; hai bên chỉ chung file trên đĩa, mỗi file ghi nguyên tử, nên dựng trùng một key chỉ tốn công chứ không hỏng. Gói đã có `.failed` trả `preview_failed` kèm lý do; helper đang nghỉ sau nhiều lần lỗi trả `preview_unavailable`.
+- Job của helper có thêm `width` và `height` tuỳ chọn (vắng là 144x144, nên dòng job của bảng chọn không đổi). Ảnh nguồn vuông 144 được phóng phủ kín khung rồi cắt giữa, không bị kéo méo.
+
+`asset_preview` nhận `source` (nguồn `asset:sticker/...` từ `asset_list`), `format`, `frames` như trên và `size` (cạnh dài tối đa, 1 đến 720, mặc định 360, không bao giờ phóng to quá cỡ gốc). Nguồn không phải sticker trả `invalid_params`.
+
+- Sticker tĩnh: một ảnh PNG, kèm `width`, `height`, `native_width`, `native_height`. `format: video` với sticker tĩnh trả `invalid_params`.
+- Sticker động (GIF, WebP): N ảnh lấy đều trên một vòng lặp, từ đầu vòng, bỏ điểm cuối vì trùng điểm đầu, kèm `frames: [{time_ms, frame}]` và `duration_ms`. `format: video` cho một vòng lặp thành MP4 30 fps, cạnh chẵn, lưu ở `%LOCALAPPDATA%\gpufx-editor\asset-previews\v1\<hash nội dung>-<rộng>x<cao>.mp4`, ghi nguyên tử và dùng lại như trên.
 
 ### `clip_set_speed` và `speed` của `clip_add`
 

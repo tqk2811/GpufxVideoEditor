@@ -1,7 +1,7 @@
 //! Turns a captured RGBA frame into the PNG an agent gets.
 
 /// `rgba` averaged down to `width` x `height`. Each target pixel covers its share of the source.
-fn shrink(rgba: &[u8], source_width: u32, source_height: u32, width: u32, height: u32) -> Vec<u8> {
+pub(crate) fn shrink(rgba: &[u8], source_width: u32, source_height: u32, width: u32, height: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(width as usize * height as usize * 4);
     let span = |index: u32, target: u32, source: u32| {
         let first = u64::from(index) * u64::from(source) / u64::from(target);

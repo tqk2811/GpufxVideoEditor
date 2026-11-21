@@ -46,7 +46,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(30);
 /// left behind; the job object ends its helper with the process.
 const DROP_WAIT: Duration = Duration::from_millis(200);
 /// The package the control job renders.
-const CONTROL_PACKAGE: &str = "packages/gpufx/ffmpeg/invert";
+pub(crate) const CONTROL_PACKAGE: &str = "packages/gpufx/ffmpeg/invert";
 
 /// What a tile of the picker shows.
 #[derive(Clone)]

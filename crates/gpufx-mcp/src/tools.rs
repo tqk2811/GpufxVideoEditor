@@ -6,12 +6,30 @@ use std::sync::Arc;
 
 use engine::Time;
 use gpufx_editor::agent::protocol::{double_option, ClipRef, KaraokePatch, TextAnimationPatch, TextPatch};
+use gpufx_editor::agent::previews::{self, PreviewFormat};
 use gpufx_editor::agent::{AgentEdit, AgentError, AgentRequest, CaptureTarget};
 use rmcp::model::{JsonObject, Tool};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+
+/// What a preview comes as.
+#[derive(Deserialize, JsonSchema, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum PreviewFormatParam {
+    Frames,
+    Video,
+}
+
+impl From<PreviewFormatParam> for PreviewFormat {
+    fn from(format: PreviewFormatParam) -> Self {
+        match format {
+            PreviewFormatParam::Frames => PreviewFormat::Frames,
+            PreviewFormatParam::Video => PreviewFormat::Video,
+        }
+    }
+}
 
 /// A kind of track, as the tools name it.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
@@ -983,6 +1001,18 @@ params!(CensorFacesParams { expected_revision: u64, clip: ClipParam, shape: Opti
 params!(TrackCreateParams { expected_revision: u64, clip: ClipParam, at: Option<i64>, cx: Option<f64>, cy: Option<f64>, w: Option<f64>, h: Option<f64>, angle: Option<f64>, quad: Option<[[f64; 2]; 4]> });
 params!(TrackSmoothParams { expected_revision: u64, track_id: u32, smooth: f64 });
 params!(FrameCaptureParams { time: Option<i64>, frame: Option<i64>, max_width: Option<u32> });
+params!(TransitionPreviewParams {
+    #[doc = "The transition package, as packages_list names it."] id: String,
+    #[doc = "frames (default): PNG pictures; video: an MP4 file in the cache."] format: Option<PreviewFormatParam>,
+    #[doc = "How many pictures, 2 to 24 (default 6)."] frames: Option<u32>,
+    #[doc = "Long edge: 144 (default, square), 360 or 720 (16:9)."] size: Option<u32>,
+});
+params!(AssetPreviewParams {
+    #[doc = "A sticker source from asset_list, asset:sticker/<id>/<file>."] source: String,
+    #[doc = "frames (default): PNG pictures; video: an MP4 file (animated stickers only)."] format: Option<PreviewFormatParam>,
+    #[doc = "How many pictures of an animated sticker, 2 to 24 (default 6)."] frames: Option<u32>,
+    #[doc = "Most pixels on the long edge, 1 to 720 (default 360); never more than the sticker has."] size: Option<u32>,
+});
 
 /// One tool of the server.
 pub struct ToolDef {
@@ -1112,6 +1142,22 @@ fn frame_capture(p: FrameCaptureParams) -> Result<AgentRequest, AgentError> {
     Ok(AgentRequest::FrameCapture { target, max_width })
 }
 
+fn transition_preview(p: TransitionPreviewParams) -> Result<AgentRequest, AgentError> {
+    let frames = previews::check_frames(p.frames.unwrap_or(previews::DEFAULT_FRAMES))?;
+    let size = p.size.unwrap_or(previews::TRANSITION_SIZES[0]);
+    previews::transition_spec(size)?;
+    Ok(AgentRequest::TransitionPreview { id: p.id, format: p.format.map_or(PreviewFormat::Frames, Into::into), frames, size })
+}
+
+fn asset_preview(p: AssetPreviewParams) -> Result<AgentRequest, AgentError> {
+    let frames = previews::check_frames(p.frames.unwrap_or(previews::DEFAULT_FRAMES))?;
+    let size = p.size.unwrap_or(previews::ASSET_DEFAULT_SIZE);
+    if size == 0 || size > previews::ASSET_MAX_SIZE {
+        return Err(AgentError::new("invalid_params", format!("size {size}: from 1 to {}", previews::ASSET_MAX_SIZE)));
+    }
+    Ok(AgentRequest::AssetPreview { source: p.source, format: p.format.map_or(PreviewFormat::Frames, Into::into), frames, size })
+}
+
 /// Every tool. Times are integer ticks of 1/90000 s.
 pub fn all_tools() -> Vec<ToolDef> {
     vec![
@@ -1186,6 +1232,8 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("clip_lock_clear", "Ends the lock of a video clip; it goes back to where it is placed.", ClipOnlyParams, |p| edit(p.expected_revision, AgentEdit::ClipLockClear { clip: p.clip.into() })),
         tool!("undo", "Undoes the last edit.", RevisionParams, |p| Ok(AgentRequest::Undo { expected_revision: p.expected_revision })),
         tool!("redo", "Redoes an undone edit.", RevisionParams, |p| Ok(AgentRequest::Redo { expected_revision: p.expected_revision })),
+        tool!("transition_preview", "What a transition looks like: format frames (default) gives frames (2 to 24, default 6) PNG pictures spread evenly over progress 0 to 1, with JSON giving the progress of each; format video gives an MP4 (20 fps, 24 frames) kept in the preview cache, as its absolute path and a resource link. size is the long edge: 144 (default, the square of the effect picker, sharing its cache), 360 or 720 (16:9). A preview not cached yet is rendered first, which can take a while; a package that failed before answers preview_failed with the reason, an unknown id invalid_params.", TransitionPreviewParams, transition_preview),
+        tool!("asset_preview", "What a sticker of asset_list looks like (source asset:sticker/...): a still gives one PNG; an animated GIF or WebP gives frames (2 to 24, default 6) PNGs spread evenly over its loop, each with its time_ms, or with format video an MP4 (30 fps, one loop) kept in a cache, as its absolute path and a resource link. size is the most pixels on the long edge, 1 to 720 (default 360), never more than the sticker has. A source that is not a sticker answers invalid_params.", AssetPreviewParams, asset_preview),
         tool!("frame_capture", "The composited frame at a time (ticks) or frame index, exactly one of them, as a PNG no wider than max_width (default 1280). A position outside the timeline is an error.", FrameCaptureParams, frame_capture),
         tool!("export_start", "Exports the project to an MP4 in the background; returns a job. Refused with file_exists unless overwrite is true. One export at a time; edits wait for it. codec: h264 (default) or hevc. encoder: auto (default; the first that opens, hardware first: *_nvenc, *_qsv, *_amf, *_mf, then libx264/libx265 in the GPL build, then libopenh264/libkvazaar) or an encoder name such as hevc_nvenc; a named encoder of another codec is refused with invalid_encoder.", ExportStartParams, |p| Ok(AgentRequest::ExportStart { out: p.out, overwrite: p.overwrite, codec: p.codec, encoder: p.encoder })),
         tool!("export_status", "The state of an export (the last one when job is absent): running with done and total, finished with its report, cancelled, or failed with a message.", ExportJobParams, |p| Ok(AgentRequest::ExportStatus { job: p.job })),

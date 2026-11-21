@@ -1284,6 +1284,8 @@ pub fn execute<H: AgentHost>(host: &mut H, prepared: Prepared) -> Step {
         },
         AgentRequest::Undo { expected_revision } => undo_or_redo(host, expected_revision, true),
         AgentRequest::Redo { expected_revision } => undo_or_redo(host, expected_revision, false),
+        // The MCP server answers these without the editor, see `super::previews::PreviewService`.
+        AgentRequest::TransitionPreview { .. } | AgentRequest::AssetPreview { .. } => Err(AgentError::new("unsupported", "previews are made by the MCP server, not by the editor")),
         AgentRequest::FrameCapture { target, max_width } => match frame_capture(host, target, max_width) {
             Ok(frame) => return Step::Frame(frame),
             Err(error) => Err(error),

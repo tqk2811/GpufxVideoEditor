@@ -5,6 +5,7 @@
 
 pub mod gateway;
 pub mod image;
+pub mod previews;
 pub mod protocol;
 pub mod run;
 pub mod text;

@@ -316,6 +316,13 @@ pub enum AgentRequest {
     Undo { expected_revision: u64 },
     Redo { expected_revision: u64 },
     FrameCapture { target: CaptureTarget, max_width: u32 },
+    /// The animated preview of transition package `id`, at the long edge `size`, as `frames`
+    /// pictures or as an MP4 file. The MCP server answers it itself in both modes, so a window
+    /// never renders it; see [`super::previews`].
+    TransitionPreview { id: String, format: super::previews::PreviewFormat, frames: u32, size: u32 },
+    /// The picture of sticker `source` (an `asset:` source), at most `size` on its long edge, as
+    /// `frames` pictures or an MP4 file when it is animated. Answered by the MCP server too.
+    AssetPreview { source: String, format: super::previews::PreviewFormat, frames: u32, size: u32 },
     /// `codec` is h264 (default) or hevc; `encoder` is auto (default) or an encoder name.
     ExportStart { out: PathBuf, overwrite: bool, codec: Option<String>, encoder: Option<String> },
     ExportStatus { job: Option<u64> },

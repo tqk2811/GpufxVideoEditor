@@ -19,6 +19,8 @@ pub const PREVIEW_SIZE: u32 = 144;
 pub const PREVIEW_FRAMES: u32 = 24;
 /// The frame rate of an animated preview.
 pub const PREVIEW_FPS: u32 = 20;
+/// The longest side a preview of another size than [`PREVIEW_SIZE`] may ask for.
+pub const MAX_PREVIEW_SIDE: u32 = 1280;
 
 /// The largest side of a package's output that is still rendered and scaled down.
 const MAX_OUTPUT_SIDE: u32 = 4096;
@@ -159,6 +161,24 @@ fn resize_rgba(source: &[u8], width: u32, height: u32, out_width: u32, out_heigh
     out
 }
 
+/// The square picture `source` (`side` pixels a side) scaled to cover `width` x `height` and cut
+/// to it around the centre, so a picture of another shape is not stretched.
+pub fn cover_rgba(source: &[u8], side: u32, width: u32, height: u32) -> Vec<u8> {
+    if (width, height) == (side, side) {
+        return source.to_vec();
+    }
+    let scaled_side = width.max(height);
+    let scaled = resize_rgba(source, side, side, scaled_side, scaled_side);
+    let (left, top) = (((scaled_side - width) / 2) as usize, ((scaled_side - height) / 2) as usize);
+    let row = scaled_side as usize * 4;
+    let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height as usize {
+        let start = (top + y) * row + left * 4;
+        out.extend_from_slice(&scaled[start..start + width as usize * 4]);
+    }
+    out
+}
+
 /// Decodes one of the built-in pictures to RGBA8.
 fn decode_picture(file: &[u8]) -> Result<Vec<u8>, String> {
     let decoder = png::Decoder::new(std::io::Cursor::new(file));
@@ -277,6 +297,8 @@ struct PackageRender<'a> {
     inputs: Vec<Image<'a>>,
     output_width: u32,
     output_height: u32,
+    /// The size of the frames this gives, which is also the size of the inputs.
+    size: (u32, u32),
     /// Which of [`CLIP_TIME`] and [`CLIP_DURATION`] the package declares. A clip's clock only ever
     /// reaches effects, so a transition is left at its defaults, as in the compositor.
     clock_time: bool,
@@ -284,7 +306,7 @@ struct PackageRender<'a> {
 }
 
 impl<'a> PackageRender<'a> {
-    fn open(context: &Arc<GpuContext>, path: &Path, pictures: &'a [Vec<u8>; 2]) -> Result<Self, Failure> {
+    fn open(context: &Arc<GpuContext>, path: &Path, pictures: &'a [Vec<u8>; 2], size: (u32, u32)) -> Result<Self, Failure> {
         let package = Package::open(path).map_err(|e| match e {
             // A file that cannot be read now (locked while it is installed, a share that is gone) says nothing of the package.
             gpufx_core::Error::Io(io) => Failure { blame: Blame::Device, message: format!("reading the package failed: {io}") },
@@ -300,15 +322,16 @@ impl<'a> PackageRender<'a> {
             return Err(format!("the package has {} outputs, a preview shows one", graph.output_count()).into());
         }
         let count = if role == Role::Transition { 2 } else { 1 };
-        let inputs: Vec<Image<'a>> = pictures[..count].iter().map(|data| Image { data, width: PREVIEW_SIZE, height: PREVIEW_SIZE, stride: PREVIEW_SIZE * 4 }).collect();
-        let streams: Vec<StreamInfo> = inputs.iter().map(|_| StreamInfo { format: None, width: PREVIEW_SIZE, height: PREVIEW_SIZE }).collect();
+        let (width, height) = size;
+        let inputs: Vec<Image<'a>> = pictures[..count].iter().map(|data| Image { data, width, height, stride: width * 4 }).collect();
+        let streams: Vec<StreamInfo> = inputs.iter().map(|_| StreamInfo { format: None, width, height }).collect();
         graph.check_inputs(&streams).map_err(|e| e.to_string())?;
-        let pads = vec![(PREVIEW_SIZE, PREVIEW_SIZE); count];
+        let pads = vec![size; count];
         let (output_width, output_height) = graph.output_size(0, &pads).map_err(|e| format!("computing the output size failed: {e}"))?;
         if output_width == 0 || output_height == 0 || output_width > MAX_OUTPUT_SIDE || output_height > MAX_OUTPUT_SIDE {
             return Err(format!("the output would be {output_width}x{output_height}").into());
         }
-        Ok(Self { graph, role, inputs, output_width, output_height, clock_time, clock_duration })
+        Ok(Self { graph, role, inputs, output_width, output_height, size, clock_time, clock_duration })
     }
 
     /// Whether a clip's clock reaches this package, so what it draws depends on the moment.
@@ -332,7 +355,7 @@ impl<'a> PackageRender<'a> {
         Ok(best.expect("at least one frame").1)
     }
 
-    /// One frame, with [`PREVIEW_SIZE`] sides.
+    /// One frame, of the size the package was opened at.
     fn render(&mut self, sample: Sample) -> Result<Vec<u8>, String> {
         if let Some(progress) = sample.progress {
             self.graph.set_param("progress", &[progress]).map_err(|e| format!("setting progress failed: {e}"))?;
@@ -346,10 +369,10 @@ impl<'a> PackageRender<'a> {
         let (width, height) = (self.output_width, self.output_height);
         let mut out = vec![0u8; width as usize * height as usize * 4];
         self.graph.process(&self.inputs, vec![ImageMut { data: &mut out, width, height, stride: width * 4 }], &FrameInfo::new(sample.time, sample.frame)).map_err(|e| e.to_string())?;
-        if (width, height) == (PREVIEW_SIZE, PREVIEW_SIZE) {
+        if (width, height) == self.size {
             Ok(out)
         } else {
-            Ok(resize_rgba(&out, width, height, PREVIEW_SIZE, PREVIEW_SIZE))
+            Ok(resize_rgba(&out, width, height, self.size.0, self.size.1))
         }
     }
 }
@@ -383,7 +406,13 @@ impl PreviewRenderer {
 
     /// The single picture of a package: RGBA8 with [`PREVIEW_SIZE`] sides.
     pub fn render_still(&mut self, package: &Path) -> Result<Vec<u8>, PreviewError> {
-        self.guarded(package, |render| {
+        self.render_still_sized(package, PREVIEW_SIZE, PREVIEW_SIZE)
+    }
+
+    /// [`Self::render_still`] at `width` x `height`, each from 1 to [`MAX_PREVIEW_SIDE`]. The
+    /// built-in pictures are scaled to cover that size.
+    pub fn render_still_sized(&mut self, package: &Path, width: u32, height: u32) -> Result<Vec<u8>, PreviewError> {
+        self.guarded(package, (width, height), |render| {
             if render.follows_clip_clock() {
                 return render.most_changed_frame();
             }
@@ -394,7 +423,12 @@ impl PreviewRenderer {
     /// The animation of a package, played on hover. An effect that does not change over time gives
     /// one frame, found by comparing frames rendered at a few times.
     pub fn render_loop(&mut self, package: &Path) -> Result<PreviewLoop, PreviewError> {
-        self.guarded(package, |render| {
+        self.render_loop_sized(package, PREVIEW_SIZE, PREVIEW_SIZE)
+    }
+
+    /// [`Self::render_loop`] at `width` x `height`, as [`Self::render_still_sized`].
+    pub fn render_loop_sized(&mut self, package: &Path, width: u32, height: u32) -> Result<PreviewLoop, PreviewError> {
+        self.guarded(package, (width, height), |render| {
             // The four probes are too sparse for a clip clock: a 0.3 s effect is at rest at all of them.
             if render.role == Role::Effect && !render.follows_clip_clock() {
                 let mut probes = Vec::with_capacity(PROBE_TIMES.len());
@@ -416,7 +450,11 @@ impl PreviewRenderer {
     }
 
     /// Runs `work` on the opened package, turning every failure of the package into an `Err`.
-    fn guarded<T>(&mut self, package: &Path, work: impl FnOnce(&mut PackageRender) -> Result<T, Failure>) -> Result<T, PreviewError> {
+    fn guarded<T>(&mut self, package: &Path, size: (u32, u32), work: impl FnOnce(&mut PackageRender) -> Result<T, Failure>) -> Result<T, PreviewError> {
+        let (width, height) = size;
+        if width == 0 || height == 0 || width > MAX_PREVIEW_SIDE || height > MAX_PREVIEW_SIDE {
+            return Err(PreviewError::Package(format!("a preview of {width}x{height} is not allowed; each side is 1 to {MAX_PREVIEW_SIDE}")));
+        }
         if self.device.as_ref().is_some_and(|device| device.lost().is_some()) {
             self.device = None;
         }
@@ -425,9 +463,15 @@ impl PreviewRenderer {
         }
         let device = self.device.as_ref().expect("opened above");
         device.take_error();
-        let pictures = &self.pictures;
+        let scaled;
+        let pictures = if size == (PREVIEW_SIZE, PREVIEW_SIZE) {
+            &self.pictures
+        } else {
+            scaled = self.pictures.clone().map(|picture| cover_rgba(&picture, PREVIEW_SIZE, width, height));
+            &scaled
+        };
         let outcome = catch_unwind(AssertUnwindSafe(|| {
-            let mut render = PackageRender::open(&device.context, package, pictures)?;
+            let mut render = PackageRender::open(&device.context, package, pictures, size)?;
             work(&mut render)
         }));
         let name = package.display();
@@ -536,6 +580,20 @@ mod tests {
         assert!(!all_identical(&[vec![1, 2], vec![1, 2], vec![1, 3]]));
         assert!(!all_identical(&[vec![1, 2], vec![9, 2], vec![1, 2]]));
         assert!(all_identical(&[vec![1, 2]]));
+    }
+
+    #[test]
+    fn cover_keeps_the_centre_and_the_asked_size() {
+        // Left half black, right half white: a wide cut keeps both halves, a tall one the middle.
+        let side = 4u32;
+        let source: Vec<u8> = (0..side * side).flat_map(|i| if i % side < side / 2 { [0, 0, 0, 255] } else { [255, 255, 255, 255] }).collect();
+        assert_eq!(cover_rgba(&source, side, side, side), source);
+        let wide = cover_rgba(&source, side, 8, 4);
+        assert_eq!(wide.len(), 8 * 4 * 4);
+        assert_eq!(wide[0], 0);
+        assert_eq!(wide[(8 - 1) * 4], 255);
+        let tall = cover_rgba(&source, side, 2, 8);
+        assert_eq!(tall.len(), 2 * 8 * 4);
     }
 
     #[test]
