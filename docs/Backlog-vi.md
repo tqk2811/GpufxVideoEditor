@@ -382,10 +382,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/gpufx-editor/src/export/child.rs:72` (`TemporaryProject`): tiến trình con tự dừng sạch khi stdin đóng và không để lại file video tạm, nhưng project tạm `gpufx-export.*.tmp.json` trong thư mục temp thì không ai xoá khi `gpufx-mcp` chết. Tiến trình con kẹt quá hạn 30 s (`crates/gpufx-render/src/main.rs:24,119`) tự thoát bằng `process::exit`, nên còn để lại cả file `*.tmp.mp4` cạnh file đích. Nên dọn chung với việc dọn file tạm của editor. Ghi ngày 2026-11-09.
 
-### [Thấp] `export_start` chỉ kiểm `overwrite: false` lúc bắt đầu
-
-`crates/gpufx-editor/src/agent/run.rs:358`: file đích xuất hiện sau bước kiểm (app khác tạo ra trong lúc render) vẫn bị bước đổi tên cuối cùng ghi đè dù `overwrite` là false. Nên để bước đổi tên từ chối ghi đè khi không được phép. Ghi ngày 2026-11-09.
-
 ### [Thấp] Tắt quyền agent trong lúc chụp chặn UI 1 giây và bật lại báo sai lỗi
 
 `crates/gpufx-editor/src/agent/gateway.rs:312` (`Drop`): luồng pipe đang chờ một lần chụp thì UI đứng tới 1 s, và luồng đó còn giữ pipe nên bật lại ngay sẽ báo lỗi tạo pipe (kiểu "có editor khác đang mở") thay vì nói là chờ một chút. Nên tách việc đóng pipe khỏi việc chờ, hoặc thử lại khi bật. Ghi ngày 2026-11-09.

@@ -133,12 +133,12 @@ impl AgentHost for FileHost {
         self.state.agent_export().map(|record| record.out.clone())
     }
 
-    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError> {
+    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice, overwrite: bool) -> Result<(), AgentError> {
         let file = self.state.project_file().map(PathBuf::from);
         let paths = AgentHost::paths(self);
         let project = self.state.project().clone();
         let total = frame_count(&project);
-        let job = ExportJob { project, project_file: file, paths, out, encoder, hashes: None, keyframe_interval: None };
+        let job = ExportJob { project, project_file: file, paths, out, encoder, hashes: None, keyframe_interval: None, overwrite };
         check_export(&job)?;
         // The child needs the GPU memory and decoders the captures hold.
         self.rig = None;

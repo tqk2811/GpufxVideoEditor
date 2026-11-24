@@ -50,10 +50,10 @@ impl AgentHost for Host {
         receiver
     }
 
-    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError> {
+    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice, overwrite: bool) -> Result<(), AgentError> {
         let project = self.state.project().clone();
         let total = frame_count(&project);
-        let job = ExportJob { project, project_file: None, paths: self.paths.clone(), out, encoder, hashes: None, keyframe_interval: None };
+        let job = ExportJob { project, project_file: None, paths: self.paths.clone(), out, encoder, hashes: None, keyframe_interval: None, overwrite };
         let released = self.preview.as_ref().expect("a test with a GPU").suspend();
         let tool = Path::new(env!("CARGO_BIN_EXE_gpufx-mcp")).with_file_name("gpufx-render.exe");
         self.state.begin_export(total);

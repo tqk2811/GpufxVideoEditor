@@ -54,6 +54,9 @@ pub struct ExportJob {
     /// Frames between keyframes; `None` for the encoder's usual two seconds. A preview proxy asks
     /// for a short interval so a seek decodes few frames.
     pub keyframe_interval: Option<u32>,
+    /// Whether the finished file may replace a file at `out`. When false, a file that appeared at
+    /// `out` while the render ran is left alone and the finished file is kept under its temporary name.
+    pub overwrite: bool,
 }
 
 /// What an export reports while it runs and how it is stopped.
@@ -149,20 +152,38 @@ struct PendingFile {
     temporary: PathBuf,
     target: PathBuf,
     keep: bool,
+    /// Whether the commit may replace a file at `target`.
+    overwrite: bool,
 }
 
 impl PendingFile {
-    fn new(target: &Path) -> Result<Self, String> {
+    fn new(target: &Path, overwrite: bool) -> Result<Self, String> {
         let temporary = reserve_temporary(target).map_err(|e| format!("reserving a temporary file next to {}: {e}", target.display()))?;
-        Ok(Self { temporary, target: target.to_path_buf(), keep: false })
+        Ok(Self { temporary, target: target.to_path_buf(), keep: false, overwrite })
     }
 
     /// Renames the finished temporary file over the target. Close the file first. When the rename
-    /// fails (a player holds the target open) the finished file is kept and named in the error.
+    /// fails (a player holds the target open, or a file is there and `overwrite` is false) the
+    /// finished file is kept and named in the error.
     fn commit(&mut self) -> Result<(), String> {
-        let renamed = std::fs::rename(&self.temporary, &self.target);
+        let renamed = if self.overwrite { std::fs::rename(&self.temporary, &self.target) } else { rename_no_replace(&self.temporary, &self.target) };
         self.keep = true;
         renamed.map_err(|e| format!("the finished file was kept as {}: renaming it to {} failed: {e}", self.temporary.display(), self.target.display()))
+    }
+}
+
+/// Moves `from` to `to` unless a file is at `to`. A hard link is made and the old name removed, which
+/// fails at once when `to` exists; a volume without hard links falls back to a check and a rename.
+fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(from);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists || to.exists() => {
+            Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} exists and may not be replaced", to.display())))
+        }
+        Err(_) => std::fs::rename(from, to),
     }
 }
 
@@ -310,8 +331,8 @@ impl ExportJob {
         let cancelled = || control.cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::SeqCst));
         let mut audio_files = self.project.output.audio.map(|_| AudioFiles::new(self.paths.clone()));
         // Declared before the sink, so they drop after it has closed its files.
-        let mut out_file = PendingFile::new(&self.out)?;
-        let mut hashes_file = self.hashes.as_deref().map(PendingFile::new).transpose()?;
+        let mut out_file = PendingFile::new(&self.out, self.overwrite)?;
+        let mut hashes_file = self.hashes.as_deref().map(|hashes| PendingFile::new(hashes, true)).transpose()?;
         if let Some(reserved) = control.reserved {
             reserved(&out_file.temporary);
             if let Some(hashes) = &hashes_file {
@@ -396,7 +417,7 @@ mod tests {
         let dir = scratch("locked");
         let target = dir.join("out.mp4");
         std::fs::write(&target, b"old").unwrap();
-        let mut pending = PendingFile::new(&target).unwrap();
+        let mut pending = PendingFile::new(&target, true).unwrap();
         std::fs::write(&pending.temporary, b"finished").unwrap();
         let temporary = pending.temporary.clone();
         // A player holding the target open without sharing: the rename over it fails.
@@ -407,6 +428,30 @@ mod tests {
         assert!(message.contains(&temporary.display().to_string()), "{message}");
         assert_eq!(std::fs::read(&temporary).unwrap(), b"finished");
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_that_appeared_meanwhile_is_not_replaced_without_overwrite() {
+        let dir = scratch("no-overwrite");
+        let target = dir.join("out.mp4");
+        let mut pending = PendingFile::new(&target, false).unwrap();
+        std::fs::write(&pending.temporary, b"finished").unwrap();
+        let temporary = pending.temporary.clone();
+        // Another program writes the target while the render runs.
+        std::fs::write(&target, b"theirs").unwrap();
+        let message = pending.commit().unwrap_err();
+        drop(pending);
+        assert!(message.contains(&temporary.display().to_string()), "{message}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"theirs");
+        assert_eq!(std::fs::read(&temporary).unwrap(), b"finished");
+        std::fs::remove_file(&temporary).unwrap();
+        let mut pending = PendingFile::new(&dir.join("free.mp4"), false).unwrap();
+        std::fs::write(&pending.temporary, b"finished").unwrap();
+        pending.commit().unwrap();
+        drop(pending);
+        assert_eq!(std::fs::read(dir.join("free.mp4")).unwrap(), b"finished");
+        assert_eq!(file_names(&dir), ["free.mp4", "out.mp4"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -434,7 +479,7 @@ mod tests {
         let bystander = dir.join("out.tmp.mp4");
         std::fs::write(&bystander, b"user").unwrap();
         {
-            let pending = PendingFile::new(&target).unwrap();
+            let pending = PendingFile::new(&target, true).unwrap();
             std::fs::write(&pending.temporary, b"partial").unwrap();
         }
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
