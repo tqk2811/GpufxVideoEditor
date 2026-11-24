@@ -119,10 +119,6 @@ Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đ�
 
 `crates/d3d12-backend/src/compositor.rs` `transition` (dòng gán `premultiplied = see_through`) đưa ảnh đã `place` vào gpufx với cờ `premultiplied` tắt, nên shader transition tính trên màu premultiplied (xem `external/FFmpegGpuFilter/crates/gpufx-core/src/frame.rs:258` nói effect phải thấy straight). Mix tuyến tính vẫn đúng, nhưng effect đổi màu làm sai vùng bán trong suốt. Nên báo `premultiplied` ở input transition. Ghi ngày 2026-11-10.
 
-### [Thấp] MCP `clip_add` với asset:sticker không có placement mặc định
-
-`crates/gpufx-mcp/src/tools.rs:163` (`clip_add`) qua `AgentEdit::ClipAdd` thêm sticker theo khớp cả khung, khác lúc thêm từ tab Sticker (nhỏ, căn giữa theo tỉ lệ thật). Agent phải tự gọi set placement. Nên dùng chung mặc định với `new_library_clip`. Ghi ngày 2026-11-10.
-
 ### [Thấp] Ảnh đổi trên đĩa vẫn dùng bản cũ cho tới khi rời clip
 
 `crates/d3d12-backend/src/compositor.rs` `load_still` kiểm dấu file khi mở decoder, nên đang ở trong clip ảnh thì đổi file không được cập nhật tới khi clip được mở lại. Chấp nhận được vì rẻ; nên có tín hiệu làm mới nếu cần. Ghi ngày 2026-11-10.

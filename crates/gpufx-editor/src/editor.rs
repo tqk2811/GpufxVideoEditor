@@ -2633,14 +2633,20 @@ impl EditorState {
     fn new_library_clip(&self, item: &MediaItem, start: Time, duration: Time) -> Clip {
         let mut clip = new_clip(&item.source, start, duration);
         if crate::media::is_sticker(&item.source) {
-            let output = &self.project().output;
-            let output_aspect = f64::from(output.width) / f64::from(output.height.max(1));
-            let source_aspect = self.sticker_library.aspect_of(&item.source).unwrap_or(1.0);
-            let wide = ClipPlacement { x: 0.0, y: 0.0, width: STICKER_WIDTH };
-            let height = PlacedRect::of(Some(wide), output_aspect, source_aspect).height;
-            clip.placement = Some(ClipPlacement { x: (1.0 - STICKER_WIDTH) / 2.0, y: (1.0 - height) / 2.0, width: STICKER_WIDTH });
+            clip.placement = Some(self.default_sticker_placement(&item.source));
         }
         clip
+    }
+
+    /// Where a sticker `source` goes when nothing says otherwise: small and centred, in its own shape.
+    /// Shared by the Sticker tab and the agent's `clip_add`.
+    pub(crate) fn default_sticker_placement(&self, source: &str) -> ClipPlacement {
+        let output = &self.project().output;
+        let output_aspect = f64::from(output.width) / f64::from(output.height.max(1));
+        let source_aspect = self.sticker_library.aspect_of(source).unwrap_or(1.0);
+        let wide = ClipPlacement { x: 0.0, y: 0.0, width: STICKER_WIDTH };
+        let height = PlacedRect::of(Some(wide), output_aspect, source_aspect).height;
+        ClipPlacement { x: (1.0 - STICKER_WIDTH) / 2.0, y: (1.0 - height) / 2.0, width: STICKER_WIDTH }
     }
 
     /// Width of picture `source` dropped on the player, as a fraction of the frame width: a
