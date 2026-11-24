@@ -177,7 +177,7 @@ Giải mã và ghép dùng shader gpufx, còn xuất dùng `rgba_to_nv12` ở `c
 
 ### [Thấp] Dọn dẹp rải rác ở engine và backend
 
-`canvas` không được giải phóng trên đường lỗi (`crates/engine/src/render.rs:264-282`). `clip_graphs` không bao giờ bị loại bỏ (`crates/d3d12-backend/src/compositor.rs:186`), nên project nhiều clip giữ graph của mọi clip. Thư mục package mặc định là đường dẫn lúc build (`crates/gpufx-render/src/main.rs:68`), không chạy được khi file thực thi được chép đi. `Decoder::wait_idle` trong trait trung lập là khái niệm riêng của D3D12VA. Ghi ngày 2026-11-09.
+`canvas` không được giải phóng trên đường lỗi (`crates/engine/src/render.rs:264-282`). Thư mục package mặc định là đường dẫn lúc build (`crates/gpufx-render/src/main.rs:68`), không chạy được khi file thực thi được chép đi. `Decoder::wait_idle` trong trait trung lập là khái niệm riêng của D3D12VA. Ghi ngày 2026-11-09.
 
 ### [Thấp] Crossfade tiếng dựa vào độ dài file lấy từ duration của container
 
@@ -211,10 +211,6 @@ Khi kéo clip hoặc cạnh trim tới mép trái/phải của vùng track, view
 
 Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, không làm tròn về mốc khung của `output.frame_rate` (`crates/gpufx-editor/src/timeline/drag.rs`, `drag_command`). Clip có thể bắt đầu giữa hai khung. Cần quyết định trước khi xuất video. Ghi ngày 2026-11-09.
 
-### [Thấp] POC duyệt TexturesDelta không drain
-
-`crates/poc/src/presenter.rs:132` duyệt `TexturesDelta` mà không `drain`. Cùng kiểu mã này đã panic ("Dropped TexturesDelta with unapplied deltas") ở bản debug của editor; chưa xác nhận trong POC. Ghi ngày 2026-11-09.
-
 ### [Thấp] Khung đầu tiên trên device mới vẫn ra trễ khoảng 1 giây vì dựng pipeline
 
 `external/FFmpegGpuFilter/crates/gpufx-core/src/convert.rs:354` dựng pipeline chuyển đổi khung GPU (`to_rgba_gpu`) ở lần dùng đầu của mỗi `GpuContext`, mất khoảng 970 ms (đo 2026-11-09). Việc này đã nằm ngoài cổng submit nên UI vẫn present được (cổng giữ tối đa khoảng 13 ms), nhưng khung đầu tiên vẫn hiện sau khoảng 1,1 giây. Nên làm nếu muốn hình đầu ra nhanh hơn: dựng sẵn lúc khởi tạo device ở luồng nền, hoặc cache pipeline. Ghi ngày 2026-11-09.
@@ -222,10 +218,6 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 ### [Thấp] Lỗi wgpu của luồng UI chỉ hiện chớp qua ở dòng preview
 
 `crates/d3d12-backend/src/gpu.rs` giờ giữ lỗi theo từng luồng (wgpu gọi handler trên luồng gây lỗi), nên lỗi của luồng UI không còn làm hỏng frame hay export. `crates/gpufx-editor/src/window.rs` (`collect_preview`) chỉ đưa lỗi của luồng UI vào `preview_error`, và frame preview kế tiếp ghi đè nó. Nên làm vì lỗi UI thật có thể trôi mất; nên có chỗ hiển thị riêng. Ghi ngày 2026-11-09.
-
-### [Thấp] `clip_graphs` và `transition_graphs` không bao giờ được dọn
-
-`crates/d3d12-backend/src/compositor.rs:284-285`: hai cache này chỉ thêm, nên preview chạy lâu hoặc project nhiều clip giữ graph của mọi clip và mọi transition đã gặp. Nên làm vì bộ nhớ GPU tăng theo số clip đã xem. Ghi ngày 2026-11-09.
 
 ### [Thấp] Tua qua ranh giới clip đóng decoder
 
