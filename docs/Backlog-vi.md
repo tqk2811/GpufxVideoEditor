@@ -95,10 +95,6 @@ Ghi ngày 2026-11-17.
 
 Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đọc từ proxy toàn khung I (hoặc GOP rất ngắn): mỗi khung giải mã đúng một lần, không cần ring lớn hay cache RAM của `crates/d3d12-backend/src/decoder/reverse.rs`. Ghi ngày 2026-11-17.
 
-### [Thấp] `still_dimensions` bỏ qua hướng EXIF
-
-`crates/d3d12-backend/src/still.rs:54` (`still_dimensions`) đọc kích thước từ header mà không xoay theo EXIF, còn `read_still` xoay rồi; `crates/gpufx-editor/src/visuals/backend.rs:42` và tỉ lệ sticker trong thư viện dùng con số đó, nên ảnh chụp dọc có EXIF cho tỉ lệ ngược so với lúc render. Nên đọc orientation khi lấy kích thước. Ghi ngày 2026-11-10.
-
 ### [Thấp] Ảnh hỏng chỉ lộ khi render
 
 `crates/d3d12-backend/src/paths.rs:277` chỉ kiểm được đường dẫn và phần mở rộng của ảnh, không kiểm nội dung; ảnh hỏng qua được validate và chỉ báo lỗi lúc tới khung có clip đó. Nên kiểm header lúc thêm clip hoặc lúc validate. Ghi ngày 2026-11-10.
