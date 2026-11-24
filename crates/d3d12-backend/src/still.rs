@@ -51,11 +51,16 @@ fn reader_of(path: &Path) -> Result<ImageReader<BufReader<File>>, String> {
     Ok(reader)
 }
 
-/// The size of the picture in `path`, read from its header alone.
+/// The size of the picture in `path` as [`read_still`] shows it, turned as its EXIF orientation
+/// says, read without decoding the pixels.
 pub fn still_dimensions(path: &Path) -> Result<(u32, u32), String> {
-    let dimensions = reader_of(path)?.into_dimensions().map_err(|e| format!("{}: {e}", path.display()))?;
-    check_pixels(path, dimensions)?;
-    Ok(dimensions)
+    let shown = path.display();
+    let mut decoder = reader_of(path)?.into_decoder().map_err(|e| format!("{shown}: {e}"))?;
+    let (width, height) = decoder.dimensions();
+    check_pixels(path, (width, height))?;
+    let orientation = decoder.orientation().map_err(|e| format!("{shown}: {e}"))?;
+    use image::metadata::Orientation::{Rotate90, Rotate90FlipH, Rotate270, Rotate270FlipH};
+    Ok(if matches!(orientation, Rotate90 | Rotate90FlipH | Rotate270 | Rotate270FlipH) { (height, width) } else { (width, height) })
 }
 
 fn check_pixels(path: &Path, (width, height): (u32, u32)) -> Result<(), String> {
@@ -832,6 +837,24 @@ mod tests {
             }
         }
         !crc
+    }
+
+    #[test]
+    fn the_dimensions_of_a_still_follow_its_exif_orientation_as_its_pixels_do() {
+        use image::ImageEncoder;
+        let dir = scratch("exif");
+        let path = dir.join("portrait.png");
+        let mut bytes = Vec::new();
+        let mut encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+        // A little-endian TIFF block with one entry: Orientation (0x0112) = 6, a quarter turn clockwise.
+        let exif = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0];
+        encoder.set_exif_metadata(exif).unwrap();
+        encoder.write_image(&vec![255; 4 * 2 * 4], 4, 2, image::ExtendedColorType::Rgba8).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let still = read_still(&path).unwrap();
+        assert_eq!((still.width, still.height), (2, 4));
+        assert_eq!(still_dimensions(&path).unwrap(), (2, 4));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -91,21 +91,9 @@ Ghi ngày 2026-11-17.
 
 Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đọc từ proxy toàn khung I (hoặc GOP rất ngắn): mỗi khung giải mã đúng một lần, không cần ring lớn hay cache RAM của `crates/d3d12-backend/src/decoder/reverse.rs`. Ghi ngày 2026-11-17.
 
-### [Thấp] `still_dimensions` bỏ qua hướng EXIF
-
-`crates/d3d12-backend/src/still.rs:54` (`still_dimensions`) đọc kích thước từ header mà không xoay theo EXIF, còn `read_still` xoay rồi; `crates/gpufx-editor/src/visuals/backend.rs:42` và tỉ lệ sticker trong thư viện dùng con số đó, nên ảnh chụp dọc có EXIF cho tỉ lệ ngược so với lúc render. Nên đọc orientation khi lấy kích thước. Ghi ngày 2026-11-10.
-
 ### [Thấp] Ảnh hỏng chỉ lộ khi render
 
 `crates/d3d12-backend/src/paths.rs:277` chỉ kiểm được đường dẫn và phần mở rộng của ảnh, không kiểm nội dung; ảnh hỏng qua được validate và chỉ báo lỗi lúc tới khung có clip đó. Nên kiểm header lúc thêm clip hoặc lúc validate. Ghi ngày 2026-11-10.
-
-### [Thấp] Đua khi khôi phục cài đặt dở
-
-`crates/gpufx-editor/src/asset_install.rs:364` (`recover_interrupted_install`) khôi phục thư mục cài dở lúc khởi động mà có thể chạy cùng một lượt cài ở tiến trình editor khác. Nên giữ cùng lock cài đặt suốt lúc khôi phục. Ghi ngày 2026-11-10.
-
-### [Thấp] `ink_bounds` vẽ thừa glyph chỉ để lấy khung mực
-
-`crates/gpufx-text/src/lib.rs:202` (`ink_bounds`) gọi `get_outline_commands_uncached`, rồi `get_image_uncached` (dòng 227) cho từng glyph ở mỗi lần layout, mà một lần đo có thể layout tới 8 vòng co chữ. Emoji và font bitmap bị vẽ hẳn ra ảnh chỉ để lấy khung. Kết quả không sai, chỉ đo chậm với chữ dài hoặc nhiều emoji. Nên nhớ khung mực theo `CacheKey` qua các vòng co. Ghi ngày 2026-11-11.
 
 ### [Thấp] Trần cache ảnh 1 GiB tính riêng từng compositor
 
@@ -118,10 +106,6 @@ Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đ�
 ### [Thấp] Transition nhận màu premultiplied như straight
 
 `crates/d3d12-backend/src/compositor.rs` `transition` (dòng gán `premultiplied = see_through`) đưa ảnh đã `place` vào gpufx với cờ `premultiplied` tắt, nên shader transition tính trên màu premultiplied (xem `external/FFmpegGpuFilter/crates/gpufx-core/src/frame.rs:258` nói effect phải thấy straight). Mix tuyến tính vẫn đúng, nhưng effect đổi màu làm sai vùng bán trong suốt. Nên báo `premultiplied` ở input transition. Ghi ngày 2026-11-10.
-
-### [Thấp] MCP `clip_add` với asset:sticker không có placement mặc định
-
-`crates/gpufx-mcp/src/tools.rs:163` (`clip_add`) qua `AgentEdit::ClipAdd` thêm sticker theo khớp cả khung, khác lúc thêm từ tab Sticker (nhỏ, căn giữa theo tỉ lệ thật). Agent phải tự gọi set placement. Nên dùng chung mặc định với `new_library_clip`. Ghi ngày 2026-11-10.
 
 ### [Thấp] Ảnh đổi trên đĩa vẫn dùng bản cũ cho tới khi rời clip
 

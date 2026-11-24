@@ -139,7 +139,15 @@ pub struct TextRasterizer {
     unit_plan_builds: u64,
     /// Texture pictures read, by path.
     textures: TextureCache,
+    /// The ink box of each glyph measured, by its key (see [`Self::ink_bounds`]), so a glyph that
+    /// comes back, in the same text or the next layout of it, is not measured again.
+    ink: HashMap<cosmic_text::CacheKey, Option<(f32, f32, f32, f32)>>,
+    /// How many glyphs have been measured rather than found in `ink`, for tests.
+    ink_measures: u64,
 }
+
+/// How many ink boxes [`TextRasterizer`] keeps; past that it forgets them all and starts again.
+const MAX_INK_BOXES: usize = 8192;
 
 /// A font file as loaded: the stamp it had, its faces and its family (`None` when not a font).
 struct LoadedFile {
@@ -219,7 +227,7 @@ impl TextRasterizer {
             None => eprintln!("gpufx-text: no font is installed; text cannot be drawn"),
         }
         let locale = sys_locale();
-        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0, unit_plans: Vec::new(), unit_plan_builds: 0, textures: TextureCache::default() }
+        TextRasterizer { font_system: FontSystem::new_with_locale_and_db(locale, db), cache: SwashCache::new(), default_family, files: HashMap::new(), file_loads: 0, unit_plans: Vec::new(), unit_plan_builds: 0, textures: TextureCache::default(), ink: HashMap::new(), ink_measures: 0 }
     }
 
     /// The installed family [`FontRef::Default`] draws with: the first of
@@ -600,6 +608,25 @@ impl TextRasterizer {
     /// The box of a glyph's outline around its origin, y down, in pixels. A glyph with no
     /// outline, such as a bitmap emoji, is measured by its picture.
     fn ink_bounds(&mut self, key: cosmic_text::CacheKey) -> Option<(f32, f32, f32, f32)> {
+        if let Some(bounds) = self.ink.get(&key) {
+            return *bounds;
+        }
+        if self.ink.len() >= MAX_INK_BOXES {
+            self.ink.clear();
+        }
+        let bounds = self.measure_ink(key);
+        self.ink_measures += 1;
+        self.ink.insert(key, bounds);
+        bounds
+    }
+
+    /// How many glyphs have had their ink box measured rather than found kept.
+    pub fn ink_measures(&self) -> u64 {
+        self.ink_measures
+    }
+
+    /// [`Self::ink_bounds`] without the kept boxes: reads the outline, or draws the glyph.
+    fn measure_ink(&mut self, key: cosmic_text::CacheKey) -> Option<(f32, f32, f32, f32)> {
         if let Some(commands) = self.cache.get_outline_commands_uncached(&mut self.font_system, key) {
             let mut bounds: Option<(f32, f32, f32, f32)> = None;
             // Outline y points up. Control points hold the curves, so their box holds the glyph.

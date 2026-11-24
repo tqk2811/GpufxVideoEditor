@@ -328,6 +328,10 @@ fn added_clip(state: &EditorState, track: usize, source: &Path, start: Time, sou
     check_speed(speed)?;
     let mut clip = new_clip(&stored, start, Time::ZERO);
     clip.source_in = source_in;
+    if crate::media::is_sticker(&stored) {
+        // As small and centred as one added from the Sticker tab, not as large as fits.
+        clip.placement = Some(state.default_sticker_placement(&stored));
+    }
     if clip.is_image() {
         // A still has no source position or speed: it runs as long as asked, 5 seconds by default;
         // an animated one by default runs whole loops, as when it is dropped on the timeline.
@@ -1619,6 +1623,17 @@ mod tests {
         assert_eq!(add(None, Some(AnimationTiming { loop_ms: 600, loops: 0 })), animated_duration(DEFAULT_IMAGE_DURATION, AnimationTiming { loop_ms: 600, loops: 0 }));
         assert_eq!(add(None, None), DEFAULT_IMAGE_DURATION, "a still keeps the default");
         assert_eq!(add(Some(Time::from_ticks(9000)), Some(timing)), Time::from_ticks(9000), "an asked duration wins");
+    }
+
+    #[test]
+    fn a_sticker_added_by_clip_add_is_placed_as_the_sticker_tab_places_it() {
+        let mut state = EditorState::default();
+        state.add_track(TrackKind::Sticker);
+        let track = state.project().tracks.iter().rposition(|track| track.kind == TrackKind::Sticker).expect("a sticker track");
+        let source = "asset:sticker/p/images/a.png";
+        let clip = added_clip(&state, track, Path::new(source), Time::ZERO, None, None, None, Some(Ok(probed(Time::ZERO))), None).unwrap();
+        assert_eq!(clip.placement, Some(state.default_sticker_placement(source)));
+        assert!(clip.placement.is_some_and(|placement| placement.width < 1.0), "not as large as the frame");
     }
 
     #[test]
