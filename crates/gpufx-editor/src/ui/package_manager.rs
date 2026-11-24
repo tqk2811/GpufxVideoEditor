@@ -383,6 +383,7 @@ mod tests {
             hidden: false,
             problem: None,
             shadowed,
+            tags: Vec::new(),
             i18n: Default::default(),
             collection: PackCollection { id: collection.to_owned(), name: collection.to_owned(), i18n: Default::default() },
         }
