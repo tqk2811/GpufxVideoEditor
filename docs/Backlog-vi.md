@@ -430,10 +430,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/gpufx-editor/src/agent/gateway.rs:49`, phía client ở `crates/gpufx-mcp/src/session.rs`: kiểm chủ server cần mở token của tiến trình editor, từ medium integrity lên high integrity nhiều khả năng bị từ chối. Đây là fail-closed có thông báo, chưa chạy thử; ghi lại để biết khi gặp. Ghi ngày 2026-11-09.
 
-### [Thấp] Comment đặt sai chỗ ở test preview
-
-`crates/gpufx-editor/tests/preview_gpu.rs:292`: comment về `try_lock_submits` nằm trên test capture mới thay vì trên test nó mô tả ở dòng 311. Ghi ngày 2026-11-09.
-
 ### [Vừa] Preview ở tốc độ cao có thể không kịp giải mã
 
 Ở 10x mỗi khung xuất cần `crates/d3d12-backend/src/decoder.rs:525` giải mã xuyên qua khoảng 10 khung nguồn, trừ khi nhảy quá 2 giây tới keyframe. Nguồn 4K dễ không kịp thời gian thực và preview sẽ rớt khung (xuất file vẫn đúng). Cần đo trên máy thật và cân nhắc giải mã chỉ khung intra khi tua nhanh. Khung không kịp đã được bỏ qua không tốn GPU (`LatestSlot`, `crates/gpufx-editor/src/preview/worker.rs:118`), nhưng giải mã chậm hơn thời gian thực trên clip GOP dài thì độ trễ của hình tăng dần tới khi `forward_seek_pays` cho tua; trong lúc phát, `ABORT_GRACE` 150 ms (`crates/gpufx-editor/src/preview/backend.rs:19`) còn huỷ lượt giải mã nếu vừa có khung trong 500 ms (`PUBLISH_FRESH_WITHIN`, `crates/d3d12-backend/src/decoder.rs:42`), nên ca này chỉ cập nhật hình khoảng mỗi nửa giây (suy từ đọc code, chưa đo). Ghi ngày 2026-11-10.

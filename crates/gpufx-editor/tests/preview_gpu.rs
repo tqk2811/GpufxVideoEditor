@@ -307,8 +307,6 @@ fn a_relative_source_follows_the_paths_of_the_request() {
     assert!(matches!(producer.produce(&missing), Err(ProduceError::Failed(_))), "the old decoder must not serve the moved project");
 }
 
-/// Covers `Gpu::try_lock_submits` only: a held gate is refused and a free one is taken. It does not
-/// run the presenter, so the skipped frame of `Presenter::render` is not tested here.
 #[test]
 fn a_capture_is_not_stopped_by_a_newer_request_but_stops_at_once_on_closing() {
     let _gpu = gpu_lock();
@@ -325,6 +323,8 @@ fn a_capture_is_not_stopped_by_a_newer_request_but_stops_at_once_on_closing() {
     assert!(is_cancelled(&error), "{error}");
 }
 
+/// Covers `Gpu::try_lock_submits` only: a held gate is refused and a free one is taken. It does not
+/// run the presenter, so the skipped frame of `Presenter::render` is not tested here.
 #[test]
 fn try_lock_submits_refuses_a_held_gate_and_takes_a_free_one() {
     let _exclusive = gpu_lock();
