@@ -378,10 +378,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/gpufx-editor/src/window.rs:241` (`serve_agent`): test đã đi qua pipe thật, `EditorState` và luồng preview thật, nhưng không có cửa sổ winit. Bật tuỳ chọn trong menu, dấu báo agent, lệnh tới khi cửa sổ thu nhỏ và preview cập nhật sau lệnh agent mới chỉ thử được bằng tay. Tiêu chí "Dùng thật" của đặc tả vẫn còn mở. Ghi ngày 2026-11-09.
 
-### [Vừa] Lưu hoặc xuất có thể ghi đè file bên trong package dạng thư mục
-
-`crates/d3d12-backend/src/export.rs:117` (`overwritten_input`): chỉ so đường dẫn đích với chính thư mục package, nên `project_save` với `overwrite: true` vào `<package>/manifest.json` làm hỏng package đang dùng, `export_start` hở tương tự. Nên từ chối mọi đích nằm dưới một package thư mục của project. Ghi ngày 2026-11-09.
-
 ### [Thấp] So file cùng một đích qua admin share không nhận ra
 
 `crates/d3d12-backend/src/export.rs:87` (`same_file`): `\\localhost\c$\m\a.mp4` không trùng `C:\m\a.mp4` sau `canonicalize`, nên kiểm tra ghi đè file nguồn bị vượt. Cần quyền vào admin share nên khó gặp; chặn triệt để thì so volume serial và file ID. Ghi ngày 2026-11-09.
@@ -397,10 +393,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 ### [Thấp] Editor chạy quyền admin có thể bị MCP thường từ chối
 
 `crates/gpufx-editor/src/agent/gateway.rs:49`, phía client ở `crates/gpufx-mcp/src/session.rs`: kiểm chủ server cần mở token của tiến trình editor, từ medium integrity lên high integrity nhiều khả năng bị từ chối. Đây là fail-closed có thông báo, chưa chạy thử; ghi lại để biết khi gặp. Ghi ngày 2026-11-09.
-
-### [Thấp] Comment đặt sai chỗ ở test preview
-
-`crates/gpufx-editor/tests/preview_gpu.rs:292`: comment về `try_lock_submits` nằm trên test capture mới thay vì trên test nó mô tả ở dòng 311. Ghi ngày 2026-11-09.
 
 ### [Vừa] Preview ở tốc độ cao có thể không kịp giải mã
 
@@ -450,10 +442,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/gpufx-editor/src/project_file.rs:120`: mở file có `frame_rate` trên 60 fps chỉ ghi stderr, project không bị đánh dấu chưa lưu, nên có thể xuất 60 fps mà không hay. Nên báo ở thanh trạng thái hoặc đánh dấu chưa lưu. CLI `gpufx-render` thì từ chối chính file đó, chờ user chốt có dùng chung cách kẹp không. Ghi ngày 2026-11-10.
 
-### [Thấp] Test preview bỏ khung chưa chứng minh được `LatestSlot`
-
-`crates/gpufx-editor/tests/preview_drop.rs:109`: đồng hồ giả chỉ tăng trong `produce`, nên mỗi lần render chỉ có một yêu cầu mới, thay slot bằng hàng đợi FIFO thì test vẫn xanh. Nên gửi nhiều yêu cầu trong lúc `produce` đang chặn rồi khẳng định khung giữa không được render. Ghi ngày 2026-11-10.
-
 ### [Thấp] Preview effect co ảnh đầu ra chưa tốt khi package đổi kích thước
 
 `crates/d3d12-backend/src/effect_preview.rs`, hàm `resize_rgba`: nội suy chỉ lấy 2x2 điểm nên thu nhỏ mạnh bị răng cưa, output không vuông bị kéo méo, và nội suy trên alpha thẳng làm viền lem màu. Hiện chỉ package kiểu `scale` đi vào đường này. Nên dùng box filter, premultiply trước khi lọc và letterbox. Ghi ngày 2026-11-10.
@@ -465,10 +453,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 ### [Thấp] Still và loop của preview dùng chung bản ghi lỗi
 
 `crates/gpufx-editor/src/effect_previews/key.rs` `preview_key` không có loại ảnh nên `.attempt` và `.failed` dùng chung cho still và loop: một lần lỗi mỗi loại tính thành hai lần, và loop hỏng chặn cả still. Nên thêm loại vào tên file hoặc nội dung bản ghi. Ghi ngày 2026-11-10.
-
-### [Thấp] File tạm `.importing-<pid>` mồ côi khi app bị kill giữa lúc ghi
-
-`crates/gpufx-editor/src/package_import.rs:283` (`write_replacing`) ghi qua file `<id>.zip.importing-<pid>` rồi đổi tên. Nếu app bị kill giữa chừng thì file tạm nằm lại trong `packages/gpufx/user` và không có chỗ nào dọn. Nên quét và xoá file `.importing-*` cũ khi khởi động. Ghi ngày 2026-11-10.
 
 ### [Thấp] Zip có thể đổi trong lúc hộp thoại ghi đè đang mở
 

@@ -122,3 +122,43 @@ fn a_clock_that_steps_back_renders_nothing_twice_and_shows_nothing_older() {
     assert_only_forward(&on_screen, "the picture");
     assert_eq!(on_screen, [0, 1, 2, 3, 4]);
 }
+
+/// Renders nothing until told to: each request says it began, then waits to be released.
+struct GatedRenderer {
+    entered: std::sync::mpsc::Sender<i64>,
+    release: Receiver<()>,
+}
+
+impl FrameProducer for GatedRenderer {
+    type Request = i64;
+    type Frame = i64;
+
+    fn request_id(request: &i64) -> RequestId {
+        RequestId { revision: REVISION, frame: *request }
+    }
+
+    fn produce(&mut self, request: &i64) -> Result<Option<i64>, ProduceError> {
+        let _ = self.entered.send(*request);
+        let _ = self.release.recv_timeout(TIMEOUT);
+        Ok(Some(*request))
+    }
+
+    fn recycle(&mut self, _frame: i64) {}
+}
+
+#[test]
+fn requests_sent_while_a_frame_renders_keep_only_the_newest() {
+    let (entered_tx, entered) = channel();
+    let (release, release_rx) = channel();
+    let worker = PreviewWorker::spawn(move || GatedRenderer { entered: entered_tx, release: release_rx }, || {});
+    worker.request(0);
+    assert_eq!(entered.recv_timeout(TIMEOUT).expect("the first frame began"), 0);
+    for frame in 1..=3 {
+        worker.request(frame);
+    }
+    release.send(()).unwrap();
+    assert_eq!(entered.recv_timeout(TIMEOUT).expect("a next frame began"), 3, "the frames in between must be skipped");
+    release.send(()).unwrap();
+    drop(worker);
+    assert!(entered.try_recv().is_err(), "nothing else was rendered");
+}

@@ -117,9 +117,26 @@ fn project_inputs(project: &Project, project_file: Option<&Path>, paths: &Projec
     inputs
 }
 
-/// What of `project` writing to `output` would destroy: a source or a package, by [`same_file`].
+/// Whether writing `output` would destroy `input`: the same file, or any file inside `input` when it
+/// is a folder, such as a package unpacked into a directory.
+fn destroys(input: &Path, output: &Path) -> bool {
+    if same_file(input, output) {
+        return true;
+    }
+    if !input.is_dir() {
+        return false;
+    }
+    let mut folder = identity(input);
+    if !folder.ends_with(['\\', '/']) {
+        folder.push(std::path::MAIN_SEPARATOR);
+    }
+    identity(output).starts_with(&folder)
+}
+
+/// What of `project` writing to `output` would destroy: a source, or a package file or anything
+/// inside a package folder.
 pub fn overwritten_input(project: &Project, paths: &ProjectPaths, output: &Path) -> Option<&'static str> {
-    project_inputs(project, None, paths).into_iter().find(|(input, _)| same_file(input, output)).map(|(_, what)| what)
+    project_inputs(project, None, paths).into_iter().find(|(input, _)| destroys(input, output)).map(|(_, what)| what)
 }
 
 /// How many names [`reserve_temporary`] tries before giving up.
@@ -389,6 +406,20 @@ mod tests {
         let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         names
+    }
+
+    #[test]
+    fn a_file_inside_a_package_folder_counts_as_destroying_it() {
+        let dir = scratch("inside");
+        let package = dir.join("pack");
+        std::fs::create_dir_all(package.join("shaders")).unwrap();
+        std::fs::write(package.join("manifest.json"), b"{}").unwrap();
+        assert!(destroys(&package, &package.join("manifest.json")));
+        assert!(destroys(&package, &package.join("shaders").join("new.mp4")));
+        assert!(destroys(&package, &package));
+        assert!(!destroys(&package, &dir.join("pack2.json")));
+        assert!(!destroys(&package, &dir.join("out.mp4")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
