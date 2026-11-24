@@ -166,6 +166,20 @@ fn bounds(corners: [Pos2; 4]) -> Rect {
     Rect::from_points(&corners)
 }
 
+/// Whether `point` lies inside the convex quadrilateral `corners`, given in order around it.
+fn inside_corners(corners: [Pos2; 4], point: Pos2) -> bool {
+    let sides = (0..4).map(|index| {
+        let (from, to) = (corners[index], corners[(index + 1) % 4]);
+        (to - from).x * (point - from).y - (to - from).y * (point - from).x
+    });
+    let (mut positive, mut negative) = (false, false);
+    for side in sides {
+        positive |= side > 0.0;
+        negative |= side < 0.0;
+    }
+    !(positive && negative)
+}
+
 /// How far the pointer has come since the press, in parts of the frame `picture`.
 fn pointer_moved(ui: &egui::Ui, picture: Rect) -> Option<(f64, f64)> {
     let moved = ui.ctx().input(|input| input.pointer.press_origin().zip(input.pointer.latest_pos()).map(|(from, to)| to - from))?;
@@ -207,7 +221,11 @@ fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: R
     let frame = on_screen(current, picture);
     let corners = turned_corners(frame, transform.rotation);
     let body_id = body_id(scope);
-    let body = ui.interact(handle_rect(bounds(corners), area, in_hand(ui.ctx(), body_id)), body_id, Sense::drag());
+    let body_in_hand = in_hand(ui.ctx(), body_id);
+    // A turned frame takes the press only inside its own corners, not in the empty corners of its bounds.
+    let over_frame = ui.ctx().pointer_hover_pos().is_some_and(|point| inside_corners(corners, point));
+    let body_rect = if body_in_hand || over_frame { handle_rect(bounds(corners), area, body_in_hand) } else { Rect::NOTHING };
+    let body = ui.interact(body_rect, body_id, Sense::drag());
     let (pose, ratio) = (transform.follow, current.height / current.width.max(1.0e-9));
     drag(ui, state, key, picture, &body, current, |start, moved| at_anchor(moved_placement(start, moved), pose, ratio, output_aspect));
     body.on_hover_and_drag_cursor(CursorIcon::Move);
@@ -237,6 +255,17 @@ mod tests {
     use super::*;
 
     const START: PlacedRect = PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 };
+
+    #[test]
+    fn a_turned_frame_holds_only_points_inside_its_corners() {
+        let corners = turned_corners(Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)), 45.0);
+        assert!(inside_corners(corners, Pos2::new(50.0, 50.0)));
+        assert!(inside_corners(corners, Pos2::new(50.0, -15.0)));
+        // A corner of the bounds is outside the turned frame.
+        let outer = bounds(corners).left_top() + Vec2::splat(5.0);
+        assert!(bounds(corners).contains(outer));
+        assert!(!inside_corners(corners, outer));
+    }
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
