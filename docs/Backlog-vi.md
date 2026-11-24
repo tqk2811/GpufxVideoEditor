@@ -95,6 +95,10 @@ Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đ�
 
 `crates/d3d12-backend/src/paths.rs:277` chỉ kiểm được đường dẫn và phần mở rộng của ảnh, không kiểm nội dung; ảnh hỏng qua được validate và chỉ báo lỗi lúc tới khung có clip đó. Nên kiểm header lúc thêm clip hoặc lúc validate. Ghi ngày 2026-11-10.
 
+### [Thấp] Khung mực glyph vẫn đo lại ở mỗi vòng co chữ
+
+`TextRasterizer` (`crates/gpufx-text/src/lib.rs`) đã nhớ khung mực theo `CacheKey` (commit 46d1dfb), nên glyph lặp lại và các lần vẽ/đo lại cùng chữ không đo lại. Nhưng mỗi vòng co chữ (tới 8 vòng) đổi cỡ font nên `CacheKey` đổi, vẫn đo lại toàn bộ glyph ở mỗi vòng. Hướng: đo khung ở một cỡ rồi co theo tỉ lệ, hoặc khoá cache theo glyph + font không kèm cỡ. Trần 8192 khung của cache là số tạm, chờ user duyệt. Ghi ngày 2026-11-25.
+
 ### [Thấp] Trần cache ảnh 1 GiB tính riêng từng compositor
 
 `crates/d3d12-backend/src/compositor.rs` `STILL_CACHE_BYTES` áp cho từng `D3d12Compositor`, nên preview và export chạy cùng lúc có thể giữ gấp đôi. Nên dùng chung bộ đếm theo `Gpu` nếu số lượng compositor tăng. Ghi ngày 2026-11-10.
