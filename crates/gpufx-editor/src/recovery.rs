@@ -477,6 +477,12 @@ pub struct Autosave {
 impl Autosave {
     /// Starts the session of `me` in `store`; `None` turns everything off.
     pub fn start(store: Option<RecoveryStore>, me: ProcessInfo, interval_secs: u64, now: Instant) -> Self {
+        // Without its own start time another editor would take this live one for dead and offer its
+        // entries as orphans, so autosave stays off.
+        let store = store.filter(|_| me.started != 0 || {
+            eprintln!("gpufx-editor: autosave is off: the start time of this process is unknown");
+            false
+        });
         let store = store.filter(|store| match store.write_session(me) {
             Ok(()) => true,
             Err(message) => {
@@ -914,6 +920,15 @@ mod tests {
             assert!(!store.entry_dir(&claimed).exists(), "removed once clean");
             assert!(std::fs::read_dir(&dir).unwrap().next().is_none(), "nothing left behind");
         }
+    }
+
+    #[test]
+    fn autosave_is_off_without_the_process_start_time() {
+        let store = RecoveryStore::new(folder("no-start-time"));
+        let id = orphan(&store, None);
+        let mut autosave = Autosave::start(Some(store.clone()), ProcessInfo { pid: 13, started: 0 }, 60, Instant::now());
+        assert_eq!(autosave.claim(&id), Err(ClaimError::Off));
+        assert!(store.entry_dir(&id).exists());
     }
 
     #[test]

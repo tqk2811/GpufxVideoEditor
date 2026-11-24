@@ -109,6 +109,8 @@ pub struct InstalledPack {
     pub problem: Option<String>,
     /// A root searched earlier holds a pack of the same key, which is the one used.
     pub shadowed: bool,
+    /// The English search tags of a wrapped shader package's `manifest.json`; empty for other packs.
+    pub tags: Vec<String>,
     /// The pack's name, description and tags in the languages it brings (`i18n/<code>.json`).
     pub i18n: Localized,
     /// The collection the package manager groups it under (see [`PackCollection`]).
@@ -150,9 +152,9 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
                         Some(PackageKind::Effect) => (PackTab::Effect, None),
                         None => (PackTab::Effect, Some(format!("it takes {} inputs, which no clip can give it", info.inputs))),
                     };
-                    InstalledPack { tab, key, id, name: info.name, version: info.version, source, path: shader.path, items: 1, bytes: None, enabled: true, hidden: info.hidden, problem, shadowed: false, i18n: Localized::default(), collection: PackCollection::default() }
+                    InstalledPack { tab, key, id, name: info.name, version: info.version, source, path: shader.path, items: 1, bytes: None, enabled: true, hidden: info.hidden, problem, shadowed: false, tags: Vec::new(), i18n: Localized::default(), collection: PackCollection::default() }
                 }
-                Err(message) => InstalledPack { tab: PackTab::Effect, name: id.clone(), key, id, version: String::new(), source, path: shader.path, items: 0, bytes: None, enabled: true, hidden: false, problem: Some(message), shadowed: false, i18n: Localized::default(), collection: PackCollection::default() },
+                Err(message) => InstalledPack { tab: PackTab::Effect, name: id.clone(), key, id, version: String::new(), source, path: shader.path, items: 0, bytes: None, enabled: true, hidden: false, problem: Some(message), shadowed: false, tags: Vec::new(), i18n: Localized::default(), collection: PackCollection::default() },
             };
             found.push(pack);
         }
@@ -169,14 +171,17 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
             for pack in listed {
                 let key = pack_key(&format!("{type_folder}/{}", pack.id));
                 found.push(match pack.read {
-                    Ok(summary) => InstalledPack { tab, key, id: pack.id, name: summary.name, version: summary.version, source, path: pack.folder, items: summary.items, bytes: None, enabled: true, hidden: false, problem: None, shadowed: false, i18n: Localized::default(), collection: PackCollection::default() },
-                    Err(message) => InstalledPack { tab, key, name: pack.id.clone(), id: pack.id, version: String::new(), source, path: pack.folder, items: 0, bytes: None, enabled: true, hidden: false, problem: Some(message), shadowed: false, i18n: Localized::default(), collection: PackCollection::default() },
+                    Ok(summary) => InstalledPack { tab, key, id: pack.id, name: summary.name, version: summary.version, source, path: pack.folder, items: summary.items, bytes: None, enabled: true, hidden: false, problem: None, shadowed: false, tags: Vec::new(), i18n: Localized::default(), collection: PackCollection::default() },
+                    Err(message) => InstalledPack { tab, key, name: pack.id.clone(), id: pack.id, version: String::new(), source, path: pack.folder, items: 0, bytes: None, enabled: true, hidden: false, problem: Some(message), shadowed: false, tags: Vec::new(), i18n: Localized::default(), collection: PackCollection::default() },
                 });
             }
         }
         for mut pack in found {
             let translations = PackTranslations::read_package(&pack.path);
             pack.i18n = translations.pack();
+            if is_shader_key(&pack.key) {
+                pack.tags = d3d12_backend::read_wrapper(&pack.path).and_then(Result::ok).map(|wrapper| wrapper.tags).unwrap_or_default();
+            }
             // A content pack holds one item; its manifest names the set it was cut from.
             pack.collection = if pack.path.is_dir() && !is_shader_key(&pack.key) {
                 PackCollection::read_folder(&pack.path, &pack.id, &pack.name, &translations)
@@ -196,7 +201,7 @@ pub fn list_installed_with(roots: &[PathBuf], user_root: Option<&Path>, read: im
 /// description holds every word of `filter`, ignoring case and accents, in their order.
 pub fn filter_packs<'a>(packs: &'a [InstalledPack], tab: PackTab, filter: &str) -> Vec<&'a InstalledPack> {
     let query = crate::search::Query::new(filter);
-    packs.iter().filter(|pack| pack.tab == tab).filter(|pack| query.score(&pack.i18n.search(crate::search::SearchFields::new(&pack.name).other([pack.id.as_str(), pack.version.as_str()]))).is_some()).collect()
+    packs.iter().filter(|pack| pack.tab == tab).filter(|pack| query.score(&pack.i18n.search(crate::search::SearchFields::new(&pack.name).tags(pack.tags.iter().map(String::as_str)).other([pack.id.as_str(), pack.version.as_str()]))).is_some()).collect()
 }
 
 /// The sizes of `paths` on disk, in their order. Slow for many packs: run it off the UI thread.
@@ -578,6 +583,17 @@ mod tests {
         assert!(find("sticker/bad", PackSource::User).problem.is_some(), "a broken pack is listed to be removed");
         assert_eq!(filter_packs(&packs, PackTab::Sticker, "my 1.2").len(), 1);
         assert_eq!(filter_packs(&packs, PackTab::Transition, "").len(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_filter_finds_a_wrapped_package_by_its_manifest_tags() {
+        let (dir, shipped, user) = fixture("wrapper-tags");
+        let blur = shipped.join("packages/gpufx/g/blur");
+        fs::write(blur.join("manifest.json"), r#"{"format":1,"type":"gpufx","id":"io.example.blur","version":"1.0.0","package":"blur.zip","tags":["soften"]}"#).unwrap();
+        let packs = list_installed_with(&[shipped, user.clone()], Some(&user), fake_read);
+        let found: Vec<&str> = filter_packs(&packs, PackTab::Effect, "soften").iter().map(|pack| pack.key.as_str()).collect();
+        assert_eq!(found, ["gpufx/g/blur"]);
         fs::remove_dir_all(dir).unwrap();
     }
 
