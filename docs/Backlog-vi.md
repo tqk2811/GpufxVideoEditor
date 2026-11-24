@@ -275,10 +275,6 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/gpufx-editor/src/editor.rs`, `is_dirty` so số revision, mà undo cũng tăng revision, nên undo về đúng bản đã lưu vẫn hỏi lưu khi đóng. Nên làm nếu cảnh báo thừa gây khó chịu. Ghi ngày 2026-11-09.
 
-### [Thấp] Seek trong lúc clone project bị kẹp về điểm cuối cũ khi timeline dài ra
-
-`crates/gpufx-editor/src/playback/thread.rs:241`: lệnh seek tới trong lúc `producer.set_project` đang clone bị kẹp theo điểm cuối của project cũ, nên timeline vừa dài ra thì seek quá điểm cuối cũ bị đưa về đó. Nên làm vì người dùng sẽ thấy tua sai vị trí đúng lúc vừa sửa. Ghi ngày 2026-11-09.
-
 ### [Thấp] Chế độ timer không có thiết bị âm thanh không bao giờ thử lại
 
 `crates/gpufx-editor/src/playback/device.rs:37`: khi không mở được thiết bị thì clock chạy theo timer, và thiết bị không được thử lại cho tới lần mở lại `Playback`. Sửa kèm chú thích "stays until a device opens" ở `crates/gpufx-editor/src/editor.rs` cho đúng hành vi. Nên làm vì cắm tai nghe vào giữa chừng vẫn không có tiếng. Ghi ngày 2026-11-09.

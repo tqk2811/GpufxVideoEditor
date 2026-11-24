@@ -356,7 +356,11 @@ impl PreparingThread {
 
     /// Passes a changed project to the thread, which keeps running.
     pub fn set_project(&self, project: Arc<Project>) {
-        self.control.lock().project = Some(project);
+        let mut commands = self.control.lock();
+        // A seek before the thread clones the project must not be held to the old end.
+        self.clock.expect_project(&project);
+        commands.project = Some(project);
+        drop(commands);
         self.control.wake.notify_all();
     }
 
@@ -520,6 +524,20 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn a_seek_while_the_thread_is_busy_uses_the_end_of_the_new_project() {
+        let permits = Permits::default();
+        let source = permits.clone();
+        let (thread, _consumer) = PreparingThread::spawn(&project(2, true, TrackKind::Video), move || source).unwrap();
+        thread.play(Time::ZERO);
+        // Without permits the thread soon waits in a read, so it cannot take the new project yet.
+        thread::sleep(Duration::from_millis(200));
+        thread.set_project(Arc::new(project(20, true, TrackKind::Video)));
+        thread.seek(Time::from_seconds(15).unwrap());
+        assert_eq!(thread.reading().position, sample_position(Time::from_seconds(15).unwrap()));
+        permits.unlimited();
     }
 
     #[test]
