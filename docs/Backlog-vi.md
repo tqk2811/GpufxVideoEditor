@@ -510,17 +510,9 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/d3d12-backend/src/rotated_place.rs:57` lấy mẫu bilinear từ ảnh gốc. Khi thu nhỏ mạnh, mỗi pixel đích chỉ đọc 4 texel và bỏ qua phần còn lại, nên cạnh và chi tiết mảnh nhấp nháy lúc xoay. Nên làm: dựng mipmap hoặc lấy mẫu nhiều điểm theo hệ số thu nhỏ. Ghi ngày 2026-11-10.
 
-### [Thấp] Vùng kéo khung xoay là hộp bao ngoài
-
-`crates/gpufx-editor/src/ui/placement.rs:188` đặt vùng nhận kéo thân khung theo hộp bao (`bounds(corners)`) của khung đã xoay, nên bấm vào góc trống của hộp bao vẫn kéo clip. Nên làm: kiểm điểm trong tứ giác xoay thay vì hộp bao. Ghi ngày 2026-11-10.
-
 ### [Thấp] Timeline sắp xếp và cấp phát danh sách keyframe mỗi khung cho mỗi clip
 
 `crates/gpufx-editor/src/ui/timeline_panel.rs:404` gọi `Clip::keyframe_times` (`crates/engine/src/keyframe.rs`), vốn gom, sắp xếp và bỏ trùng một `Vec` mới ở mỗi lần vẽ của mỗi clip. Vài clip thì không đáng kể, hàng trăm clip có keyframe thì tốn. Nên làm nếu timeline dài gây giật: cache theo revision của project hoặc chỉ tính cho clip đang trong khung nhìn. Ghi ngày 2026-11-10.
-
-### [Thấp] Kéo mép đầu clip tĩnh không lùi được trước điểm bắt đầu
-
-`crates/gpufx-editor/src/timeline/drag.rs:75` (`clamp_trim`) lấy `source_limit` từ `source_in` cho mọi clip, nên mép đầu của clip ảnh/chữ không kéo lùi được trước `start` dù engine (`trim_start`) cho phép clip tĩnh dài ra phía trước. Có từ trước bước chữ. Nên bỏ giới hạn nguồn khi `clip.is_still()`. Ghi ngày 2026-11-11.
 
 ### [Thấp] gpufx-text chưa tự ngắt dòng, emoji vẽ bằng màu chữ
 

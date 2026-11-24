@@ -72,8 +72,9 @@ pub fn clamp_trim(project: &Project, command: EditCommand) -> EditCommand {
         EditCommand::TrimStart { new_start, .. } => {
             let previous_end = key.clip.checked_sub(1).and_then(|index| track.clips.get(index)).and_then(|previous| previous.end()).unwrap_or(Time::ZERO);
             // The source cannot be read before its first frame. A reversed clip reads further up
-            // its source there, whose length the project does not know, as an end trim does.
-            let source_limit = if clip.plays_reversed() { Time::ZERO } else { clip.start.saturating_sub(clip.timeline_ticks(clip.source_in)).max(Time::ZERO) };
+            // its source there, whose length the project does not know, as an end trim does. A
+            // still or an animated picture has no first frame to run out of (see engine::trim_start).
+            let source_limit = if clip.plays_reversed() || clip.is_still() || clip.may_be_animated() { Time::ZERO } else { clip.start.saturating_sub(clip.timeline_ticks(clip.source_in)).max(Time::ZERO) };
             let lower = previous_end.max(source_limit);
             // A clip already shorter than the minimum is not shrunk further. The engine rounds a
             // start up to the grid of the speed, so the limit is the last grid position before it.
@@ -317,6 +318,16 @@ mod tests {
         let command = EditCommand::TrimStart { key: key(0), new_start: Time::ZERO };
         assert_eq!(clamp_trim(&project, command), EditCommand::TrimStart { key: key(0), new_start: seconds(1) });
         assert!(clamp_trim(&project, command).apply(&project).is_ok());
+    }
+
+    #[test]
+    fn a_still_clip_start_trims_back_past_its_start() {
+        // A still has no source to run out of, so only the clip before it limits its start edge.
+        let mut project = project();
+        project.tracks[0].clips[0] = new_clip("a.png", seconds(2), seconds(2));
+        let command = EditCommand::TrimStart { key: key(0), new_start: Time::ZERO };
+        assert_eq!(clamp_trim(&project, command), command);
+        assert!(command.apply(&project).is_ok());
     }
 
     #[test]
