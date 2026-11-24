@@ -122,16 +122,16 @@ impl Presenter {
 
         let raw_input = self.state.take_egui_input(&self.window);
         let texture_id = self.texture_id;
-        let full_output = self.context.run_ui(raw_input, |root| ui(root, texture_id));
+        let mut full_output = self.context.run_ui(raw_input, |root| ui(root, texture_id));
         self.state.handle_platform_output(&self.window, full_output.platform_output);
         let paint_jobs = self.context.tessellate(full_output.shapes, full_output.pixels_per_point);
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [self.config.width, self.config.height],
             pixels_per_point: full_output.pixels_per_point,
         };
-        for (id, deltas) in &full_output.textures_delta.set {
+        for (id, deltas) in full_output.textures_delta.set.drain() {
             for delta in deltas {
-                self.renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
+                self.renderer.update_texture(&gpu.device, &gpu.queue, id, &delta);
             }
         }
 
@@ -168,8 +168,8 @@ impl Presenter {
         gpu.queue.present(surface_texture);
         self.last_present = present_started.elapsed();
 
-        for id in &full_output.textures_delta.free {
-            self.renderer.free_texture(id);
+        for id in full_output.textures_delta.free.drain() {
+            self.renderer.free_texture(&id);
         }
         Ok(Some(submission))
     }
