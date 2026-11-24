@@ -698,3 +698,20 @@ fn box_mode_draws_a_box_behind_the_active_word_only_and_keeps_its_size() {
     let plain_box = r.rasterize(&karaoke_text("HHH HHH", engine::KaraokeMode::None), HEIGHT, 1.0);
     assert!(plain_box.width < image.width, "a text without a box keeps no room for one");
 }
+
+#[test]
+fn ink_boxes_are_measured_once_per_glyph_and_change_nothing() {
+    let Some(mut r) = rasterizer() else { return };
+    let text = TextContent::new("abab abab abab", 0.1);
+    let first = r.rasterize(&text, HEIGHT, 1.0);
+    let measured = r.ink_measures();
+    // "a", "b" and the space, each at one of four sub-pixel offsets at most: fewer than the 14 glyphs.
+    assert!(measured > 0 && measured <= 12, "{measured} glyphs measured for three letters");
+    let again = r.rasterize(&text, HEIGHT, 1.0);
+    assert_eq!(r.ink_measures(), measured, "a text drawn again measures nothing");
+    assert_eq!(r.measure(&text, HEIGHT, 1.0), (first.width, first.height));
+    assert_eq!(r.ink_measures(), measured);
+    // A fresh rasterizer, with no box kept, draws the same picture.
+    let fresh = TextRasterizer::new().rasterize(&text, HEIGHT, 1.0);
+    assert!(first == again && first == fresh, "kept ink boxes change the picture");
+}

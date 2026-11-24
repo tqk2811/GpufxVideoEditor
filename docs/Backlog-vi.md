@@ -99,10 +99,6 @@ Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đ�
 
 `crates/d3d12-backend/src/paths.rs:277` chỉ kiểm được đường dẫn và phần mở rộng của ảnh, không kiểm nội dung; ảnh hỏng qua được validate và chỉ báo lỗi lúc tới khung có clip đó. Nên kiểm header lúc thêm clip hoặc lúc validate. Ghi ngày 2026-11-10.
 
-### [Thấp] `ink_bounds` vẽ thừa glyph chỉ để lấy khung mực
-
-`crates/gpufx-text/src/lib.rs:202` (`ink_bounds`) gọi `get_outline_commands_uncached`, rồi `get_image_uncached` (dòng 227) cho từng glyph ở mỗi lần layout, mà một lần đo có thể layout tới 8 vòng co chữ. Emoji và font bitmap bị vẽ hẳn ra ảnh chỉ để lấy khung. Kết quả không sai, chỉ đo chậm với chữ dài hoặc nhiều emoji. Nên nhớ khung mực theo `CacheKey` qua các vòng co. Ghi ngày 2026-11-11.
-
 ### [Thấp] Trần cache ảnh 1 GiB tính riêng từng compositor
 
 `crates/d3d12-backend/src/compositor.rs` `STILL_CACHE_BYTES` áp cho từng `D3d12Compositor`, nên preview và export chạy cùng lúc có thể giữ gấp đôi. Nên dùng chung bộ đếm theo `Gpu` nếu số lượng compositor tăng. Ghi ngày 2026-11-10.
