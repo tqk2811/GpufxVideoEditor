@@ -292,6 +292,7 @@ impl ProxyMaker for ChildProxyMaker {
             encoder: EncoderChoice::Auto(VideoCodec::H264),
             hashes: None,
             keyframe_interval: Some(KEYFRAME_INTERVAL),
+            overwrite: true,
         };
         let done = AtomicI64::new(0);
         let finished = AtomicBool::new(false);

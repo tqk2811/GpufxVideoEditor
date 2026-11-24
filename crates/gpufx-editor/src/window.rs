@@ -621,7 +621,7 @@ impl Session {
     /// Starts an export of the current project to `out` in a child process. Playback and the
     /// preview stop first, so the child has the GPU memory and decoders; it starts once the preview
     /// has let go.
-    fn start_export(&mut self, out: PathBuf, encoder: Option<EncoderChoice>) {
+    fn start_export(&mut self, out: PathBuf, encoder: Option<EncoderChoice>, overwrite: bool) {
         if self.state.is_exporting() {
             self.state.report_refused(Message::ExportAlreadyRunning);
             return;
@@ -636,7 +636,7 @@ impl Session {
         self.playback = None;
         self.audio_preview.stop();
         let preview_released = self.preview.suspend();
-        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: choice, hashes: None, keyframe_interval: None };
+        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: choice, hashes: None, keyframe_interval: None, overwrite };
         let window = self.window.clone();
         match ExportWorker::start(job, self.package_roots.clone(), sibling_render_exe(), preview_released, move || window.request_redraw()) {
             Ok(worker) => {
@@ -1176,7 +1176,7 @@ impl Session {
                 self.refresh_pack_list_if_open();
             }
             Action::SaveTo(path, choice) => self.save_project(path, choice),
-            Action::StartExport(path) => self.start_export(path, None),
+            Action::StartExport(path) => self.start_export(path, None, true),
             Action::ProjectReplaced => {
                 self.playback = None;
                 self.audio_preview.stop();
@@ -1621,10 +1621,10 @@ impl AgentHost for Session {
         receiver
     }
 
-    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError> {
-        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: encoder.clone(), hashes: None, keyframe_interval: None };
+    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice, overwrite: bool) -> Result<(), AgentError> {
+        let job = ExportJob { project: self.state.project().clone(), project_file: self.state.project_file().map(Path::to_path_buf), paths: self.paths.clone(), out: out.clone(), encoder: encoder.clone(), hashes: None, keyframe_interval: None, overwrite };
         check_export(&job)?;
-        Session::start_export(self, out, Some(encoder));
+        Session::start_export(self, out, Some(encoder), overwrite);
         if self.state.is_exporting() {
             Ok(())
         } else {

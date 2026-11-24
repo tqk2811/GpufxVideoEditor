@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use d3d12_backend::{EncoderChoice, ExportControl, ExportError, ExportJob, ExportReport, Gpu, ProgressEvent, ProjectPaths, CANCEL_LINE, PROGRESS_PROTOCOL};
 use engine::{frame_count, Project};
 
-const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--codec <h264|hevc>] [--encoder <name|auto>] [--hashes <file>] [--keyint <frames>] [--packages <dir>]... [--progress <text|json>] [--cancel-on-stdin-eof]\n\
+const USAGE: &str = "usage: gpufx-render <project.json> --out <file.mp4> [--codec <h264|hevc>] [--encoder <name|auto>] [--hashes <file>] [--keyint <frames>] [--packages <dir>]... [--progress <text|json>] [--cancel-on-stdin-eof] [--no-overwrite]\n\
     \n\
     --codec     video codec: h264 (default) or hevc; with --encoder auto, picks which encoders Auto tries\n\
     --encoder   auto (default): the first encoder that opens on this machine, hardware first\n\
@@ -51,6 +51,8 @@ struct Arguments {
     package_roots: Vec<PathBuf>,
     progress: ProgressMode,
     cancel_on_stdin_eof: bool,
+    /// False under `--no-overwrite`: a file that appears at `out` meanwhile is kept.
+    overwrite: bool,
 }
 
 /// The folder under `%LOCALAPPDATA%` that the editor installs the user's packs in (fonts, sounds,
@@ -76,6 +78,7 @@ fn parse_arguments() -> Result<Arguments, String> {
     let mut package_roots = Vec::new();
     let mut progress = ProgressMode::Text;
     let mut cancel_on_stdin_eof = false;
+    let mut overwrite = true;
     // Paths need not be Unicode on Windows, so the arguments stay OS strings until they are read as text.
     let mut arguments = std::env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -96,6 +99,7 @@ fn parse_arguments() -> Result<Arguments, String> {
                 }
             }
             "--cancel-on-stdin-eof" => cancel_on_stdin_eof = true,
+            "--no-overwrite" => overwrite = false,
             "-h" | "--help" => return Err(USAGE.to_owned()),
             other if project.is_none() && !other.starts_with("--") => project = Some(PathBuf::from(&argument)),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
@@ -108,7 +112,7 @@ fn parse_arguments() -> Result<Arguments, String> {
         return Err("--cancel-on-stdin-eof needs --progress json".to_owned());
     }
     let encoder = EncoderChoice::parse(codec.as_deref(), encoder.as_deref())?;
-    Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, keyframe_interval, package_roots, progress, cancel_on_stdin_eof })
+    Ok(Arguments { project: project.ok_or(USAGE)?, out: out.ok_or(USAGE)?, encoder, hashes, keyframe_interval, package_roots, progress, cancel_on_stdin_eof, overwrite })
 }
 
 /// The `--keyint` value: a whole number of frames from 1 to 600.
@@ -181,7 +185,7 @@ fn run() -> Result<(), Failure> {
     let paths = Arc::new(ProjectPaths::new(&arguments.project, arguments.package_roots.clone()));
     let has_audio = project.output.audio.is_some();
     let total = frame_count(&project);
-    let job = ExportJob { project, project_file: Some(arguments.project.clone()), paths, out: arguments.out.clone(), encoder: arguments.encoder, hashes: arguments.hashes, keyframe_interval: arguments.keyframe_interval };
+    let job = ExportJob { project, project_file: Some(arguments.project.clone()), paths, out: arguments.out.clone(), encoder: arguments.encoder, hashes: arguments.hashes, keyframe_interval: arguments.keyframe_interval, overwrite: arguments.overwrite };
     job.check_named("--out", "--hashes")?;
 
     let gpu = Arc::new(Gpu::create()?);

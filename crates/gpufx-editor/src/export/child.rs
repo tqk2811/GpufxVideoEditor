@@ -210,6 +210,9 @@ fn render_arguments(project_file: &Path, job: &ExportJob, package_roots: &[PathB
     for root in package_roots {
         arguments.extend(["--packages".into(), root.clone().into()]);
     }
+    if !job.overwrite {
+        arguments.push("--no-overwrite".into());
+    }
     arguments.extend(["--progress".into(), "json".into()]);
     if headless {
         arguments.push("--cancel-on-stdin-eof".into());
@@ -301,7 +304,7 @@ mod tests {
 
     fn job(dir: &Path, mode: &str) -> ExportJob {
         // The track is hidden, so its missing source and package pass validation.
-        ExportJob { project: project("clip.mp4", "fx"), project_file: Some(dir.join("project.json")), paths: Arc::new(ProjectPaths::new(&dir.join("project.json"), Vec::new())), out: dir.join(format!("{mode}.mp4")), encoder: EncoderChoice::Named("libx264".into()), hashes: None, keyframe_interval: None }
+        ExportJob { project: project("clip.mp4", "fx"), project_file: Some(dir.join("project.json")), paths: Arc::new(ProjectPaths::new(&dir.join("project.json"), Vec::new())), out: dir.join(format!("{mode}.mp4")), encoder: EncoderChoice::Named("libx264".into()), hashes: None, keyframe_interval: None, overwrite: true }
     }
 
     fn run(job: &ExportJob, cancel: bool, grace: Duration) -> ExportOutcome {

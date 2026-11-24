@@ -280,10 +280,6 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/d3d12-backend/src/compositor.rs` (`needs_rebuild`): chưa có gói transition nào dùng size function, nên test GPU chỉ phủ đường cập nhật tại chỗ. Nhánh dựng lại dùng chung logic với clip effect. Ghi ngày 2026-11-09.
 
-### [Thấp] Tìm trong thư viện phân biệt dạng Unicode và dấu
-
-`crates/gpufx-editor/src/media.rs:79-82`: tên NFC và NFD không khớp nhau, gõ "dep" không ra "đẹp". Ghi ngày 2026-11-09.
-
 ### [Thấp] Thư viện không đánh dấu file đã mất và không có nút gỡ
 
 `crates/gpufx-editor/src/media.rs`, `crates/gpufx-editor/src/ui/left_panel.rs`: file bị xoá khỏi đĩa vẫn còn trong lưới, bấm vẫn thêm clip, lỗi chỉ lộ ở preview hoặc khi xuất. Ghi ngày 2026-11-09.
@@ -357,10 +353,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 ### [Thấp] Server MCP bị kill giữa lúc xuất để lại project tạm
 
 `crates/gpufx-editor/src/export/child.rs:72` (`TemporaryProject`): tiến trình con tự dừng sạch khi stdin đóng và không để lại file video tạm, nhưng project tạm `gpufx-export.*.tmp.json` trong thư mục temp thì không ai xoá khi `gpufx-mcp` chết. Tiến trình con kẹt quá hạn 30 s (`crates/gpufx-render/src/main.rs:24,119`) tự thoát bằng `process::exit`, nên còn để lại cả file `*.tmp.mp4` cạnh file đích. Nên dọn chung với việc dọn file tạm của editor. Ghi ngày 2026-11-09.
-
-### [Thấp] `export_start` chỉ kiểm `overwrite: false` lúc bắt đầu
-
-`crates/gpufx-editor/src/agent/run.rs:358`: file đích xuất hiện sau bước kiểm (app khác tạo ra trong lúc render) vẫn bị bước đổi tên cuối cùng ghi đè dù `overwrite` là false. Nên để bước đổi tên từ chối ghi đè khi không được phép. Ghi ngày 2026-11-09.
 
 ### [Thấp] Tắt quyền agent trong lúc chụp chặn UI 1 giây và bật lại báo sai lỗi
 

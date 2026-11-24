@@ -84,7 +84,8 @@ pub trait AgentHost {
     /// Renders output frame `frame` of `project` as RGBA of its output size, without changing anything shown.
     fn capture(&mut self, project: Arc<Project>, frame: i64) -> Receiver<Result<Vec<u8>, AgentError>>;
     /// Starts exporting the project to `out`. `Err` when the job is refused before it starts.
-    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice) -> Result<(), AgentError>;
+    /// `overwrite` false keeps a file that appears at `out` while the render runs.
+    fn start_export(&mut self, out: PathBuf, encoder: EncoderChoice, overwrite: bool) -> Result<(), AgentError>;
     /// Asks the running export to stop.
     fn cancel_export(&mut self);
     /// Whether a dialog, a prompt or a load of the window is in the way.
@@ -1199,7 +1200,7 @@ fn export_start<H: AgentHost>(host: &mut H, out: &Path, overwrite: bool, codec: 
     if out.exists() && !overwrite {
         return Err(AgentError::new("file_exists", format!("{} exists: pass overwrite to replace it", out.display())));
     }
-    host.start_export(out.clone(), encoder)?;
+    host.start_export(out.clone(), encoder, overwrite)?;
     let job = host.state().begin_agent_export(out.clone());
     Ok(json!({"job": job, "out": out}))
 }
@@ -1372,7 +1373,7 @@ mod tests {
             channel().1
         }
 
-        fn start_export(&mut self, out: PathBuf, _encoder: EncoderChoice) -> Result<(), AgentError> {
+        fn start_export(&mut self, out: PathBuf, _encoder: EncoderChoice, _overwrite: bool) -> Result<(), AgentError> {
             self.started.push(out);
             Ok(())
         }

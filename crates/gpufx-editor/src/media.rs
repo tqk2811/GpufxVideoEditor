@@ -127,11 +127,18 @@ impl MediaLibrary {
         }
     }
 
-    /// The items of `kind` whose name contains every word of `search`, ignoring case.
+    /// The items of `kind` whose name contains every word of `search`, ignoring case, accents and
+    /// the Unicode form (NFC or NFD) of either side.
     pub fn visible(&self, kind: MediaKind, search: &str) -> Vec<&MediaItem> {
-        let search = search.to_lowercase();
+        let search = crate::search::fold(search);
         let words: Vec<&str> = search.split_whitespace().collect();
-        self.items.iter().filter(|item| item.kind == kind && words.iter().all(|word| item.name.to_lowercase().contains(word))).collect()
+        self.items
+            .iter()
+            .filter(|item| item.kind == kind && {
+                let name = crate::search::fold(&item.name);
+                words.iter().all(|word| name.contains(word))
+            })
+            .collect()
     }
 }
 
@@ -173,6 +180,19 @@ pub fn end_of_selected_track(project: &Project, selected: ClipKey, item: &MediaI
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn library_search_ignores_accents_and_the_unicode_form() {
+        let mut library = MediaLibrary::default();
+        let nfc = "\u{0111}\u{1EB9}p";
+        let nfd = "\u{0111}e\u{0323}p";
+        for name in [format!("{nfc}.mp4"), format!("{nfd} 2.mp4")] {
+            library.add(MediaItem { source: format!("C:/{name}"), name, kind: MediaKind::Video, duration: None, estimated: false });
+        }
+        assert_eq!(library.visible(MediaKind::Video, "dep").len(), 2);
+        assert_eq!(library.visible(MediaKind::Video, nfc).len(), 2);
+        assert_eq!(library.visible(MediaKind::Video, nfd).len(), 2);
+    }
+
     use super::*;
     use crate::editor::new_clip;
     use engine::{Output, Track, SUPPORTED_VERSION};
