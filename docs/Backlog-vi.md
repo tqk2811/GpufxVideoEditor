@@ -99,10 +99,6 @@ Khi tính năng proxy (nhánh `feat/proxy`) bật, clip phát ngược nên đ�
 
 `crates/d3d12-backend/src/paths.rs:277` chỉ kiểm được đường dẫn và phần mở rộng của ảnh, không kiểm nội dung; ảnh hỏng qua được validate và chỉ báo lỗi lúc tới khung có clip đó. Nên kiểm header lúc thêm clip hoặc lúc validate. Ghi ngày 2026-11-10.
 
-### [Thấp] Đua khi khôi phục cài đặt dở
-
-`crates/gpufx-editor/src/asset_install.rs:364` (`recover_interrupted_install`) khôi phục thư mục cài dở lúc khởi động mà có thể chạy cùng một lượt cài ở tiến trình editor khác. Nên giữ cùng lock cài đặt suốt lúc khôi phục. Ghi ngày 2026-11-10.
-
 ### [Thấp] `ink_bounds` vẽ thừa glyph chỉ để lấy khung mực
 
 `crates/gpufx-text/src/lib.rs:202` (`ink_bounds`) gọi `get_outline_commands_uncached`, rồi `get_image_uncached` (dòng 227) cho từng glyph ở mỗi lần layout, mà một lần đo có thể layout tới 8 vòng co chữ. Emoji và font bitmap bị vẽ hẳn ra ảnh chỉ để lấy khung. Kết quả không sai, chỉ đo chậm với chữ dài hoặc nhiều emoji. Nên nhớ khung mực theo `CacheKey` qua các vòng co. Ghi ngày 2026-11-11.
