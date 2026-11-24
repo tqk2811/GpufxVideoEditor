@@ -333,6 +333,10 @@ struct State {
     /// The size and time of each settled source when its status was found; `None` when it could
     /// not be read.
     stamps: HashMap<PathBuf, Option<FileStamp>>,
+    /// The new stamp a recheck saw for a settled source whose file changed: the source is queued
+    /// again only when the next recheck sees that stamp unchanged, so a file still being copied is
+    /// not made again every recheck.
+    changed: HashMap<PathBuf, Option<FileStamp>>,
     queue: VecDeque<PathBuf>,
     /// The source being made and how to stop it.
     running: Option<(PathBuf, Arc<AtomicBool>)>,
@@ -585,11 +589,24 @@ fn recheck(shared: &Shared, stamper: &dyn Fn(&Path) -> Option<FileStamp>) {
         let state = shared.lock();
         state.stamps.iter().filter(|(source, _)| !matches!(state.entries.get(*source), Some(ProxyStatus::Queued | ProxyStatus::Running(_)) | None)).map(|(source, stamp)| (source.clone(), *stamp)).collect()
     };
-    let changed: Vec<(PathBuf, Option<FileStamp>)> = known.into_iter().filter(|(source, stamp)| stamper(source) != *stamp).collect();
+    let seen: Vec<(PathBuf, Option<FileStamp>, Option<FileStamp>)> = known.into_iter().filter_map(|(source, stamp)| {
+        let now = stamper(&source);
+        (now != stamp).then_some((source, stamp, now))
+    }).collect();
+    let mut state = shared.lock();
+    // Queue a changed file only once its new stamp held over two rechecks in a row.
+    let previous = std::mem::take(&mut state.changed);
+    let mut changed = Vec::new();
+    for (source, stamp, now) in seen {
+        if previous.get(&source) == Some(&now) {
+            changed.push((source, stamp));
+        } else {
+            state.changed.insert(source, now);
+        }
+    }
     if changed.is_empty() {
         return;
     }
-    let mut state = shared.lock();
     let mut queued = false;
     state.changing(|state| {
         for (source, stamp) in changed {
@@ -1014,6 +1031,14 @@ mod tests {
 
         version.store(1, Ordering::SeqCst);
         let revision = manager.revision();
+        recheck(&manager.shared, &*manager.stamper);
+        assert!(made.recv_timeout(Duration::from_millis(100)).is_err(), "a new stamp waits for one more recheck");
+        assert!(manager.proxies().contains_key(big), "still in use while the file may be copied");
+        version.store(2, Ordering::SeqCst);
+        recheck(&manager.shared, &*manager.stamper);
+        assert!(made.recv_timeout(Duration::from_millis(100)).is_err(), "a file still growing is not made again");
+        version.store(1, Ordering::SeqCst);
+        recheck(&manager.shared, &*manager.stamper);
         manager.recheck();
         let mut again = vec![made.recv_timeout(Duration::from_secs(10)).unwrap()];
         assert!(!manager.proxies().contains_key(big), "the stale proxy is no longer used");
