@@ -308,10 +308,6 @@ Thời điểm thả và trim lấy theo điểm ảnh rồi đổi ra tick, kh�
 
 `crates/d3d12-backend/src/compositor.rs` (`needs_rebuild`): chưa có gói transition nào dùng size function, nên test GPU chỉ phủ đường cập nhật tại chỗ. Nhánh dựng lại dùng chung logic với clip effect. Ghi ngày 2026-11-09.
 
-### [Thấp] Tìm trong thư viện phân biệt dạng Unicode và dấu
-
-`crates/gpufx-editor/src/media.rs:79-82`: tên NFC và NFD không khớp nhau, gõ "dep" không ra "đẹp". Ghi ngày 2026-11-09.
-
 ### [Thấp] Thư viện không đánh dấu file đã mất và không có nút gỡ
 
 `crates/gpufx-editor/src/media.rs`, `crates/gpufx-editor/src/ui/left_panel.rs`: file bị xoá khỏi đĩa vẫn còn trong lưới, bấm vẫn thêm clip, lỗi chỉ lộ ở preview hoặc khi xuất. Ghi ngày 2026-11-09.
