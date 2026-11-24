@@ -474,10 +474,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/gpufx-editor/src/project_file.rs:120`: mở file có `frame_rate` trên 60 fps chỉ ghi stderr, project không bị đánh dấu chưa lưu, nên có thể xuất 60 fps mà không hay. Nên báo ở thanh trạng thái hoặc đánh dấu chưa lưu. CLI `gpufx-render` thì từ chối chính file đó, chờ user chốt có dùng chung cách kẹp không. Ghi ngày 2026-11-10.
 
-### [Thấp] Test preview bỏ khung chưa chứng minh được `LatestSlot`
-
-`crates/gpufx-editor/tests/preview_drop.rs:109`: đồng hồ giả chỉ tăng trong `produce`, nên mỗi lần render chỉ có một yêu cầu mới, thay slot bằng hàng đợi FIFO thì test vẫn xanh. Nên gửi nhiều yêu cầu trong lúc `produce` đang chặn rồi khẳng định khung giữa không được render. Ghi ngày 2026-11-10.
-
 ### [Thấp] Preview effect co ảnh đầu ra chưa tốt khi package đổi kích thước
 
 `crates/d3d12-backend/src/effect_preview.rs`, hàm `resize_rgba`: nội suy chỉ lấy 2x2 điểm nên thu nhỏ mạnh bị răng cưa, output không vuông bị kéo méo, và nội suy trên alpha thẳng làm viền lem màu. Hiện chỉ package kiểu `scale` đi vào đường này. Nên dùng box filter, premultiply trước khi lọc và letterbox. Ghi ngày 2026-11-10.
