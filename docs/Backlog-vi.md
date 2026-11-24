@@ -410,10 +410,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/gpufx-editor/src/window.rs:241` (`serve_agent`): test đã đi qua pipe thật, `EditorState` và luồng preview thật, nhưng không có cửa sổ winit. Bật tuỳ chọn trong menu, dấu báo agent, lệnh tới khi cửa sổ thu nhỏ và preview cập nhật sau lệnh agent mới chỉ thử được bằng tay. Tiêu chí "Dùng thật" của đặc tả vẫn còn mở. Ghi ngày 2026-11-09.
 
-### [Vừa] Lưu hoặc xuất có thể ghi đè file bên trong package dạng thư mục
-
-`crates/d3d12-backend/src/export.rs:117` (`overwritten_input`): chỉ so đường dẫn đích với chính thư mục package, nên `project_save` với `overwrite: true` vào `<package>/manifest.json` làm hỏng package đang dùng, `export_start` hở tương tự. Nên từ chối mọi đích nằm dưới một package thư mục của project. Ghi ngày 2026-11-09.
-
 ### [Thấp] So file cùng một đích qua admin share không nhận ra
 
 `crates/d3d12-backend/src/export.rs:87` (`same_file`): `\\localhost\c$\m\a.mp4` không trùng `C:\m\a.mp4` sau `canonicalize`, nên kiểm tra ghi đè file nguồn bị vượt. Cần quyền vào admin share nên khó gặp; chặn triệt để thì so volume serial và file ID. Ghi ngày 2026-11-09.
