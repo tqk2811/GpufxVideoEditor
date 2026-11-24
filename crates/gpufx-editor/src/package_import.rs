@@ -311,10 +311,30 @@ fn read_bounded(source: &Path, limit: u64) -> Result<Vec<u8>, ImportProblem> {
     Ok(bytes)
 }
 
-/// Writes `bytes` to `target` through a file beside it that no scan takes for a package.
+/// How old a temporary file of [`write_replacing`] must be before it counts as left behind by an
+/// app that was killed while writing it, rather than one another editor is writing now.
+const STALE_IMPORT_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Removes the temporary files of [`write_replacing`] in `folder` older than [`STALE_IMPORT_AGE`].
+fn sweep_stale_imports(folder: &Path, now: std::time::SystemTime) {
+    let Ok(entries) = fs::read_dir(folder) else { return };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().contains(".importing-") {
+            continue;
+        }
+        let age = entry.metadata().and_then(|meta| meta.modified()).ok().and_then(|modified| now.duration_since(modified).ok());
+        if age.is_some_and(|age| age > STALE_IMPORT_AGE) && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Writes `bytes` to `target` through a file beside it that no scan takes for a package. Temporary
+/// files an earlier killed app left in that folder are removed first.
 fn write_replacing(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let folder = target.parent().ok_or_else(|| std::io::Error::other("the target has no folder"))?;
     fs::create_dir_all(folder)?;
+    sweep_stale_imports(folder, std::time::SystemTime::now());
     let mut temporary_name = target.file_name().unwrap_or_default().to_os_string();
     temporary_name.push(format!(".importing-{}", std::process::id()));
     let temporary = folder.join(temporary_name);
@@ -557,6 +577,26 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn writing_a_package_removes_old_temporary_files_and_keeps_fresh_ones() {
+        let dir = scratch("stale");
+        let old = dir.join("a.zip.importing-4242");
+        let fresh = dir.join("b.zip.importing-4343");
+        let bystander = dir.join("c.zip");
+        for path in [&old, &fresh, &bystander] {
+            fs::write(path, b"x").unwrap();
+        }
+        let long_ago = std::time::SystemTime::now() - STALE_IMPORT_AGE - std::time::Duration::from_secs(60);
+        File::options().write(true).open(&old).unwrap().set_modified(long_ago).unwrap();
+        File::options().write(true).open(&bystander).unwrap().set_modified(long_ago).unwrap();
+        write_replacing(&dir.join("t.zip"), b"new").unwrap();
+        assert!(!old.exists(), "a temporary file left by a killed app is removed");
+        assert!(fresh.exists(), "one another editor may be writing is kept");
+        assert!(bystander.exists(), "a package is never swept");
+        assert_eq!(fs::read(dir.join("t.zip")).unwrap(), b"new");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     fn written(dir: &Path, bytes: &[u8]) -> PathBuf {

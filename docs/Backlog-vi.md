@@ -490,10 +490,6 @@ Nguồn PQ/HLG được đưa về SDR BT.709 bằng BT.2390 tới 203 cd/m2, đ
 
 `crates/gpufx-editor/src/effect_previews/key.rs` `preview_key` không có loại ảnh nên `.attempt` và `.failed` dùng chung cho still và loop: một lần lỗi mỗi loại tính thành hai lần, và loop hỏng chặn cả still. Nên thêm loại vào tên file hoặc nội dung bản ghi. Ghi ngày 2026-11-10.
 
-### [Thấp] File tạm `.importing-<pid>` mồ côi khi app bị kill giữa lúc ghi
-
-`crates/gpufx-editor/src/package_import.rs:283` (`write_replacing`) ghi qua file `<id>.zip.importing-<pid>` rồi đổi tên. Nếu app bị kill giữa chừng thì file tạm nằm lại trong `packages/gpufx/user` và không có chỗ nào dọn. Nên quét và xoá file `.importing-*` cũ khi khởi động. Ghi ngày 2026-11-10.
-
 ### [Thấp] Zip có thể đổi trong lúc hộp thoại ghi đè đang mở
 
 `crates/gpufx-editor/src/tasks.rs:330` (`PromptAnswered`) và `install_zip` (`package_import.rs:304`): câu hỏi ghi đè dựa trên lần đọc đầu, còn lần cài thứ hai đọc lại file. Nếu file zip bị thay giữa hai lần thì lần cài thứ hai có thể thay một id khác mà không hỏi. Nên giữ byte đã kiểm hoặc so lại id trước khi ghi đè. Ghi ngày 2026-11-10.
