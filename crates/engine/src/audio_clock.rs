@@ -228,6 +228,12 @@ impl AudioClock {
         self.shared.end.load(Ordering::Acquire)
     }
 
+    /// Takes the end of `project`, which the producer is about to receive, so a seek made before
+    /// [`AudioProducer::set_project`] runs is limited to the new timeline rather than the old one.
+    pub fn expect_project(&self, project: &Project) {
+        self.shared.end.store(end_of(project), Ordering::Release);
+    }
+
     /// Moves to the sample of `time`, limited to the timeline, and discards the prepared samples.
     pub fn seek(&self, time: Time) {
         self.shared.publish_seek(Some(sample_position(time)));
