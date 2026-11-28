@@ -2,7 +2,7 @@
 //! by point, or a path drawn by hand that closes on release. The finished shape becomes a censor
 //! clip at the playhead whose box fits it. The preview side is `ui/censor_overlay.rs`.
 
-use engine::polygon::{closed_polygon, fit_in_box, MAX_POLYGON_POINTS, MIN_POLYGON_POINTS};
+use engine::polygon::{closed_polygon, fit_in_box, polygon_problem, MAX_POLYGON_POINTS, MIN_POLYGON_POINTS};
 use engine::{CensorContent, ClipPlacement, RegionShape, CENSOR_ASPECT_RANGE, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 
 use crate::editor::EditorState;
@@ -72,6 +72,10 @@ pub fn drawn_censor(shape: RegionShape, points: &[[f64; 2]], bounds: (f64, f64, 
     } else {
         Vec::new()
     };
+    // Points on one line cover nothing: the engine refuses them, so no clip is made of them.
+    if shape == RegionShape::Polygon && polygon_problem(&local).is_some() {
+        return None;
+    }
     let censor = CensorContent { shape, points: local, aspect, ..CensorContent::default() };
     let placement = ClipPlacement { x: box_left, y: box_top, width: box_width };
     Some((censor, placement))
@@ -209,6 +213,17 @@ mod tests {
         state.censor_draw_points().unwrap().extend(tiny);
         assert!(!state.finish_censor_polygon(&tiny));
         assert_eq!(state.censor_draw().map(|draw| draw.points.len()), Some(0), "a hand-drawn path starts over");
+    }
+
+    #[test]
+    fn clicked_points_on_one_line_make_no_region_and_are_kept() {
+        let line = [[0.1, 0.1], [0.3, 0.3], [0.5, 0.5]];
+        assert!(drawn_censor(RegionShape::Polygon, &line, (0.1, 0.1, 0.5, 0.5), (1920, 1080)).is_none());
+        let mut state = EditorState::default();
+        state.toggle_censor_draw(CensorDrawMode::Points);
+        state.censor_draw_points().unwrap().extend(line);
+        assert!(!state.finish_censor_polygon(&line));
+        assert_eq!(state.censor_draw().map(|draw| draw.points.len()), Some(3), "the points stay");
     }
 
     #[test]
