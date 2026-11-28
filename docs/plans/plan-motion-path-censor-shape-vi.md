@@ -28,26 +28,29 @@ Trạng thái: đã duyệt hướng (2026-11-28), đang làm.
 ### Mô hình
 
 - `ClipMotion` (`crates/engine/src/keyframe.rs`) thêm `path: Option<MotionPath>`, serde mặc định `None`.
-- `MotionPath { x: String, y: String, rotation: Option<String> }`. Chuỗi rỗng ở `x` hoặc `y` nghĩa là 0.
+- `MotionPath { x: String, y: String, rotation: Option<String>, origin: f64, span: Option<f64> }`. Chuỗi rỗng ở `x` hoặc `y` nghĩa là 0. `origin` (serde mặc định 0) là số giây cộng vào thời gian tính từ đầu clip để ra `t`; `span` (serde mặc định `None` = độ dài clip) là giá trị của `d`.
 - Biến dùng được trong mọi biểu thức:
 
 | Biến | Nghĩa |
 |---|---|
-| `t` | giây tính từ đầu clip |
-| `d` | độ dài clip (giây) |
+| `t` | giây tính từ đầu quỹ đạo: thời gian từ đầu clip cộng `origin` |
+| `d` | độ dài quỹ đạo (giây): `span`, không có thì là độ dài clip |
 | `p` | `t / d`, từ 0 tới 1 |
-| `dir` | chỉ có trong biểu thức góc xoay: hướng đi của quỹ đạo tại `t`, cùng đơn vị với thuộc tính Rotation, tính bằng sai phân của `x`, `y` |
+| `dir` | chỉ có trong biểu thức góc xoay: hướng đi của quỹ đạo trên màn hình tại `t`, cùng đơn vị với thuộc tính Rotation, tính bằng sai phân của `x`, `y`; bước của `x` nhân với tỉ lệ khung (rộng/cao) vì `x` tính theo chiều ngang còn `y` theo chiều dọc |
 
-- `x`, `y` là độ lệch theo phần của khung hình (1 = cả chiều ngang hoặc dọc), **cộng thêm** vào vị trí sau keyframe X/Y (qua `ClipTransform.shift` hoặc chỗ tương đương trong `Clip::transform_at`). Góc xoay cộng thêm vào Rotation.
+- `x`, `y` là độ lệch theo phần của khung hình (1 = cả chiều ngang hoặc dọc), **cộng thêm** vào vị trí sau keyframe X/Y. Góc xoay cộng thêm vào Rotation.
+- Quỹ đạo là một lớp pose đặt lên chỗ nghỉ của clip, như pose của animation có sẵn: `Clip::transform_at` chỉ là chỗ nghỉ (placement + keyframe, không có quỹ đạo); `Clip::path_pose_at(offset, output_aspect)` cho độ lệch và góc xoay, `ClipTransform::with_path` cộng chúng vào, gọi trong `schedule::sample_at` cạnh `with_pose`. Mọi chỗ render, xuất, vùng che, follow/lock và ánh xạ khung hình đi qua `sample_at` nên thấy clip ở đúng chỗ nó hiện; còn kéo khung, `with_placement`, bake follow/lock và snap dùng chỗ nghỉ, nên kéo khung chỉ dời điểm quỹ đạo bắt đầu.
+- Khung kéo (gizmo) vẽ và bắt chuột ở chỗ clip đang hiện (đã cộng quỹ đạo), nhưng kéo thì tính từ chỗ nghỉ và chỉ đổi placement.
+- Sửa timeline giữ chuyển động liền mạch: cắt đôi thì hai nửa giữ `span` = `d` cũ, nửa sau `origin` cộng thêm độ lệch của điểm cắt; cắt đầu clip thì `origin` cộng thêm phần bị cắt, `span` giữ `d` cũ; cắt cuối clip thì `span` giữ `d` cũ. `origin` dời cùng chỗ dời keyframe (`shift_keyframes`). Đặt quỹ đạo mới (mẫu chọn nhanh, MCP) thì bắt đầu lại từ đầu clip; sửa chữ một biểu thức trong inspector thì giữ `origin`/`span`.
 - Biểu thức được parse một lần và giữ trong bộ nhớ đệm (không serialize), không parse lại mỗi khung.
 - Kiểm hợp lệ trong `crates/engine/src/validate.rs`: biểu thức parse được với đúng bộ biến. Giá trị không hữu hạn (NaN, vô cực) khi tính thì coi là 0.
 
 ### Editor
 
 - Inspector của clip: mục "Quỹ đạo" với ba ô biểu thức, báo lỗi cú pháp khi gõ (như ô biểu thức của tham số effect), vài mẫu chọn nhanh (tròn, số 8, sóng sin, xoắn ốc).
-- Preview: vẽ đường quỹ đạo của clip đang chọn (lấy lại cách vẽ `draw_path` ở `ui/tracking_overlay.rs`).
+- Preview: vẽ đường quỹ đạo của clip đang chọn (lấy lại cách vẽ `draw_path` ở `ui/tracking_overlay.rs`), số điểm theo độ dài clip (60 điểm mỗi giây, tối đa 2000).
 - Undo/redo như các thao tác sửa clip khác. Chữ giao diện qua `i18n/en.json` và `vi.json`.
-- Tool MCP `clip_set_path` (đặt hoặc xoá quỹ đạo).
+- Tool MCP `clip_set_path` (đặt hoặc xoá quỹ đạo). Một test kiểm mô tả của tool nêu đủ tên hàm và hằng của `gpufx-expr` (`function_names`, `constant_names`).
 
 ## Phần 3: vùng che vẽ tự do
 
