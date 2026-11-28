@@ -783,7 +783,8 @@ fn path_rows(ui: &mut egui::Ui, state: &mut EditorState, path: Option<&engine::M
         let vars = if rotation { engine::motion_path::rotation_vars() } else { engine::motion_path::position_vars() };
         let changed = ui.push_id(("motion-path", index), |ui| super::param_widgets::expression_text(ui, language, saved, &vars, true)).inner;
         if let Some(text) = changed {
-            let mut next = engine::MotionPath::new(path.x.clone(), path.y.clone(), path.rotation.clone());
+            // The same path with one text changed: its time base (after a split or a trim) stays.
+            let mut next = path.fresh();
             match index {
                 0 => next.x = text,
                 1 => next.y = text,

@@ -7,8 +7,10 @@ use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Stroke, Str
 use engine::{ClipKey, ClipPlacement, ClipTransform, FollowPose, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 
 const FRAME_WIDTH: f32 = 1.5;
-/// Points of the drawn motion path of the selected clip, over its whole length.
-const PATH_POINTS: usize = 160;
+/// Points of the drawn motion path of the selected clip: so many a second of its length, within limits.
+const PATH_POINTS_PER_SECOND: f64 = 60.0;
+const MIN_PATH_POINTS: usize = 2;
+const MAX_PATH_POINTS: usize = 2000;
 const PATH_WIDTH: f32 = 1.5;
 const GRIP_SIZE: f32 = 8.0;
 const GRIP_HIT_SIZE: f32 = 14.0;
@@ -127,10 +129,10 @@ fn handle_rect(rect: Rect, area: Rect, dragged: bool) -> Rect {
     }
 }
 
-/// The clip the frame belongs to, how it stands at the playhead (moved by the motion track it
-/// follows, if any), and the width over height of its source. Only a clip that is on screen now and
-/// may be edited has a frame.
-fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
+/// The clip the frame belongs to, how it rests at the playhead (moved by the motion track it
+/// follows, if any), how it is shown there (its motion path on top of that), and the width over
+/// height of its source. Only a clip that is on screen now and may be edited has a frame.
+fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, ClipTransform, f64)> {
     let key = state.selection()?;
     let track = state.project().tracks.get(key.track)?;
     let clip = track.clips.get(key.clip)?;
@@ -139,17 +141,21 @@ fn target(state: &EditorState) -> Option<(ClipKey, ClipTransform, f64)> {
     }
     // The resting place, without the text animation's pose: dragging edits the clip's own placement,
     // so the frame stays put while the text moves through its preset.
-    let mut transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
+    // The motion path is left out of it too, but the frame is drawn where the path puts the clip.
+    let offset = state.playhead().saturating_sub(clip.start);
+    let mut transform = clip.transform_at(offset);
+    let mut shown = transform.with_path(clip, offset, state.project().output_aspect());
     if let Some(follow) = &clip.follow {
         engine::follow_transform(state.project(), follow, &mut transform, state.playhead());
+        engine::follow_transform(state.project(), follow, &mut shown, state.playhead());
     }
     if clip.is_text() || clip.is_censor() {
-        return Some((key, transform, state.clip_aspect(clip)));
+        return Some((key, transform, shown, state.clip_aspect(clip)));
     }
     let mut visuals = state.visuals.borrow_mut();
     let slot = visuals.slot(&clip.source);
     match visuals.view(slot) {
-        SourceView::Known(facts) if facts.has_video && facts.aspect > 0.0 => Some((key, transform, f64::from(facts.aspect))),
+        SourceView::Known(facts) if facts.has_video && facts.aspect > 0.0 => Some((key, transform, shown, f64::from(facts.aspect))),
         _ => None,
     }
 }
@@ -212,9 +218,16 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, pictu
     if picture.width() < 1.0 || picture.height() < 1.0 || !visible(state.is_exporting(), state.is_playing(), own_handle_dragged(ui.ctx(), ui.scope_id())) {
         return;
     }
-    let Some((key, transform, source_aspect)) = target(state) else { return };
+    let Some((key, transform, shown, source_aspect)) = target(state) else { return };
     draw_motion_path(ui, state, area, picture, key, source_aspect);
-    show_frame(ui, state, area, picture, key, transform, source_aspect);
+    show_frame(ui, state, area, picture, key, transform, shown, source_aspect);
+}
+
+/// How many points the drawn path of a clip `seconds` long has: [`PATH_POINTS_PER_SECOND`] a
+/// second, from [`MIN_PATH_POINTS`] to [`MAX_PATH_POINTS`].
+fn path_point_count(seconds: f64) -> usize {
+    let wanted = (seconds.max(0.0) * PATH_POINTS_PER_SECOND).ceil();
+    (wanted.min(MAX_PATH_POINTS as f64) as usize).max(MIN_PATH_POINTS)
 }
 
 /// Where the middle of `clip` is, in parts of the frame, at `count` evenly spaced times of its
@@ -227,7 +240,7 @@ fn motion_path_points(clip: &engine::Clip, output_aspect: f64, source_aspect: f6
     (0..count)
         .map(|i| {
             let offset = engine::Time::from_ticks(length.saturating_sub(1).saturating_mul(i as i64) / (count as i64 - 1));
-            let rect = clip.transform_at(offset).rect(output_aspect, source_aspect);
+            let rect = clip.transform_at(offset).with_path(clip, offset, output_aspect).rect(output_aspect, source_aspect);
             [rect.x + rect.width / 2.0, rect.y + rect.height / 2.0]
         })
         .collect()
@@ -239,9 +252,9 @@ fn draw_motion_path(ui: &egui::Ui, state: &EditorState, area: Rect, picture: Rec
     if clip.follow.is_some() {
         return;
     }
-    let output = &state.project().output;
-    let output_aspect = f64::from(output.width) / f64::from(output.height);
-    let points: Vec<Pos2> = motion_path_points(clip, output_aspect, source_aspect, PATH_POINTS)
+    let output_aspect = state.project().output_aspect();
+    let count = path_point_count(clip.duration.ticks() as f64 / engine::TICKS_PER_SECOND as f64);
+    let points: Vec<Pos2> = motion_path_points(clip, output_aspect, source_aspect, count)
         .into_iter()
         .map(|[x, y]| picture.min + Vec2::new(x as f32 * picture.width(), y as f32 * picture.height()))
         .collect();
@@ -253,13 +266,16 @@ fn draw_motion_path(ui: &egui::Ui, state: &EditorState, area: Rect, picture: Rec
     painter.circle_filled(points[0], 3.0, Color32::from_rgb(255, 200, 40));
 }
 
-fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: Rect, key: ClipKey, transform: ClipTransform, source_aspect: f64) {
+/// Draws and handles the frame of `key`: `shown` is where the clip is on screen (its motion path
+/// included), which is where the frame is drawn and pressed; `transform` is its resting place,
+/// from which a drag starts, so a drag changes the place and never takes the path into it.
+#[allow(clippy::too_many_arguments)]
+fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: Rect, key: ClipKey, transform: ClipTransform, shown: ClipTransform, source_aspect: f64) {
     let scope = ui.scope_id();
-    let output = &state.project().output;
-    let output_aspect = f64::from(output.width) / f64::from(output.height);
+    let output_aspect = state.project().output_aspect();
     let current = transform.rect(output_aspect, source_aspect);
-    let frame = on_screen(current, picture);
-    let corners = turned_corners(frame, transform.rotation);
+    let frame = on_screen(shown.rect(output_aspect, source_aspect), picture);
+    let corners = turned_corners(frame, shown.rotation);
     let body_id = body_id(scope);
     let body_in_hand = in_hand(ui.ctx(), body_id);
     // A turned frame takes the press only inside its own corners, not in the empty corners of its bounds.
@@ -271,7 +287,7 @@ fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: R
     body.on_hover_and_drag_cursor(CursorIcon::Move);
     let painter = ui.painter_at(area);
     let outline = Stroke::new(FRAME_WIDTH, Color32::RED);
-    if transform.rotation != 0.0 {
+    if shown.rotation != 0.0 {
         painter.add(egui::Shape::closed_line(corners.to_vec(), outline));
         // The grips scale along the axes of the frame, which a turned picture does not have.
         return;
@@ -409,10 +425,11 @@ mod tests {
         let key = ClipKey { track: 0, clip: 0 };
         let clip = &state.project().tracks[0].clips[0];
         // The resting place, as `target` gives it: the animation's pose is never dragged.
-        let transform = clip.transform_at(state.playhead().saturating_sub(clip.start));
-        let output = &state.project().output;
-        let aspect = f64::from(output.width) / f64::from(output.height);
-        let mut output = ctx.run_ui(raw, |ui| show_frame(ui, state, area, area, key, transform, aspect));
+        let offset = state.playhead().saturating_sub(clip.start);
+        let transform = clip.transform_at(offset);
+        let aspect = state.project().output_aspect();
+        let shown = transform.with_path(clip, offset, aspect);
+        let mut output = ctx.run_ui(raw, |ui| show_frame(ui, state, area, area, key, transform, shown, aspect));
         output.textures_delta.clear();
     }
 
@@ -473,10 +490,44 @@ mod tests {
         state.replace_project(project, None);
         state.select(Some(ClipKey { track: 1, clip: 0 }));
         state.set_playhead(engine::Time::from_ticks(engine::TICKS_PER_SECOND / 2));
-        let (_, transform, aspect) = target(&state).expect("a frame");
+        let (_, transform, _, aspect) = target(&state).expect("a frame");
         let rect = transform.rect(16.0 / 9.0, aspect);
         // Half a second in, the object went an eighth of the frame to the right.
         assert!(close(rect.x, 0.1 + 0.125), "{rect:?}");
+    }
+
+    #[test]
+    fn the_frame_of_a_clip_on_a_path_is_drawn_where_it_shows_and_a_drag_moves_only_its_place() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::default();
+        state.add_track(engine::TrackKind::Video);
+        state.add_clip_from_file(0, std::path::Path::new("a.mp4"));
+        let mut project = state.project().clone();
+        project.tracks[0].clips[0].placement = Some(ClipPlacement { x: 0.1, y: 0.1, width: 0.3 });
+        project.tracks[0].clips[0].motion.path = Some(engine::MotionPath::new("0.25", "", None));
+        state.replace_project(project, None);
+        state.select(Some(ClipKey { track: 0, clip: 0 }));
+        let area = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 225.0));
+        // Resting, the picture spans 40 to 160 points; the path shows it 100 points to the right.
+        let shown = Pos2::new(200.0, 50.0);
+        pass(&ctx, &mut state, area, vec![]);
+        pass(&ctx, &mut state, area, vec![egui::Event::PointerMoved(shown)]);
+        pass(&ctx, &mut state, area, vec![button(shown, true)]);
+        for step in 1..=4 {
+            pass(&ctx, &mut state, area, vec![egui::Event::PointerMoved(shown + Vec2::new(10.0 * step as f32, 0.0))]);
+        }
+        pass(&ctx, &mut state, area, vec![button(shown + Vec2::new(40.0, 0.0), false)]);
+        pass(&ctx, &mut state, area, vec![]);
+        let placement = state.project().tracks[0].clips[0].placement.expect("placed");
+        assert!((placement.x - 0.2).abs() < 1e-4, "the drag of 40 points is all the place moved, the path stays out of it: {placement:?}");
+        assert!(close(placement.width, 0.3), "{placement:?}");
+    }
+
+    #[test]
+    fn the_drawn_path_has_points_for_its_length() {
+        assert_eq!(path_point_count(0.0), MIN_PATH_POINTS);
+        assert_eq!(path_point_count(2.0), 120);
+        assert_eq!(path_point_count(600.0), MAX_PATH_POINTS);
     }
 
     #[test]

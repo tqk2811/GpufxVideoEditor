@@ -478,7 +478,7 @@
   "motionPathX": "x = (phần chiều ngang khung hình)",
   "motionPathY": "y = (phần chiều dọc khung hình)",
   "motionPathRotation": "Góc xoay = (độ, không bắt buộc)",
-  "motionPathHint": "t: giây từ đầu clip, d: độ dài clip, p: t / d từ 0 tới 1, dir: hướng đi của quỹ đạo (chỉ cho góc xoay). Cộng thêm vào vị trí và góc xoay.",
+  "motionPathHint": "t: giây từ đầu quỹ đạo (là đầu clip; cắt đôi hay cắt đầu clip thì quỹ đạo chạy tiếp), d: độ dài quỹ đạo (độ dài clip, giữ nguyên khi cắt), p: t / d từ 0 tới 1, dir: hướng đi của quỹ đạo trên màn hình (chỉ cho góc xoay). Cộng thêm lên vị trí và góc xoay; kéo khung là dời điểm quỹ đạo bắt đầu.",
   "motionPathPresets": "Mẫu:",
   "pathCircle": "Tròn",
   "pathFigureEight": "Số 8",

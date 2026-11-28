@@ -479,7 +479,7 @@
   "motionPathX": "x = (part of the frame width)",
   "motionPathY": "y = (part of the frame height)",
   "motionPathRotation": "Rotation = (degrees, optional)",
-  "motionPathHint": "t: seconds from the clip start, d: clip length, p: t / d from 0 to 1, dir: heading of the path (rotation only). Added to the place and rotation.",
+  "motionPathHint": "t: seconds since the path start (the clip start; a split or start trim keeps it going), d: span of the path (the clip length, kept by splits and trims), p: t / d from 0 to 1, dir: heading of the path on screen (rotation only). Laid on top of the place and rotation; dragging the frame moves where the path starts.",
   "motionPathPresets": "Presets:",
   "pathCircle": "Circle",
   "pathFigureEight": "Figure 8",
