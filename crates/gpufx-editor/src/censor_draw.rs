@@ -19,7 +19,8 @@ pub enum CensorDrawMode {
     Rect,
     /// Drag the box of an ellipse.
     Ellipse,
-    /// Click each point; click the first point again, press Enter or double-click to close.
+    /// Click each point; click the first point again or press Enter to close, or double-click to
+    /// add a last point and close.
     Points,
     /// Hold the button and draw; the release closes the path.
     Freehand,

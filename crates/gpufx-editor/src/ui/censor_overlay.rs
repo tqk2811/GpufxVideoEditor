@@ -5,8 +5,9 @@
 use crate::censor_draw::{freehand_polygon, CensorDrawMode, FREEHAND_TOLERANCE};
 use crate::editor::EditorState;
 use crate::i18n::Message;
-use egui::{Align2, Color32, CornerRadius, CursorIcon, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2};
+use egui::{Align2, Color32, CornerRadius, CursorIcon, FontId, Key, Modifiers, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2};
 use engine::polygon::{nearest_edge, MAX_POLYGON_POINTS, MIN_POLYGON_POINTS};
+use engine::tracker::homography::Homography;
 use engine::{ClipKey, RegionShape};
 
 const DRAW_COLOR: Color32 = Color32::from_rgb(255, 210, 0);
@@ -25,7 +26,10 @@ fn to_screen(point: [f64; 2], picture: Rect) -> Pos2 {
 }
 
 fn to_frame(pos: Pos2, picture: Rect) -> [f64; 2] {
-    let pos = picture.clamp(pos);
+    unclamped_frame(picture.clamp(pos), picture)
+}
+
+fn unclamped_frame(pos: Pos2, picture: Rect) -> [f64; 2] {
     [f64::from((pos.x - picture.left()) / picture.width()), f64::from((pos.y - picture.top()) / picture.height())]
 }
 
@@ -135,7 +139,9 @@ fn draw(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: Rect, m
             }
         }
         CensorDrawMode::Points => {
-            let enter = ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
+            // Enter belongs to a focused widget (a text field, a button) when there is one.
+            let free = ui.ctx().memory(|memory| memory.focused().is_none());
+            let enter = free && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
             let points = state.censor_draw().map(|draw| draw.points.clone()).unwrap_or_default();
             let screen: Vec<Pos2> = points.iter().map(|p| to_screen(*p, picture)).collect();
             if response.double_clicked() || enter {
@@ -176,8 +182,9 @@ fn draw(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: Rect, m
 }
 
 /// The selected censor clip when it is a polygon shown at the playhead and may be edited, with
-/// where its box stands now: the box in parts of the frame and its clockwise turn.
-fn polygon_target(state: &EditorState) -> Option<(ClipKey, engine::CensorContent, engine::PlacedRect, f64)> {
+/// where its box stands now: the box in parts of the frame, its clockwise turn, and the corners it
+/// is pinned to when it follows a track in perspective.
+fn polygon_target(state: &EditorState) -> Option<(ClipKey, engine::CensorContent, engine::PlacedRect, f64, Option<[[f64; 2]; 4]>)> {
     if state.is_playing() {
         return None;
     }
@@ -194,33 +201,51 @@ fn polygon_target(state: &EditorState) -> Option<(ClipKey, engine::CensorContent
         engine::follow_transform(state.project(), follow, &mut transform, at);
     }
     let output = &state.project().output;
-    let rect = transform.rect(f64::from(output.width) / f64::from(output.height.max(1)), censor.aspect);
-    Some((key, censor.clone(), rect, transform.rotation))
+    let output_aspect = f64::from(output.width) / f64::from(output.height.max(1));
+    let rect = transform.rect(output_aspect, censor.aspect);
+    // As [`engine::CensorRegion::of`] gives the compositor: the shape is drawn into these corners.
+    let quad = transform.pinned_corners(transform.unfollowed_rect(output_aspect, censor.aspect), output_aspect);
+    Some((key, censor.clone(), rect, transform.rotation, quad))
 }
 
-/// Where the box of a region (its frame on screen, turned `rotation` clockwise degrees) puts
-/// point `local` of it, and back.
+/// Where the box of a region (its frame on screen, turned `rotation` clockwise degrees, or warped
+/// onto the corners it is pinned to) puts point `local` of it, and back.
 struct BoxOnScreen {
     frame: Rect,
     sine: f32,
     cosine: f32,
+    picture: Rect,
+    /// From the box (0 to 1 across it) to the frame and back, when it lies in perspective.
+    warp: Option<(Homography, Homography)>,
 }
 
 impl BoxOnScreen {
-    fn new(rect: engine::PlacedRect, rotation: f64, picture: Rect) -> Self {
+    fn new(rect: engine::PlacedRect, rotation: f64, quad: Option<[[f64; 2]; 4]>, picture: Rect) -> Self {
         let min = picture.min + Vec2::new(rect.x as f32 * picture.width(), rect.y as f32 * picture.height());
         let frame = Rect::from_min_size(min, Vec2::new(rect.width as f32 * picture.width(), rect.height as f32 * picture.height()));
         let (sine, cosine) = (rotation as f32).to_radians().sin_cos();
-        BoxOnScreen { frame, sine, cosine }
+        let unit = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let warp = quad.and_then(|quad| {
+            let forward = Homography::from_quads(&unit, &quad)?;
+            Some((forward, forward.inverse()?))
+        });
+        BoxOnScreen { frame, sine, cosine, picture, warp }
     }
 
     fn to_screen(&self, local: [f64; 2]) -> Pos2 {
+        if let Some((forward, _)) = &self.warp {
+            return forward.apply(local).map_or(self.frame.center(), |frame| to_screen(frame, self.picture));
+        }
         let d = Vec2::new((local[0] as f32 - 0.5) * self.frame.width(), (local[1] as f32 - 0.5) * self.frame.height());
         self.frame.center() + Vec2::new(self.cosine * d.x - self.sine * d.y, self.sine * d.x + self.cosine * d.y)
     }
 
     /// The point of the box under `pos`, kept inside the box.
     fn to_local(&self, pos: Pos2) -> [f64; 2] {
+        if let Some((_, backward)) = &self.warp {
+            let local = backward.apply(unclamped_frame(pos, self.picture)).unwrap_or([0.5, 0.5]);
+            return local.map(|value| if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.5 });
+        }
         let d = pos - self.frame.center();
         let turned = Vec2::new(self.cosine * d.x + self.sine * d.y, self.cosine * d.y - self.sine * d.x);
         let part = |value: f32, length: f32| f64::from(value / length.max(1e-6) + 0.5).clamp(0.0, 1.0);
@@ -232,8 +257,8 @@ impl BoxOnScreen {
 /// removed by a right-click while more than three are left, and a new one added where a side is
 /// double-clicked.
 fn edit_points(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: Rect) {
-    let Some((key, censor, rect, rotation)) = polygon_target(state) else { return };
-    let on_screen = BoxOnScreen::new(rect, rotation, picture);
+    let Some((key, censor, rect, rotation, quad)) = polygon_target(state) else { return };
+    let on_screen = BoxOnScreen::new(rect, rotation, quad, picture);
     let screen: Vec<Pos2> = censor.points.iter().map(|p| on_screen.to_screen(*p)).collect();
     let painter = ui.painter_at(area);
     painter.add(Shape::closed_line(screen.clone(), Stroke::new(LINE_WIDTH, DRAW_COLOR)));
@@ -266,8 +291,14 @@ fn edit_points(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: 
     if over_point || censor.points.len() >= MAX_POLYGON_POINTS {
         return;
     }
-    let double = ui.input(|input| input.pointer.button_double_clicked(PointerButton::Primary));
-    let Some(pos) = ui.ctx().pointer_interact_pos().filter(|pos| double && area.contains(*pos)) else { return };
+    // A side takes a double-click through a widget of its own under the pointer, so a widget on
+    // top (a menu, a dialog) keeps it, and the frame under it still takes its drag.
+    let Some(hover) = ui.ctx().pointer_hover_pos().filter(|pos| area.contains(*pos)) else { return };
+    if screen.iter().any(|point| (*point - hover).abs().max_elem() <= POINT_HIT_SIZE / 2.0) || inserted_at(&screen, hover).is_none() {
+        return;
+    }
+    let side = ui.interact(Rect::from_center_size(hover, Vec2::splat(2.0 * EDGE_HIT as f32)).intersect(area), scope.with("side"), Sense::click());
+    let Some(pos) = side.interact_pointer_pos().filter(|_| side.double_clicked()) else { return };
     if let Some(index) = inserted_at(&screen, pos) {
         let mut points = censor.points.clone();
         points.insert(index, on_screen.to_local(pos));
@@ -287,6 +318,7 @@ fn inserted_at(screen: &[Pos2], pos: Pos2) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::censor_draw::CensorDrawMode;
+    use egui::PointerButton;
 
     #[test]
     fn a_click_on_the_first_point_closes_once_three_are_there() {
@@ -314,7 +346,7 @@ mod tests {
     #[test]
     fn a_turned_box_maps_its_points_to_the_screen_and_back() {
         let picture = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(640.0, 360.0));
-        let on_screen = BoxOnScreen::new(engine::PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }, 30.0, picture);
+        let on_screen = BoxOnScreen::new(engine::PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }, 30.0, None, picture);
         let local = [0.2, 0.9];
         let back = on_screen.to_local(on_screen.to_screen(local));
         assert!((back[0] - local[0]).abs() < 1e-4 && (back[1] - local[1]).abs() < 1e-4, "{back:?}");
@@ -322,12 +354,81 @@ mod tests {
         assert!((middle - picture.center()).length() < 1e-3);
     }
 
+    #[test]
+    fn a_box_in_perspective_maps_its_points_onto_its_quadrilateral_and_back() {
+        let picture = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(640.0, 360.0));
+        let quad = [[0.3, 0.2], [0.7, 0.35], [0.7, 0.65], [0.3, 0.8]];
+        let rect = engine::PlacedRect { x: 0.3, y: 0.2, width: 0.4, height: 0.6 };
+        let on_screen = BoxOnScreen::new(rect, 0.0, Some(quad), picture);
+        for (corner, local) in quad.iter().zip([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]) {
+            assert!((on_screen.to_screen(local) - to_screen(*corner, picture)).length() < 1e-2, "corner {local:?}");
+        }
+        // The middle of the box is where the diagonals of the quadrilateral cross, not the middle of its bounds.
+        let middle = on_screen.to_screen([0.5, 0.5]);
+        assert!((middle - to_screen([1.275 / 2.25, 0.5], picture)).length() < 1e-2, "{middle:?}");
+        let local = [0.2, 0.9];
+        let back = on_screen.to_local(on_screen.to_screen(local));
+        assert!((back[0] - local[0]).abs() < 1e-4 && (back[1] - local[1]).abs() < 1e-4, "{back:?}");
+    }
+
     /// One frame of a 400 by 300 screen with `events`, the player's censor drawing over all of it.
     fn pass(ctx: &egui::Context, state: &mut EditorState, events: Vec<egui::Event>) {
+        pass_with(ctx, state, events, false);
+    }
+
+    /// [`pass`], with a text field holding the keyboard focus when `typing`.
+    fn pass_with(ctx: &egui::Context, state: &mut EditorState, events: Vec<egui::Event>, typing: bool) {
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(400.0, 300.0));
         let input = egui::RawInput { screen_rect: Some(screen), events, ..Default::default() };
-        let mut output = ctx.run_ui(input, |ui| show(ui, state, screen, screen));
+        let mut text = String::new();
+        let mut output = ctx.run_ui(input, |ui| {
+            if typing {
+                ui.text_edit_singleline(&mut text).request_focus();
+            }
+            show(ui, state, screen, screen);
+        });
         output.textures_delta.clear();
+    }
+
+    fn enter() -> egui::Event {
+        egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }
+    }
+
+    #[test]
+    fn enter_in_a_focused_text_field_does_not_close_the_polygon() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::default();
+        state.toggle_censor_draw(CensorDrawMode::Points);
+        for at in [Pos2::new(40.0, 30.0), Pos2::new(200.0, 30.0), Pos2::new(120.0, 150.0)] {
+            click(&ctx, &mut state, at);
+        }
+        pass_with(&ctx, &mut state, Vec::new(), true);
+        pass_with(&ctx, &mut state, vec![enter()], true);
+        assert_eq!(state.censor_draw().map(|draw| draw.points.len()), Some(3), "still drawing");
+        assert!(state.project().tracks.is_empty());
+    }
+
+    #[test]
+    fn a_double_click_on_a_side_adds_a_point_there_and_elsewhere_nothing() {
+        let ctx = egui::Context::default();
+        let mut state = EditorState::default();
+        assert!(state.finish_censor_polygon(&[[0.1, 0.1], [0.5, 0.1], [0.5, 0.5], [0.1, 0.5]]));
+        let count = |state: &EditorState| {
+            let key = state.selection().unwrap();
+            state.project().tracks[key.track].clips[key.clip].censor.as_ref().unwrap().points.len()
+        };
+        let double = |state: &mut EditorState, at: Pos2| {
+            pass(&ctx, state, vec![egui::Event::PointerMoved(at)]);
+            for _ in 0..2 {
+                pass(&ctx, state, vec![egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+                pass(&ctx, state, vec![egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+            }
+            ctx.input_mut(|input| input.time += 1.0);
+        };
+        double(&mut state, Pos2::new(120.0, 100.0));
+        assert_eq!(count(&state), 4, "inside, away from the sides");
+        double(&mut state, Pos2::new(120.0, 32.0));
+        assert_eq!(count(&state), 5, "on the top side");
     }
 
     fn click(ctx: &egui::Context, state: &mut EditorState, at: Pos2) {

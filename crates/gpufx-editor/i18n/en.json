@@ -371,7 +371,7 @@
   "censorDrawEllipse": "Ellipse",
   "censorDrawPoints": "Points",
   "censorDrawFreehand": "Freehand",
-  "censorDrawHint": "Drag to draw a box. Points: click each corner, then the first point, Enter or a double-click closes. Freehand: hold and draw, release closes. Esc cancels.",
+  "censorDrawHint": "Drag to draw a box. Points: click each corner; click the first point or press Enter to close, or double-click to add a last corner and close. Freehand: hold and draw, release closes. Esc cancels.",
   "censorPolygonHint": "On the preview: drag a point to move it, double-click a side to add one, right-click a point to remove it.",
   "censorFeather": "Soft edge",
   "censorMode": "Hide with",
