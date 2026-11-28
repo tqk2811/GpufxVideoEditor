@@ -204,17 +204,22 @@ fn vector(ui: &mut egui::Ui, info: &ParamInfo, params: &Map<String, Value>, comp
 /// and parses, so a bad expression never reaches the shaders. Escape puts the saved text back; text
 /// that does not parse stays with its error until it is fixed.
 fn expression(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &Map<String, Value>) -> Option<Value> {
-    let saved = expression_value(params, info);
+    expression_text(ui, language, expression_value(params, info), &info.vars, false).map(|text| json!(text))
+}
+
+/// The field of [`expression`] for any text over `vars`: the new text once it is left and parses.
+/// Fields in one scope need their own `ui.push_id`. `allow_empty`: an empty text is no error.
+pub(super) fn expression_text(ui: &mut egui::Ui, language: Language, saved: String, vars: &[String], allow_empty: bool) -> Option<String> {
     let id = ui.scope_id().with("expression-text");
     let draft = draft_text(ui.ctx(), id);
     let had_draft = draft.is_some();
     let mut text = draft.unwrap_or_else(|| saved.clone());
     let response = ui.add(egui::TextEdit::singleline(&mut text).id(id.with("edit")).desired_width(f32::INFINITY).font(egui::TextStyle::Monospace));
-    let error = expression_error(&text, &info.vars);
+    let error = if allow_empty && text.trim().is_empty() { None } else { expression_error(&text, vars) };
     if let Some(message) = &error {
         ui.colored_label(theme::refused(), message);
-    } else if !info.vars.is_empty() {
-        ui.colored_label(theme::text_dim(), language.t(Message::Variables(info.vars.join(", "))));
+    } else if !vars.is_empty() {
+        ui.colored_label(theme::text_dim(), language.t(Message::Variables(vars.join(", "))));
     }
     if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape)) {
         remove_draft(ui.ctx(), id);
@@ -226,7 +231,7 @@ fn expression(ui: &mut egui::Ui, language: Language, info: &ParamInfo, params: &
     }
     if response.lost_focus() && error.is_none() && text != saved {
         remove_draft(ui.ctx(), id);
-        return Some(json!(text));
+        return Some(text);
     }
     if error.is_some() && (response.lost_focus() || had_draft) {
         store_draft(ui.ctx(), id, text, saved);

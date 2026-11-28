@@ -7,6 +7,9 @@ use egui::{Color32, CornerRadius, CursorIcon, Id, Pos2, Rect, Sense, Stroke, Str
 use engine::{ClipKey, ClipPlacement, ClipTransform, FollowPose, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 
 const FRAME_WIDTH: f32 = 1.5;
+/// Points of the drawn motion path of the selected clip, over its whole length.
+const PATH_POINTS: usize = 160;
+const PATH_WIDTH: f32 = 1.5;
 const GRIP_SIZE: f32 = 8.0;
 const GRIP_HIT_SIZE: f32 = 14.0;
 
@@ -210,7 +213,44 @@ pub(super) fn show(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, pictu
         return;
     }
     let Some((key, transform, source_aspect)) = target(state) else { return };
+    draw_motion_path(ui, state, area, picture, key, source_aspect);
     show_frame(ui, state, area, picture, key, transform, source_aspect);
+}
+
+/// Where the middle of `clip` is, in parts of the frame, at `count` evenly spaced times of its
+/// length (its follow left out). Empty without a motion path.
+fn motion_path_points(clip: &engine::Clip, output_aspect: f64, source_aspect: f64, count: usize) -> Vec<[f64; 2]> {
+    if clip.motion.path.is_none() || count < 2 {
+        return Vec::new();
+    }
+    let length = clip.duration.ticks().max(1);
+    (0..count)
+        .map(|i| {
+            let offset = engine::Time::from_ticks(length.saturating_sub(1).saturating_mul(i as i64) / (count as i64 - 1));
+            let rect = clip.transform_at(offset).rect(output_aspect, source_aspect);
+            [rect.x + rect.width / 2.0, rect.y + rect.height / 2.0]
+        })
+        .collect()
+}
+
+/// Draws the motion path of the selected clip: the curve its middle runs along.
+fn draw_motion_path(ui: &egui::Ui, state: &EditorState, area: Rect, picture: Rect, key: ClipKey, source_aspect: f64) {
+    let Some(clip) = state.project().tracks.get(key.track).and_then(|track| track.clips.get(key.clip)) else { return };
+    if clip.follow.is_some() {
+        return;
+    }
+    let output = &state.project().output;
+    let output_aspect = f64::from(output.width) / f64::from(output.height);
+    let points: Vec<Pos2> = motion_path_points(clip, output_aspect, source_aspect, PATH_POINTS)
+        .into_iter()
+        .map(|[x, y]| picture.min + Vec2::new(x as f32 * picture.width(), y as f32 * picture.height()))
+        .collect();
+    if points.len() < 2 {
+        return;
+    }
+    let painter = ui.painter_at(area);
+    painter.add(egui::Shape::line(points.clone(), Stroke::new(PATH_WIDTH, Color32::from_rgb(255, 200, 40))));
+    painter.circle_filled(points[0], 3.0, Color32::from_rgb(255, 200, 40));
 }
 
 fn show_frame(ui: &mut egui::Ui, state: &mut EditorState, area: Rect, picture: Rect, key: ClipKey, transform: ClipTransform, source_aspect: f64) {
@@ -255,6 +295,17 @@ mod tests {
     use super::*;
 
     const START: PlacedRect = PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 };
+
+    #[test]
+    fn the_motion_path_runs_through_the_middle_of_the_clip_over_its_length() {
+        let mut clip = engine::Clip { placement: Some(ClipPlacement { x: 0.25, y: 0.25, width: 0.5 }), ..crate::editor::new_clip("a.png", engine::Time::ZERO, engine::Time::from_ticks(90_000)) };
+        assert!(motion_path_points(&clip, 1.0, 1.0, 5).is_empty(), "no path, no points");
+        clip.motion.path = Some(engine::MotionPath::new("0.2*p", "", None));
+        let points = motion_path_points(&clip, 1.0, 1.0, 5);
+        assert_eq!(points.len(), 5);
+        assert!(close(points[0][0], 0.5) && close(points[0][1], 0.5), "{points:?}");
+        assert!((points[4][0] - 0.7).abs() < 1e-4, "{points:?}");
+    }
 
     #[test]
     fn a_turned_frame_holds_only_points_inside_its_corners() {

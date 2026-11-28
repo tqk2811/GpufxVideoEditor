@@ -354,6 +354,8 @@ fn picture_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: 
     ui.add_enabled_ui(editable, |ui| {
         placement_row(ui, state, &language.t(Message::FieldPlacement), clip.placement.is_some() || ClipProperty::ALL.into_iter().any(|property| property.is_placement() && clip.motion.has_keyframes(property)));
         motion_rows(ui, state, key, clip);
+        ui.separator();
+        path_rows(ui, state, clip.motion.path.as_ref());
     });
     let kind = state.project().tracks[key.track].kind;
     let tracked_video = kind == engine::TrackKind::Video && !clip.is_still() && clip.text.is_none() && clip.censor.is_none() && clip.follow.is_none();
@@ -764,6 +766,49 @@ fn motion_rows(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, clip: &
         if let Some(keyframe) = on_keyframe {
             easing_row(ui, state, language, key, target, keyframe);
         }
+    }
+}
+
+/// The motion path of the clip: whether it has one, its three expressions and ready-made curves.
+fn path_rows(ui: &mut egui::Ui, state: &mut EditorState, path: Option<&engine::MotionPath>) {
+    let language = state.language();
+    let mut on = path.is_some();
+    if ui.checkbox(&mut on, language.t(Message::MotionPath)).changed() {
+        state.set_motion_path(on.then(engine::MotionPath::default));
+    }
+    let Some(path) = path else { return };
+    let fields = [(Message::MotionPathX, path.x.clone(), false), (Message::MotionPathY, path.y.clone(), false), (Message::MotionPathRotation, path.rotation.clone().unwrap_or_default(), true)];
+    for (index, (label, saved, rotation)) in fields.into_iter().enumerate() {
+        ui.colored_label(theme::text_dim(), language.t(label));
+        let vars = if rotation { engine::motion_path::rotation_vars() } else { engine::motion_path::position_vars() };
+        let changed = ui.push_id(("motion-path", index), |ui| super::param_widgets::expression_text(ui, language, saved, &vars, true)).inner;
+        if let Some(text) = changed {
+            let mut next = engine::MotionPath::new(path.x.clone(), path.y.clone(), path.rotation.clone());
+            match index {
+                0 => next.x = text,
+                1 => next.y = text,
+                _ => next.rotation = (!text.trim().is_empty()).then_some(text),
+            }
+            state.set_motion_path(Some(next));
+        }
+    }
+    ui.colored_label(theme::text_dim(), language.t(Message::MotionPathHint));
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(theme::text_dim(), language.t(Message::MotionPathPresets));
+        for preset in engine::PathPreset::ALL {
+            if ui.button(language.t(path_preset_label(preset))).clicked() {
+                state.set_motion_path(Some(preset.path()));
+            }
+        }
+    });
+}
+
+fn path_preset_label(preset: engine::PathPreset) -> Message {
+    match preset {
+        engine::PathPreset::Circle => Message::PathCircle,
+        engine::PathPreset::FigureEight => Message::PathFigureEight,
+        engine::PathPreset::SineWave => Message::PathSineWave,
+        engine::PathPreset::Spiral => Message::PathSpiral,
     }
 }
 

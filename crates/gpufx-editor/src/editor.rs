@@ -1865,6 +1865,12 @@ impl EditorState {
         self.run(|project| engine::set_matte(project, key, matte));
     }
 
+    /// Sets or removes the motion path of the selected clip, as one undo step.
+    pub fn set_motion_path(&mut self, path: Option<engine::MotionPath>) {
+        let Some(key) = self.selection else { return };
+        self.run(|project| engine::set_motion_path(project, key, path));
+    }
+
     /// Moves a slider of the background removal of the selected clip, merged like the other sliders.
     pub fn live_matte(&mut self, matte: engine::ClipMatte) {
         let Some(key) = self.selection else { return };
@@ -3085,6 +3091,20 @@ mod tests {
         assert!(state.claim_project_lock(&dir.join("P.JSON")), "the file it already holds");
         state.release_project_lock();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_motion_path_is_set_refused_when_broken_and_undone_in_one_step() {
+        let mut state = state_with_clip();
+        state.select(Some(key(0)));
+        let before = state.project().clone();
+        state.set_motion_path(Some(engine::PathPreset::Circle.path()));
+        assert_eq!(state.project().tracks[0].clips[0].motion.path, Some(engine::PathPreset::Circle.path()));
+        let set = state.project().clone();
+        state.set_motion_path(Some(engine::MotionPath::new("sin(", "", None)));
+        assert_eq!(state.project(), &set, "a path that does not parse changes nothing");
+        state.undo();
+        assert_eq!(state.project(), &before);
     }
 
     #[test]
