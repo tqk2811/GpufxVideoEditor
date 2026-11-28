@@ -16,7 +16,58 @@ pub fn polygon_problem(points: &[[f64; 2]]) -> Option<String> {
     if let Some(point) = points.iter().find(|p| !p.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))) {
         return Some(format!("polygon point {point:?} not inside the box (0 to 1)"));
     }
+    if spread(points) <= MIN_POLYGON_SPREAD {
+        return Some("a polygon whose points lie on one line covers nothing".to_owned());
+    }
     None
+}
+
+/// How far, in parts of the box, a polygon's points must stand off the line through two of them:
+/// closer, they lie on one line (or on one point) and the shape covers nothing.
+pub const MIN_POLYGON_SPREAD: f64 = 1e-6;
+
+/// How far the point of `points` farthest off the line through the first point and the point
+/// farthest from it stands; 0 when all are on one line or one point. The shoelace area would not
+/// do: a bowtie's two halves cancel in it, though the even-odd rule fills both.
+fn spread(points: &[[f64; 2]]) -> f64 {
+    let Some(&first) = points.first() else { return 0.0 };
+    let length = |p: &[f64; 2]| (p[0] - first[0]).hypot(p[1] - first[1]);
+    let Some(far) = points.iter().max_by(|a, b| length(a).total_cmp(&length(b))) else { return 0.0 };
+    let span = length(far);
+    if !(span > MIN_POLYGON_SPREAD) {
+        return 0.0;
+    }
+    let (dx, dy) = ((far[0] - first[0]) / span, (far[1] - first[1]) / span);
+    points.iter().map(|p| ((p[0] - first[0]) * dy - (p[1] - first[1]) * dx).abs()).fold(0.0, f64::max)
+}
+
+/// About the largest distance from a point inside the closed polygon `points` to its edge, with the
+/// box `size` units wide and high (so the distance is in those units): the best of a grid of
+/// samples refined around the best one, so a little under the true one. A soft edge wider than it
+/// never reaches full strength.
+pub fn inner_radius(points: &[[f64; 2]], size: (f64, f64)) -> f64 {
+    const SAMPLES: usize = 24;
+    const REFINE: usize = 8;
+    let scaled: Vec<[f64; 2]> = points.iter().map(|p| [p[0] * size.0, p[1] * size.1]).collect();
+    let mut best = (0.0_f64, [size.0 / 2.0, size.1 / 2.0]);
+    // A grid over the box, then finer grids around the best sample so far.
+    let (mut middle, mut cell, mut count) = ([size.0 / 2.0, size.1 / 2.0], [size.0 / SAMPLES as f64, size.1 / SAMPLES as f64], SAMPLES);
+    for _ in 0..4 {
+        for row in 0..count {
+            for column in 0..count {
+                let offset = |i: usize, step: f64| (i as f64 + 0.5 - count as f64 / 2.0) * step;
+                let p = [middle[0] + offset(column, cell[0]), middle[1] + offset(row, cell[1])];
+                let distance = signed_distance(&scaled, p);
+                if distance > best.0 {
+                    best = (distance, p);
+                }
+            }
+        }
+        middle = best.1;
+        cell = [cell[0] * 2.0 / REFINE as f64, cell[1] * 2.0 / REFINE as f64];
+        count = REFINE;
+    }
+    best.0
 }
 
 /// Whether `p` is inside the closed polygon `points`, by the even-odd rule.
@@ -213,6 +264,22 @@ mod tests {
         assert!(polygon_problem(&vec![[0.5, 0.5]; MAX_POLYGON_POINTS + 1]).is_some());
         assert!(polygon_problem(&[[0.0, 0.0], [1.2, 0.0], [0.0, 1.0]]).is_some());
         assert!(polygon_problem(&[[0.0, 0.0], [f64::NAN, 0.0], [0.0, 1.0]]).is_some());
+    }
+
+    #[test]
+    fn a_polygon_on_one_line_or_one_point_is_refused_but_a_bowtie_is_kept() {
+        assert!(polygon_problem(&[[0.1, 0.1], [0.5, 0.5], [0.9, 0.9]]).is_some(), "collinear");
+        assert!(polygon_problem(&[[0.3, 0.3]; 4]).is_some(), "all on one point");
+        assert!(polygon_problem(&[[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [1.0, 0.0]]).is_some(), "duplicates on a line");
+        assert!(polygon_problem(&[[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0]]).is_none(), "a bowtie has no shoelace area yet fills");
+    }
+
+    #[test]
+    fn the_inner_radius_of_a_square_and_a_thin_strip() {
+        let square = inner_radius(&SQUARE, (100.0, 100.0));
+        assert!(square > 49.0 && square <= 50.0, "{square}");
+        let strip = inner_radius(&[[0.0, 0.45], [1.0, 0.45], [1.0, 0.55], [0.0, 0.55]], (100.0, 100.0));
+        assert!(strip > 4.8 && strip <= 5.0, "{strip}");
     }
 
     #[test]

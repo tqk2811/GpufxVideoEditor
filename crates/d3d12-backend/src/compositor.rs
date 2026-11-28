@@ -1565,6 +1565,16 @@ impl D3d12Compositor {
     /// [`picture_stretch`]); 1 for a region of the frame itself.
     fn hide(&mut self, base: ImageId, region: &CensorRegion, stretch: f64, info: &FrameInfo) -> Result<ImageId, String> {
         let stretch = if stretch.is_finite() && stretch > 0.0 { stretch } else { 1.0 };
+        if region.shape == RegionShape::Polygon && engine::polygon::polygon_problem(&region.points).is_some() {
+            // Validation keeps such polygons out of a project, so this is no case to log each
+            // frame: the region hides nothing rather than its whole box. Opacity 0 passes the
+            // picture through into a new image, as the caller expects.
+            if base == BLANK_IMAGE {
+                return Ok(BLANK_IMAGE);
+            }
+            let nothing = CensorRegion { shape: RegionShape::Rect, points: Vec::new(), opacity: 0.0, mode: CensorMode::Solid { color: [0, 0, 0, 0] }, ..region.clone() };
+            return self.hide(base, &nothing, stretch, info);
+        }
         let (width, height) = (self.width, self.height);
         // Strengths are in pixels of a 1080-line frame.
         let scale = f64::from(height) / 1080.0;
@@ -1632,7 +1642,12 @@ impl D3d12Compositor {
             }
             None => (region.rect, region.rotation, (region.rect.width * f64::from(width) * stretch, region.rect.height * f64::from(height))),
         };
-        let feather = region.feather.clamp(0.0, 1.0) * box_size.0.min(box_size.1) / 2.0;
+        let mut feather = region.feather.clamp(0.0, 1.0) * box_size.0.min(box_size.1) / 2.0;
+        if polygon {
+            // A thin polygon is nearer its edge everywhere than half the box: a soft edge past
+            // its deepest point would leave even its middle partly shown.
+            feather = feather.min(engine::polygon::inner_radius(&region.points, box_size));
+        }
         let h = warp.map_or([0.0; 9], |(_, h)| h);
         let numbers = [
             ("x", rect.x), ("y", rect.y), ("width", rect.width.max(0.0)), ("height", rect.height.max(0.0)), ("rotation", rotation), ("feather", feather),
@@ -2606,6 +2621,27 @@ mod tests {
         let rgba = hidden(&mut compositor, white, CensorRegion { shape: RegionShape::Polygon, points: triangle, feather: 1.0, ..middle_region(black) });
         let row: Vec<u8> = (160..=240).step_by(8).map(|x| red(&rgba, x, 120)).collect();
         assert!(row[0] > 200 && row.windows(2).all(|pair| pair[1] <= pair[0]), "darker away from the left side: {row:?}");
+    }
+
+    #[test]
+    fn a_thin_polygon_with_a_full_soft_edge_still_hides_its_middle() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        // A strip 18 pixels high across the box (pixels 160..480 by 90..270).
+        let strip = vec![[0.0, 0.45], [1.0, 0.45], [1.0, 0.55], [0.0, 0.55]];
+        let rgba = hidden(&mut compositor, white, CensorRegion { shape: RegionShape::Polygon, points: strip, feather: 1.0, ..middle_region(CensorMode::Solid { color: [0, 0, 0, 255] }) });
+        assert!(red(&rgba, 320, 180) < 8, "the middle of the strip is hidden in full: {}", red(&rgba, 320, 180));
+        assert_eq!(red(&rgba, 320, 120), 255, "outside the strip");
+    }
+
+    #[test]
+    fn a_polygon_on_one_line_hides_nothing_not_its_box() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        let line = vec![[0.1, 0.1], [0.5, 0.5], [0.9, 0.9]];
+        let rgba = hidden(&mut compositor, white, CensorRegion { shape: RegionShape::Polygon, points: line, ..middle_region(CensorMode::Solid { color: [0, 0, 0, 255] }) });
+        assert_eq!(red(&rgba, 320, 180), 255, "the box stays as it was");
+        assert_eq!(red(&rgba, 200, 120), 255);
     }
 
     #[test]
