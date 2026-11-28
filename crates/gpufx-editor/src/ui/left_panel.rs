@@ -161,12 +161,35 @@ fn library(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequ
     }
 }
 
+/// The ways to draw a censor region on the preview; the one on is shown chosen, and a click on
+/// it turns it off.
+fn censor_draw_row(ui: &mut egui::Ui, state: &mut EditorState) {
+    use crate::censor_draw::CensorDrawMode;
+    let language = state.language();
+    ui.colored_label(theme::text_dim(), language.t(Message::CensorDraw));
+    let on = state.censor_draw().map(|draw| draw.mode);
+    ui.horizontal_wrapped(|ui| {
+        let modes = [
+            (CensorDrawMode::Rect, Message::CensorDrawRect),
+            (CensorDrawMode::Ellipse, Message::CensorDrawEllipse),
+            (CensorDrawMode::Points, Message::CensorDrawPoints),
+            (CensorDrawMode::Freehand, Message::CensorDrawFreehand),
+        ];
+        for (mode, label) in modes {
+            if ui.selectable_label(on == Some(mode), language.t(label)).on_hover_text(language.t(Message::CensorDrawHint)).clicked() {
+                state.toggle_censor_draw(mode);
+            }
+        }
+    });
+}
+
 /// The Sticker tab: the import button, a search, a category filter and the grid.
 fn sticker_tab(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiRequest>) {
     let language = state.language();
     if icons::label_button(ui, Icon::Plus, &language.t(Message::AddCensor), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).on_hover_text(language.t(Message::AddCensorHint)).clicked() {
         state.add_censor_at_playhead();
     }
+    censor_draw_row(ui, state);
     ui.add_space(4.0);
     if icons::label_button(ui, Icon::Upload, &language.t(Message::ImportPackage), theme::accent_soft(), theme::accent_text(), Some(ui.available_width())).clicked() {
         requests.push(UiRequest::ImportPackage);

@@ -378,10 +378,17 @@ fn censor_rows(ui: &mut egui::Ui, state: &mut EditorState, censor: &engine::Cens
     ui.horizontal(|ui| {
         for (shape, label) in [(engine::RegionShape::Rect, Message::CensorShapeRect), (engine::RegionShape::Ellipse, Message::CensorShapeEllipse)] {
             if ui.selectable_label(censor.shape == shape, language.t(label)).clicked() && censor.shape != shape {
-                state.set_censor(engine::CensorContent { shape, ..*censor });
+                state.set_censor(engine::CensorContent { shape, points: Vec::new(), ..censor.clone() });
             }
         }
+        // A polygon is drawn on the preview, not picked here; once drawn it shows as the shape.
+        if censor.shape == engine::RegionShape::Polygon {
+            let _ = ui.selectable_label(true, language.t(Message::CensorShapePolygon));
+        }
     });
+    if censor.shape == engine::RegionShape::Polygon {
+        ui.add(egui::Label::new(egui::RichText::new(language.t(Message::CensorPolygonHint)).color(theme::text_dim())).wrap());
+    }
     let mut feather = censor.feather * 100.0;
     let changed = ui.horizontal(|ui| {
         ui.colored_label(theme::text_dim(), language.t(Message::CensorFeather));
@@ -391,7 +398,7 @@ fn censor_rows(ui: &mut egui::Ui, state: &mut EditorState, censor: &engine::Cens
         changed
     });
     if changed.inner {
-        state.live_censor(engine::CensorContent { feather: (feather / 100.0).clamp(0.0, 1.0), ..*censor });
+        state.live_censor(engine::CensorContent { feather: (feather / 100.0).clamp(0.0, 1.0), ..censor.clone() });
     }
     ui.colored_label(theme::text_dim(), language.t(Message::CensorMode));
     ui.horizontal(|ui| {
@@ -403,7 +410,7 @@ fn censor_rows(ui: &mut egui::Ui, state: &mut EditorState, censor: &engine::Cens
         for (mode, label) in modes {
             let same = std::mem::discriminant(&mode) == std::mem::discriminant(&censor.mode);
             if ui.selectable_label(same, language.t(label)).clicked() && !same {
-                state.set_censor(engine::CensorContent { mode, ..*censor });
+                state.set_censor(engine::CensorContent { mode, ..censor.clone() });
             }
         }
     });
@@ -411,13 +418,13 @@ fn censor_rows(ui: &mut egui::Ui, state: &mut EditorState, censor: &engine::Cens
         engine::CensorMode::Blur { radius } => {
             let mut value = radius;
             if strength_row(ui, &language.t(Message::CensorStrength), &mut value, 0.0..=engine::MAX_CENSOR_BLUR) {
-                state.live_censor(engine::CensorContent { mode: engine::CensorMode::Blur { radius: value }, ..*censor });
+                state.live_censor(engine::CensorContent { mode: engine::CensorMode::Blur { radius: value }, ..censor.clone() });
             }
         }
         engine::CensorMode::Pixelate { block } => {
             let mut value = block;
             if strength_row(ui, &language.t(Message::CensorBlock), &mut value, 1.0..=engine::MAX_CENSOR_BLOCK) {
-                state.live_censor(engine::CensorContent { mode: engine::CensorMode::Pixelate { block: value }, ..*censor });
+                state.live_censor(engine::CensorContent { mode: engine::CensorMode::Pixelate { block: value }, ..censor.clone() });
             }
         }
         engine::CensorMode::Solid { color } => {
@@ -425,7 +432,7 @@ fn censor_rows(ui: &mut egui::Ui, state: &mut EditorState, censor: &engine::Cens
             ui.horizontal(|ui| {
                 ui.colored_label(theme::text_dim(), language.t(Message::CensorColor));
                 if egui::color_picker::color_edit_button_srgba(ui, &mut picked, egui::color_picker::Alpha::OnlyBlend).changed() {
-                    state.live_censor(engine::CensorContent { mode: engine::CensorMode::Solid { color: picked.to_srgba_unmultiplied() }, ..*censor });
+                    state.live_censor(engine::CensorContent { mode: engine::CensorMode::Solid { color: picked.to_srgba_unmultiplied() }, ..censor.clone() });
                 }
             });
         }

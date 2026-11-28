@@ -9,6 +9,7 @@ pub mod package_manager;
 mod param_widgets;
 mod placement;
 mod animation_inspector;
+mod censor_overlay;
 mod text_inspector;
 mod text_layers;
 mod player;
@@ -257,6 +258,9 @@ fn handle_shortcuts(ctx: &egui::Context, state: &mut EditorState, requests: &mut
                 state.ui.cancel_splitter();
             } else if state.is_holding() {
                 state.cancel_drag();
+            } else if state.censor_draw().is_some() {
+                // Ends drawing a censor region and drops what was drawn.
+                state.cancel_censor_draw();
             } else if state.track_pick().is_some() {
                 // Ends "Pick object" and drops the box being drawn.
                 state.cancel_track_pick();

@@ -398,6 +398,12 @@ pub struct UiState {
     /// The video clip whose preview takes a box drawn for a new motion track, with its source
     /// file; read it through [`EditorState::track_pick`], which drops a stale one.
     pub tracking_pick: Option<(ClipKey, String)>,
+    /// The shape being drawn on the preview for a new censor clip, if one is; see
+    /// [`crate::censor_draw`].
+    pub censor_draw: Option<crate::censor_draw::CensorDraw>,
+    /// Counts the censor drawings ended or cancelled: part of the id of the preview's drawing
+    /// area, so a drag going when Escape cancelled one never finishes into a clip.
+    pub censor_draw_round: u32,
     /// Counts the picks ended by Escape: part of the id of the preview's drawing area, so a box
     /// drag that was going when Escape ended the pick never finishes into a track.
     pub tracking_pick_round: u32,
@@ -2268,6 +2274,15 @@ impl EditorState {
         }
         let censor = engine::CensorContent::default();
         let placement = censor_placement(self.output_pixels(), &censor);
+        self.add_censor_clip_at_playhead(censor, placement);
+    }
+
+    /// Adds censor clip `censor` with its box at `placement` at the playhead, as
+    /// [`Self::add_censor_at_playhead`] does. Whether it was added.
+    pub(crate) fn add_censor_clip_at_playhead(&mut self, censor: engine::CensorContent, placement: engine::ClipPlacement) -> bool {
+        if self.edits_blocked() {
+            return false;
+        }
         let (start, duration) = (self.playhead, DEFAULT_IMAGE_DURATION);
         let choice = choose_track(self.project(), TrackKind::Sticker, duration, start);
         let track = match choice {
@@ -2282,6 +2297,7 @@ impl EditorState {
             self.selection = clip_at(self.project(), track, start);
             self.status = Status::Info(Message::CensorAdded);
         }
+        added
     }
 
     /// Changes how the selected censor clip hides, as one undo step.
@@ -5382,7 +5398,7 @@ lines"));
         assert!((x - 0.5).abs() < 1e-9 && (y - 0.5).abs() < 1e-9, "in the middle: {x} {y}");
         assert_eq!(clip_name(&clip), "censor");
         let censor = engine::CensorContent { mode: engine::CensorMode::Pixelate { block: 40.0 }, ..clip.censor.expect("a censor region") };
-        state.set_censor(censor);
+        state.set_censor(censor.clone());
         assert_eq!(state.project().tracks[key.track].clips[key.clip].censor, Some(censor));
         assert!(state.can_undo(), "undo steps");
     }

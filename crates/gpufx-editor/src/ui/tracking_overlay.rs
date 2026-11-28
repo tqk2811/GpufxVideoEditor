@@ -233,7 +233,7 @@ fn pick(ui: &mut egui::Ui, state: &mut EditorState, key: ClipKey, area: Rect, pi
 /// The box a drag of `response` draws over `picture`: the one to show while it goes, and the one
 /// it leaves on its release. The press point is kept at the start of the drag and the box at each
 /// step, because egui forgets where the pointer went down on the frame of the release.
-fn drawn_box(ui: &egui::Ui, response: &egui::Response, picture: Rect) -> (Option<Rect>, Option<Rect>) {
+pub(super) fn drawn_box(ui: &egui::Ui, response: &egui::Response, picture: Rect) -> (Option<Rect>, Option<Rect>) {
     let (origin_id, rect_id) = (response.id.with("origin"), response.id.with("rect"));
     if response.drag_started() {
         let origin = ui.ctx().input(|input| input.pointer.press_origin()).or(response.interact_pointer_pos());
