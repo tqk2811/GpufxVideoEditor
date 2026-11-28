@@ -368,6 +368,8 @@ pub enum ValidationError {
     InvalidFollow { track: usize, clip: usize, problem: String },
     /// The `lock` of a clip is not usable; `problem` says why.
     InvalidLock { track: usize, clip: usize, problem: String },
+    /// An expression of the motion path of a clip does not parse; `field` is x, y or rotation.
+    InvalidMotionPath { track: usize, clip: usize, field: &'static str, problem: String },
     /// A censor clip is not usable; `problem` says why.
     InvalidCensor { track: usize, clip: usize, problem: String },
     /// The region of an effect is not usable; `problem` says why.
@@ -485,6 +487,7 @@ impl fmt::Display for ValidationError {
             MarkerLabelTooLong { marker, length } => write!(f, "marker {marker}: the label has {length} characters, more than {MAX_MARKER_LABEL}"),
             InvalidBeats { source, problem } => write!(f, "beats of {source:?}: {problem}"),
             InvalidMotionTrack { track, problem } => write!(f, "motion track {track}: {problem}"),
+            InvalidMotionPath { track, clip, field, problem } => write!(f, "track {track}, clip {clip}: motion path {field}: {problem}"),
             InvalidFollow { track, clip, problem } => write!(f, "track {track}, clip {clip}: follow: {problem}"),
             InvalidLock { track, clip, problem } => write!(f, "track {track}, clip {clip}: lock: {problem}"),
             InvalidCensor { track, clip, problem } => write!(f, "track {track}, clip {clip}: censor: {problem}"),
@@ -571,6 +574,9 @@ fn motion_errors(clip: &Clip, track: usize, c: usize, on_audio_track: bool, erro
     }
     if !ClipProperty::Rotation.accepts(motion.rotation) {
         errors.push(InvalidRotation { track, clip: c, rotation: motion.rotation });
+    }
+    if let Some((field, problem)) = motion.path.as_ref().and_then(|path| path.problem()) {
+        errors.push(InvalidMotionPath { track, clip: c, field: field.name(), problem });
     }
     if on_audio_track && !motion.is_default() {
         errors.push(AudioTrackMotion { track, clip: c });

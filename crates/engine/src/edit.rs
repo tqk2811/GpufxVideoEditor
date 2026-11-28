@@ -1118,6 +1118,16 @@ pub fn set_rotation(project: &Project, key: ClipKey, rotation: f64) -> Result<Pr
     finish(project, next)
 }
 
+/// Sets the motion path of a clip, or removes it with `None` (see [`crate::motion_path`]). A path
+/// whose expressions do not parse is refused.
+pub fn set_motion_path(project: &Project, key: ClipKey, path: Option<crate::motion_path::MotionPath>) -> Result<Project, EditError> {
+    unlocked(project, key.track)?;
+    let mut next = project.clone();
+    // A fresh path, so its cache of parsed expressions is of its texts.
+    clip_mut(&mut next, key)?.motion.path = path.map(|path| crate::motion_path::MotionPath::new(path.x, path.y, path.rotation));
+    finish(project, next)
+}
+
 /// Whether `at`, in ticks from the start of the clip, is inside it. The end does not count: no
 /// frame of the clip is at its end, so a keyframe there would never show.
 fn inside_clip(clip: &Clip, at: Time) -> bool {

@@ -18,7 +18,7 @@
 
 use crate::project::{Clip, ClipPlacement, Effect, PlacedRect, MAX_PLACEMENT_OFFSET, MAX_PLACEMENT_WIDTH, MIN_PLACEMENT_WIDTH};
 use crate::clip_animation::{animation_max_scale, animation_rotates, AnimationPose};
-use crate::time::Time;
+use crate::time::{Time, TICKS_PER_SECOND};
 use crate::tracking::FollowPose;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -198,6 +198,9 @@ pub struct ClipMotion {
     pub rotation: f64,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub keyframes: BTreeMap<ClipProperty, Vec<Keyframe>>,
+    /// A curve the clip moves along, on top of the above (see [`crate::motion_path`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<crate::motion_path::MotionPath>,
 }
 
 fn full_opacity() -> f64 {
@@ -214,7 +217,7 @@ fn is_no_rotation(rotation: &f64) -> bool {
 
 impl Default for ClipMotion {
     fn default() -> Self {
-        Self { opacity: full_opacity(), rotation: 0.0, keyframes: BTreeMap::new() }
+        Self { opacity: full_opacity(), rotation: 0.0, keyframes: BTreeMap::new(), path: None }
     }
 }
 
@@ -360,15 +363,22 @@ impl Clip {
     /// The transform `offset` ticks after the start of the clip.
     pub fn transform_at(&self, offset: Time) -> ClipTransform {
         let motion = &self.motion;
+        let (shift, path_rotation) = match &motion.path {
+            Some(path) => path.sample(offset.ticks() as f64 / TICKS_PER_SECOND as f64, self.duration.ticks() as f64 / TICKS_PER_SECOND as f64),
+            None => ([0.0, 0.0], 0.0),
+        };
         ClipTransform {
             placement: self.placement,
             x: motion.value_at(ClipProperty::X, offset),
             y: motion.value_at(ClipProperty::Y, offset),
             width: motion.value_at(ClipProperty::Width, offset),
             opacity: motion.value_at(ClipProperty::Opacity, offset).unwrap_or(motion.opacity),
-            rotation: motion.value_at(ClipProperty::Rotation, offset).unwrap_or(motion.rotation),
-            rotates: motion.has_keyframes(ClipProperty::Rotation) || motion.rotation != 0.0 || animation_rotates(&self.animation),
-            shift: [0.0, 0.0],
+            rotation: motion.value_at(ClipProperty::Rotation, offset).unwrap_or(motion.rotation) + path_rotation,
+            rotates: motion.has_keyframes(ClipProperty::Rotation)
+                || motion.rotation != 0.0
+                || animation_rotates(&self.animation)
+                || motion.path.as_ref().is_some_and(|path| path.rotates()),
+            shift,
             zoom: 1.0,
             stretch: [1.0, 1.0],
             blur: 0.0,
