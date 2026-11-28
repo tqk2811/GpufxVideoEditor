@@ -18,7 +18,8 @@
 #   GpufxVideoEditor-Assets checkout for a pack whose id it has, which may be newer than the releases. A tag
 #   with no release yet is skipped with a warning. Once every download succeeded, each type folder that a
 #   release or the CapCut private checkout fills is emptied first, so packs of an older layout (one pack per
-#   set) do not show twice; a type folder with no source is left as it is.
+#   set) do not show twice; a type folder with no source is left as it is. The text styles and clip
+#   animations of the GpufxVideoEditor-Assets checkout are packed (py) and installed over the release packs.
 # - the private CapCut packs (one folder per item), copied from a GpufxVideoEditor-Assets-capcut-private
 #   checkout next to this repository (or -CapcutPrivate) when there is one.
 # The editor uses the packages next to its executable before those of the checkout, so once this folder
@@ -256,6 +257,26 @@ foreach ($folder in $available) {
         }
         Write-Host "unpacked $count packs of $($aggregate.Name) -> $contentStaging"
     }
+}
+
+# The text styles and clip animations of the GpufxVideoEditor-Assets checkout are packed here and installed
+# over the release packs, so a style or animation added or changed there shows up without a new release.
+$localPacks = Join-Path $download 'local-packs'
+if (Test-Path -LiteralPath $localPacks) { Remove-Item -LiteralPath $localPacks -Recurse -Force }
+foreach ($local in @(
+    @{ Script = 'pack_text_styles.py'; Out = 'text-styles' }
+    @{ Script = 'pack_animations.py'; Out = 'animations' }
+)) {
+    $out = Join-Path $localPacks $local.Out
+    & py -I (Join-Path $repoRoot "external\GpufxVideoEditor-Assets\scripts\$($local.Script)") -o $out | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "$($local.Script) failed ($LASTEXITCODE)" }
+    $count = 0
+    # The aggregate *-packs.zip only bundles the per-item zips beside it.
+    foreach ($zip in Get-ChildItem -LiteralPath $out -Recurse -File -Filter '*.zip' | Where-Object { $_.Name -notlike '*-packs.zip' }) {
+        Install-PackZip $zip.FullName
+        $count++
+    }
+    Write-Host "packed $count packs of the GpufxVideoEditor-Assets checkout ($($local.Out)) -> $contentStaging"
 }
 
 # Every download and unpack succeeded: a type folder is emptied only when the releases or the CapCut private
