@@ -731,6 +731,12 @@ fn run_edit(state: &mut EditorState, edit: AgentEdit, probe: Option<Result<Media
                 })
                 .map_err(refused)?;
         }
+        AgentEdit::ClipSetPath { clip, path } => {
+            if let Some((field, problem)) = path.as_ref().and_then(engine::MotionPath::problem) {
+                return Err(AgentError::new("invalid_expression", format!("path {}: {problem}", field.name())));
+            }
+            state.apply_agent_command(|project| engine::set_motion_path(project, clip.into(), path)).map_err(refused)?;
+        }
         AgentEdit::ClipSetVoice { clip, semitones, effect } => {
             if let Some(semitones) = semitones.filter(|semitones| !(-engine::MAX_PITCH_SEMITONES..=engine::MAX_PITCH_SEMITONES).contains(semitones)) {
                 return Err(AgentError::new("out_of_range", format!("semitones {semitones} is outside -{max} to {max}", max = engine::MAX_PITCH_SEMITONES)));

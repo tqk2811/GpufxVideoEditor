@@ -179,6 +179,8 @@ pub enum AgentEdit {
     ClipSetDenoise { clip: ClipRef, mode: Option<engine::DenoiseMode>, strength: Option<f64> },
     /// Sets the AI background removal of a clip; `None` keeps the clip's current value.
     ClipSetMatte { clip: ClipRef, model: Option<engine::MatteModel>, threshold: Option<f64>, feather: Option<f64>, edge: Option<f64>, invert: Option<bool>, temporal: Option<u32> },
+    /// Sets the motion path of a clip, or removes it with `None`.
+    ClipSetPath { clip: ClipRef, path: Option<engine::MotionPath> },
     /// Sets the pitch shift and voice effect of a clip; `None` keeps the clip's current value.
     ClipSetVoice { clip: ClipRef, semitones: Option<f64>, effect: Option<engine::VoiceEffect> },
     /// Sets the static place, opacity and rotation of a clip; `None` leaves that one alone.

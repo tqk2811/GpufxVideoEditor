@@ -91,6 +91,11 @@ fn each_edit_tool_gives_what_the_engine_command_gives() {
         step(&mut session, "clip_set_matte", json!({"clip": clip0, "model": "fast", "feather": 2.0, "invert": true}), next)
     };
     expected = {
+        let path = engine::MotionPath::new("0.2*cos(tau*p)", "0.1*t", Some("dir".into()));
+        let next = engine::set_motion_path(&expected, key(0, 0), Some(path)).unwrap();
+        step(&mut session, "clip_set_path", json!({"clip": clip0, "x": "0.2*cos(tau*p)", "y": "0.1*t", "rotation": "dir"}), next)
+    };
+    expected = {
         let voice = engine::ClipVoice { semitones: -6.0, effect: engine::VoiceEffect::Robot };
         let next = engine::set_voice(&expected, key(0, 1), voice).unwrap();
         step(&mut session, "clip_set_voice", json!({"clip": {"track": 0, "clip": 1}, "preset": "deep", "effect": "robot"}), next)
@@ -177,6 +182,12 @@ fn denoise_and_voice_tools_check_their_ranges_and_keep_what_is_absent() {
     let mut now = two_clips(&mut session);
     let clip0 = json!({"track": 0, "clip": 0});
     assert_eq!(call_err(&mut session, "clip_set_matte", json!({"expected_revision": now, "clip": clip0, "feather": 25.0})).code, "out_of_range");
+    assert_eq!(call_err(&mut session, "clip_set_path", json!({"expected_revision": now, "clip": clip0, "x": "dir"})).code, "invalid_expression", "dir is only for the rotation");
+    assert_eq!(call_err(&mut session, "clip_set_path", json!({"expected_revision": now, "clip": clip0, "remove": true, "x": "t"})).code, "invalid_params");
+    now = revision(&call_ok(&mut session, "clip_set_path", json!({"expected_revision": now, "clip": clip0, "x": "0.1*t"})));
+    assert!(project_of(&mut session).tracks[0].clips[0].motion.path.is_some());
+    now = revision(&call_ok(&mut session, "clip_set_path", json!({"expected_revision": now, "clip": clip0, "remove": true})));
+    assert!(project_of(&mut session).tracks[0].clips[0].motion.path.is_none());
     assert_eq!(call_err(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "general", "strength": 1.5})).code, "out_of_range");
     assert_eq!(call_err(&mut session, "clip_set_voice", json!({"expected_revision": now, "clip": clip0, "semitones": -12.5})).code, "out_of_range");
     assert_eq!(call_err(&mut session, "clip_set_denoise", json!({"expected_revision": now, "clip": clip0, "mode": "loud"})).code, "invalid_params");

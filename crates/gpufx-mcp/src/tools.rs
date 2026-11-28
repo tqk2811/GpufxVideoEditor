@@ -922,6 +922,32 @@ fn clip_set_matte(p: MatteParams) -> Result<AgentRequest, AgentError> {
     edit(p.expected_revision, AgentEdit::ClipSetMatte { clip: p.clip.into(), model, threshold: p.threshold, feather: p.feather, edge: p.edge, invert: p.invert, temporal: p.temporal })
 }
 
+params!(PathParams {
+    expected_revision: u64,
+    clip: ClipParam,
+    #[doc = "x = f(t): the offset across, in parts of the frame width. Empty or absent is 0."]
+    x: Option<String>,
+    #[doc = "y = g(t): the offset down, in parts of the frame height. Empty or absent is 0."]
+    y: Option<String>,
+    #[doc = "Degrees clockwise added to the rotation; may use dir. Absent: no turning."]
+    rotation: Option<String>,
+    #[doc = "Removes the path of the clip; x, y and rotation must then be absent."]
+    #[serde(default)]
+    remove: bool
+});
+
+fn clip_set_path(p: PathParams) -> Result<AgentRequest, AgentError> {
+    let path = if p.remove {
+        if p.x.is_some() || p.y.is_some() || p.rotation.is_some() {
+            return Err(AgentError::new("invalid_params", "remove takes no x, y or rotation"));
+        }
+        None
+    } else {
+        Some(engine::MotionPath::new(p.x.unwrap_or_default(), p.y.unwrap_or_default(), p.rotation.filter(|text| !text.trim().is_empty())))
+    };
+    edit(p.expected_revision, AgentEdit::ClipSetPath { clip: p.clip.into(), path })
+}
+
 /// The effect of clip_set_voice.
 #[derive(Deserialize, JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
@@ -1199,6 +1225,7 @@ pub fn all_tools() -> Vec<ToolDef> {
         tool!("clip_set_fades", "Sets the audio fades of a clip, in ticks.", FadesParams, |p| edit(p.expected_revision, AgentEdit::ClipSetFades { clip: p.clip.into(), fade_in: ticks(p.fade_in), fade_out: ticks(p.fade_out) })),
         tool!("clip_set_denoise", "Sets the noise reduction of a clip's sound: mode off, voice (RNNoise, keeps speech and removes everything else) or general (removes steady broadband noise such as hiss or fans from any material), and strength from 0 to 1. Either may be left out, which keeps the clip's current value (a clip never set has mode off and strength 1). It works on the source audio before speed, pitch, gain and fades. Refused with out_of_range for a strength outside 0 to 1.", DenoiseParams, clip_set_denoise),
         tool!("clip_set_matte", "Sets the AI background removal of a video or image clip (the person is kept, the background becomes transparent so lower tracks show through): model off, quality (MODNet, finer edges) or fast (PP-HumanSeg lite); threshold 0 to 1 (0 keeps the soft matte, above 0 makes it hard at that level); feather 0 to 20 and edge -20 (shrink) to 20 (grow), in pixels of a 1080-line output; invert (keep the background instead); temporal 0 to 4 (average the matte over that many earlier source frames, off when 0). Each may be left out, which keeps the clip's current value. Ignored on text clips. A model that is not installed leaves the clip drawn without its matte. Refused with out_of_range for a value outside its range.", MatteParams, clip_set_matte),
+        tool!("clip_set_path", "Moves a clip along a path given as equations, or removes its path (remove true). x = f(t) and y = g(t) are offsets in parts of the frame width and height, added after the clip's place and X/Y keyframes; rotation, optional, is clockwise degrees added to its rotation. Variables: t (seconds from the clip start), d (clip length in seconds), p (t / d, 0 to 1); rotation also has dir, the heading of the path in the same degrees (0 is to the right, 90 down), so rotation \"dir\" turns the clip along its path. Numbers, + - * / ^, parentheses, pi, tau, e and the functions sin cos tan asin acos atan atan2 abs sign min max clamp mix step smoothstep pow sqrt exp log floor ceil round fract. A value that is not finite counts as 0. Example circle: x \"0.2*cos(tau*p)\", y \"0.2*sin(tau*p)\". Refused with invalid_expression when an expression does not parse.", PathParams, clip_set_path),
         tool!("clip_set_voice", "Sets the voice change of a clip: a pitch shift in semitones (-12 to 12, the speed stays) and an effect (none or robot). preset (normal: 0, chipmunk: +9, deep: -6, robot: 0 with the robot effect) gives both first; semitones or effect, when given, override it, and what neither gives keeps the clip's current value. Refused with out_of_range for semitones beyond 12 either way.", VoiceParams, clip_set_voice),
         tool!("clip_set_transform", "Sets the static place (x, y, width, all in parts of the frame), opacity (0 to 1) and rotation (clockwise degrees) of a clip. What is absent stays. A number with keyframes ignores its static value.", TransformParams, |p| edit(p.expected_revision, AgentEdit::ClipSetTransform { clip: p.clip.into(), placement: p.placement.map(Into::into), opacity: p.opacity, rotation: p.rotation })),
         tool!("keyframe_set", "Sets a keyframe at `at`, ticks from the start of the clip (clip.start, not the clip_time of an effect), from 0 up to but not including the duration. Give property (x, y, width, opacity, rotation), or effect (its index) and param (a float parameter of that effect). Replaces one at the same tick; easing (linear, ease_in, ease_out, ease_in_out) is how the value moves to the next keyframe, and absent keeps the one replaced. Refused with keyframe_outside_clip.", KeyframeSetParams, |p| { let target = keyframe_target(p.property, p.effect, p.param)?; edit(p.expected_revision, AgentEdit::KeyframeSet { clip: p.clip.into(), target, at: ticks(p.at), value: p.value, easing: p.easing.map(Into::into) }) }),
