@@ -412,7 +412,7 @@ pub fn add_face_censors(project: &Project, reference: ClipKey, result: &FaceResu
         let (cx, cy, w, h) = (x + w / 2.0, y + h / 2.0, w * CENSOR_MARGIN, h * CENSOR_MARGIN);
         let range = engine::CENSOR_ASPECT_RANGE;
         let aspect = (w * f64::from(width) / (h * f64::from(height)).max(1.0e-9)).clamp(*range.start(), *range.end());
-        let censor = CensorContent { shape: result.request.style.shape, aspect, feather: result.request.style.feather, mode: result.request.style.mode };
+        let censor = CensorContent { shape: result.request.style.shape, points: Vec::new(), aspect, feather: result.request.style.feather, mode: result.request.style.mode };
         let placement = engine::ClipPlacement { x: cx - w / 2.0, y: cy - h / 2.0, width: w.clamp(engine::MIN_PLACEMENT_WIDTH, engine::MAX_PLACEMENT_WIDTH) };
         let duration = end.saturating_sub(start);
         let lane = match crate::media::choose_track(&next, engine::TrackKind::Sticker, duration, start) {
@@ -593,7 +593,7 @@ mod tests {
         let clip = censor[0];
         let follow = clip.follow.unwrap();
         assert_eq!((follow.link.track_id, follow.link.follow_scale, follow.link.follow_rotation, follow.link.smooth), (1, true, false, CENSOR_SMOOTH));
-        assert_eq!(clip.censor.unwrap().shape, RegionShape::Ellipse);
+        assert_eq!(clip.censor.as_ref().unwrap().shape, RegionShape::Ellipse);
         // the region covers the first face, a little bigger, from its first sample to its last plus a step
         let placement = clip.placement.unwrap();
         assert!(((placement.x + placement.width / 2.0) - face_at(0).0).abs() < 1e-6, "{placement:?}");

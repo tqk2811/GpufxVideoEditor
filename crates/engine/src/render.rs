@@ -158,13 +158,15 @@ pub trait Compositor {
 }
 
 /// The box of a censor clip in the output frame and how it hides, see [`Compositor::censor`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CensorRegion {
     /// The box before turning, in parts of the frame.
     pub rect: PlacedRect,
     /// Clockwise degrees around the middle of the box.
     pub rotation: f64,
     pub shape: RegionShape,
+    /// The points of a [`RegionShape::Polygon`], in parts of the box; empty for the other shapes.
+    pub points: Vec<[f64; 2]>,
     /// Softness of the edge, in parts of half the smaller side of the box.
     pub feather: f64,
     /// Strengths in pixels of a 1080-line frame.
@@ -183,7 +185,7 @@ impl CensorRegion {
     pub fn of(sample: &SourceSample<'_>, censor: &CensorContent, output_aspect: f64) -> CensorRegion {
         let rect = sample.transform.rect(output_aspect, censor.aspect);
         let quad = sample.transform.pinned_corners(sample.transform.unfollowed_rect(output_aspect, censor.aspect), output_aspect);
-        CensorRegion { rect, rotation: sample.transform.rotation, shape: censor.shape, feather: censor.feather, mode: censor.mode, opacity: sample.transform.opacity.clamp(0.0, 1.0), quad }
+        CensorRegion { rect, rotation: sample.transform.rotation, shape: censor.shape, points: censor.points.clone(), feather: censor.feather, mode: censor.mode, opacity: sample.transform.opacity.clamp(0.0, 1.0), quad }
     }
 }
 

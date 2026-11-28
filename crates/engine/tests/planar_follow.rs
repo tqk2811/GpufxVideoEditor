@@ -197,7 +197,7 @@ fn between_two_samples_whose_mean_folds_the_corners_of_the_nearer_sample_hold() 
 fn a_censor_clip_following_in_perspective_hides_the_object_quadrilateral() {
     let mut p = rig(true);
     let censor = engine::CensorContent { aspect: 1.0, ..engine::CensorContent::default() };
-    p.tracks[1].clips[0].censor = Some(censor);
+    p.tracks[1].clips[0].censor = Some(censor.clone());
     let layers = layers_at_frame(&p, 30);
     let layer = layers.iter().find(|layer| layer.track == 1).expect("the censor clip shows");
     let LayerContent::Clip(sample) = layer.content else { panic!("no transition") };
@@ -206,7 +206,7 @@ fn a_censor_clip_following_in_perspective_hides_the_object_quadrilateral() {
     assert_quad(region.quad.expect("in perspective"), middle);
     // Without perspective the region stays a turned box.
     let mut plain = rig(false);
-    plain.tracks[1].clips[0].censor = Some(censor);
+    plain.tracks[1].clips[0].censor = Some(censor.clone());
     let layers = layers_at_frame(&plain, 30);
     let layer = layers.iter().find(|layer| layer.track == 1).unwrap();
     let LayerContent::Clip(sample) = layer.content else { panic!("no transition") };

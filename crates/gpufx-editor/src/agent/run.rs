@@ -939,7 +939,7 @@ fn censor_faces<H: AgentHost>(host: &mut H, expected: u64, clip: ClipRef, shape:
     }
     let defaults = crate::face_censor::FaceCensorStyle::default();
     let style = crate::face_censor::FaceCensorStyle { shape: shape.unwrap_or(defaults.shape), feather: feather.unwrap_or(defaults.feather), mode: mode.unwrap_or(defaults.mode) };
-    if let Some(problem) = (engine::CensorContent { shape: style.shape, aspect: 1.0, feather: style.feather, mode: style.mode }).problem() {
+    if let Some(problem) = (engine::CensorContent { shape: style.shape, points: Vec::new(), aspect: 1.0, feather: style.feather, mode: style.mode }).problem() {
         return Err(AgentError::new("invalid_params", problem));
     }
     let key: ClipKey = clip.into();

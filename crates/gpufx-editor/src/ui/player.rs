@@ -37,10 +37,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut EditorState, requests: &mut Vec<UiReq
     let output = &state.project().output;
     let frame = picture_rect(area, (output.width, output.height));
     // While a box is drawn for a new motion track, the placement frame steps aside.
-    if !super::tracking_overlay::picking(state) {
-        placement::show(ui, state, area, frame);
+    // While a censor region is drawn, the drawing takes the picture.
+    if super::censor_overlay::drawing(state) {
+        super::censor_overlay::show(ui, state, area, frame);
+    } else {
+        if !super::tracking_overlay::picking(state) {
+            placement::show(ui, state, area, frame);
+        }
+        super::tracking_overlay::show(ui, state, area, frame);
+        // The points of a polygon region sit over the frame of its clip, so they take the pointer first.
+        super::censor_overlay::show(ui, state, area, frame);
     }
-    super::tracking_overlay::show(ui, state, area, frame);
     handle_picture_drop(ui, state, frame);
     painter.hline(rect.x_range(), controls.top(), Stroke::new(1.0, theme::border()));
     ui.scope_builder(UiBuilder::new().max_rect(controls.shrink2(Vec2::new(10.0, 0.0))), |ui| transport(ui, state, requests, controls));

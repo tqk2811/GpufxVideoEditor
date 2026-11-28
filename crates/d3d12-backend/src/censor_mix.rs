@@ -2,7 +2,8 @@
 //! region of its clip.
 //!
 //! It mixes the picture with a changed copy of it through a rectangle or an ellipse, turned and
-//! with a soft edge, or through that shape warped onto a quadrilateral (a region lying in
+//! with a soft edge, or a closed polygon in parts of that box (even-odd, its soft edge measured to
+//! the nearest side, its points a row of the third input), or through that shape warped onto a quadrilateral (a region lying in
 //! perspective on a planar track). The changed copy is the second input (a blur made before), blocks of the
 //! picture made here (pixelate), or one colour. Built in memory, as the alpha packages are, because
 //! it is part of how the compositor works.
@@ -20,7 +21,7 @@ const MANIFEST: &str = r#"{
   "used_for": ["gpufx"],
   "version": "1.0.0",
   "description": "Mixes the picture with a hidden copy through a turned rectangle or ellipse with a soft edge.",
-  "inputs": [{ "name": "picture" }, { "name": "hidden", "same_size": true }],
+  "inputs": [{ "name": "picture" }, { "name": "hidden", "same_size": true }, { "name": "points" }],
   "params": [
     { "name": "x", "type": "float", "default": 0, "min": -16, "max": 16 },
     { "name": "y", "type": "float", "default": 0, "min": -16, "max": 16 },
@@ -38,6 +39,7 @@ const MANIFEST: &str = r#"{
     { "name": "alpha", "type": "float", "default": 1, "min": 0, "max": 1 },
     { "name": "blank", "type": "float", "default": 0, "min": 0, "max": 1 },
     { "name": "stretch", "type": "float", "default": 1, "min": 0.0001, "max": 10000 },
+    { "name": "count", "type": "float", "default": 0, "min": 0, "max": 256 },
     { "name": "quad", "type": "float", "default": 0, "min": 0, "max": 1 },
     { "name": "quad_width", "type": "float", "default": 1, "min": 0, "max": 1000000 },
     { "name": "quad_height", "type": "float", "default": 1, "min": 0, "max": 1000000 },
@@ -58,6 +60,35 @@ const SHADER: &str = r#"fn picture_at(p: vec2i) -> vec4f {
     if (params.blank > 0.5) { return vec4f(0.0, 0.0, 0.0, 1.0); }
     let limit = vec2i(textureDimensions(picture)) - vec2i(1);
     return textureLoad(picture, clamp(p, vec2i(0), limit), 0);
+}
+
+// Point `i` of the polygon, in pixels from the middle of a box of half size `half`. Each
+// coordinate is 16 bits over two channels of the row, high byte first, 0 to 65535 across the box.
+fn polygon_point(i: i32, half: vec2f) -> vec2f {
+    let c = round(textureLoad(points, vec2i(i, 0), 0) * 255.0);
+    let part = vec2f(c.x * 256.0 + c.y, c.z * 256.0 + c.w) / 65535.0;
+    return (part - 0.5) * half * 2.0;
+}
+
+// How far inside the closed polygon `local` is, in pixels: the distance to the nearest side,
+// negative outside. Inside by the even-odd rule.
+fn polygon_inside(local: vec2f, half: vec2f) -> f32 {
+    let n = i32(params.count);
+    var nearest = 1e30;
+    var odd = false;
+    var b = polygon_point(n - 1, half);
+    for (var i = 0; i < n; i = i + 1) {
+        let a = polygon_point(i, half);
+        let edge = b - a;
+        let t = clamp(dot(local - a, edge) / max(dot(edge, edge), 1e-12), 0.0, 1.0);
+        nearest = min(nearest, length(local - a - edge * t));
+        if ((a.y > local.y) != (b.y > local.y) && local.x < edge.x * (local.y - a.y) / (b.y - a.y) + a.x) {
+            odd = !odd;
+        }
+        b = a;
+    }
+    if (odd) { return nearest; }
+    return -nearest;
 }
 
 @compute @workgroup_size(8, 8)
@@ -96,7 +127,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     }
     // How far inside the edge the pixel is, in pixels.
     var inside = 0.0;
-    if (params.ellipse > 0.5) {
+    if (params.count >= 3.0) {
+        inside = polygon_inside(local, half);
+    } else if (params.ellipse > 0.5) {
         inside = (1.0 - length(local / half)) * min(half.x, half.y);
     } else {
         let room = half - abs(local);
@@ -133,7 +166,21 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 "#;
 
-/// Takes `picture, hidden`; see the module documentation.
+/// The width of the row of points the censor mix reads: the most points of a polygon.
+pub(crate) const POINTS_WIDTH: u32 = engine::polygon::MAX_POLYGON_POINTS as u32;
+
+/// The row of pixels holding `points` (in parts of the box) for the censor mix: each coordinate
+/// as 16 bits over two channels, high byte first. The rest of the row is zero.
+pub(crate) fn points_row(points: &[[f64; 2]]) -> Vec<u8> {
+    let mut rgba = vec![0; POINTS_WIDTH as usize * 4];
+    for (pixel, point) in rgba.chunks_exact_mut(4).zip(points) {
+        let [x, y] = point.map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16);
+        pixel.copy_from_slice(&[(x >> 8) as u8, x as u8, (y >> 8) as u8, y as u8]);
+    }
+    rgba
+}
+
+/// Takes `picture, hidden, points`; see the module documentation.
 pub(crate) fn censor_mix_effect(context: &Arc<GpuContext>) -> Result<Effect, String> {
     effect_of(context, MANIFEST, SHADER)
 }

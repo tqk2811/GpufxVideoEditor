@@ -19,11 +19,27 @@ fn censor_add_makes_a_sticker_track_and_refuses_an_unknown_mode() {
     assert_eq!(added["clip"], json!({"track": 0, "clip": 0}));
     let project = project_of(&mut session);
     assert_eq!(project.tracks[0].kind, engine::TrackKind::Sticker);
-    let censor = project.tracks[0].clips[0].censor.expect("a censor region");
+    let censor = project.tracks[0].clips[0].censor.clone().expect("a censor region");
     assert_eq!((censor.shape, censor.mode), (engine::RegionShape::Ellipse, engine::CensorMode::Solid { color: [255, 0, 0, 255] }));
     let now = revision(&added);
     assert_eq!(call_err(&mut session, "censor_add", json!({"expected_revision": now, "start": 0, "duration": 90_000, "mode": "smear"})).code, "invalid_params");
     assert_eq!(call_err(&mut session, "censor_add", json!({"expected_revision": now, "start": 90_000, "duration": 90_000, "mode": "blur", "strength": 500})).code, "invalid_project");
+}
+
+#[test]
+fn censor_add_takes_a_polygon_with_its_points() {
+    let mut session = FileSession::with_roots(vec![packages_root()]);
+    let points = json!([[0.0, 0.0], [1.0, 0.2], [0.5, 1.0]]);
+    let added = call_ok(&mut session, "censor_add", json!({"expected_revision": 0, "start": 0, "duration": 90_000, "shape": "polygon", "points": points}));
+    let project = project_of(&mut session);
+    let censor = project.tracks[0].clips[0].censor.clone().expect("a censor region");
+    assert_eq!((censor.shape, censor.points), (engine::RegionShape::Polygon, vec![[0.0, 0.0], [1.0, 0.2], [0.5, 1.0]]));
+    let now = revision(&added);
+    let refused = |session: &mut FileSession, params: serde_json::Value| call_err(session, "censor_add", params).code;
+    assert_eq!(refused(&mut session, json!({"expected_revision": now, "start": 90_000, "duration": 90_000, "shape": "polygon"})), "invalid_params", "no points");
+    assert_eq!(refused(&mut session, json!({"expected_revision": now, "start": 90_000, "duration": 90_000, "shape": "rect", "points": points})), "invalid_params", "points without a polygon");
+    assert_eq!(refused(&mut session, json!({"expected_revision": now, "start": 90_000, "duration": 90_000, "shape": "polygon", "points": [[0.0, 0.0], [1.0, 1.0]]})), "invalid_project", "two points");
+    assert_eq!(refused(&mut session, json!({"expected_revision": now, "start": 90_000, "duration": 90_000, "shape": "polygon", "points": [[0.0, 0.0], [1.5, 0.0], [0.0, 1.0]]})), "invalid_project", "a point outside the box");
 }
 
 #[test]

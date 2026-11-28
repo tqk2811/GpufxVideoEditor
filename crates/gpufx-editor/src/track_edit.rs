@@ -524,7 +524,7 @@ mod tests {
         if let Some(follow) = &clip.follow {
             engine::follow_transform(project, follow, &mut transform, at);
         }
-        transform.rect(16.0 / 9.0, clip.censor.unwrap().aspect).x
+        transform.rect(16.0 / 9.0, clip.censor.as_ref().unwrap().aspect).x
     }
 
     #[test]
