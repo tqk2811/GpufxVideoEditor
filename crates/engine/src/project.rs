@@ -349,6 +349,8 @@ pub struct CensorContent {
     /// The points of a [`RegionShape::Polygon`], in parts of the box (0 to 1 across its width and
     /// height), so the shape moves, turns and follows with the box. Closed and filled by the
     /// even-odd rule, see [`crate::polygon`]. Empty for the other shapes.
+    // Kept here rather than in `RegionShape::Polygon`: `RegionShape` stays `Copy` and is shared
+    // with `EffectRegion`, which takes no polygon.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub points: Vec<[f64; 2]>,
     /// Width over height of the box, in output pixels.

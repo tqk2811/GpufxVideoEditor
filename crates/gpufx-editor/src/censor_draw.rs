@@ -51,17 +51,28 @@ pub fn drawn_censor(shape: RegionShape, points: &[[f64; 2]], bounds: (f64, f64, 
     if !(width >= MIN_DRAWN_SIZE && height >= MIN_DRAWN_SIZE) {
         return None;
     }
+    if shape == RegionShape::Polygon && !(MIN_POLYGON_POINTS..=MAX_POLYGON_POINTS).contains(&points.len()) {
+        return None;
+    }
+    // The box a clip can take: its shape and width kept in range. A drawing too thin or too
+    // narrow for them gets a box grown around its middle, so the points keep their true place
+    // inside it; only a drawing wider than the widest box is squeezed.
+    let output_aspect = f64::from(output.0) / f64::from(output.1.max(1));
+    let aspect = (width * output_aspect / height).clamp(*CENSOR_ASPECT_RANGE.start(), *CENSOR_ASPECT_RANGE.end());
+    let mut box_width = width.max(MIN_PLACEMENT_WIDTH);
+    if box_width * output_aspect / aspect < height {
+        box_width = height * aspect / output_aspect;
+    }
+    let box_width = box_width.min(MAX_PLACEMENT_WIDTH);
+    let box_height = box_width * output_aspect / aspect;
+    let (box_left, box_top) = (left - (box_width - width) / 2.0, top - (box_height - height) / 2.0);
     let local = if shape == RegionShape::Polygon {
-        if !(MIN_POLYGON_POINTS..=MAX_POLYGON_POINTS).contains(&points.len()) {
-            return None;
-        }
-        points.iter().map(|p| [((p[0] - left) / width).clamp(0.0, 1.0), ((p[1] - top) / height).clamp(0.0, 1.0)]).collect()
+        points.iter().map(|p| [((p[0] - box_left) / box_width).clamp(0.0, 1.0), ((p[1] - box_top) / box_height).clamp(0.0, 1.0)]).collect()
     } else {
         Vec::new()
     };
-    let aspect = (width * f64::from(output.0) / (height * f64::from(output.1.max(1)))).clamp(*CENSOR_ASPECT_RANGE.start(), *CENSOR_ASPECT_RANGE.end());
     let censor = CensorContent { shape, points: local, aspect, ..CensorContent::default() };
-    let placement = ClipPlacement { x: left, y: top, width: width.clamp(MIN_PLACEMENT_WIDTH, MAX_PLACEMENT_WIDTH) };
+    let placement = ClipPlacement { x: box_left, y: box_top, width: box_width };
     Some((censor, placement))
 }
 
@@ -114,7 +125,10 @@ impl EditorState {
 
     fn finish_censor(&mut self, shape: RegionShape, points: &[[f64; 2]], bounds: (f64, f64, f64, f64)) -> bool {
         let Some((censor, placement)) = drawn_censor(shape, points, bounds, self.output_pixels()) else {
-            if let Some(points) = self.censor_draw_points() {
+            // Clicked points stay, so a polygon too small to close can be drawn on; a dragged box
+            // or a hand-drawn path starts over.
+            let clicked = self.ui.censor_draw.as_ref().is_some_and(|draw| draw.mode == CensorDrawMode::Points);
+            if let Some(points) = self.censor_draw_points().filter(|_| !clicked) {
                 points.clear();
             }
             return false;
@@ -147,6 +161,53 @@ mod tests {
         assert!((censor.points[2][0] - 0.5).abs() < 1e-9 && (censor.points[2][1] - 1.0).abs() < 1e-9);
         assert_eq!((placement.x, placement.y), (0.2, 0.2));
         assert!((placement.width - 0.4).abs() < 1e-9);
+    }
+
+    /// Where `local` of the box `placement` (of shape `aspect` in a square output) lands in the frame.
+    fn in_frame(local: [f64; 2], placement: ClipPlacement, aspect: f64) -> [f64; 2] {
+        [placement.x + local[0] * placement.width, placement.y + local[1] * placement.width / aspect]
+    }
+
+    #[test]
+    fn a_drawing_past_the_widest_shape_keeps_its_points_where_they_were_drawn() {
+        // 125 times wider than high: the box is held at 100 and grows around the middle.
+        let points = [[0.0, 0.5], [1.0, 0.5], [0.5, 0.508]];
+        let (censor, placement) = drawn_censor(RegionShape::Polygon, &points, (0.0, 0.5, 1.0, 0.508), (1000, 1000)).unwrap();
+        assert!(censor.problem().is_none(), "{:?}", censor.problem());
+        assert!((censor.aspect - 100.0).abs() < 1e-9);
+        for (local, drawn) in censor.points.iter().zip(points) {
+            let back = in_frame(*local, placement, censor.aspect);
+            assert!((back[0] - drawn[0]).abs() < 1e-9 && (back[1] - drawn[1]).abs() < 1e-9, "{back:?} for {drawn:?}");
+        }
+        // A rectangle keeps the middle of what was drawn.
+        let (censor, placement) = drawn_censor(RegionShape::Rect, &[], (0.0, 0.5, 1.0, 0.508), (1000, 1000)).unwrap();
+        let middle = in_frame([0.5, 0.5], placement, censor.aspect);
+        assert!((middle[0] - 0.5).abs() < 1e-9 && (middle[1] - 0.504).abs() < 1e-9, "{middle:?}");
+    }
+
+    #[test]
+    fn a_drawing_narrower_than_the_narrowest_box_keeps_its_points() {
+        let points = [[0.5, 0.2], [0.506, 0.2], [0.503, 0.7]];
+        let (censor, placement) = drawn_censor(RegionShape::Polygon, &points, (0.5, 0.2, 0.506, 0.7), (1000, 1000)).unwrap();
+        assert!(placement.width >= MIN_PLACEMENT_WIDTH);
+        for (local, drawn) in censor.points.iter().zip(points) {
+            let back = in_frame(*local, placement, censor.aspect);
+            assert!((back[0] - drawn[0]).abs() < 1e-9 && (back[1] - drawn[1]).abs() < 1e-9, "{back:?} for {drawn:?}");
+        }
+    }
+
+    #[test]
+    fn clicked_points_too_small_to_close_are_kept_to_draw_on() {
+        let mut state = EditorState::default();
+        state.toggle_censor_draw(CensorDrawMode::Points);
+        let tiny = [[0.5, 0.5], [0.501, 0.5], [0.5, 0.501]];
+        state.censor_draw_points().unwrap().extend(tiny);
+        assert!(!state.finish_censor_polygon(&tiny));
+        assert_eq!(state.censor_draw().map(|draw| draw.points.len()), Some(3), "the points stay");
+        state.toggle_censor_draw(CensorDrawMode::Freehand);
+        state.censor_draw_points().unwrap().extend(tiny);
+        assert!(!state.finish_censor_polygon(&tiny));
+        assert_eq!(state.censor_draw().map(|draw| draw.points.len()), Some(0), "a hand-drawn path starts over");
     }
 
     #[test]
