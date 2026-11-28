@@ -6,17 +6,25 @@
 //!
 //! | Variable | Meaning |
 //! |---|---|
-//! | `t` | seconds since the start of the clip |
-//! | `d` | the length of the clip in seconds |
-//! | `p` | `t / d`, from 0 to 1 |
-//! | `dir` | rotation only: the heading of the path at `t`, in clockwise degrees like the Rotation property (0 is to the right) |
+//! | `t` | seconds since the start of the path: the start of the clip plus [`MotionPath::origin`] |
+//! | `d` | the span of the path in seconds: [`MotionPath::span`], else the length of the clip |
+//! | `p` | `t / d`, from 0 to 1 over the span |
+//! | `dir` | rotation only: the heading of the path at `t` on screen (the frame's aspect counted), in clockwise degrees like the Rotation property (0 is to the right) |
 //!
-//! `x` and `y` are offsets in parts of the frame width and height, added after the keyframes of
-//! X and Y. The rotation is added to the Rotation property. A value that is not finite counts as 0.
+//! `x` and `y` are offsets in parts of the frame width and height. They are not part of the
+//! clip's own place ([`crate::Clip::transform_at`]): like the pose of a preset animation they are
+//! laid on top of it where the clip is drawn ([`crate::Clip::path_pose_at`]), so dragging the
+//! picture moves the place the path starts from. The rotation is added to the Rotation property.
+//! A value that is not finite counts as 0.
+//!
+//! A split or a trim of the start moves `origin` and sets `span` to the length the path had, so
+//! the motion goes on where it was rather than starting again.
 
 use std::sync::OnceLock;
 
 use gpufx_expr::Expr;
+/// The names of the functions and constants an expression may use.
+pub use gpufx_expr::{constant_names, function_names};
 use serde::{Deserialize, Serialize};
 
 /// Step of the finite difference that gives `dir`, in seconds.
@@ -31,15 +39,27 @@ pub struct MotionPath {
     pub y: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rotation: Option<String>,
+    /// Seconds added to the time since the start of the clip to give `t`: what a split or a start
+    /// trim cut off the front.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub origin: f64,
+    /// The `d` of the path in seconds. Absent: the length of the clip. Set by a split or a trim so
+    /// the shorter piece keeps the motion of the whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<f64>,
     /// The parsed expressions, made on first use. They are of the texts above as they were then:
     /// a path whose texts changed afterwards is parsed again on each use (build a new path instead).
     #[serde(skip)]
     compiled: OnceLock<(Texts, Option<Compiled>)>,
 }
 
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
+}
+
 impl PartialEq for MotionPath {
     fn eq(&self, other: &Self) -> bool {
-        self.x == other.x && self.y == other.y && self.rotation == other.rotation
+        self.x == other.x && self.y == other.y && self.rotation == other.rotation && self.origin == other.origin && self.span == other.span
     }
 }
 
@@ -121,11 +141,17 @@ impl PathPreset {
 
 impl MotionPath {
     pub fn new(x: impl Into<String>, y: impl Into<String>, rotation: Option<String>) -> Self {
-        Self { x: x.into(), y: y.into(), rotation, compiled: OnceLock::new() }
+        Self { x: x.into(), y: y.into(), rotation, origin: 0.0, span: None, compiled: OnceLock::new() }
     }
 
-    fn texts(&self) -> Texts {
-        (self.x.clone(), self.y.clone(), self.rotation.clone())
+    /// The same path with an empty cache of parsed expressions, its time base kept.
+    pub fn fresh(&self) -> Self {
+        Self { origin: self.origin, span: self.span, ..Self::new(self.x.clone(), self.y.clone(), self.rotation.clone()) }
+    }
+
+    /// Whether `texts` are the texts of the path now, compared in place (no copy per sample).
+    fn same_texts(&self, texts: &Texts) -> bool {
+        texts.0 == self.x && texts.1 == self.y && texts.2 == self.rotation
     }
 
     /// The parsed expressions, `None` when one does not parse.
@@ -141,12 +167,12 @@ impl MotionPath {
                 },
             })
         })();
-        (self.texts(), parsed)
+        ((self.x.clone(), self.y.clone(), self.rotation.clone()), parsed)
     }
 
     fn with_compiled<R>(&self, f: impl FnOnce(Option<&Compiled>) -> R) -> R {
         let cached = self.compiled.get_or_init(|| self.compile());
-        if cached.0 == self.texts() {
+        if self.same_texts(&cached.0) {
             f(cached.1.as_ref())
         } else {
             f(self.compile().1.as_ref())
@@ -175,20 +201,30 @@ impl MotionPath {
         self.rotation.as_deref().is_some_and(|text| !text.trim().is_empty())
     }
 
-    /// The offset `[x, y]` at `t` seconds of a clip `d` seconds long, in parts of the frame. 0 when
+    /// The `t` and `d` of the path `elapsed` seconds after the start of a clip `length` seconds
+    /// long: with [`Self::origin`] added and [`Self::span`] in place of the length. An origin or a
+    /// span that is not finite (or a span not above 0) is left out.
+    pub fn local_time(&self, elapsed: f64, length: f64) -> (f64, f64) {
+        let origin = if self.origin.is_finite() { self.origin } else { 0.0 };
+        let span = self.span.filter(|span| span.is_finite() && *span > 0.0).unwrap_or(length);
+        (elapsed + origin, span)
+    }
+
+    /// The offset `[x, y]` at path time `t` of a path of span `d`, in parts of the frame. 0 when
     /// an expression does not parse.
     pub fn offset_at(&self, t: f64, d: f64) -> [f64; 2] {
         self.with_compiled(|c| c.map_or([0.0, 0.0], |c| offset(c, t, d)))
     }
 
-    /// The added rotation at `t` seconds of a clip `d` seconds long, in clockwise degrees.
-    pub fn rotation_at(&self, t: f64, d: f64) -> f64 {
-        self.with_compiled(|c| c.map_or(0.0, |c| rotation(c, t, d)))
+    /// The added rotation at path time `t` of a path of span `d`, in clockwise degrees, for a
+    /// frame of `output_aspect` (width over height), which `dir` needs.
+    pub fn rotation_at(&self, t: f64, d: f64, output_aspect: f64) -> f64 {
+        self.with_compiled(|c| c.map_or(0.0, |c| rotation(c, t, d, output_aspect)))
     }
 
-    /// The offset and the added rotation at once.
-    pub fn sample(&self, t: f64, d: f64) -> ([f64; 2], f64) {
-        self.with_compiled(|c| c.map_or(([0.0, 0.0], 0.0), |c| (offset(c, t, d), rotation(c, t, d))))
+    /// The offset and the added rotation at once, at path time `t`.
+    pub fn sample(&self, t: f64, d: f64, output_aspect: f64) -> ([f64; 2], f64) {
+        self.with_compiled(|c| c.map_or(([0.0, 0.0], 0.0), |c| (offset(c, t, d), rotation(c, t, d, output_aspect))))
     }
 }
 
@@ -206,11 +242,13 @@ fn offset(c: &Compiled, t: f64, d: f64) -> [f64; 2] {
     [eval(&c.x, &vars), eval(&c.y, &vars)]
 }
 
-/// The heading of the path at `t` in clockwise degrees (y goes down), from a central difference.
-/// 0 where the path stands still.
-fn heading(c: &Compiled, t: f64, d: f64) -> f64 {
+/// The heading of the path at `t` on screen in clockwise degrees (y goes down), from a central
+/// difference. `x` counts in frame widths and `y` in frame heights, so the step of `x` is scaled
+/// by `output_aspect` to compare the two in the same unit. 0 where the path stands still.
+fn heading(c: &Compiled, t: f64, d: f64, output_aspect: f64) -> f64 {
     let ([x0, y0], [x1, y1]) = (offset(c, t - DIR_STEP, d), offset(c, t + DIR_STEP, d));
-    let (dx, dy) = (x1 - x0, y1 - y0);
+    let aspect = if output_aspect.is_finite() && output_aspect > 0.0 { output_aspect } else { 1.0 };
+    let (dx, dy) = ((x1 - x0) * aspect, y1 - y0);
     if dx.abs() < 1e-12 && dy.abs() < 1e-12 {
         0.0
     } else {
@@ -218,10 +256,10 @@ fn heading(c: &Compiled, t: f64, d: f64) -> f64 {
     }
 }
 
-fn rotation(c: &Compiled, t: f64, d: f64) -> f64 {
+fn rotation(c: &Compiled, t: f64, d: f64, output_aspect: f64) -> f64 {
     let Some(expr) = &c.rotation else { return 0.0 };
     let [t, d, p] = position_values(t, d);
-    finite(expr.eval(&[t, d, p, heading(c, t, d)]))
+    finite(expr.eval(&[t, d, p, heading(c, t, d, output_aspect)]))
 }
 
 #[cfg(test)]
@@ -244,19 +282,41 @@ mod tests {
     #[test]
     fn non_finite_counts_as_zero() {
         let path = MotionPath::new("1/0", "log(0-1)", Some("1/0".into()));
-        assert_eq!(path.sample(1.0, 2.0), ([0.0, 0.0], 0.0));
+        assert_eq!(path.sample(1.0, 2.0, 1.0), ([0.0, 0.0], 0.0));
     }
 
     #[test]
     fn dir_follows_the_heading() {
         let right = MotionPath::new("t", "", Some("dir".into()));
-        close(right.rotation_at(0.5, 1.0), 0.0);
+        close(right.rotation_at(0.5, 1.0, 1.0), 0.0);
         let down = MotionPath::new("", "t", Some("dir".into()));
-        close(down.rotation_at(0.5, 1.0), 90.0);
+        close(down.rotation_at(0.5, 1.0, 1.0), 90.0);
         let up = MotionPath::new("", "0-t", Some("dir+10".into()));
-        close(up.rotation_at(0.5, 1.0), -80.0);
+        close(up.rotation_at(0.5, 1.0, 1.0), -80.0);
         let still = MotionPath::new("", "", Some("dir".into()));
-        assert_eq!(still.rotation_at(0.5, 1.0), 0.0);
+        assert_eq!(still.rotation_at(0.5, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn dir_is_the_heading_on_screen_in_a_wide_frame() {
+        // Equal parts of the width and the height: on a 2:1 frame the step sideways is twice as
+        // long on screen, so the heading is atan(1/2), not 45 degrees.
+        let diagonal = MotionPath::new("t", "t", Some("dir".into()));
+        close(diagonal.rotation_at(0.5, 1.0, 2.0), 0.5f64.atan().to_degrees());
+        close(diagonal.rotation_at(0.5, 1.0, 1.0), 45.0);
+    }
+
+    #[test]
+    fn origin_and_span_set_the_path_time() {
+        let mut path = MotionPath::new("p", "", None);
+        assert_eq!(path.local_time(1.0, 4.0), (1.0, 4.0));
+        path.origin = 2.0;
+        path.span = Some(8.0);
+        assert_eq!(path.local_time(1.0, 4.0), (3.0, 8.0));
+        assert_eq!(path.fresh(), path, "a fresh copy keeps the time base");
+        path.origin = f64::NAN;
+        path.span = Some(0.0);
+        assert_eq!(path.local_time(1.0, 4.0), (1.0, 4.0), "broken numbers are left out");
     }
 
     #[test]

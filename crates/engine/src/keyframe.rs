@@ -291,6 +291,17 @@ impl ClipTransform {
         self
     }
 
+    /// This transform with the pose of a motion path on top (see [`Clip::path_pose_at`]): its
+    /// shift added after the place and keyframes, its rotation to the rotation.
+    pub fn with_path(mut self, clip: &Clip, offset: Time, output_aspect: f64) -> Self {
+        if let Some(([dx, dy], rotation)) = clip.path_pose_at(offset, output_aspect) {
+            self.shift = [self.shift[0] + dx, self.shift[1] + dy];
+            self.rotation += rotation;
+            self.rotates |= clip.motion.path.as_ref().is_some_and(|path| path.rotates());
+        }
+        self
+    }
+
     /// The rectangle of the picture before rotation, for a frame of `output_aspect` and a source of
     /// `source_aspect`, both width over height.
     pub fn rect(self, output_aspect: f64, source_aspect: f64) -> PlacedRect {
@@ -360,30 +371,44 @@ impl ClipTransform {
 }
 
 impl Clip {
-    /// The transform `offset` ticks after the start of the clip.
+    /// The transform `offset` ticks after the start of the clip: its resting place, from its
+    /// placement and keyframes. Its motion path is not in it (see [`Self::path_pose_at`]), so what
+    /// edits the place (a drag of the frame, a bake) edits the place the path starts from.
     pub fn transform_at(&self, offset: Time) -> ClipTransform {
         let motion = &self.motion;
-        let (shift, path_rotation) = match &motion.path {
-            Some(path) => path.sample(offset.ticks() as f64 / TICKS_PER_SECOND as f64, self.duration.ticks() as f64 / TICKS_PER_SECOND as f64),
-            None => ([0.0, 0.0], 0.0),
-        };
         ClipTransform {
             placement: self.placement,
             x: motion.value_at(ClipProperty::X, offset),
             y: motion.value_at(ClipProperty::Y, offset),
             width: motion.value_at(ClipProperty::Width, offset),
             opacity: motion.value_at(ClipProperty::Opacity, offset).unwrap_or(motion.opacity),
-            rotation: motion.value_at(ClipProperty::Rotation, offset).unwrap_or(motion.rotation) + path_rotation,
-            rotates: motion.has_keyframes(ClipProperty::Rotation)
-                || motion.rotation != 0.0
-                || animation_rotates(&self.animation)
-                || motion.path.as_ref().is_some_and(|path| path.rotates()),
-            shift,
+            rotation: motion.value_at(ClipProperty::Rotation, offset).unwrap_or(motion.rotation),
+            rotates: motion.has_keyframes(ClipProperty::Rotation) || motion.rotation != 0.0 || animation_rotates(&self.animation),
+            shift: [0.0, 0.0],
             zoom: 1.0,
             stretch: [1.0, 1.0],
             blur: 0.0,
             follow: None,
             pin: None,
+        }
+    }
+
+    /// How the motion path moves the clip `offset` ticks after its start, for a frame of
+    /// `output_aspect`: the shift `[dx, dy]` in parts of the frame and the added clockwise degrees.
+    /// `None` without a path. Laid on the resting place by [`ClipTransform::with_path`].
+    pub fn path_pose_at(&self, offset: Time, output_aspect: f64) -> Option<([f64; 2], f64)> {
+        let path = self.motion.path.as_ref()?;
+        let seconds = |time: Time| time.ticks() as f64 / TICKS_PER_SECOND as f64;
+        let (t, d) = path.local_time(seconds(offset), seconds(self.duration));
+        Some(path.sample(t, d, output_aspect))
+    }
+
+    /// Gives the motion path the span it has now, so a change of the clip's length leaves the
+    /// motion as it is (see [`crate::motion_path::MotionPath::span`]).
+    pub(crate) fn pin_path_span(&mut self) {
+        let length = self.duration.ticks() as f64 / TICKS_PER_SECOND as f64;
+        if let Some(path) = self.motion.path.as_mut() {
+            path.span = Some(path.local_time(0.0, length).1);
         }
     }
 
@@ -436,12 +461,16 @@ impl Clip {
         self.motion.keyframes.values_mut().chain(self.effects.iter_mut().flat_map(|effect| effect.keyframes.values_mut()))
     }
 
-    /// Moves every keyframe by `delta` ticks in clip time.
+    /// Moves every keyframe, and the motion path, by `delta` ticks in clip time.
     pub(crate) fn shift_keyframes(&mut self, delta: Time) {
         for keys in self.all_keyframes_mut() {
             for key in keys.iter_mut() {
                 key.at = key.at.saturating_add(delta);
             }
+        }
+        // The path moves with the keyframes: what was at `t` is now at `t + delta`.
+        if let Some(path) = self.motion.path.as_mut() {
+            path.origin = path.local_time(0.0, 0.0).0 - delta.ticks() as f64 / TICKS_PER_SECOND as f64;
         }
     }
 

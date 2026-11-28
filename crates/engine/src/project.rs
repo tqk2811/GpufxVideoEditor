@@ -1550,6 +1550,11 @@ impl fmt::Display for LoadError {
 impl std::error::Error for LoadError {}
 
 impl Project {
+    /// Width over height of the output frame.
+    pub fn output_aspect(&self) -> f64 {
+        f64::from(self.output.width) / f64::from(self.output.height.max(1))
+    }
+
     /// Parses a project and rejects unknown versions. Does not run [`crate::validate`].
     pub fn from_json(text: &str) -> Result<Project, LoadError> {
         /// Only the version, read first, so a file of another version is refused as such and not

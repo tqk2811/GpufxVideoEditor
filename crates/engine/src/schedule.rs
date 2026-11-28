@@ -157,12 +157,13 @@ pub fn layers_at_frame(project: &Project, frame: i64) -> Vec<Layer<'_>> {
     let Some(t) = frame_time(project, frame) else {
         return Vec::new();
     };
+    let output_aspect = project.output_aspect();
     project
         .tracks
         .iter()
         .enumerate()
         .filter(|(_, track)| !track.is_audio() && !track.hidden)
-        .filter_map(|(i, track)| content_at(track, t).map(|content| Layer { track: i, content: with_follow(project, i, content, t) }))
+        .filter_map(|(i, track)| content_at(track, t, output_aspect).map(|content| Layer { track: i, content: with_follow(project, i, content, t) }))
         .collect()
 }
 
@@ -223,17 +224,18 @@ pub fn lock_transform(project: &Project, track: usize, clip: usize, transform: &
 /// The transform of clip `clip` of track `track` at timeline time `t` as it is drawn: its preset
 /// animations and its lock included, not a follow.
 pub(crate) fn placed_transform_at(project: &Project, track: usize, clip: usize, t: Time) -> ClipTransform {
-    let mut transform = clip_transform_at(&project.tracks[track], clip, t);
+    let mut transform = clip_transform_at(&project.tracks[track], clip, t, project.output_aspect());
     lock_transform(project, track, clip, &mut transform, t);
     transform
 }
 
-/// The transform of clip `clip` of `track` at timeline time `t`, its preset animations included.
-pub(crate) fn clip_transform_at(track: &Track, clip: usize, t: Time) -> ClipTransform {
-    sample_at(track, clip, t).transform
+/// The transform of clip `clip` of `track` at timeline time `t`, in a frame of `output_aspect`,
+/// its motion path and preset animations included.
+pub(crate) fn clip_transform_at(track: &Track, clip: usize, t: Time, output_aspect: f64) -> ClipTransform {
+    sample_at(track, clip, t, output_aspect).transform
 }
 
-fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
+fn sample_at(track: &Track, clip: usize, t: Time, output_aspect: f64) -> SourceSample<'_> {
     let c = &track.clips[clip];
     let offset = t.saturating_sub(c.start);
     let (visible_start, visible_end) = visible_span(track, clip);
@@ -241,7 +243,8 @@ fn sample_at(track: &Track, clip: usize, t: Time) -> SourceSample<'_> {
         elapsed: t.saturating_sub(visible_start).max(Time::ZERO).min(visible_end.saturating_sub(visible_start)),
         duration: visible_end.saturating_sub(visible_start),
     };
-    let mut transform = c.transform_at(offset);
+    // The motion path moves the clip from its resting place, as the pose of an animation does.
+    let mut transform = c.transform_at(offset).with_path(c, offset, output_aspect);
     // The preset animations of a clip move its picture after its own place and keyframes, on the
     // clock of the time it is visible.
     if !c.animation.is_empty() {
@@ -284,7 +287,7 @@ pub(crate) fn transition_window(transition: &Transition, next: &Clip) -> (Time, 
     (start, start.saturating_add(transition.duration))
 }
 
-fn content_at(track: &Track, t: Time) -> Option<LayerContent<'_>> {
+fn content_at(track: &Track, t: Time, output_aspect: f64) -> Option<LayerContent<'_>> {
     for tr in &track.transitions {
         let Some(b) = track.clips.get(tr.after_clip + 1) else {
             continue;
@@ -294,8 +297,8 @@ fn content_at(track: &Track, t: Time) -> Option<LayerContent<'_>> {
             return Some(LayerContent::Transition {
                 package: &tr.package,
                 params: &tr.params,
-                from: sample_at(track, tr.after_clip, t),
-                to: sample_at(track, tr.after_clip + 1, t),
+                from: sample_at(track, tr.after_clip, t, output_aspect),
+                to: sample_at(track, tr.after_clip + 1, t, output_aspect),
                 progress: Progress {
                     elapsed: t.saturating_sub(window_start),
                     total: tr.duration,
@@ -307,5 +310,5 @@ fn content_at(track: &Track, t: Time) -> Option<LayerContent<'_>> {
         .clips
         .iter()
         .position(|c| t >= c.start && t < c.start.saturating_add(c.duration))
-        .map(|i| LayerContent::Clip(sample_at(track, i, t)))
+        .map(|i| LayerContent::Clip(sample_at(track, i, t, output_aspect)))
 }

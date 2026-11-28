@@ -507,7 +507,7 @@ impl Project {
         let anchor_mapping = mapping(own.transform_at(anchor_offset));
         let to = motion.quad_at(lock.link.anchor_source_time, lock.link.smooth)?.map(|corner| anchor_mapping.to_frame(corner));
         let source = own.source_time_at(t.saturating_sub(own.start)).max(Time::ZERO);
-        let now_mapping = mapping(crate::schedule::clip_transform_at(lane, clip, t));
+        let now_mapping = mapping(crate::schedule::clip_transform_at(lane, clip, t, output_aspect));
         let from = motion.quad_at(source, lock.link.smooth)?.map(|corner| now_mapping.to_frame(corner));
         let pin = crate::tracker::homography::Homography::from_quads(&from, &to)?;
         let (mx, my) = (to.iter().map(|c| c[0]).sum::<f64>() / 4.0, to.iter().map(|c| c[1]).sum::<f64>() / 4.0);
@@ -538,7 +538,7 @@ impl Project {
         let (to, to_size, to_angle) = to_output(anchor_point, own.transform_at(anchor_offset), output_aspect, motion.aspect);
         let source = own.source_time_at(t.saturating_sub(own.start)).max(Time::ZERO);
         let point = motion.point_at(source, lock.link.smooth)?;
-        let (from, from_size, from_angle) = to_output(point, crate::schedule::clip_transform_at(lane, clip, t), output_aspect, motion.aspect);
+        let (from, from_size, from_angle) = to_output(point, crate::schedule::clip_transform_at(lane, clip, t, output_aspect), output_aspect, motion.aspect);
         let scale = if lock.link.follow_scale && from_size > MIN_POSE_SIZE && to_size > MIN_POSE_SIZE { to_size / from_size } else { 1.0 };
         let rotation = if lock.link.follow_rotation { to_angle - from_angle } else { 0.0 };
         Some(FollowPose { from, to, scale: scale * lock.zoom, rotation })
@@ -777,8 +777,8 @@ impl Project {
         let lane = self.tracks.get(track)?;
         let own = lane.clips.get(clip)?;
         let unlocked = motion_track.is_some_and(|id| own.lock.is_some_and(|lock| lock.link.track_id == id));
-        let transform = if unlocked { crate::schedule::clip_transform_at(lane, clip, t) } else { crate::schedule::placed_transform_at(self, track, clip, t) };
         let output_aspect = f64::from(self.output.width) / f64::from(self.output.height.max(1));
+        let transform = if unlocked { crate::schedule::clip_transform_at(lane, clip, t, output_aspect) } else { crate::schedule::placed_transform_at(self, track, clip, t) };
         Some(FrameMapping { rect: transform.rect(output_aspect, source_aspect), rotation: transform.rotation, output_aspect, pin: transform.pin })
     }
 }

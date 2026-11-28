@@ -535,6 +535,7 @@ fn retime_animation(track: &mut Track, clip: usize, animation: ClipAnimation) ->
     if grow == Time::ZERO && grow_start == Time::ZERO {
         return Some(());
     }
+    changed.pin_path_span();
     changed.duration = changed.duration.checked_add(grow)?;
     changed.shift_keyframes(grow_start);
     for other in track.clips.iter_mut().skip(clip + 1).filter(|other| other.start >= old_clip_end) {
@@ -664,6 +665,7 @@ pub fn trim_start(project: &Project, key: ClipKey, new_start: Time) -> Result<Pr
         freeze_karaoke_words(changed, words_shift);
     }
     changed.source_in = source_in;
+    changed.pin_path_span();
     changed.duration = duration;
     changed.shift_keyframes(Time::from_ticks(-delta.ticks()));
     sort_track(target);
@@ -711,6 +713,7 @@ pub fn trim_source_in(project: &Project, key: ClipKey, new_source_in: Time) -> R
     let mut next = project.clone();
     let changed = &mut next.tracks[key.track].clips[key.clip];
     changed.source_in = source_in;
+    changed.pin_path_span();
     changed.duration = duration;
     // A reversed clip shows source_in at its end: what moves is the end, and the frames under the
     // start, with their keyframes, stay.
@@ -744,6 +747,7 @@ pub fn trim_end(project: &Project, key: ClipKey, new_end: Time) -> Result<Projec
         .ok_or(EditError::TimeOverflow { key })?;
     let mut next = project.clone();
     let changed = &mut next.tracks[key.track].clips[key.clip];
+    changed.pin_path_span();
     changed.duration = duration;
     // A reversed clip shows source_in at its end edge: the top of its source range, under the start
     // edge, stays, and source_in moves by the source the trim adds or removes.
@@ -833,6 +837,9 @@ pub fn split_clip(project: &Project, key: ClipKey, at: Time) -> Result<Project, 
     if karaoke {
         freeze_karaoke_words(&mut whole, 0);
     }
+    // Both halves keep the path of the whole: the same span, the second going on from the cut
+    // (its origin moves with its keyframes below).
+    whole.pin_path_span();
     let mut second = whole.clone();
     second.start = clip.start.saturating_add(offset);
     // A still keeps no offset, as in trim_start, but a karaoke text does.
@@ -1123,8 +1130,8 @@ pub fn set_rotation(project: &Project, key: ClipKey, rotation: f64) -> Result<Pr
 pub fn set_motion_path(project: &Project, key: ClipKey, path: Option<crate::motion_path::MotionPath>) -> Result<Project, EditError> {
     unlocked(project, key.track)?;
     let mut next = project.clone();
-    // A fresh path, so its cache of parsed expressions is of its texts.
-    clip_mut(&mut next, key)?.motion.path = path.map(|path| crate::motion_path::MotionPath::new(path.x, path.y, path.rotation));
+    // A fresh path, so its cache of parsed expressions is of its texts; its time base stays.
+    clip_mut(&mut next, key)?.motion.path = path.map(|path| path.fresh());
     finish(project, next)
 }
 
