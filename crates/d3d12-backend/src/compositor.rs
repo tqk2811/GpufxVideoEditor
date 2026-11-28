@@ -830,6 +830,9 @@ pub struct D3d12Compositor {
     /// Mixes a hidden copy into a region, for censor clips and effect regions. Built the first time
     /// one is drawn.
     censor_mixer: Option<EffectGraph>,
+    /// The points of the polygon censor regions drawn lately, each uploaded as a row of
+    /// [`crate::censor_mix::POINTS_WIDTH`] pixels the censor mix reads, newest last.
+    censor_points: Vec<(Vec<u8>, Image)>,
     /// A fully transparent image, only ever read. Not in the pool, whose images hold old pictures.
     transparent: Option<ImageId>,
     stills: HashMap<StillKey, CachedStill>,
@@ -916,7 +919,7 @@ impl D3d12Compositor {
     pub fn new(gpu: Arc<Gpu>, paths: Arc<ProjectPaths>, width: u32, height: u32) -> Result<Self, String> {
         let overlay = load_overlay(&gpu.context, &paths)?;
         let placer = load_overlay(&gpu.context, &paths)?;
-        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, pinner: None, blurrer: None, blur_unavailable: false, censor_mixer: None, transparent: None, stills: HashMap::new(), stills_used: 0, animations: HashMap::new(), text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
+        Ok(Self { gpu, paths, width, height, images: ImageSlots::default(), spares: Vec::new(), clip_graphs: ClipCache::with_per_key(CLIP_GRAPH_SHAPES), transition_graphs: HashMap::new(), clip_graphs_used: HashMap::new(), frames: 0, overlay, placer, rotator: None, pinner: None, blurrer: None, blur_unavailable: false, censor_mixer: None, censor_points: Vec::new(), transparent: None, stills: HashMap::new(), stills_used: 0, animations: HashMap::new(), text_rasterizer: None, text_sizes: HashMap::new(), text_rasterizations: 0, missing_font_families: Vec::new(), readback: None, abort: None, closing: None, publish_clock: Arc::default(), matte_models: HashMap::new(), matte_problems: Vec::new(), matte_cache: MatteCache::new(MATTE_CACHE_BYTES), matte_shaper: None, matte_leads: ClipCache::with_per_key(2), matte_neighbours: HashMap::new(), matte_windows: HashMap::new() })
     }
 
     /// Why matting models could not be used, once per model: missing or failing to load. A clip
@@ -1591,6 +1594,19 @@ impl D3d12Compositor {
                 this.release_image(hidden);
             }
         };
+        let polygon = region.shape == RegionShape::Polygon && engine::polygon::polygon_problem(&region.points).is_none();
+        let points = if polygon {
+            match self.polygon_points(&region.points) {
+                Ok(index) => Some(index),
+                Err(message) => {
+                    release_hidden(self);
+                    return Err(message);
+                }
+            }
+        } else {
+            None
+        };
+        let point_count = if polygon { region.points.len() as f64 } else { 0.0 };
         let mixer = match &mut self.censor_mixer {
             Some(mixer) => mixer,
             empty => match load_censor_mixer(&self.gpu.context) {
@@ -1624,7 +1640,7 @@ impl D3d12Compositor {
             ("h0", h[0]), ("h1", h[1]), ("h2", h[2]), ("h3", h[3]), ("h4", h[4]), ("h5", h[5]), ("h6", h[6]), ("h7", h[7]), ("h8", h[8]),
             ("ellipse", if region.shape == RegionShape::Ellipse { 1.0 } else { 0.0 }), ("opacity", region.opacity.clamp(0.0, 1.0)), ("mode", mode), ("block", block),
             ("red", color[0]), ("green", color[1]), ("blue", color[2]), ("alpha", color[3]), ("blank", if blank { 1.0 } else { 0.0 }),
-            ("stretch", stretch),
+            ("stretch", stretch), ("count", point_count),
         ];
         for (name, value) in numbers {
             if let Err(e) = mixer.set_param(name, &[value]) {
@@ -1641,10 +1657,19 @@ impl D3d12Compositor {
         };
         let second = hidden.unwrap_or(picture);
         let mixer = self.censor_mixer.as_mut().expect("built above");
-        let mut inputs = [self.images[picture.0].frame(width, height), self.images[second.0].frame(width, height)];
+        // A shape that is no polygon reads no points; the picture stands in for the row.
+        let third = match points {
+            Some(index) => self.censor_points[index].1.frame(crate::censor_mix::POINTS_WIDTH, 1),
+            None => self.images[picture.0].frame(width, height),
+        };
+        let mut inputs = [self.images[picture.0].frame(width, height), self.images[second.0].frame(width, height), third];
         let result = Self::run_graph(&self.gpu, mixer, &mut inputs, &mut self.images, output, width, height, info);
         self.images[picture.0].fence_value = inputs[0].fence_value.max(inputs[1].fence_value);
         self.images[second.0].fence_value = self.images[second.0].fence_value.max(inputs[1].fence_value);
+        match points {
+            Some(index) => self.censor_points[index].1.fence_value = self.censor_points[index].1.fence_value.max(inputs[2].fence_value),
+            None => self.images[picture.0].fence_value = self.images[picture.0].fence_value.max(inputs[2].fence_value),
+        }
         release_hidden(self);
         if let Err(message) = result {
             self.release_image(output);
@@ -1652,6 +1677,25 @@ impl D3d12Compositor {
         }
         self.images[output.0].premultiplied = premultiplied;
         Ok(output)
+    }
+
+    /// The index in [`Self::censor_points`] of the row holding `points`, uploaded when it is not
+    /// there yet. A few rows are kept, so several polygon regions do not upload each frame.
+    fn polygon_points(&mut self, points: &[[f64; 2]]) -> Result<usize, String> {
+        let rgba = crate::censor_mix::points_row(points);
+        if let Some(index) = self.censor_points.iter().position(|(row, _)| *row == rgba) {
+            let kept = self.censor_points.remove(index);
+            self.censor_points.push(kept);
+            return Ok(self.censor_points.len() - 1);
+        }
+        let picture = StillPicture { width: crate::censor_mix::POINTS_WIDTH, height: 1, rgba: rgba.clone(), has_alpha: true };
+        let image = Image::upload(&self.gpu, &picture)?;
+        if self.censor_points.len() >= CENSOR_POINT_ROWS {
+            // The oldest row; a read of it may still run, which the wrappers keep alive (see [`Image::idle`]).
+            self.censor_points.remove(0);
+        }
+        self.censor_points.push((rgba, image));
+        Ok(self.censor_points.len() - 1)
     }
 
     /// A blurred copy of `image` by `radius` pixels; `image` stays the caller's. A radius past what
@@ -1924,7 +1968,7 @@ fn region_of(effect: &ProjectEffect, region: EffectRegion, height: u32) -> Censo
         solid => solid,
     };
     let rect = PlacedRect { x: region.cx - region.w / 2.0, y: region.cy - region.h / 2.0, width: region.w, height: region.h };
-    CensorRegion { rect, rotation: region.angle, shape: region.shape, feather: region.feather, mode, opacity: 1.0, quad: region.corners }
+    CensorRegion { rect, rotation: region.angle, shape: region.shape, points: Vec::new(), feather: region.feather, mode, opacity: 1.0, quad: region.corners }
 }
 
 /// How many pixels of a picture of `aspect` (width over height) one pixel of a frame of `width` by
@@ -1987,6 +2031,9 @@ const MAX_BLUR_PASS: f64 = 48.0;
 /// The most runs of the blur for one censor blur. A larger radius is cut to what this many runs
 /// give (`MAX_BLUR_PASS` times the square root of this), a little under 136 pixels.
 const MAX_BLUR_PASSES: f64 = 8.0;
+
+/// How many uploaded polygons [`D3d12Compositor::polygon_points`] keeps.
+const CENSOR_POINT_ROWS: usize = 8;
 
 fn load_censor_mixer(context: &Arc<GpuContext>) -> Result<EffectGraph, String> {
     let mut holder = Some(censor_mix_effect(context)?);
@@ -2480,7 +2527,7 @@ mod tests {
 
     /// The middle half of the frame, upright and sharp.
     fn middle_region(mode: CensorMode) -> CensorRegion {
-        CensorRegion { rect: PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }, rotation: 0.0, shape: RegionShape::Rect, feather: 0.0, mode, opacity: 1.0, quad: None }
+        CensorRegion { rect: PlacedRect { x: 0.25, y: 0.25, width: 0.5, height: 0.5 }, rotation: 0.0, shape: RegionShape::Rect, points: Vec::new(), feather: 0.0, mode, opacity: 1.0, quad: None }
     }
 
     fn red(rgba: &[u8], x: u32, y: u32) -> u8 {
@@ -2532,6 +2579,41 @@ mod tests {
         assert_eq!(red(&rgba, 320, 180), 0, "the middle is hidden");
         assert_eq!(red(&rgba, 165, 95), 255, "a corner of the box is outside the ellipse");
         assert_eq!(red(&rgba, 175, 180), 0, "the left of the ellipse is inside");
+    }
+
+    #[test]
+    fn a_polygon_region_hides_inside_its_points_by_the_even_odd_rule() {
+        let Some(mut compositor) = censor_rig() else { return };
+        let white = |_x: u32, _y: u32| [255, 255, 255, 255];
+        let black = CensorMode::Solid { color: [0, 0, 0, 255] };
+        // A triangle over the box (pixels 160..480 by 90..270): top-left, top-right, bottom-left.
+        let triangle = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        let rgba = hidden(&mut compositor, white, CensorRegion { shape: RegionShape::Polygon, points: triangle.clone(), ..middle_region(black) });
+        assert_eq!(red(&rgba, 200, 120), 0, "near the corner of the right angle is inside");
+        assert_eq!(red(&rgba, 440, 240), 255, "the far corner of the box is outside the triangle");
+        assert_eq!(red(&rgba, 100, 120), 255, "outside the box");
+
+        // A pentagram: its middle is covered twice, so it stays.
+        let star: Vec<[f64; 2]> = (0..5).map(|i| {
+            let a = std::f64::consts::TAU * f64::from(i * 2) / 5.0 - std::f64::consts::FRAC_PI_2;
+            [0.5 + 0.5 * a.cos(), 0.5 + 0.5 * a.sin()]
+        }).collect();
+        let rgba = hidden(&mut compositor, white, CensorRegion { shape: RegionShape::Polygon, points: star, ..middle_region(black) });
+        assert_eq!(red(&rgba, 320, 180), 255, "the middle of a pentagram is outside");
+        assert_eq!(red(&rgba, 320, 100), 0, "its top point is inside");
+
+        // A soft edge darkens toward the inside, measured to the nearest side.
+        let rgba = hidden(&mut compositor, white, CensorRegion { shape: RegionShape::Polygon, points: triangle, feather: 1.0, ..middle_region(black) });
+        let row: Vec<u8> = (160..=240).step_by(8).map(|x| red(&rgba, x, 120)).collect();
+        assert!(row[0] > 200 && row.windows(2).all(|pair| pair[1] <= pair[0]), "darker away from the left side: {row:?}");
+    }
+
+    #[test]
+    fn points_row_keeps_sixteen_bits_a_coordinate() {
+        let row = crate::censor_mix::points_row(&[[0.0, 1.0], [0.5, 0.25]]);
+        assert_eq!(row.len(), 256 * 4);
+        assert_eq!(&row[..8], &[0, 0, 255, 255, 128, 0, 64, 0]);
+        assert!(row[8..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -2639,7 +2721,7 @@ mod tests {
         let aspect = 9.0 / 16.0;
         let (regions, stretch) = picture_regions(vec![CensorRegion { rect: PlacedRect { x: 0.3, y: 0.5 - 0.4 * aspect / 2.0, width: 0.4, height: 0.4 * aspect }, rotation: 45.0, shape: RegionShape::Ellipse, ..middle_region(CensorMode::Solid { color: [0, 0, 0, 255] }) }], aspect, (0.0, 0.0), 640, 360);
         let white = |_x: u32, _y: u32| [255, 255, 255, 255];
-        let rgba = hidden_stretched(&mut compositor, white, regions[0], stretch);
+        let rgba = hidden_stretched(&mut compositor, white, regions[0].clone(), stretch);
         assert_eq!(red(&rgba, 320 + 115, 180), 0, "far along the width is inside");
         assert_eq!(red(&rgba, 320 - 115, 180), 0);
         assert_eq!(red(&rgba, 320, 180 + 35), 0, "near the top and bottom too");
@@ -2650,11 +2732,11 @@ mod tests {
     #[test]
     fn a_margin_and_the_picture_shape_map_a_region_onto_the_whole_picture() {
         let region = middle_region(CensorMode::Pixelate { block: 8.0 });
-        let (regions, stretch) = picture_regions(vec![region], 2.0, (0.25, 0.0), 640, 360);
+        let (regions, stretch) = picture_regions(vec![region.clone()], 2.0, (0.25, 0.0), 640, 360);
         let rect = regions[0].rect;
         assert!((rect.x - 0.5 / 1.5).abs() < 1e-9 && (rect.width - 0.5 / 1.5).abs() < 1e-9 && rect.y == 0.25, "{rect:?}");
         assert!((stretch - 3.0 * 360.0 / 640.0).abs() < 1e-9, "the whole picture is 3:1: {stretch}");
-        assert_eq!(picture_regions(vec![region], 16.0 / 9.0, (0.0, 0.0), 640, 360).0[0], region);
+        assert_eq!(picture_regions(vec![region.clone()], 16.0 / 9.0, (0.0, 0.0), 640, 360).0[0], region);
     }
 
     #[test]

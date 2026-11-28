@@ -32,6 +32,7 @@ pub mod srt;
 pub mod stretch;
 pub mod clip_animation;
 pub mod per_unit;
+pub mod polygon;
 pub mod time;
 pub mod tracker;
 pub mod tracking;

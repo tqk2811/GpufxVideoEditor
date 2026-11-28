@@ -298,6 +298,9 @@ pub enum RegionShape {
     #[default]
     Rect,
     Ellipse,
+    /// A closed polygon drawn by hand, only for a censor region: its points are
+    /// [`CensorContent::points`].
+    Polygon,
 }
 
 /// The largest blur of a censor region, in pixels of a 1080-line frame.
@@ -339,10 +342,15 @@ impl CensorMode {
 /// A censor region: a clip of a sticker track that changes the picture of the tracks under it
 /// inside its box, as an adjustment layer limited to that box. Its box is placed as a sticker is
 /// ([`Clip::placement`], keyframes, [`Clip::follow`]), with the shape `aspect`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CensorContent {
     #[serde(default)]
     pub shape: RegionShape,
+    /// The points of a [`RegionShape::Polygon`], in parts of the box (0 to 1 across its width and
+    /// height), so the shape moves, turns and follows with the box. Closed and filled by the
+    /// even-odd rule, see [`crate::polygon`]. Empty for the other shapes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<[f64; 2]>,
     /// Width over height of the box, in output pixels.
     pub aspect: f64,
     /// Softness of the edge, in parts of half the smaller side of the box, 0 to 1.
@@ -354,7 +362,7 @@ pub struct CensorContent {
 
 impl Default for CensorContent {
     fn default() -> Self {
-        CensorContent { shape: RegionShape::Rect, aspect: 16.0 / 9.0, feather: 0.2, mode: CensorMode::default() }
+        CensorContent { shape: RegionShape::Rect, points: Vec::new(), aspect: 16.0 / 9.0, feather: 0.2, mode: CensorMode::default() }
     }
 }
 
@@ -366,6 +374,15 @@ impl CensorContent {
         }
         if !(self.feather.is_finite() && (0.0..=1.0).contains(&self.feather)) {
             return Some(format!("feather {} not from 0 to 1", self.feather));
+        }
+        match self.shape {
+            RegionShape::Polygon => {
+                if let Some(problem) = crate::polygon::polygon_problem(&self.points) {
+                    return Some(problem);
+                }
+            }
+            _ if !self.points.is_empty() => return Some(format!("points given for a {:?} shape, only a polygon takes them", self.shape)),
+            _ => {}
         }
         self.mode.problem()
     }
@@ -420,6 +437,9 @@ impl EffectRegion {
         }
         if !(self.feather.is_finite() && (0.0..=1.0).contains(&self.feather)) {
             return Some(format!("feather {} not from 0 to 1", self.feather));
+        }
+        if self.shape == RegionShape::Polygon {
+            return Some("the region of an effect takes no polygon, only a censor clip does".to_owned());
         }
         self.link.and_then(|link| link.problem())
     }
